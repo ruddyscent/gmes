@@ -1,4 +1,4 @@
-#!/usr/bin/env pythonssssssssssssssssssssssssssssssssssssssssssssssssssss
+#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
 ##    gmes - GIST Maxwell's Equations Solver

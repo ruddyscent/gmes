@@ -768,7 +768,8 @@ cdef class Block(GeometricObject):
         self.e3 = np.array(e3, np.double) / norm(e3)
         self.size = np.array(size, np.double)
 
-        self.projection_matrix = np.array([self.e1, self.e2, self.e3])
+        basis = np.column_stack((self.e1, self.e2, self.e3))
+        self.projection_matrix = np.linalg.inv(basis)
 
     def __getstate__(self):
         d = GeometricObject.__getstate__(self)
@@ -787,7 +788,8 @@ cdef class Block(GeometricObject):
         self.e2.setfield(d['e2'], np.double)
         self.e3.setfield(d['e3'], np.double)
         self.size.setfield(d['size'], np.double)
-        self.projection_matrix.setfield(d['pm'], np.double)
+        basis = np.column_stack((self.e1, self.e2, self.e3))
+        self.projection_matrix.setfield(np.linalg.inv(basis), np.double)
 
     cpdef bint in_object(self, tuple point):
         """Check whether the given point is in this block.

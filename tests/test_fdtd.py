@@ -17,6 +17,21 @@ from gmes import (
 
 
 class FDTDSmokeTest(unittest.TestCase):
+    def test_source_free_simulation_uses_default_empty_source_list(self):
+        simulation = TMzFDTD(
+            space=Cartesian(size=(2, 2, 0), resolution=3),
+            geom_list=[DefaultMedium(material=Dielectric())],
+            verbose=False,
+        )
+
+        simulation.init()
+        simulation.step()
+
+        self.assertEqual(simulation.src_list, [])
+        self.assertEqual(simulation.time_step.n, 1)
+        for field in simulation.field.values():
+            self.assertFalse(field.any())
+
     def test_tmz_point_source_regression(self):
         space = Cartesian(size=(2, 2, 0), resolution=5)
         geometry = [

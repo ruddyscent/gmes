@@ -26,7 +26,9 @@ jobs:
           cache: pip
       - name: Install SWIG on Linux
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install --yes swig
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes libopenmpi-dev openmpi-bin swig
       - name: Install SWIG on macOS
         if: runner.os == 'macOS'
         run: brew install swig
@@ -34,6 +36,9 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e ".[dev,hdf5]"
+      - name: Install MPI test dependency
+        if: runner.os == 'Linux'
+        run: python -m pip install "mpi4py>=4"
       - name: Run quality checks
         run: |
           python -m isort --check-only gmes examples tests utils setup.py
@@ -41,6 +46,9 @@ jobs:
           python -m pylint gmes setup.py
       - name: Run tests
         run: python -m unittest discover -v
+      - name: Run MPI deployment smoke test
+        if: runner.os == 'Linux'
+        run: mpiexec --oversubscribe -n 10 python tests/mpi_deployment_smoke.py
       - name: Build distributions
         run: python -m build
 

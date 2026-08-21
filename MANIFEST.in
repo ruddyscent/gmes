@@ -2,6 +2,7 @@ include VERSION README.md LICENSE CHANGELOG.md CONTRIBUTING.md SECURITY.md
 recursive-include src *.cc *.hh *.i *.pyx
 recursive-include examples README *.py
 recursive-include tests README *.py
+recursive-include benchmarks README.md *.py
 recursive-include docs *.md
 exclude gmes/constant.py
 exclude gmes/pw_material.py

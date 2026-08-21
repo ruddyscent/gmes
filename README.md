@@ -20,12 +20,22 @@ GMES (GIST Maxwell's Equations Solver) is a free electromagnetic simulator that 
 ## Requirements
 
 - Python 3.14 or newer
-- A C++23 compiler and standard library with `std::mdspan` support
+- A C++23 compiler and standard library
 - SWIG 4
 - NumPy 2.3 or newer
 - SciPy 1.16 or newer
 
 Matplotlib, mpi4py, and PyTables are available through the `plot`, `mpi`, and `hdf5` optional dependency groups.
+
+Native field updates use OpenMP automatically on Linux. On macOS, install
+Homebrew's runtime alongside SWIG to enable them:
+
+```sh
+brew install swig libomp
+```
+
+Set `GMES_ENABLE_OPENMP=0` while building to create a serial extension. A
+nonstandard macOS installation can be selected with `GMES_OPENMP_PREFIX`.
 
 ## Installation
 
@@ -94,12 +104,30 @@ The tests include component coverage, geometry and source-time checks, a determi
 
 ## Parallel execution
 
+Large native material-update loops use OpenMP when the package was built with
+an available runtime. Set the thread count before starting Python:
+
+```sh
+OMP_NUM_THREADS=4 python examples/air3d.py
+```
+
+Loops with fewer than 32,768 cells remain serial by default because thread
+startup costs outweigh the benefit for small grids. Advanced users can tune
+this cutoff with `GMES_OPENMP_THRESHOLD`; setting it to `0` forces all eligible
+loops through OpenMP.
+
+MPI remains available for decomposition across processes:
+
 Install GMES with its MPI dependency and use the launcher supplied by your MPI implementation:
 
 ```sh
 python -m pip install ".[mpi]"
 mpiexec -n <process-count> python <simulation.py>
 ```
+
+When combining MPI and OpenMP, set `OMP_NUM_THREADS` explicitly and keep
+`<process-count> * OMP_NUM_THREADS` within the available physical cores to
+avoid oversubscription.
 
 ## Repository layout
 
@@ -108,6 +136,7 @@ gmes/       Python package and public simulation API
 src/        C++, SWIG, and Cython extension sources
 examples/   Example electromagnetic simulations
 tests/      Unit and numerical regression tests
+benchmarks/ Repeatable field-update performance measurements
 utils/      Data-processing and diagnostic utilities
 docs/       Maintenance and migration notes
 ```

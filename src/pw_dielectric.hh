@@ -95,12 +95,12 @@ namespace gmes
 	       const T* const hy, int hy_x_size, int hy_y_size, int hy_z_size,
 	       double dy, double dz, double dt, double n)
     {
-      for (auto&& [idx, param] : zip_equal(idx_list, param_list)) {
+      for_each_equal(idx_list, param_list, [&](const auto& idx, auto& param) {
     	update(ex, ex_x_size, ex_y_size, ex_z_size,
 	       hz, hz_x_size, hz_y_size, hz_z_size,
 	       hy, hy_x_size, hy_y_size, hy_z_size,
 	       dy, dz, dt, n, idx, param);
-      }
+      });
     }
 
   private:
@@ -134,12 +134,12 @@ namespace gmes
 	       const T* const hz, int hz_x_size, int hz_y_size, int hz_z_size,
 	       double dz, double dx, double dt, double n)
     {
-      for (auto&& [idx, param] : zip_equal(idx_list, param_list)) {
+      for_each_equal(idx_list, param_list, [&](const auto& idx, auto& param) {
       	update(ey, ey_x_size, ey_y_size, ey_z_size,
 	       hx, hx_x_size, hx_y_size, hx_z_size,
 	       hz, hz_x_size, hz_y_size, hz_z_size,
 	       dz, dx, dt, n, idx, param);
-      }
+      });
     }
 
   private:
@@ -173,13 +173,13 @@ namespace gmes
 	       const T* const hx, int hx_x_size, int hx_y_size, int hx_z_size,
 	       double dx, double dy, double dt, double n)
     {
-      for (auto&& [idx, param] : zip_equal(idx_list, param_list)) {
+      for_each_equal(idx_list, param_list, [&](const auto& idx, auto& param) {
 	update(ez, ez_x_size, ez_y_size, ez_z_size,
 	       hy, hy_x_size, hy_y_size, hy_z_size,
 	       hx, hx_x_size, hx_y_size, hx_z_size,
 	       dx, dy, dt, n,
                idx, param);
-      }
+      });
     }
 
   private:
@@ -269,12 +269,12 @@ namespace gmes
 	       const T* const ey, int ey_x_size, int ey_y_size, int ey_z_size,
 	       double dy, double dz, double dt, double n)
     {
-      for (auto&& [idx, param] : zip_equal(idx_list, param_list)) {
+      for_each_equal(idx_list, param_list, [&](const auto& idx, auto& param) {
       	update(hx, hx_x_size, hx_y_size, hx_z_size,
 	       ez, ez_x_size, ez_y_size, ez_z_size,
 	       ey, ey_x_size, ey_y_size, ey_z_size,
 	       dy, dz, dt, n, idx, param);
-      }
+      });
     }
 
   private:
@@ -308,12 +308,12 @@ namespace gmes
 	       const T* const ez, int ez_x_size, int ez_y_size, int ez_z_size,
 	       double dz, double dx, double dt, double n)
     {
-      for (auto&& [idx, param] : zip_equal(idx_list, param_list)) {
+      for_each_equal(idx_list, param_list, [&](const auto& idx, auto& param) {
       	update(hy, hy_x_size, hy_y_size, hy_z_size,
 	       ex, ex_x_size, ex_y_size, ex_z_size,
 	       ez, ez_x_size, ez_y_size, ez_z_size,
 	       dz, dx, dt, n, idx, param);
-      }
+      });
     }
 
   private:
@@ -347,12 +347,12 @@ namespace gmes
 	       const T* const ex, int ex_x_size, int ex_y_size, int ex_z_size,
 	       double dx, double dy, double dt, double n)
     {
-      for (auto&& [idx, param] : zip_equal(idx_list, param_list)) {
+      for_each_equal(idx_list, param_list, [&](const auto& idx, auto& param) {
     	update(hz, hz_x_size, hz_y_size, hz_z_size,
 	       ey, ey_x_size, ey_y_size, ey_z_size,
 	       ex, ex_x_size, ex_y_size, ex_z_size,
 	       dx, dy, dt, n, idx, param);
-      }
+      });
     }
 
   private:

@@ -4,9 +4,9 @@ GMES targets the latest stable Python 3 release. Python 2 compatibility and the 
 
 ## Development setup
 
-Install a C++23 compiler and standard library with `std::mdspan` support plus
-SWIG 4, then create an isolated Python 3.14 environment from the repository
-root:
+Install a C++23 compiler and SWIG 4, then create an isolated Python 3.14
+environment from the repository root. Install `libomp` as well on macOS when
+testing native field-update parallelism:
 
 ```sh
 python3.14 -m venv .venv
@@ -23,16 +23,21 @@ Run the narrowest relevant tests while developing, followed by the complete suit
 
 ```sh
 python -m unittest tests.test_geometry -v
-python -m isort --check-only gmes examples tests utils setup.py
-python -m black --check gmes examples tests utils setup.py
+python -m isort --check-only gmes examples tests benchmarks utils setup.py
+python -m black --check gmes examples tests benchmarks utils setup.py
 python -m pylint gmes setup.py
 python -m unittest discover -v
+OMP_NUM_THREADS=4 GMES_OPENMP_THRESHOLD=0 python -m unittest discover -v
 python -m build
 ```
 
 Numerical behavior changes must include a deterministic regression test. Avoid using the large examples as routine tests because some need more than 1 GB of memory and run for a long time.
 
 Generated SWIG proxies, Cython C/C++ output, compiled extensions, distributions, and simulation results must not be committed.
+
+Use `benchmarks/field_updates.py` to evaluate field-update performance. Run
+each thread count in a separate process and compare both timing and checksum
+output. Keep visualization and simulation output disabled during measurements.
 
 ## Change scope and compatibility
 

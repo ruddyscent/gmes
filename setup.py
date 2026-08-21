@@ -1,6 +1,9 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
+import os
+import sys
+
 # System imports
 from glob import glob
 from pathlib import Path
@@ -25,6 +28,47 @@ class BuildExt(build_ext):
             )
 
 
+def openmp_options():
+    """Return compiler and linker options for an available OpenMP runtime."""
+    setting = os.environ.get("GMES_ENABLE_OPENMP", "auto").lower()
+    if setting in {"0", "false", "no", "off"}:
+        return [], []
+    required = setting in {"1", "true", "yes", "on"}
+
+    if sys.platform.startswith("linux"):
+        return ["-fopenmp"], ["-fopenmp"]
+
+    if sys.platform == "darwin":
+        prefixes = [
+            Path(value)
+            for value in (
+                os.environ.get("GMES_OPENMP_PREFIX"),
+                "/opt/homebrew/opt/libomp",
+                "/usr/local/opt/libomp",
+            )
+            if value
+        ]
+        prefix = next((value for value in prefixes if value.is_dir()), None)
+        if prefix is not None:
+            include_dir = prefix / "include"
+            library_dir = prefix / "lib"
+            return (
+                ["-Xpreprocessor", "-fopenmp", f"-I{include_dir}"],
+                [
+                    f"-L{library_dir}",
+                    "-lomp",
+                    f"-Wl,-rpath,{library_dir}",
+                ],
+            )
+
+    if required:
+        raise RuntimeError(
+            "OpenMP was requested but no supported runtime was found; "
+            "install libomp on macOS or use a compiler with OpenMP on Linux"
+        )
+    return [], []
+
+
 # Obtain the numpy include directory. This logic works across numpy versions.
 try:
     numpy_include = numpy.get_include()
@@ -34,6 +78,7 @@ except AttributeError:
 pw_src_lst = glob("src/pw_*.cc")
 pw_src_lst.extend(glob("src/pw_*.i"))
 pw_dep_lst = glob("src/pw_*.hh")
+openmp_compile_args, openmp_link_args = openmp_options()
 
 # pw_material module
 pw_material = Extension(
@@ -43,7 +88,8 @@ pw_material = Extension(
     include_dirs=[numpy_include],
     swig_opts=["-c++", "-outdir", "gmes"],
     language="c++",
-    extra_compile_args=["-std=c++23"],
+    extra_compile_args=["-std=c++23", *openmp_compile_args],
+    extra_link_args=openmp_link_args,
 )
 
 # constant module

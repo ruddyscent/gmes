@@ -4,6 +4,8 @@
 #include <complex>
 #include <concepts>
 #include <cstddef>
+#include <cstdlib>
+#include <exception>
 #include <ranges>
 #include <stdexcept>
 #include <tuple>
@@ -16,8 +18,32 @@
 #define GMES_HAS_STD_MDSPAN 0
 #endif
 
+#if defined(__GNUC__) || defined(__clang__)
+#define GMES_ALWAYS_INLINE __attribute__((always_inline))
+#else
+#define GMES_ALWAYS_INLINE
+#endif
+
 namespace gmes
 {
+  inline std::size_t
+  openmp_threshold() noexcept
+  {
+    constexpr std::size_t default_threshold = 32768;
+    static const std::size_t threshold = [] {
+      const char* const value = std::getenv("GMES_OPENMP_THRESHOLD");
+      if (value == nullptr || value[0] == '\0' || value[0] == '-')
+        return default_threshold;
+
+      char* end = nullptr;
+      const unsigned long long parsed = std::strtoull(value, &end, 10);
+      if (end == value || *end != '\0')
+        return default_threshold;
+      return static_cast<std::size_t>(parsed);
+    }();
+    return threshold;
+  }
+
   template <typename T>
   concept FieldScalar =
     std::floating_point<T> ||
@@ -118,8 +144,61 @@ namespace gmes
     return EqualZipView(first, second);
 #endif
   }
+
+#if defined(_OPENMP)
+  template <std::ranges::random_access_range First,
+            std::ranges::random_access_range Second,
+            typename Function>
+  void
+  parallel_for_equal(First& first, Second& second,
+                     Function& function, std::size_t count)
+  {
+    std::exception_ptr error;
+#pragma omp parallel for schedule(static)
+    for (std::ptrdiff_t position = 0;
+         position < static_cast<std::ptrdiff_t>(count);
+         ++position) {
+      try {
+        function(first[position], second[position]);
+      }
+      catch (...) {
+#pragma omp critical(gmes_for_each_equal_exception)
+        {
+          if (!error)
+            error = std::current_exception();
+        }
+      }
+    }
+    if (error)
+      std::rethrow_exception(error);
+  }
+#endif
+
+  template <std::ranges::random_access_range First,
+            std::ranges::random_access_range Second,
+            typename Function>
+    requires std::ranges::sized_range<First> &&
+             std::ranges::sized_range<Second>
+  GMES_ALWAYS_INLINE inline void
+  for_each_equal(First& first, Second& second, Function&& function)
+  {
+    const auto count = std::ranges::size(first);
+    if (count != std::ranges::size(second))
+      throw std::logic_error("material indices and parameters are out of sync");
+
+#if defined(_OPENMP)
+    if (count >= openmp_threshold()) {
+      parallel_for_equal(first, second, function, count);
+      return;
+    }
+#endif
+
+    for (auto&& [first_item, second_item] : zip_equal(first, second))
+      function(first_item, second_item);
+  }
 } // namespace gmes
 
 #undef GMES_HAS_STD_MDSPAN
+#undef GMES_ALWAYS_INLINE
 
 #endif // CPP23_SUPPORT_HH_

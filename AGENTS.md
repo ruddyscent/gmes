@@ -8,7 +8,7 @@ GMES (GIST Maxwell's Equations Solver) is a Python package for electromagnetic s
 
 ## Compatibility
 
-- Target Python 3.14 or newer and a C++23 toolchain with `std::mdspan` support.
+- Target Python 3.14 or newer and a C++23 toolchain.
 - Python 2 compatibility is not required.
 - Preserve numerical behavior unless a change is explicitly documented and covered by regression tests.
 - Use the PEP 517 build declared in `pyproject.toml`; keep SWIG and Cython sources compatible with their current stable releases.
@@ -28,6 +28,14 @@ Run the test suite:
 python -m unittest discover -v
 ```
 
+OpenMP is enabled automatically on Linux and when Homebrew `libomp` is found
+on macOS. Use `GMES_ENABLE_OPENMP=0` for a serial build. For changes to native
+field updates, also exercise the parallel path explicitly:
+
+```sh
+OMP_NUM_THREADS=4 GMES_OPENMP_THRESHOLD=0 python -m unittest discover -v
+```
+
 Choose the narrowest tests that cover the change. If the required native build toolchain is unavailable, report which checks could not be run instead of claiming full verification.
 
 ## Change guidelines
@@ -37,6 +45,8 @@ Choose the narrowest tests that cover the change. If the required native build t
 - Add or update tests when changing numerical behavior, material models, geometry, sources, or boundary conditions.
 - Update documentation or examples when a public API or user-facing workflow changes.
 - Do not commit generated extension artifacts, build outputs, or simulation results.
+- Keep performance measurements in `benchmarks/` free of visualization and
+  generated simulation output.
 
 ## Branch and merge workflow
 

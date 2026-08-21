@@ -11,6 +11,8 @@ jobs:
   test:
     name: Python 3.14 / ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    env:
+      GMES_ENABLE_OPENMP: "1"
     strategy:
       fail-fast: false
       matrix:
@@ -29,18 +31,20 @@ jobs:
         run: sudo apt-get update && sudo apt-get install --yes swig
       - name: Install SWIG on macOS
         if: runner.os == 'macOS'
-        run: brew install swig
+        run: brew install swig libomp
       - name: Install package and test dependencies
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e ".[dev,hdf5]"
       - name: Run quality checks
         run: |
-          python -m isort --check-only gmes examples tests utils setup.py
-          python -m black --check gmes examples tests utils setup.py
+          python -m isort --check-only gmes examples tests benchmarks utils setup.py
+          python -m black --check gmes examples tests benchmarks utils setup.py
           python -m pylint gmes setup.py
       - name: Run tests
-        run: python -m unittest discover -v
+        run: |
+          python -m unittest discover -v
+          OMP_NUM_THREADS=4 GMES_OPENMP_THRESHOLD=0 python -m unittest discover -v
       - name: Build distributions
         run: python -m build
 
@@ -48,6 +52,8 @@ jobs:
     name: Python prerelease
     runs-on: ubuntu-latest
     continue-on-error: true
+    env:
+      GMES_ENABLE_OPENMP: "1"
 
     steps:
       - uses: actions/checkout@v4

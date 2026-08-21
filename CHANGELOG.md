@@ -16,6 +16,10 @@ Notable changes to GMES are documented in this file.
 ### Added
 
 - Deterministic geometry, source-time, FDTD, and HDF5 regression tests.
+- Optional OpenMP parallelism for large native material-update loops, with a
+  tunable cell-count threshold and serial build fallback.
+- Repeatable field-update benchmarks for two-dimensional, three-dimensional,
+  and Drude dispersive simulations.
 - Linux and macOS CI for tests and distribution builds.
 - An allowed-to-fail Python prerelease compatibility check.
 - Automated monthly dependency update checks.

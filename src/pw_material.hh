@@ -13,6 +13,10 @@
 
 namespace gmes
 {
+  bool openmp_enabled() noexcept;
+  int openmp_max_threads() noexcept;
+  std::size_t openmp_cell_threshold() noexcept;
+
   struct PwMaterialParam
   {
   }; // struct PwMaterialParam

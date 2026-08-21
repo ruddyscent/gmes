@@ -396,7 +396,12 @@ class TotalFieldScatteredField(Src):
 
         self.k = np.array(direction, np.double) / norm(direction)
         self.center = np.array(center, np.double)
+        if not np.isfinite(self.center).all():
+            raise ValueError("center must contain only finite values")
+
         self.size = np.array(size, np.double)
+        if not np.isfinite(self.size).all():
+            raise ValueError("size must contain only finite values")
 
         self.half_size = 0.5 * self.size
         self.e_direction = np.array(polarization, np.double) / norm(polarization)

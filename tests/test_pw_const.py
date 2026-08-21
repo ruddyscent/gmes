@@ -112,6 +112,31 @@ class TestSequence(unittest.TestCase):
             sample.update_all(*fields, 1, 1, 1, 0)
             self.assertEqual(fields[0][0, 0, 0], material.value)
 
+    def test_all_updaters_reject_read_only_target_fields(self):
+        getter_names = (
+            "get_pw_material_ex",
+            "get_pw_material_ey",
+            "get_pw_material_ez",
+            "get_pw_material_hx",
+            "get_pw_material_hy",
+            "get_pw_material_hz",
+        )
+
+        for material in (self.const_real, self.const_cmplx):
+            cmplx = material is self.const_cmplx
+            dtype = complex if cmplx else float
+            for getter_name in getter_names:
+                with self.subTest(value=material.value, updater=getter_name):
+                    sample = getattr(material, getter_name)(
+                        self.idx, (0, 0, 0), cmplx=cmplx
+                    )
+                    fields = [np.zeros((3, 3, 3), dtype=dtype) for _ in range(3)]
+                    fields[0].flags.writeable = False
+
+                    with self.assertRaisesRegex(TypeError, "must be writeable"):
+                        sample.update_all(*fields, 1, 1, 1, 0)
+                    self.assertFalse(fields[0].any())
+
     def testEyReal(self):
         sample = self.const_real.get_pw_material_ey(self.idx, (0, 0, 0), cmplx=False)
 

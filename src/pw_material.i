@@ -208,6 +208,9 @@ double _dm2_relative_error(
   void set(const double* const a, int a_size1, int a_size2,
 	   const double* const c, int c_size)
   {
+    if (a_size2 != 3 || c_size != 3)
+      throw std::invalid_argument("Drude coefficients require shapes (n, 3) and (3,)");
+
     for (int i = 0; i < a_size1; i++) {
       std::array<double, 3> tmp;
       std::copy(a + i * a_size2, a + i * a_size2 + 3, tmp.begin());
@@ -237,6 +240,9 @@ double _dm2_relative_error(
   void set(const double* const a, int a_size1, int a_size2,
 	   const double* const c, int c_size)
   {
+    if (a_size2 != 3 || c_size != 3)
+      throw std::invalid_argument("Lorentz coefficients require shapes (n, 3) and (3,)");
+
     for (int i = 0; i < a_size1; i++) {
       std::array<double, 3> tmp;
       std::copy(a + i * a_size2, a + i * a_size2 + 3, tmp.begin());
@@ -267,6 +273,9 @@ double _dm2_relative_error(
 	   const double* const b, int b_size1, int b_size2,
 	   const double* const c, int c_size)
   {
+    if (a_size2 != 3 || b_size2 != 5 || c_size != 4)
+      throw std::invalid_argument("DcpAde coefficients require shapes (n, 3), (n, 5), and (4,)");
+
     for (int i = 0; i < a_size1; i++) {
       std::array<double, 3> tmp;
       std::copy(a + i * a_size2, a + i * a_size2 + 3, tmp.begin());
@@ -305,6 +314,9 @@ double _dm2_relative_error(
 	   const std::complex<double>* const b, int b_size1, int b_size2,
 	   const double* const c, int c_size)
   {
+    if (a_size2 != 3 || b_size2 != 3 || c_size != 3)
+      throw std::invalid_argument("DcpPlrc coefficients require shapes (n, 3), (n, 3), and (3,)");
+
     for (int i = 0; i < a_size1; i++) {
       std::array<double, 3> tmp;
       std::copy(a + i * a_size2, a + i * a_size2 + 3, tmp.begin());

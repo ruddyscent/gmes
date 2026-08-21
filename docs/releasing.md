@@ -61,8 +61,10 @@ API token is stored in GitHub.
    uv build
    ```
 
-4. Run the `Release` workflow manually from the preparation branch. A manual
-   run builds and validates artifacts but cannot publish them.
+4. Confirm that the preparation pull request's `Release` workflow succeeds.
+   It builds and validates artifacts but cannot publish them. Once the workflow
+   exists on the default branch, maintainers may also run it manually against
+   a preparation branch for the same artifact-only validation.
 5. Squash-merge the preparation pull request after the required CI and CodeQL
    checks pass. Confirm that local `master` is at the merged commit.
 

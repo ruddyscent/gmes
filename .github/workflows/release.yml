@@ -1,6 +1,23 @@
 name: Release
 
 on:
+  pull_request:
+    branches:
+      - master
+    paths:
+      - ".github/workflows/release.yml"
+      - "CHANGELOG.md"
+      - "MANIFEST.in"
+      - "README.md"
+      - "VERSION"
+      - "docs/releasing.md"
+      - "pyproject.toml"
+      - "setup.py"
+      - "src/**"
+      - "tests/test_packaging.py"
+      - "tests/test_release.py"
+      - "utils/macos_build.py"
+      - "utils/release.py"
   push:
     tags:
       - "v*"

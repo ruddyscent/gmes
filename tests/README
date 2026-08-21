@@ -4,4 +4,5 @@ migration contracts.
 Install the package in an isolated environment, then run all tests from
 the repository root:
 
-$ python -m unittest discover -v
+$ uv sync --locked --extra hdf5
+$ uv run --no-sync python -m unittest discover -v

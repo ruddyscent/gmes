@@ -22,6 +22,7 @@
 #define PW_DM2_HH_
 
 #include <array>
+#include <cmath>
 #include <numeric>
 #include <stdexcept>
 #include <vector>

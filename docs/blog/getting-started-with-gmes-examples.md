@@ -186,9 +186,9 @@ gold = DcpPlrc(
 python examples/man.py --quick
 ```
 
-### 광결정 슬래브 `phc_slab.py`
+### 평판형 광결정 `phc_slab.py`
 
-[`phc_slab.py`](../../examples/phc_slab.py)는 실리콘-온-인슐레이터 슬래브에 삼각 격자 공기 구멍과 선결함을 만든다. `make_crystals()`, `make_line_defect()`처럼 구조 생성을 함수로 분리했기 때문에 큰 반복 형상을 관리하는 방법을 보여 준다.
+[`phc_slab.py`](../../examples/phc_slab.py)는 실리콘-온-인슐레이터 기반의 평판 구조에 삼각 격자 공기 구멍과 선결함을 만든다. `make_crystals()`, `make_line_defect()`처럼 구조 생성을 함수로 분리했기 때문에 큰 반복 형상을 관리하는 방법을 보여 준다.
 
 전체 모델은 역사적으로 약 1.3GB의 메모리를 요구한다. 먼저 축소 실행으로 설치와 형상 구성을 확인하는 편이 좋다.
 

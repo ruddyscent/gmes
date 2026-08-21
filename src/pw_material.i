@@ -16,7 +16,21 @@
 
 %include <std_string.i>
 %include <std_complex.i>
+%include <std_except.i>
+%include <exception.i>
 %include "numpy.i"
+
+%exception {
+  try {
+    $action
+  } catch (const std::invalid_argument& error) {
+    SWIG_exception(SWIG_ValueError, error.what());
+  } catch (const std::out_of_range& error) {
+    SWIG_exception(SWIG_IndexError, error.what());
+  } catch (const std::exception& error) {
+    SWIG_exception(SWIG_RuntimeError, error.what());
+  }
+}
 
 %numpy_typemaps(std::complex<double>, NPY_CDOUBLE, int)
 %apply size_t { gmes::IdxCnt::size_type };

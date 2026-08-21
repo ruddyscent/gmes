@@ -21,12 +21,6 @@
 #include <vector>
 #include "pw_dielectric.hh"
 
-#define ex(i,j,k) ex[ex_y_size==1?0:((i)*ex_y_size+(j))*ex_z_size+(k)]
-#define ey(i,j,k) ey[ey_z_size==1?0:((i)*ey_y_size+(j))*ey_z_size+(k)]
-#define ez(i,j,k) ez[ez_x_size==1?0:((i)*ez_y_size+(j))*ez_z_size+(k)]
-#define hx(i,j,k) hx[hx_y_size==1?0:((i)*hx_y_size+(j))*hx_z_size+(k)]
-#define hy(i,j,k) hy[hy_z_size==1?0:((i)*hy_y_size+(j))*hy_z_size+(k)]
-#define hz(i,j,k) hz[hz_x_size==1?0:((i)*hz_y_size+(j))*hz_z_size+(k)]
 
 // The classes should be rewritten using template specialization
 // to increase the calculation speed.
@@ -77,8 +71,7 @@ namespace gmes
     double
     get_eps_inf(const int* const idx, int idx_size) const
     {
-      Index3 index;
-      std::copy(idx, idx + idx_size, index.begin());
+      const Index3 index = make_index(idx, idx_size);
       const int i = position(index);
       if (i < 0)
 	return 0;
@@ -90,8 +83,7 @@ namespace gmes
     attach(const int* const idx, int idx_size,
 	   const PwMaterialParam* const pm_param_ptr)
     {
-      Index3 index;
-      std::copy(idx, idx + idx_size, index.begin());
+      const Index3 index = make_index(idx, idx_size);
 
       const auto& dcp_param = *static_cast<const DcpAdeElectricParam<T> * const>(pm_param_ptr);
 
@@ -196,13 +188,11 @@ namespace gmes
 	       const T* const hy, int hy_x_size, int hy_y_size, int hy_z_size,
 	       double dy, double dz, double dt, double n)
     {
-      auto idx = idx_list.begin();
-      auto param = param_list.begin();
-      for (; idx != idx_list.end(); ++idx, ++param) {
+      for (auto&& [idx, param] : zip_equal(idx_list, param_list)) {
     	update(ex, ex_x_size, ex_y_size, ex_z_size,
 	       hz, hz_x_size, hz_y_size, hz_z_size,
 	       hy, hy_x_size, hy_y_size, hy_z_size,
-	       dy, dz, dt, n, *idx, *param);
+	       dy, dz, dt, n, idx, param);
       }
     }
 
@@ -220,9 +210,9 @@ namespace gmes
       const auto& c = dcp_param.c;
       T& e_old = dcp_param.e_old;
 
-      const T& e_now = ex(i,j,k);
-      const T e_new = c[0] * ((hz(i+1,j+1,k) - hz(i+1,j,k)) / dy -
-			      (hy(i+1,j,k+1) - hy(i+1,j,k)) / dz)
+      const T& e_now = field_at(ex, ex_x_size, ex_y_size, ex_z_size, ex_y_size == 1, i,j,k);
+      const T e_new = c[0] * ((field_at(hz, hz_x_size, hz_y_size, hz_z_size, hz_x_size == 1, i+1,j+1,k) - field_at(hz, hz_x_size, hz_y_size, hz_z_size, hz_x_size == 1, i+1,j,k)) / dy -
+			      (field_at(hy, hy_x_size, hy_y_size, hy_z_size, hy_z_size == 1, i+1,j,k+1) - field_at(hy, hy_x_size, hy_y_size, hy_z_size, hy_z_size == 1, i+1,j,k)) / dz)
 	+ c[1] * (dps_sum(static_cast<T>(0), dcp_param) +
 		  cps_sum(static_cast<T>(0), dcp_param))
 	+ c[2] * e_old + c[3] * e_now;
@@ -231,7 +221,7 @@ namespace gmes
       update_p(e_old, e_now, e_new, dcp_param);
 
       e_old = e_now;
-      ex(i,j,k) = e_new;
+      field_at(ex, ex_x_size, ex_y_size, ex_z_size, ex_y_size == 1, i,j,k) = e_new;
     }
 
   protected:
@@ -253,13 +243,11 @@ namespace gmes
 	       const T* const hz, int hz_x_size, int hz_y_size, int hz_z_size,
 	       double dz, double dx, double dt, double n)
     {
-      auto idx = idx_list.begin();
-      auto param = param_list.begin();
-      for (; idx != idx_list.end(); ++idx, ++param) {
+      for (auto&& [idx, param] : zip_equal(idx_list, param_list)) {
     	update(ey, ey_x_size, ey_y_size, ey_z_size,
 	       hx, hx_x_size, hx_y_size, hx_z_size,
 	       hz, hz_x_size, hz_y_size, hz_z_size,
-	       dz, dx, dt, n, *idx, *param);
+	       dz, dx, dt, n, idx, param);
       }
     }
 
@@ -277,9 +265,9 @@ namespace gmes
       const auto& c = dcp_param.c;
       T& e_old = dcp_param.e_old;
 
-      const T& e_now = ey(i,j,k);
-      T e_new = c[0] * ((hx(i,j+1,k+1) - hx(i,j+1,k)) / dz -
-			(hz(i+1,j+1,k) - hz(i,j+1,k)) / dx)
+      const T& e_now = field_at(ey, ey_x_size, ey_y_size, ey_z_size, ey_z_size == 1, i,j,k);
+      T e_new = c[0] * ((field_at(hx, hx_x_size, hx_y_size, hx_z_size, hx_y_size == 1, i,j+1,k+1) - field_at(hx, hx_x_size, hx_y_size, hx_z_size, hx_y_size == 1, i,j+1,k)) / dz -
+			(field_at(hz, hz_x_size, hz_y_size, hz_z_size, hz_x_size == 1, i+1,j+1,k) - field_at(hz, hz_x_size, hz_y_size, hz_z_size, hz_x_size == 1, i,j+1,k)) / dx)
 	+ c[1] * (dps_sum(static_cast<T>(0), dcp_param) +
 		  cps_sum(static_cast<T>(0), dcp_param))
 	+ c[2] * e_old + c[3] * e_now;
@@ -288,7 +276,7 @@ namespace gmes
       update_p(e_old, e_now, e_new, dcp_param);
 
       e_old = e_now;
-      ey(i,j,k) = e_new;
+      field_at(ey, ey_x_size, ey_y_size, ey_z_size, ey_z_size == 1, i,j,k) = e_new;
     }
 
   protected:
@@ -310,13 +298,11 @@ namespace gmes
 	       const T* const hx, int hx_x_size, int hx_y_size, int hx_z_size,
 	       double dx, double dy, double dt, double n)
     {
-      auto idx = idx_list.begin();
-      auto param = param_list.begin();
-      for (; idx != idx_list.end(); ++idx, ++param) {
+      for (auto&& [idx, param] : zip_equal(idx_list, param_list)) {
     	update(ez, ez_x_size, ez_y_size, ez_z_size,
 	       hy, hy_x_size, hy_y_size, hy_z_size,
 	       hx, hx_x_size, hx_y_size, hx_z_size,
-	       dx, dy, dt, n, *idx, *param);
+	       dx, dy, dt, n, idx, param);
       }
     }
 
@@ -334,9 +320,9 @@ namespace gmes
       const auto& c = dcp_param.c;
       T& e_old = dcp_param.e_old;
 
-      const T& e_now = ez(i,j,k);
-      T e_new = c[0] * ((hy(i+1,j,k+1) - hy(i,j,k+1)) / dx -
-			(hx(i,j+1,k+1) - hx(i,j,k+1)) / dy)
+      const T& e_now = field_at(ez, ez_x_size, ez_y_size, ez_z_size, ez_x_size == 1, i,j,k);
+      T e_new = c[0] * ((field_at(hy, hy_x_size, hy_y_size, hy_z_size, hy_z_size == 1, i+1,j,k+1) - field_at(hy, hy_x_size, hy_y_size, hy_z_size, hy_z_size == 1, i,j,k+1)) / dx -
+			(field_at(hx, hx_x_size, hx_y_size, hx_z_size, hx_y_size == 1, i,j+1,k+1) - field_at(hx, hx_x_size, hx_y_size, hx_z_size, hx_y_size == 1, i,j,k+1)) / dy)
 	+ c[1] * (dps_sum(static_cast<T>(0), dcp_param) +
 		  cps_sum(static_cast<T>(0), dcp_param))
 	+ c[2] * e_old + c[3] * e_now;
@@ -345,7 +331,7 @@ namespace gmes
       update_p(e_old, e_now, e_new, dcp_param);
 
       e_old = e_now;
-      ez(i,j,k) = e_new;
+      field_at(ez, ez_x_size, ez_y_size, ez_z_size, ez_x_size == 1, i,j,k) = e_new;
     }
 
   protected:
@@ -447,8 +433,7 @@ namespace gmes
     double
     get_eps_inf(const int* const idx, int idx_size) const
     {
-      Index3 index;
-      std::copy(idx, idx + idx_size, index.begin());
+      const Index3 index = make_index(idx, idx_size);
       const int i = position(index);
       if (i < 0)
 	return 0;
@@ -460,8 +445,7 @@ namespace gmes
     attach(const int* const idx, int idx_size,
 	   const PwMaterialParam* const pm_param_ptr)
     {
-      Index3 index;
-      std::copy(idx, idx + idx_size, index.begin());
+      const Index3 index = make_index(idx, idx_size);
 
       auto dcp_param = *static_cast<const DcpPlrcElectricParam<T> * const>(pm_param_ptr);
 
@@ -568,13 +552,11 @@ namespace gmes
 	       const T* const hy, int hy_x_size, int hy_y_size, int hy_z_size,
 	       double dy, double dz, double dt, double n)
     {
-      auto idx = idx_list.begin();
-      auto param = param_list.begin();
-      for (; idx != idx_list.end(); ++idx, ++param) {
+      for (auto&& [idx, param] : zip_equal(idx_list, param_list)) {
     	update(ex, ex_x_size, ex_y_size, ex_z_size,
 	       hz, hz_x_size, hz_y_size, hz_z_size,
 	       hy, hy_x_size, hy_y_size, hy_z_size,
-	       dy, dz, dt, n, *idx, *param);
+	       dy, dz, dt, n, idx, param);
       }
     }
 
@@ -591,16 +573,16 @@ namespace gmes
 
       const auto& c = dcp_param.c;
 
-      const std::complex<double> e_now = ex(i,j,k);
+      const std::complex<double> e_now = field_at(ex, ex_x_size, ex_y_size, ex_z_size, ex_y_size == 1, i,j,k);
       const std::complex<double> e_new =
-	c[0] * ((hz(i+1,j+1,k) - hz(i+1,j,k)) / dy -
-		(hy(i+1,j,k+1) - hy(i+1,j,k)) / dz) +
+	c[0] * ((field_at(hz, hz_x_size, hz_y_size, hz_z_size, hz_x_size == 1, i+1,j+1,k) - field_at(hz, hz_x_size, hz_y_size, hz_z_size, hz_x_size == 1, i+1,j,k)) / dy -
+		(field_at(hy, hy_x_size, hy_y_size, hy_z_size, hy_z_size == 1, i+1,j,k+1) - field_at(hy, hy_x_size, hy_y_size, hy_z_size, hy_z_size == 1, i+1,j,k)) / dz) +
 	c[1] * e_now + c[2] * psi_total(dcp_param);
 
       update_psi_dp(e_now, e_new, dcp_param);
       update_psi_cp(e_now, e_new, dcp_param);
 
-      assign(e_new, ex(i,j,k));
+      assign(e_new, field_at(ex, ex_x_size, ex_y_size, ex_z_size, ex_y_size == 1, i,j,k));
   }
 
   protected:
@@ -620,13 +602,11 @@ namespace gmes
 	       const T* const hz, int hz_x_size, int hz_y_size, int hz_z_size,
 	       double dz, double dx, double dt, double n)
     {
-      auto idx = idx_list.begin();
-      auto param = param_list.begin();
-      for (; idx != idx_list.end(); ++idx, ++param) {
+      for (auto&& [idx, param] : zip_equal(idx_list, param_list)) {
     	update(ey, ey_x_size, ey_y_size, ey_z_size,
 	       hx, hx_x_size, hx_y_size, hx_z_size,
 	       hz, hz_x_size, hz_y_size, hz_z_size,
-	       dz, dx, dt, n, *idx, *param);
+	       dz, dx, dt, n, idx, param);
       }
     }
 
@@ -643,16 +623,16 @@ namespace gmes
 
       const auto& c = dcp_param.c;
 
-      const std::complex<double> e_now = ey(i,j,k);
+      const std::complex<double> e_now = field_at(ey, ey_x_size, ey_y_size, ey_z_size, ey_z_size == 1, i,j,k);
       const std::complex<double> e_new =
-	c[0] * ((hx(i,j+1,k+1) - hx(i,j+1,k)) / dz -
-		(hz(i+1,j+1,k) - hz(i,j+1,k)) / dx) +
+	c[0] * ((field_at(hx, hx_x_size, hx_y_size, hx_z_size, hx_y_size == 1, i,j+1,k+1) - field_at(hx, hx_x_size, hx_y_size, hx_z_size, hx_y_size == 1, i,j+1,k)) / dz -
+		(field_at(hz, hz_x_size, hz_y_size, hz_z_size, hz_x_size == 1, i+1,j+1,k) - field_at(hz, hz_x_size, hz_y_size, hz_z_size, hz_x_size == 1, i,j+1,k)) / dx) +
 	c[1] * e_now + c[2] * psi_total(dcp_param);
 
       update_psi_dp(e_now, e_new, dcp_param);
       update_psi_cp(e_now, e_new, dcp_param);
 
-      assign(e_new, ey(i,j,k));
+      assign(e_new, field_at(ey, ey_x_size, ey_y_size, ey_z_size, ey_z_size == 1, i,j,k));
     }
 
   protected:
@@ -672,13 +652,11 @@ namespace gmes
 	       const T* const hx, int hx_x_size, int hx_y_size, int hx_z_size,
 	       double dx, double dy, double dt, double n)
     {
-      auto idx = idx_list.begin();
-      auto param = param_list.begin();
-      for (; idx != idx_list.end(); ++idx, ++param) {
+      for (auto&& [idx, param] : zip_equal(idx_list, param_list)) {
     	update(ez, ez_x_size, ez_y_size, ez_z_size,
 	       hy, hy_x_size, hy_y_size, hy_z_size,
 	       hx, hx_x_size, hx_y_size, hx_z_size,
-	       dx, dy, dt, n, *idx, *param);
+	       dx, dy, dt, n, idx, param);
       }
     }
 
@@ -695,16 +673,16 @@ namespace gmes
 
       const auto& c = dcp_param.c;
 
-      const std::complex<double> e_now = ez(i,j,k);
+      const std::complex<double> e_now = field_at(ez, ez_x_size, ez_y_size, ez_z_size, ez_x_size == 1, i,j,k);
       const std::complex<double> e_new =
-	c[0] * ((hy(i+1,j,k+1) - hy(i,j,k+1)) / dx -
-		(hx(i,j+1,k+1) - hx(i,j,k+1)) / dy) +
+	c[0] * ((field_at(hy, hy_x_size, hy_y_size, hy_z_size, hy_z_size == 1, i+1,j,k+1) - field_at(hy, hy_x_size, hy_y_size, hy_z_size, hy_z_size == 1, i,j,k+1)) / dx -
+		(field_at(hx, hx_x_size, hx_y_size, hx_z_size, hx_y_size == 1, i,j+1,k+1) - field_at(hx, hx_x_size, hx_y_size, hx_z_size, hx_y_size == 1, i,j,k+1)) / dy) +
 	c[1] * e_now + c[2] * psi_total(dcp_param);
 
       update_psi_dp(e_now, e_new, dcp_param);
       update_psi_cp(e_now, e_new, dcp_param);
 
-      assign(e_new, ez(i,j,k));
+      assign(e_new, field_at(ez, ez_x_size, ez_y_size, ez_z_size, ez_x_size == 1, i,j,k));
     }
 
   protected:

@@ -8,7 +8,7 @@ GMES (GIST Maxwell's Equations Solver) is a Python package for electromagnetic s
 
 ## Compatibility
 
-- Target Python 3.14 or newer and a C++17 toolchain.
+- Target Python 3.14 or newer and a C++23 toolchain with `std::mdspan` support.
 - Python 2 compatibility is not required.
 - Preserve numerical behavior unless a change is explicitly documented and covered by regression tests.
 - Use the PEP 517 build declared in `pyproject.toml`; keep SWIG and Cython sources compatible with their current stable releases.
@@ -37,6 +37,20 @@ Choose the narrowest tests that cover the change. If the required native build t
 - Add or update tests when changing numerical behavior, material models, geometry, sources, or boundary conditions.
 - Update documentation or examples when a public API or user-facing workflow changes.
 - Do not commit generated extension artifacts, build outputs, or simulation results.
+
+## Branch and merge workflow
+
+The active `Protect master` GitHub ruleset governs changes to `master`:
+
+- Make commits on a non-target feature or fix branch. Do not push commits directly to `master`.
+- Open a pull request targeting `master`; approving reviews are not currently required.
+- Bring the pull request branch up to date with the latest `master` before merging.
+- Wait for both required checks to pass: `Python 3.14 / ubuntu-latest` and `Python 3.14 / macos-latest`.
+- Resolve every pull request review conversation before merging.
+- Use **Squash and merge**. Merge commits and rebase merges are not allowed because `master` must retain a linear history and squash is the only permitted merge method.
+- Never force-push to or delete `master`. The ruleset has no bypass actors.
+
+Verify the current settings in the [Protect master ruleset](https://github.com/ruddyscent/gmes/settings/rules/21130311) if GitHub reports different requirements.
 
 ## Commit messages
 

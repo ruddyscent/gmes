@@ -28,8 +28,7 @@ namespace gmes
     double
     get_eps_inf(const int* const idx, int idx_size) const
     {
-      Index3 index;
-      std::copy(idx, idx + idx_size, index.begin());
+      const Index3 index = make_index(idx, idx_size);
       const int i = position(index);
       if (i < 0)
 	return 0;
@@ -41,8 +40,7 @@ namespace gmes
     attach(const int* const idx, int idx_size,
 	   const PwMaterialParam* const pm_param_ptr)
     {
-      Index3 index;
-      std::copy(idx, idx + idx_size, index.begin());
+      const Index3 index = make_index(idx, idx_size);
 
       const auto& dummy_param = *static_cast<const DummyElectricParam<T>*>(pm_param_ptr);
 
@@ -110,8 +108,7 @@ namespace gmes
     double
     get_mu_inf(const int* const idx, int idx_size) const
     {
-      Index3 index;
-      std::copy(idx, idx + idx_size, index.begin());
+      const Index3 index = make_index(idx, idx_size);
       const int i = position(index);
       if (i < 0)
 	return 0;
@@ -123,8 +120,7 @@ namespace gmes
     attach(const int* const idx, int idx_size,
 	   const PwMaterialParam* const pm_param_ptr)
     {
-      Index3 index;
-      std::copy(idx, idx + idx_size, index.begin());
+      const Index3 index = make_index(idx, idx_size);
 
       const auto& dummy_param = *static_cast<const DummyMagneticParam<T>*>(pm_param_ptr);
 

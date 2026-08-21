@@ -5,8 +5,11 @@
 #include <array>
 #include <iterator>
 #include <functional>
+#include <span>
+#include <stdexcept>
 #include <utility>
 #include <vector>
+#include "cpp23_support.hh"
 
 namespace gmes
 {
@@ -27,14 +30,27 @@ namespace gmes
   }; // template MagneticParam
 
   typedef std::array<int, 3> Index3;
-  typedef std::vector<Index3> IdxCnt;
+  using IdxCnt = std::vector<Index3>;
+
+  inline Index3
+  make_index(const int* const data, int size)
+  {
+    if (size != 3)
+      throw std::invalid_argument("field indices must contain exactly three values");
+
+    const std::span<const int, 3> values(data, 3);
+    return {values[0], values[1], values[2]};
+  }
 
   template <typename T>
   class PwMaterial
   {
   public:
+    static_assert(FieldScalar<T>,
+                  "PwMaterial requires a floating-point or complex field type");
+
     virtual
-    ~PwMaterial() {}
+    ~PwMaterial() = default;
 
     virtual const std::string& name() const = 0;
 

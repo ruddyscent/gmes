@@ -3,7 +3,7 @@
 GMES (GIST Maxwell's Equations Solver) is a free electromagnetic simulator that solves Maxwell's equations with the explicit finite-difference time-domain (FDTD) method. It provides a Python interface backed by C++, SWIG, and Cython extensions for modeling photonic devices in one-, two-, and three-dimensional Cartesian domains.
 
 > [!IMPORTANT]
-> The current development line targets Python 3.14, C++17, NumPy 2, Cython 3, and SWIG 4. Python 2 and the former Distutils build are no longer supported.
+> The current development line targets Python 3.14, C++23, NumPy 2, Cython 3, and SWIG 4. Python 2 and the former Distutils build are no longer supported.
 
 ## Features
 
@@ -20,7 +20,7 @@ GMES (GIST Maxwell's Equations Solver) is a free electromagnetic simulator that 
 ## Requirements
 
 - Python 3.14 or newer
-- A C++17 compiler
+- A C++23 compiler and standard library with `std::mdspan` support
 - SWIG 4
 - NumPy 2.3 or newer
 - SciPy 1.16 or newer

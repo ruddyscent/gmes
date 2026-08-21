@@ -14,7 +14,14 @@ requires about 1.1 GB of memory.
 
 """
 
+import argparse
+
 from gmes import *
+
+FULL_RESOLUTION = 40
+FULL_UNTIL = 50
+QUICK_RESOLUTION = 8
+QUICK_UNTIL = 1
 
 
 class Silver(DcpPlrc):
@@ -51,13 +58,34 @@ class Silver(DcpPlrc):
         )
 
 
-space = Cartesian(size=(2, 8, 2), resolution=40, parallel=True)
-geom_list = [DefaultMedium(Dielectric())]
-for y in range(-2, 4):
-    geom_list.append(Sphere(Silver(75 * NANO), radius=1.0 / 3, center=(0, y, 0)))
-geom_list.append(Shell(Cpml(), thickness=0.5))
-src_list = [PointSource(Continuous(freq=0.207), center=(0, -3, 0), component=Jy)]
-my_fdtd = FDTD(space, geom_list, src_list, courant_ratio=0.5)
-my_fdtd.init()
-my_fdtd.show_field(Ey, Z, 0, (-1e-5, 1e-5))
-my_fdtd.step_until_t(50)
+def run(resolution=FULL_RESOLUTION, until=FULL_UNTIL):
+    """Run the six-particle plasmon-waveguide simulation."""
+    space = Cartesian(size=(2, 8, 2), resolution=resolution, parallel=True)
+    geom_list = [DefaultMedium(Dielectric())]
+    for y in range(-2, 4):
+        geom_list.append(Sphere(Silver(75 * NANO), radius=1.0 / 3, center=(0, y, 0)))
+    geom_list.append(Shell(Cpml(), thickness=0.5))
+    src_list = [PointSource(Continuous(freq=0.207), center=(0, -3, 0), component=Jy)]
+    simulation = FDTD(space, geom_list, src_list, courant_ratio=0.5)
+    simulation.init()
+    simulation.show_field(Ey, Z, 0, (-1e-5, 1e-5))
+    simulation.step_until_t(until)
+    return simulation
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--quick",
+        action="store_true",
+        help="use reduced resolution and duration for a fast smoke test",
+    )
+    args = parser.parse_args()
+    if args.quick:
+        run(QUICK_RESOLUTION, QUICK_UNTIL)
+    else:
+        run()
+
+
+if __name__ == "__main__":
+    main()

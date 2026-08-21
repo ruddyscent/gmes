@@ -44,6 +44,8 @@ all = [
     "mpi4py>=4",
     "tables>=3.10",
 ]
+
+[dependency-groups]
 dev = [
     "black>=26.5",
     "build>=1.2",

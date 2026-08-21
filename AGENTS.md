@@ -16,16 +16,18 @@ GMES (GIST Maxwell's Equations Solver) is a Python package for electromagnetic s
 
 ## Building and testing
 
-Build and install the package in an isolated environment from the repository root:
+Install the locked development environment and optional HDF5 dependency from
+the repository root:
 
 ```sh
-python -m pip install -e ".[dev,hdf5]"
+uv python install 3.14
+uv sync --locked --extra hdf5
 ```
 
 Run the test suite:
 
 ```sh
-python -m unittest discover -v
+uv run --no-sync python -m unittest discover -v
 ```
 
 Choose the narrowest tests that cover the change. If the required native build toolchain is unavailable, report which checks could not be run instead of claiming full verification.

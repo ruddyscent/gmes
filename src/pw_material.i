@@ -81,6 +81,8 @@ import_array();
 %apply (int* IN_ARRAY1, int DIM1) {(const int* const idx, int idx_size)};
 %apply (double* IN_ARRAY2, int DIM1, int DIM2) {(const double* const a, int a_size1, int a_size2)};
 %apply (double* IN_ARRAY2, int DIM1, int DIM2) {(const double* const b, int b_size1, int b_size2)};
+%apply (double* IN_ARRAY2, int DIM1, int DIM2) {(const double* const u_new_values, int u_new_rows, int u_new_cols)};
+%apply (double* IN_ARRAY2, int DIM1, int DIM2) {(const double* const u_ref_values, int u_ref_rows, int u_ref_cols)};
 %apply (std::complex<double>* IN_ARRAY2, int DIM1, int DIM2) {(const std::complex<double>* const b, int b_size1, int b_size2)};
 %apply (double* IN_ARRAY1, int DIM1) {(const double* const c, int c_size)};
 
@@ -102,6 +104,26 @@ import_array();
 %include "pw_lorentz.hh"
 %include "pw_dcp.hh"
 %include "pw_dm2.hh"
+
+%inline %{
+double _dm2_relative_error(
+  double e_new,
+  const double* const u_new_values, int u_new_rows, int u_new_cols,
+  double e_ref,
+  const double* const u_ref_values, int u_ref_rows, int u_ref_cols)
+{
+  if (u_new_cols != 3 || u_ref_cols != 3 || u_new_rows != u_ref_rows)
+    throw std::invalid_argument("atomic states must have matching (n, 3) shapes");
+
+  std::vector<std::array<double, 3> > u_new(u_new_rows), u_ref(u_ref_rows);
+  for (int i = 0; i < u_new_rows; ++i) {
+    std::copy_n(u_new_values + 3 * i, 3, u_new[i].begin());
+    std::copy_n(u_ref_values + 3 * i, 3, u_ref[i].begin());
+  }
+
+  return gmes::rel_error(e_new, u_new, e_ref, u_ref);
+}
+%}
 
 // Instantiate template classes
 %define %linear_wrap(T, postfix)

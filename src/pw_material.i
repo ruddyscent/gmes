@@ -39,8 +39,17 @@
 import_array();
 %}
 
+%ignore gmes::PwMaterial::indices_in_bounds;
+
 // Declare numpy typemaps.
 %define %apply_numpy_typemaps(TYPE)
+%typemap(check)
+      (TYPE* const inplace_field, int inplace_dim1, int inplace_dim2, int inplace_dim3)
+{
+  if (!arg1->indices_in_bounds($2, $3, $4))
+    SWIG_exception_fail(SWIG_IndexError, "field index is out of bounds");
+}
+
 %apply (TYPE* IN_ARRAY3, int DIM1, int DIM2, int DIM3)
       {(const TYPE* const in_field1, int in1_dim1, int in1_dim2, int in1_dim3)};
 %apply (TYPE* IN_ARRAY3, int DIM1, int DIM2, int DIM3)

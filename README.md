@@ -24,6 +24,7 @@ GMES (GIST Maxwell's Equations Solver) is a free electromagnetic simulator that 
 - SWIG 4
 - NumPy 2.3 or newer
 - SciPy 1.16 or newer
+- macOS 11 or newer when building or installing on macOS
 
 Matplotlib, mpi4py, and PyTables are available through the `plot`, `mpi`, and `hdf5` optional dependency groups.
 
@@ -93,6 +94,11 @@ python -m build
 ```
 
 The tests include component coverage, geometry and source-time checks, a deterministic FDTD regression, and optional HDF5 output coverage. The HDF5 tests are skipped when PyTables is not installed.
+
+macOS wheels target macOS 11 by default. Set `MACOSX_DEPLOYMENT_TARGET`
+explicitly before building only when a wheel intentionally requires a newer
+macOS release; the build verifies both the wheel platform tag and every native
+extension's minimum OS load command.
 
 ## Parallel execution
 

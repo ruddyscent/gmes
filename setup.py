@@ -2,13 +2,27 @@
 # -*- coding: utf-8 -*-
 
 # System imports
+import os
+import sys
 from glob import glob
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from utils.macos_build import (
+    MINIMUM_MACOS_VERSION,
+    verify_extension_targets,
+    verify_wheel_platform_tag,
+)
+
+if sys.platform == "darwin":
+    os.environ.setdefault("MACOSX_DEPLOYMENT_TARGET", MINIMUM_MACOS_VERSION)
 
 # Third-party modules - we depend on numpy for everything
 import numpy
 from Cython.Build import cythonize
 from setuptools import Extension, setup
+from setuptools.command.bdist_wheel import bdist_wheel
 from setuptools.command.build_ext import build_ext
 
 
@@ -23,6 +37,21 @@ class BuildExt(build_ext):
             self.copy_file(
                 str(Path("gmes") / module_name), str(package_dir / module_name)
             )
+
+
+class BdistWheel(bdist_wheel):
+    """Reject macOS wheels that do not honor the configured target."""
+
+    def run(self):
+        if sys.platform == "darwin":
+            target = os.environ["MACOSX_DEPLOYMENT_TARGET"]
+            verify_wheel_platform_tag(self.get_tag()[2], target)
+
+        super().run()
+
+        if sys.platform == "darwin":
+            build_command = self.get_finalized_command("build_ext")
+            verify_extension_targets(build_command.get_outputs(), target)
 
 
 # Obtain the numpy include directory. This logic works across numpy versions.
@@ -72,5 +101,5 @@ setup(
         [pw_material, constant, pygeom, material],
         compiler_directives={"language_level": 3},
     ),
-    cmdclass={"build_ext": BuildExt},
+    cmdclass={"bdist_wheel": BdistWheel, "build_ext": BuildExt},
 )

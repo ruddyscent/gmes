@@ -60,6 +60,13 @@ class PointSourceParam(PwSourceParam):
             self.f = open(filename, "w")
 
 
+def _record_source_value(output, time, value):
+    if np.iscomplexobj(value):
+        output.write("%f\t%f\t%f\n" % (time, value.real, value.imag))
+    else:
+        output.write("%f\t%f\n" % (time, value))
+
+
 class PointSourceElectric(PwSource):
     def name(self):
         return "PointSourceElectric"
@@ -72,7 +79,7 @@ class PointSourceElectric(PwSource):
         """
         src_t = param.amp * param.src_time.oscillator(dt * n)
         if param.f:
-            param.f.write("%f\t%f\n" % (dt * n, src_t))
+            _record_source_value(param.f, dt * n, src_t)
 
         if issubclass(param.comp, const.Electric):
             e[idx] = src_t
@@ -104,7 +111,7 @@ class PointSourceMagnetic(PwSource):
         """
         src_t = param.amp * param.src_time.oscillator(dt * n)
         if param.f:
-            param.f.write("%f\t%f\n" % (dt * n, src_t))
+            _record_source_value(param.f, dt * n, src_t)
 
         if issubclass(param.comp, const.Magnetic):
             h[idx] = src_t

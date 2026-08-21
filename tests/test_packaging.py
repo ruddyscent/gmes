@@ -5,6 +5,8 @@ import tempfile
 import unittest
 from pathlib import Path, PurePosixPath
 
+from utils.release import verify_sdist
+
 
 class SourceDistributionTest(unittest.TestCase):
     def test_includes_example_verification_document(self):
@@ -28,6 +30,7 @@ class SourceDistributionTest(unittest.TestCase):
 
             archives = list(Path(output_directory).glob("*.tar.gz"))
             self.assertEqual(len(archives), 1)
+            verify_sdist(archives[0], "0.10.0")
             with tarfile.open(archives[0], "r:gz") as archive:
                 packaged_paths = {
                     PurePosixPath(*PurePosixPath(name).parts[1:])

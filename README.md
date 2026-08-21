@@ -19,12 +19,24 @@ GMES (GIST Maxwell's Equations Solver) is a free electromagnetic simulator that 
 
 ## Requirements
 
-- Python 3.14 or newer
+- Python 3.14 or newer (the tested 0.10.0 release target is Python 3.14)
 - A C++23 compiler and standard library
 - SWIG 4
 - NumPy 2.3 or newer
 - SciPy 1.16 or newer
-- macOS 11 or newer when building or installing on macOS
+
+GMES 0.10.0 publishes binary wheels for the following combinations:
+
+| Python | Operating system | Architecture | Minimum platform |
+| --- | --- | --- | --- |
+| CPython 3.14 | Linux | x86_64 | glibc 2.34 (`manylinux_2_34`) |
+| CPython 3.14 | macOS | arm64 (Apple silicon) | macOS 11 |
+
+Source installations are supported on current Linux x86_64 and macOS arm64
+systems with the native toolchain documented below. Windows and macOS x86_64
+are not supported by the 0.10.0 release because they do not have tested wheel
+builds. Python versions newer than 3.14 may satisfy the package metadata but
+are not part of the 0.10.0 tested release matrix.
 
 Matplotlib, mpi4py, and PyTables are available through the `plot`, `mpi`, and `hdf5` optional dependency groups.
 
@@ -55,7 +67,19 @@ for older C++ language modes.
 
 ## Installation
 
-Install SWIG with the package manager for your operating system, then create an isolated Python environment:
+On a supported wheel platform, create an isolated Python environment and
+install the release from PyPI; a compiler and SWIG are not needed for this
+path:
+
+```sh
+python3.14 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install "gmes==0.10.0"
+```
+
+For a source checkout or source distribution, install SWIG and the compiler
+toolchain first, then install the local project:
 
 ```sh
 python3.14 -m venv .venv
@@ -142,6 +166,10 @@ macOS wheels target macOS 11 by default. Set `MACOSX_DEPLOYMENT_TARGET`
 explicitly before building only when a wheel intentionally requires a newer
 macOS release; the build verifies both the wheel platform tag and every native
 extension's minimum OS load command.
+
+Release artifacts are built only by the tag-triggered GitHub Actions release
+workflow. Maintainers must not upload files from a local `dist/` directory.
+See [`docs/releasing.md`](docs/releasing.md) for the release checklist.
 
 ## Parallel execution
 

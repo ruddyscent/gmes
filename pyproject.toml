@@ -119,3 +119,19 @@ enable = [
     "undefined-variable",
     "used-before-assignment",
 ]
+
+[tool.cibuildwheel]
+build = "cp314-manylinux_x86_64 cp314-macosx_arm64"
+build-frontend = "build[uv]"
+test-command = "python -c 'import gmes, gmes._constant, gmes._pw_material, gmes.material, gmes.pygeom'"
+
+[tool.cibuildwheel.linux]
+archs = ["x86_64"]
+before-all = "dnf install --assumeyes swig"
+manylinux-x86_64-image = "manylinux_2_34"
+repair-wheel-command = "auditwheel repair -w {dest_dir} {wheel}"
+
+[tool.cibuildwheel.macos]
+archs = ["arm64"]
+environment = {MACOSX_DEPLOYMENT_TARGET = "11.0"}
+repair-wheel-command = "delocate-wheel --require-archs {delocate_archs} -w {dest_dir} -v {wheel}"

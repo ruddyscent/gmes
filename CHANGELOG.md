@@ -2,7 +2,7 @@
 
 Notable changes to GMES are documented in this file.
 
-## [0.10.0] - Unreleased
+## [0.10.0] - 2026-08-22
 
 ### Changed
 
@@ -20,6 +20,8 @@ Notable changes to GMES are documented in this file.
 - An allowed-to-fail Python prerelease compatibility check.
 - Automated monthly dependency update checks.
 - isort and Black formatting checks plus a focused Pylint quality gate.
+- Reproducible Python 3.14 wheel and source-distribution releases through
+  GitHub Actions and PyPI Trusted Publishing.
 
 ### Fixed
 

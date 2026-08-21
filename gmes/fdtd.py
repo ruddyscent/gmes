@@ -210,7 +210,7 @@ class FDTD(object):
         if self.verbose:
             print("Initializing source...", end=" ")
 
-        self.src_list = src_list
+        self.src_list = [] if src_list is None else src_list
         for so in self.src_list:
             so.init(self.geom_tree, self.space, self.cmplx)
 

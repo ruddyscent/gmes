@@ -1,0 +1,61 @@
+[build-system]
+requires = [
+    "setuptools>=77",
+    "wheel",
+    "Cython>=3.1",
+    "numpy>=2.3",
+]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gmes"
+dynamic = ["version"]
+description = "GIST Maxwell's Equations Solver"
+readme = {file = "README", content-type = "text/markdown"}
+requires-python = ">=3.14"
+license = "GPL-3.0-or-later"
+authors = [
+    {name = "Kyungwon Chun", email = "kwchun@gist.ac.kr"},
+]
+maintainers = [
+    {name = "Kyungwon Chun", email = "kwchun@gist.ac.kr"},
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: C++",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Scientific/Engineering :: Physics",
+]
+dependencies = [
+    "numpy>=2.3",
+    "scipy>=1.16",
+]
+
+[project.optional-dependencies]
+plot = ["matplotlib>=3.10"]
+mpi = ["mpi4py>=4"]
+hdf5 = ["tables>=3.10"]
+all = [
+    "matplotlib>=3.10",
+    "mpi4py>=4",
+    "tables>=3.10",
+]
+dev = [
+    "build>=1.2",
+    "coverage>=7.10",
+]
+
+[project.urls]
+Homepage = "https://github.com/ruddyscent/gmes"
+Repository = "https://github.com/ruddyscent/gmes"
+Issues = "https://github.com/ruddyscent/gmes/issues"
+
+[tool.setuptools]
+packages = ["gmes"]
+
+[tool.setuptools.dynamic]
+version = {file = "VERSION"}

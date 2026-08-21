@@ -3,22 +3,22 @@
 
 """ Transmittance and reflectance through a thin gold layer.
 
-This script is to obtain the transmittance and reflectance of 
+This script is to obtain the transmittance and reflectance of
 TE polarized light through a thin gold layer.
 
 """
 
-from __future__ import division
+
 
 import os, sys, datetime
 new_path = os.path.abspath('../')
 sys.path.append(new_path)
 
 from datetime import datetime
-print os.uname()
-print 'python version:', sys.version
+print(os.uname())
+print('python version:', sys.version)
 start_time = datetime.now()
-print 'starting initialization:', start_time
+print('starting initialization:', start_time)
 
 from sys import argv
 from math import pi, sin, cos

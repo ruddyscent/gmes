@@ -16,7 +16,7 @@ i_min, j_min, k_min = np.inf, np.inf, np.inf
 i_max, j_max, k_max = 0, 0, 0
 for fname in sys.argv[1:]:
     string_coordinate = fname.split('(')[1].split(')')[0].split(',')
-    i, j, k = map(int, string_coordinate)
+    i, j, k = list(map(int, string_coordinate))
     if i < i_min:
         i_min = i
     if j < j_min:
@@ -33,9 +33,9 @@ for fname in sys.argv[1:]:
 data = np.empty((i_max + 1, j_max + 1, k_max + 1), object)
 for fname in sys.argv[1:]:
     string_coordinate = fname.split('(')[1].split(')')[0].split(',')
-    i, j, k = map(int, string_coordinate)
+    i, j, k = list(map(int, string_coordinate))
     data[i,j,k] = np.load(fname)
-    
+
 for i in range(i_min, i_max + 1):
     for j in range(j_min, j_max + 1):
         for k in range(k_min + 1, k_max + 1):
@@ -51,6 +51,6 @@ data = data[:,j_min]
 
 for i in range(i_min + 1, i_max + 1):
     data[i_min] = np.vstack((data[i_min], data[i]))
-    
+
 np.save(head, data[i_min])
-print head + '.npy'
+print(head + '.npy')

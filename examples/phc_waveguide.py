@@ -3,7 +3,7 @@
 
 """Shows a Ez field in a photonic crystal waveguide.
 
-A simple example showing the Ez field in a two-dimensional 
+A simple example showing the Ez field in a two-dimensional
 photonic crystal waveguide.
 
 """
@@ -19,8 +19,8 @@ geom_list = [DefaultMedium(material=Dielectric())]
 geom_list.extend([Cylinder(material=Dielectric(8.9),
                            radius=0.38,
                            center=(x,y,0))
-                  for x in xrange(-8, 9) 
-                  for y in xrange(-4, 5)
+                  for x in range(-8, 9)
+                  for y in range(-4, 5)
                   if y != 0])
 geom_list.append(Shell(material=Cpml()))
 src_list = [PointSource(src_time=Continuous(freq=0.43),

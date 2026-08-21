@@ -2,11 +2,11 @@
 # -*- coding: utf-8 -*-
 
 #
-# This module is based on the pydiadoc.py developed by Hans Breuer 
+# This module is based on the pydiadoc.py developed by Hans Breuer
 # <hans@breuer.org>.
 #
 # This module should be called in the 'Python Dia Console'.
-#    
+#
 # Usage: autodoc_cb([Python module])
 #
 # Kyungwon Chun <kwchun@gist.ac.kr>
@@ -20,7 +20,7 @@ def distribute_objects(objs):
 	for o in objs:
 		if width < o.properties['elem_width'].value:
 			width = o.properties['elem_width'].value
-		if height < o.properties['elem_height'].value: 
+		if height < o.properties['elem_height'].value:
 			height = o.properties['elem_height'].value
 	# add 20% 'distance'
 	width *= 1.2
@@ -54,8 +54,8 @@ def autodoc_cb(module_name):
 
 	layer = data.active_layer
 
-	oType = dia.get_object_type('UML - Class')		
-	
+	oType = dia.get_object_type('UML - Class')
+
 	module = __import__(module_name)
 	theDir = dir(module)
 	# for reflection we need some objects ...
@@ -64,20 +64,20 @@ def autodoc_cb(module_name):
 		theObjects.append (data.paper)
 	except AttributeError:
 		pass # no reason to fail with new bindings
-	if diagram: 
+	if diagram:
 		theObjects.append (diagram)
-	if display: 
+	if display:
 		theObjects.append (display)
 	# add some objects with interesting properties
 	#theObjects.append(dia.DiaImage())
 	once = 1
-	for s in ['Standard - Image', 'Standard - BezierLine', 'Standard - Text', 
+	for s in ['Standard - Image', 'Standard - BezierLine', 'Standard - Text',
 		'UML - Class', 'UML - Dependency']:
 		o, h1, h2 = dia.get_object_type(s).create(0,0)
-		for p in o.properties.keys():
+		for p in list(o.properties.keys()):
 			v = o.properties[p].value
 			theObjects.append(v)
-			if type(v) is types.TupleType and len(v) > 0:
+			if type(v) is tuple and len(v) > 0:
 				theObjects.append(v[0])
 		if once:
 			theObjects.append(o)
@@ -94,7 +94,7 @@ def autodoc_cb(module_name):
 	for s in theDir:
 		if s == '_dia':
 			continue # avoid all the messy details ;)
-		if theTypes.has_key(s):
+		if s in theTypes:
 			continue
 		for o in theObjects:
 			is_a = eval('type(o) is module.' + s)
@@ -102,7 +102,7 @@ def autodoc_cb(module_name):
 			if is_a:
 				theTypes[s] = o
 				break
-		if not theTypes.has_key (s):
+		if s not in theTypes:
 			theTypes[s] = eval ('module.' + s)
 	# add UML classes for every object in dir
 	#print theTypes
@@ -126,7 +126,7 @@ def autodoc_cb(module_name):
 		# set the objects name
 		o.properties['name'] = s
 		# now populate the object with ...
-		if theTypes.has_key(s):
+		if s in theTypes:
 			t = theTypes[s]
 			# ... methods and ...
 			methods = []
@@ -146,7 +146,7 @@ def autodoc_cb(module_name):
 				try:
 					is_m = eval('callable(t.' + m + ')')
 				except:
-					print 'type(t.' + m + ')?'
+					print('type(t.' + m + ')?')
 					is_m = 0
 				doc = ''
 				tt = ''
@@ -157,10 +157,10 @@ def autodoc_cb(module_name):
 							tt = eval('oo.' + m + '().__class__.__name__')
 						else:
 							tt = eval('t.' + m + '.__class__.__name__')
-					except TypeError, msg:
-						print m, msg
-					except AttributeError, msg:
-						print m, msg # No constructor defined
+					except TypeError as msg:
+						print(m, msg)
+					except AttributeError as msg:
+						print(m, msg) # No constructor defined
 				try:
 					doc = eval('t.' + m + '.__doc__')
 				except:

@@ -36,34 +36,24 @@ Modules:
     source --- Define the input sources
     pw_source --- Source update mechanism
     material --- Define the propagating medium
-    pw_material --- Provide the update mechanism 
+    pw_material --- Provide the update mechanism
 
 """
 
-from sys import stderr
+from .fdtd import *
+from .geometry import *
+from .constant import *
+from .source import *
+from .material import *
 
-try:
-    import psyco
-    psyco.profile()
-    from psyco.classes import *
-except ImportError:
-    stderr.write('No module named psyco. Execution speed might be slow.\n')
-
-from fdtd import *
-from geometry import *
-from constant import *
-from source import *
-from material import *
-
-import fdtd, geometry, show, constant, source, material
-import pw_material, pw_source
+from . import constant, fdtd, geometry, material, pw_material, pw_source, show, source
 
 # List here only the objects we want to be publicly available
 _module = ['fdtd', 'geometry', 'show', 'constant', 'source', 'pw_source', 'material', 'pw_material']
-_class = ['TimeStep', 'FDTD', 'TExFDTD', 'TEyFDTD', 'TEzFDTD', 'TMxFDTD', 'TMyFDTD', 'TMzFDTD', 'TEMxFDTD', 'TEMyFDTD', 'TEMzFDTD', 
-          'Cartesian', 'DefaultMedium', 'Cone', 'Cylinder', 'Block', 'Ellipsoid', 'Sphere', 'Shell', 
-          'Ex', 'Ey', 'Ez', 'Hx', 'Hy', 'Hz', 'Jx', 'Jy', 'Jz', 'Mx', 'My', 'Mz', 'X', 'Y', 'Z', 'PlusX', 'MinusX', 'PlusY', 'MinusY', 'PlusZ', 'MinusZ', 
-          'Continuous', 'Bandpass', 'DifferentiatedGaussian', 'PointSource', 'TotalFieldScatteredField', 'GaussianBeam', 
+_class = ['TimeStep', 'FDTD', 'TExFDTD', 'TEyFDTD', 'TEzFDTD', 'TMxFDTD', 'TMyFDTD', 'TMzFDTD', 'TEMxFDTD', 'TEMyFDTD', 'TEMzFDTD',
+          'Cartesian', 'DefaultMedium', 'Cone', 'Cylinder', 'Block', 'Ellipsoid', 'Sphere', 'Shell',
+          'Ex', 'Ey', 'Ez', 'Hx', 'Hy', 'Hz', 'Jx', 'Jy', 'Jz', 'Mx', 'My', 'Mz', 'X', 'Y', 'Z', 'PlusX', 'MinusX', 'PlusY', 'MinusY', 'PlusZ', 'MinusZ',
+          'Continuous', 'Bandpass', 'DifferentiatedGaussian', 'PointSource', 'TotalFieldScatteredField', 'GaussianBeam',
           'Dummy', 'Const', 'Dielectric', 'Upml', 'Cpml', 'DrudePole', 'LorentzPole', 'CriticalPoint', 'DcpAde', 'DcpPlrc', 'DcpRc', 'Drude', 'Lorentz', 'Dm2']
 _constant = ['pi', 'c0', 'mu0', 'eps0', 'Z0', 'PETA', 'TERA', 'GIGA', 'MEGA', 'KILO', 'MILLI', 'MICRO', 'NANO', 'PICO', 'FEMTO', 'ATTO',
              'inf']

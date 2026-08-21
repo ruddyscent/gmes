@@ -2,20 +2,20 @@
 
 """Simulate a photonic crystal slab waveguide.
 
-The photonic crystal slab consists of a silicon-on-insulator 
+The photonic crystal slab consists of a silicon-on-insulator
 substrate with a triangular array of holes. The whole waveguide is
-in the air. This structure is presented at 
+in the air. This structure is presented at
 
 'N. Moll and G.-L. Bona, "Comparison of three-dimensional photonic
-crystal slab waveguides with two-dimensional photonic crystal 
-waveguides: Efficient butt coupling into these photonic crystal 
+crystal slab waveguides with two-dimensional photonic crystal
+waveguides: Efficient butt coupling into these photonic crystal
 waveguides," J. Appl. Phys., vol. 93, no. 9, pp. 4986-4991, 2003.'
 
 This script requires about 1.3GB of memory.
 
 """
 
-from __future__ import division
+
 
 import os, sys
 new_path = os.path.abspath('../')
@@ -45,7 +45,7 @@ def make_hole(center):
     """Punch a air hole on the slab.
 
     """
-    return Cylinder(material=AIR, center=center, axis=(0,0,1), 
+    return Cylinder(material=AIR, center=center, axis=(0,0,1),
                     radius=RADIUS, height=SLAB_THICK)
 
 
@@ -56,7 +56,7 @@ def make_crystals(x_size, y_size):
     a1 = array((cos(pi/3), sin(pi/3)))
     a2 = array((cos(pi/3), -sin(pi/3)))
     crystals = []
-    
+
     for i in arange(-ceil(x_size), ceil(x_size)):
         for j in arange(-ceil(y_size), ceil(y_size)):
             center = tuple(i * a1 + j * a2) + (0,)
@@ -83,16 +83,16 @@ def make_line_defect(length):
     """
     line_defect = []
 
-    for i in xrange(int(-length / 2), int(length / 2 + 1)):
+    for i in range(int(-length / 2), int(length / 2 + 1)):
         line_defect += fill_hole((i, 0, 0))
 
     return line_defect
-    
-    
+
+
 geom_list = ([DefaultMedium(material=AIR),
-              Block(material=SiO2, 
+              Block(material=SiO2,
                    size=(SIZE[0], SIZE[1], SLAB_THICK)),
-              Block(material=Si, 
+              Block(material=Si,
                     size=(SIZE[0], SIZE[1], SLAB_CORE))] +
              make_crystals(*SIZE[:2]) +
              make_line_defect(SIZE[0]) +

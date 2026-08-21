@@ -2,10 +2,9 @@
 # -*- coding: utf-8 -*-
 
 # System imports
-from os import getcwd
 from glob import glob
-from distutils.core import setup, Extension
-from Cython.Distutils import build_ext
+from Cython.Build import cythonize
+from setuptools import Extension, setup
 
 # Third-party modules - we depend on numpy for everything
 import numpy
@@ -15,10 +14,6 @@ try:
     numpy_include = numpy.get_include()
 except AttributeError:
     numpy_include = numpy.get_numpy_include()
-
-PACKAGE = 'gmes'
-VERSION = open('VERSION').read().strip()
-base = getcwd() + '/'
 
 pw_src_lst = glob('src/pw_*.cc')
 pw_src_lst.extend(glob('src/pw_*.i'))
@@ -31,7 +26,7 @@ pw_material = Extension(name = 'gmes._pw_material',
                         include_dirs = [numpy_include],
                         swig_opts = ['-c++', '-outdir', 'gmes'],
                         language = 'c++',
-                        extra_compile_args=['-std=c++0x'])
+                        extra_compile_args=['-std=c++17'])
 
 # constant module
 constant = Extension(name = 'gmes._constant',
@@ -40,7 +35,7 @@ constant = Extension(name = 'gmes._constant',
                      include_dirs = [numpy_include],
                      swig_opts = ['-c++', '-outdir', 'gmes'],
                      language = 'c++',
-                     extra_compile_args=['-std=c++0x'])
+                     extra_compile_args=['-std=c++17'])
 
 # pygeom module
 pygeom = Extension(name = 'gmes.pygeom',
@@ -49,30 +44,12 @@ pygeom = Extension(name = 'gmes.pygeom',
 
 # material module
 material = Extension(name = 'gmes.material',
-                     sources = ['src/material.pyx'])
+                     sources = ['src/material.pyx'],
+                     include_dirs = [numpy_include])
 
-setup(name = PACKAGE,
-      version = VERSION,
-      description = "GIST Maxwell's Equations Solver",
-      long_description = """
-      GMES is a free Python package to solve the Maxwell's 
-      equations using the explicit Finite-Difference Time-Domain 
-      method.""",
-      author = 'Kyungwon Chun',
-      author_email = 'kwchun@gist.ac.kr',
-      maintainer = 'Kyungwon Chun',
-      maintainer_email = 'kwchun@gist.ac.kr',
-      url = 'http://sourceforge.net/projects/gmes',
-      classifiers = [
-        'Development Status :: 3 - Alpha',
-        'User Interface :: Console/Terminal',
-        'Intended Audience :: Science/Research',
-        'License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)',
-        'Operating System :: OS Portable (Source code to work with many OS platforms)',
-        'Programming Language :: C++, Python',
-        'Topic :: Physics, Simulations',
-        'Translations: English, Korean'],
-      license = 'GPL-3.0-or-later',
-      packages = [PACKAGE],
-      ext_modules = [pw_material, constant, pygeom, material],
-      cmdclass = {'build_ext': build_ext})
+setup(
+    ext_modules=cythonize(
+        [pw_material, constant, pygeom, material],
+        compiler_directives={'language_level': 3},
+    ),
+)

@@ -21,8 +21,10 @@
 #ifndef PW_DM2_HH_
 #define PW_DM2_HH_
 
+#include <algorithm>
 #include <array>
 #include <cmath>
+#include <limits>
 #include <numeric>
 #include <stdexcept>
 #include <vector>
@@ -32,6 +34,8 @@
 
 namespace gmes
 {
+  constexpr std::size_t dm2_max_iterations = 100;
+
   // TODO: l2_norm should be a local function.
   template <typename T>
   double
@@ -62,21 +66,26 @@ namespace gmes
   rel_error(const T& e_new, const std::vector<std::array<T, 3> >& u_new,
             const T& e_ref, const std::vector<std::array<T, 3> >& u_ref)
   {
-    T e_diff = e_new - e_ref;
+    if (u_new.size() != u_ref.size())
+      throw std::invalid_argument("atomic state sizes must match");
 
-    std::vector<std::array<T, 3> > u_diff;
-    u_diff.reserve(u_ref.size());
+    const T e_diff = e_new - e_ref;
+    std::vector<std::array<T, 3> > u_diff(u_ref.size());
 
     for (std::size_t  i = 0; i < u_ref.size(); ++i) {
-      std::set_difference(u_new[i].begin(), u_new[i].end(),
-                          u_ref[i].begin(), u_ref[i].end(),
-                          u_diff[i].begin());
+      for (std::size_t j = 0; j < u_ref[i].size(); ++j)
+        u_diff[i][j] = u_new[i][j] - u_ref[i][j];
     }
 
-    double denom = l2_norm(e_diff, u_diff);
-    double num = l2_norm(e_ref, u_ref);
+    const double difference_norm = l2_norm(e_diff, u_diff);
+    const double reference_norm = l2_norm(e_ref, u_ref);
 
-    return denom / num;
+    if (reference_norm == 0)
+      return difference_norm == 0
+        ? 0
+        : std::numeric_limits<double>::infinity();
+
+    return difference_norm / reference_norm;
   } // template rel_error
 
 
@@ -356,6 +365,7 @@ namespace gmes
       const T hy_dz = (field_at(hy, hy_x_size, hy_y_size, hy_z_size, hy_z_size == 1, i+1,j,k+1) - field_at(hy, hy_x_size, hy_y_size, hy_z_size, hy_z_size == 1, i+1,j,k)) / dz;
 
       double error;
+      std::size_t iteration = 0;
       do {
         T e_tmp = e_new;
         std::vector<std::array<T, 3> > u_tmp = u_new;
@@ -378,6 +388,10 @@ namespace gmes
         }
 
         error = rel_error(e_new, u_new, e_tmp, u_tmp);
+        if (std::isnan(error))
+          throw std::runtime_error("Dm2 corrector produced an invalid error");
+        if (++iteration >= dm2_max_iterations && error > rtol)
+          throw std::runtime_error("Dm2 corrector failed to converge");
       } while (error > rtol);
 
       field_at(ex, ex_x_size, ex_y_size, ex_z_size, ex_y_size == 1, i,j,k) = e_new;
@@ -440,6 +454,7 @@ namespace gmes
       const T hz_dx = (field_at(hz, hz_x_size, hz_y_size, hz_z_size, hz_x_size == 1, i+1,j+1,k) - field_at(hz, hz_x_size, hz_y_size, hz_z_size, hz_x_size == 1, i,j+1,k)) / dx;
 
       double error;
+      std::size_t iteration = 0;
       do {
         T e_tmp = e_new;
         std::vector<std::array<T, 3> > u_tmp = u_new;
@@ -462,6 +477,10 @@ namespace gmes
         }
 
         error = rel_error(e_new, u_new, e_tmp, u_tmp);
+        if (std::isnan(error))
+          throw std::runtime_error("Dm2 corrector produced an invalid error");
+        if (++iteration >= dm2_max_iterations && error > rtol)
+          throw std::runtime_error("Dm2 corrector failed to converge");
       } while (error > rtol);
 
       field_at(ey, ey_x_size, ey_y_size, ey_z_size, ey_z_size == 1, i,j,k) = e_new;
@@ -524,6 +543,7 @@ namespace gmes
       const T hx_dy = (field_at(hx, hx_x_size, hx_y_size, hx_z_size, hx_y_size == 1, i,j+1,k+1) - field_at(hx, hx_x_size, hx_y_size, hx_z_size, hx_y_size == 1, i,j,k+1)) / dy;
 
       double error;
+      std::size_t iteration = 0;
       do {
         T e_tmp = e_new;
         std::vector<std::array<T, 3> > u_tmp = u_new;
@@ -546,6 +566,10 @@ namespace gmes
         }
 
         error = rel_error(e_new, u_new, e_tmp, u_tmp);
+        if (std::isnan(error))
+          throw std::runtime_error("Dm2 corrector produced an invalid error");
+        if (++iteration >= dm2_max_iterations && error > rtol)
+          throw std::runtime_error("Dm2 corrector failed to converge");
       } while (error > rtol);
 
       field_at(ez, ez_x_size, ez_y_size, ez_z_size, ez_x_size == 1, i,j,k) = e_new;

@@ -152,9 +152,9 @@ Cylinder(
 
 두 예제를 나란히 실행하면 입사 평면파만 있을 때와 유전체 산란체가 있을 때의 차이를 분리해 볼 수 있다. 이후 원기둥의 반지름, 유전율, 입사각, 주파수를 바꿔 가며 산란 패턴을 비교하는 실험으로 확장하기 좋다.
 
-## 분산 재료: 금 박막의 프레넬 반사
+## 파장에 따라 달라지는 유전율: 금 박막의 프레넬 반사
 
-금속의 유전율은 일반 유전체처럼 상수 하나로 표현하기 어렵다. [`fresnel_reflection.py`](../../examples/fresnel_reflection.py)는 Drude pole과 두 개의 critical point를 조합한 `DcpPlrc` 모델로 금의 주파수 분산을 표현한다.
+금속의 유전율은 일반 유전체처럼 상수 하나로 표현하기 어렵다. [`fresnel_reflection.py`](../../examples/fresnel_reflection.py)는 Drude pole과 두 개의 critical point를 조합한 `DcpPlrc` 모델로 주파수에 따라 달라지는 금의 유전율을 표현한다.
 
 ```python
 dp = DrudePole(omega=..., gamma=...)
@@ -170,7 +170,7 @@ gold = DcpPlrc(
 
 소스는 `GaussianBeam`이고, 금 박막 앞뒤에 probe를 두어 반사파와 투과파의 시간 신호를 기록한다. `bloch=(0, k0 * sin(angle), 0)`은 경사 입사 문제의 횡방향 위상 변화를 나타낸다. 현재 예제의 `angle=0`을 바꾸면 입사각에 따른 반사와 투과를 조사할 수 있다.
 
-이 예제를 다른 파장이나 금속으로 확장할 때는 단순히 `eps_inf`만 바꾸면 안 된다. 분산 모델의 계수, 단위 정규화, 적용 가능한 파장 범위를 함께 검토해야 물리적으로 의미 있는 결과를 얻는다.
+이 예제를 다른 파장이나 금속으로 확장할 때는 단순히 `eps_inf`만 바꾸면 안 된다. 주파수 의존 유전율 모델의 계수, 단위 정규화, 적용 가능한 파장 범위를 함께 검토해야 물리적으로 의미 있는 결과를 얻는다.
 
 ## 3차원으로 확장하기
 
@@ -198,7 +198,7 @@ python examples/phc_slab.py --quick
 
 ### 은 나노입자 배열 `metal_array.py`
 
-[`metal_array.py`](../../examples/metal_array.py)는 여섯 개 은 나노구가 만드는 플라즈몬 도파관을 모델링한다. 은은 실험 데이터에 맞춘 분산 재료로 정의하고, 배열 방향과 같은 방향의 `Jy` 점 소스로 종방향 모드를 여기한다.
+[`metal_array.py`](../../examples/metal_array.py)는 여섯 개 은 나노구가 만드는 플라즈몬 도파관을 모델링한다. 은은 실험 데이터에 맞춘 주파수 의존 유전율 모델로 정의하고, 배열 방향과 같은 방향의 `Jy` 점 소스로 종방향 모드를 여기한다.
 
 ```python
 for y in range(-2, 4):
@@ -229,10 +229,10 @@ mpiexec -n 4 python examples/metal_array.py
 | 주기 구조와 결함 학습 | `phc_waveguide.py` | `Cylinder`, 반복 형상 | 보통 |
 | 평면파 입사 확인 | `tfsf.py` | `TotalFieldScatteredField` | 낮음 |
 | 유전체 산란 비교 | `tfsf_with_scatterer.py` | TFSF, `Cylinder` | 낮음 |
-| 반사율·투과율 측정 | `fresnel_reflection.py` | 분산 재료, `GaussianBeam`, probe | 보통 |
+| 반사율·투과율 측정 | `fresnel_reflection.py` | 주파수 의존 유전율, `GaussianBeam`, probe | 보통 |
 | 3차원 형상 구성 | `man.py --quick` | 3D 기하 객체 | 축소 시 낮음 |
 | 3차원 광결정 | `phc_slab.py --quick` | 격자 생성, 선결함 | 전체 실행 높음 |
-| 플라즈모닉 배열 | `metal_array.py --quick` | 분산 금속, MPI | 전체 실행 높음 |
+| 플라즈모닉 배열 | `metal_array.py --quick` | 주파수 의존 금속 모델, MPI | 전체 실행 높음 |
 
 처음이라면 `air2d.py`에서 해상도와 소스 주파수를 바꾸고, 다음으로 `slab_waveguide.py`에서 코어 폭과 유전율을 바꿔 보는 순서를 권한다. 그 뒤 `tfsf.py`와 산란체 버전을 비교하면 소스, 재료, 경계가 결과에 미치는 영향을 단계적으로 익힐 수 있다.
 
@@ -253,6 +253,6 @@ FDTD 결과는 그림이 자연스러워 보인다는 이유만으로 신뢰할 
 
 ## 마치며
 
-GMES 예제의 장점은 복잡한 전자기 문제도 결국 동일한 조립 과정으로 표현된다는 점이다. `Cartesian`으로 무대를 만들고, 기하 객체로 재료를 배치하고, 소스를 넣고, 적절한 FDTD 클래스로 시간을 전진시킨다. 공기 중 원통파와 슬래브 도파관에서 이 패턴을 익히면 광결정, TFSF 산란, 분산 금속 같은 고급 예제도 훨씬 쉽게 읽힌다.
+GMES 예제의 장점은 복잡한 전자기 문제도 결국 동일한 조립 과정으로 표현된다는 점이다. `Cartesian`으로 무대를 만들고, 기하 객체로 재료를 배치하고, 소스를 넣고, 적절한 FDTD 클래스로 시간을 전진시킨다. 공기 중 원통파와 슬래브 도파관에서 이 패턴을 익히면 광결정, TFSF 산란, 주파수 의존 금속 모델 같은 고급 예제도 훨씬 쉽게 읽힌다.
 
 다음 단계는 예제 하나를 기준 문제로 삼아 매개변수를 체계적으로 바꾸고, probe와 필드 출력을 이용해 정량적인 결과를 얻는 것이다. 저장소의 [`examples/VERIFICATION.md`](../../examples/VERIFICATION.md)에는 각 예제의 최근 검증 범위와 실행 비용이 정리되어 있으므로 큰 계산을 시작하기 전에 함께 확인할 수 있다.

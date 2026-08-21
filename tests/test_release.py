@@ -88,6 +88,14 @@ class ReleaseConfigurationTest(unittest.TestCase):
         self.assertNotIn("actions/checkout", publish_job)
         self.assertNotIn("run:", publish_job)
 
+    def test_github_release_job_has_explicit_repository_context(self):
+        github_release_job = self.workflow.split("  github-release:", 1)[1]
+
+        self.assertNotIn("actions/checkout", github_release_job)
+        self.assertIn("GH_REPO: ${{ github.repository }}", github_release_job)
+        self.assertIn("gh release create", github_release_job)
+        self.assertIn("--verify-tag", github_release_job)
+
     def test_distribution_set_rejects_local_or_extra_files(self):
         with tempfile.TemporaryDirectory() as directory:
             (Path(directory) / "developer-build.whl").touch()

@@ -318,19 +318,19 @@ class ShowPlane(Thread):
         if axis is X:
             self.data = field[
                 cut_idx[0],
-                start_bndry_idx[1] : end_bndry_idx[1],
-                start_bndry_idx[2] : end_bndry_idx[2],
+                start_bndry_idx[1] : end_bndry_idx[1] + 1,
+                start_bndry_idx[2] : end_bndry_idx[2] + 1,
             ]
         elif axis is Y:
             self.data = field[
-                start_bndry_idx[0] : end_bndry_idx[0],
+                start_bndry_idx[0] : end_bndry_idx[0] + 1,
                 cut_idx[1],
-                start_bndry_idx[2] : end_bndry_idx[2],
+                start_bndry_idx[2] : end_bndry_idx[2] + 1,
             ]
         elif axis is Z:
             self.data = field[
-                start_bndry_idx[0] : end_bndry_idx[0],
-                start_bndry_idx[1] : end_bndry_idx[1],
+                start_bndry_idx[0] : end_bndry_idx[0] + 1,
+                start_bndry_idx[1] : end_bndry_idx[1] + 1,
                 cut_idx[2],
             ]
         else:

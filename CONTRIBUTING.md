@@ -4,30 +4,31 @@ GMES targets the latest stable Python 3 release. Python 2 compatibility and the 
 
 ## Development setup
 
-Install a C++23 compiler and standard library with `std::mdspan` support plus
-SWIG 4, then create an isolated Python 3.14 environment from the repository
-root:
+Install a C++23 compiler and standard library with `std::mdspan` support,
+SWIG 4, and [uv](https://docs.astral.sh/uv/). Then create the locked Python
+3.14 development environment from the repository root:
 
 ```sh
-python3.14 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -e ".[dev,hdf5]"
+uv python install 3.14
+uv sync --extra hdf5
 ```
 
-Use `.[all,dev]` when work also needs plotting and MPI support.
+The `dev` dependency group is installed by default. Use `uv sync --extra all`
+when work also needs plotting, MPI, and HDF5 support. Commit `uv.lock` changes
+when intentionally updating dependencies, and use `uv lock --check` to verify
+that the lockfile matches `pyproject.toml`.
 
 ## Verification
 
 Run the narrowest relevant tests while developing, followed by the complete suite before submitting a change:
 
 ```sh
-python -m unittest tests.test_geometry -v
-python -m isort --check-only gmes examples tests utils setup.py
-python -m black --check gmes examples tests utils setup.py
-python -m pylint gmes setup.py
-python -m unittest discover -v
-python -m build
+uv run python -m unittest tests.test_geometry -v
+uv run python -m isort --check-only gmes examples tests utils setup.py
+uv run python -m black --check gmes examples tests utils setup.py
+uv run python -m pylint gmes setup.py
+uv run python -m unittest discover -v
+uv build
 ```
 
 Numerical behavior changes must include a deterministic regression test. Avoid using the large examples as routine tests because some need more than 1 GB of memory and run for a long time.

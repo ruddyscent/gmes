@@ -29,7 +29,7 @@ Matplotlib, mpi4py, and PyTables are available through the `plot`, `mpi`, and `h
 
 ## Installation
 
-Install SWIG with the package manager for your operating system, then create an isolated Python environment:
+Install SWIG with the package manager for your operating system, then install GMES in an isolated Python environment:
 
 ```sh
 python3.14 -m venv .venv
@@ -38,13 +38,19 @@ python -m pip install --upgrade pip
 python -m pip install .
 ```
 
-For development, install the package in editable mode with the development and optional runtime dependencies needed for the tests:
+For development, install [uv](https://docs.astral.sh/uv/), then create the
+Python 3.14 environment and install the project with the optional runtime
+dependencies needed by the tests:
 
 ```sh
-python -m pip install -e ".[dev,hdf5]"
+uv python install 3.14
+uv sync --extra hdf5
 ```
 
-Other supported combinations include `.[plot]`, `.[mpi]`, and `.[all]`. The build uses the PEP 517 configuration in `pyproject.toml`; invoking `setup.py` directly is not supported.
+The `dev` dependency group is installed by default. Other supported runtime
+combinations include `--extra plot`, `--extra mpi`, and `--extra all`. The
+build uses the PEP 517 configuration in `pyproject.toml`; invoking `setup.py`
+directly is not supported.
 
 ## Quick start
 
@@ -86,8 +92,8 @@ See [`examples/`](examples/) for simulations of wave propagation, Fresnel reflec
 Run the complete test suite and build both distribution formats with:
 
 ```sh
-python -m unittest discover -v
-python -m build
+uv run python -m unittest discover -v
+uv build
 ```
 
 The tests include component coverage, geometry and source-time checks, a deterministic FDTD regression, and optional HDF5 output coverage. The HDF5 tests are skipped when PyTables is not installed.

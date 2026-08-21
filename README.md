@@ -20,13 +20,38 @@ GMES (GIST Maxwell's Equations Solver) is a free electromagnetic simulator that 
 ## Requirements
 
 - Python 3.14 or newer
-- A C++23 compiler and standard library with `std::mdspan` support
+- A C++23 compiler and standard library
 - SWIG 4
 - NumPy 2.3 or newer
 - SciPy 1.16 or newer
 - macOS 11 or newer when building or installing on macOS
 
 Matplotlib, mpi4py, and PyTables are available through the `plot`, `mpi`, and `hdf5` optional dependency groups.
+
+### System prerequisites
+
+On Ubuntu 24.04 or newer, install the compiler toolchain and SWIG with:
+
+```sh
+sudo apt-get update
+sudo apt-get install --yes build-essential swig
+c++ --version
+swig -version
+```
+
+On macOS, install the current Xcode Command Line Tools and SWIG:
+
+```sh
+xcode-select --install
+brew install swig
+c++ --version
+swig -version
+```
+
+The native extensions are always compiled in C++23 mode. They use
+`std::mdspan` when the standard library provides `<mdspan>` and otherwise use
+the internal contiguous-indexing fallback. That fallback does not add support
+for older C++ language modes.
 
 ## Installation
 
@@ -46,6 +71,8 @@ by the tests:
 ```sh
 uv python install 3.14
 uv sync --locked --extra hdf5
+uv run --no-sync python -m unittest discover -v
+uv build
 ```
 
 This checkout requires uv 0.12.5; uv exits with an actionable version error
@@ -55,6 +82,13 @@ The `dev` dependency group is installed by default. Other supported runtime
 combinations include `--extra plot`, `--extra mpi`, and `--extra all`. The
 build uses the PEP 517 configuration in `pyproject.toml`; invoking `setup.py`
 directly is not supported.
+
+If an existing checkout used `python -m pip install -e ".[dev,hdf5]"`, switch
+to the commands above. `dev` is now a PEP 735 dependency group rather than a
+package extra, and `uv sync` installs it by default. Extras such as `hdf5`,
+`plot`, and `mpi` remain explicit `--extra` options. Use `uv sync --locked`
+when consuming the committed lockfile; reserve `uv lock --upgrade` for a
+deliberate dependency-update change.
 
 ## Quick start
 
@@ -87,8 +121,8 @@ visualizing `air2d.py` example, install its plotting and HDF5 dependencies and
 then launch it from the repository root:
 
 ```sh
-python -m pip install -e ".[plot,hdf5]"
-python examples/air2d.py
+uv sync --locked --extra plot --extra hdf5
+uv run --no-sync python examples/air2d.py
 ```
 
 See [`examples/`](examples/) for simulations of wave propagation, Fresnel reflection, photonic-crystal waveguides, slab waveguides, plasmonic arrays, and total-field/scattered-field excitation. Some three-dimensional examples require more than 1 GB of memory and are not suitable as routine smoke tests.
@@ -111,11 +145,21 @@ extension's minimum OS load command.
 
 ## Parallel execution
 
-Install GMES with its MPI dependency and use the launcher supplied by your MPI implementation:
+Install an MPI implementation (`libopenmpi-dev openmpi-bin` on Ubuntu or
+`open-mpi` with Homebrew on macOS), then install the Python extra and use its
+launcher through the uv environment:
 
 ```sh
-python -m pip install ".[mpi]"
-mpiexec -n <process-count> python <simulation.py>
+# Ubuntu
+sudo apt-get install --yes libopenmpi-dev openmpi-bin
+
+# macOS
+brew install open-mpi
+```
+
+```sh
+uv sync --locked --extra mpi
+uv run --no-sync mpiexec -n <process-count> python <simulation.py>
 ```
 
 ## Repository layout

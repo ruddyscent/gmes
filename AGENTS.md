@@ -8,7 +8,7 @@ GMES (GIST Maxwell's Equations Solver) is a Python package for electromagnetic s
 
 ## Compatibility
 
-- Target Python 3.14 or newer and a C++23 toolchain with `std::mdspan` support.
+- Target Python 3.14 or newer and a C++23 toolchain. Use `std::mdspan` when the standard library provides it; preserve the internal contiguous-indexing fallback when it does not.
 - Python 2 compatibility is not required.
 - Preserve numerical behavior unless a change is explicitly documented and covered by regression tests.
 - Use the PEP 517 build declared in `pyproject.toml`; keep SWIG and Cython sources compatible with their current stable releases.
@@ -17,20 +17,23 @@ GMES (GIST Maxwell's Equations Solver) is a Python package for electromagnetic s
 ## Building and testing
 
 Install the locked development environment and optional HDF5 dependency from
-the repository root:
+the repository root. System prerequisites are `build-essential` and `swig` on
+Ubuntu 24.04 or newer, or the current Xcode Command Line Tools and Homebrew
+`swig` on macOS; verify them with `c++ --version` and `swig -version`.
 
 ```sh
 uv python install 3.14
 uv sync --locked --extra hdf5
-```
-
-Run the test suite:
-
-```sh
 uv run --no-sync python -m unittest discover -v
+uv build
 ```
 
 Choose the narrowest tests that cover the change. If the required native build toolchain is unavailable, report which checks could not be run instead of claiming full verification.
+
+`uv sync --locked` consumes the committed lockfile. Use `uv lock --upgrade`
+only in a dedicated dependency-update change. The `dev` dependencies are a
+PEP 735 group installed by uv by default, not a package extra; do not restore
+the former `.[dev,hdf5]` pip workflow.
 
 ## Change guidelines
 

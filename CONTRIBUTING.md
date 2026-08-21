@@ -4,13 +4,22 @@ GMES targets the latest stable Python 3 release. Python 2 compatibility and the 
 
 ## Development setup
 
-Install a C++23 compiler and standard library with `std::mdspan` support,
-SWIG 4, and [uv](https://docs.astral.sh/uv/). Then create the locked Python
-3.14 development environment from the repository root:
+Install a C++23 compiler, SWIG 4, and [uv](https://docs.astral.sh/uv/). On
+Ubuntu 24.04 or newer use `sudo apt-get install --yes build-essential swig`;
+on macOS install the current Xcode Command Line Tools and run
+`brew install swig`. Verify the selected tools with `c++ --version` and
+`swig -version`.
+
+The build uses `std::mdspan` when `<mdspan>` is available and otherwise uses
+its internal contiguous-indexing fallback; C++23 mode itself is required.
+Create and verify the locked Python 3.14 development environment from the
+repository root:
 
 ```sh
 uv python install 3.14
 uv sync --locked --extra hdf5
+uv run --no-sync python -m unittest discover -v
+uv build
 ```
 
 The `dev` dependency group is installed by default. Use the following command
@@ -19,6 +28,10 @@ when work also needs plotting, MPI, and HDF5 support:
 ```sh
 uv sync --locked --extra all
 ```
+
+Developers migrating from `python -m pip install -e ".[dev,hdf5]"` should use
+the uv setup above. `dev` is a PEP 735 dependency group, not an installable
+extra; runtime extras such as `hdf5` are still selected with `--extra`.
 
 uv's editable-project cache tracks the C++, SWIG, and Cython inputs under
 `src/`. Changing a `*.cc`, `*.hh`, `*.i`, or `*.pyx` file makes the next
@@ -49,6 +62,10 @@ to the NumPy version in `uv.lock`; update both together, then verify an
 editable sync and a distribution build. When changing the required uv release,
 update both `[tool.uv].required-version` and the `setup-uv` workflow input in
 the same pull request.
+
+Keep the `build` package in the `dev` group. The packaging regression in
+`tests/test_packaging.py` invokes `python -m build --sdist`, while `uv build`
+remains the documented command for contributor distribution builds.
 
 ## Verification
 

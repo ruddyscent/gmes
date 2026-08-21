@@ -11,10 +11,46 @@ from gmes.pw_source import (
     TransparentEx,
     TransparentMagneticParam,
 )
-from gmes.source import Bandpass, Continuous, DifferentiatedGaussian
+from gmes.source import (
+    Bandpass,
+    Continuous,
+    DifferentiatedGaussian,
+    TotalFieldScatteredField,
+)
 
 
 class SourceTimeTest(unittest.TestCase):
+    def make_tfsf(self, **kwargs):
+        parameters = {
+            "src_time": Continuous(freq=0.8),
+            "center": (0, 0, 0),
+            "size": (3, 3, 1),
+            "direction": (1, 0, 0),
+            "polarization": (0, 1, 0),
+        }
+        parameters.update(kwargs)
+        return TotalFieldScatteredField(**parameters)
+
+    def test_tfsf_accepts_finite_center_and_size(self):
+        source = self.make_tfsf(center=(-1, 0.5, 2), size=(3, 4, 5))
+
+        np.testing.assert_array_equal(source.center, (-1, 0.5, 2))
+        np.testing.assert_array_equal(source.size, (3, 4, 5))
+
+    def test_tfsf_rejects_each_non_finite_center_and_size_component(self):
+        for argument in ("center", "size"):
+            for axis in range(3):
+                for value in (np.inf, -np.inf, np.nan):
+                    with self.subTest(argument=argument, axis=axis, value=value):
+                        vector = [0, 0, 0] if argument == "center" else [3, 3, 1]
+                        vector[axis] = value
+
+                        with self.assertRaisesRegex(
+                            ValueError,
+                            rf"{argument} must contain only finite values",
+                        ):
+                            self.make_tfsf(**{argument: vector})
+
     def test_continuous_source_default_width(self):
         source = Continuous(freq=2)
 

@@ -6,7 +6,7 @@
 from copy import deepcopy
 
 import numpy as np
-from numpy import empty, zeros, inf, dot, array
+from numpy import array, dot, empty, inf, zeros
 
 # GMES modules
 from . import constant as const

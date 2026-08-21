@@ -40,13 +40,12 @@ Modules:
 
 """
 
+from . import constant, fdtd, geometry, material, pw_material, pw_source, source
+from .constant import *
 from .fdtd import *
 from .geometry import *
-from .constant import *
-from .source import *
 from .material import *
-
-from . import constant, fdtd, geometry, material, pw_material, pw_source, source
+from .source import *
 
 # List here only the objects we want to be publicly available
 _module = [

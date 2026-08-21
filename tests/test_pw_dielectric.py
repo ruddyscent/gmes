@@ -1,9 +1,11 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 import unittest
+
 import numpy as np
-from gmes.material import Dielectric
+
 from gmes.geometry import Cartesian
+from gmes.material import Dielectric
 
 
 class TestSequence(unittest.TestCase):

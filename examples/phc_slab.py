@@ -16,6 +16,7 @@ This script requires about 1.3GB of memory.
 """
 
 from numpy import *
+
 from gmes import *
 
 # Define simulation parameters.

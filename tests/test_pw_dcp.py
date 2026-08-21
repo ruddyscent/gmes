@@ -1,11 +1,12 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 import unittest
+
 import numpy as np
 
-from gmes.material import DcpPlrc, DcpAde, DrudePole, CriticalPoint
 from gmes.constant import c0
 from gmes.geometry import Cartesian
+from gmes.material import CriticalPoint, DcpAde, DcpPlrc, DrudePole
 
 
 class Gold(DcpAde):

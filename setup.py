@@ -5,12 +5,11 @@
 from glob import glob
 from pathlib import Path
 
+# Third-party modules - we depend on numpy for everything
+import numpy
 from Cython.Build import cythonize
 from setuptools import Extension, setup
 from setuptools.command.build_ext import build_ext
-
-# Third-party modules - we depend on numpy for everything
-import numpy
 
 
 class BuildExt(build_ext):

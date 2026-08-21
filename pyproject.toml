@@ -48,6 +48,7 @@ dev = [
     "black>=26.5",
     "build>=1.2",
     "coverage>=7.10",
+    "isort>=8.0",
     "pylint>=4.0",
 ]
 
@@ -64,6 +65,14 @@ version = {file = "VERSION"}
 
 [tool.black]
 target-version = ["py314"]
+
+[tool.isort]
+profile = "black"
+py_version = 314
+extend_skip = [
+    "gmes/constant.py",
+    "gmes/pw_material.py",
+]
 
 [tool.pylint.main]
 py-version = "3.14"

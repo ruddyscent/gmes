@@ -1,29 +1,38 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-from copy import deepcopy
-from math import sqrt, pi, sin, cos, exp
 from cmath import exp as cexp
+from copy import deepcopy
+from math import cos, exp, pi, sin, sqrt
 
 import numpy as np
-from numpy import inf, cross, dot, ndindex
+from numpy import cross, dot, inf, ndindex
 from numpy.linalg import norm
 from scipy.optimize import bisect
 
 from . import constant as const
-from .geometry import Cartesian, DefaultMedium, Shell, in_range
 from .fdtd import TEMzFDTD
-from .material import Dielectric, Cpml
+from .geometry import Cartesian, DefaultMedium, Shell, in_range
+from .material import Cpml, Dielectric
 
-# for a point source
-from .pw_source import PointSourceParam
-from .pw_source import PointSourceEx, PointSourceEy, PointSourceEz
-from .pw_source import PointSourceHx, PointSourceHy, PointSourceHz
-
-# for a total-field/scattered-field and Gaussian beam source
-from .pw_source import TransparentElectricParam, TransparentMagneticParam
-from .pw_source import TransparentEx, TransparentEy, TransparentEz
-from .pw_source import TransparentHx, TransparentHy, TransparentHz
+# Point and total-field/scattered-field source update types.
+from .pw_source import (
+    PointSourceEx,
+    PointSourceEy,
+    PointSourceEz,
+    PointSourceHx,
+    PointSourceHy,
+    PointSourceHz,
+    PointSourceParam,
+    TransparentElectricParam,
+    TransparentEx,
+    TransparentEy,
+    TransparentEz,
+    TransparentHx,
+    TransparentHy,
+    TransparentHz,
+    TransparentMagneticParam,
+)
 
 #
 # SrcTime: Continuous, Bandpass

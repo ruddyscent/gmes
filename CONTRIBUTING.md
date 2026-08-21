@@ -21,6 +21,7 @@ Run the narrowest relevant tests while developing, followed by the complete suit
 
 ```sh
 python -m unittest tests.test_geometry -v
+python -m isort --check-only gmes examples tests utils setup.py
 python -m black --check gmes examples tests utils setup.py
 python -m pylint gmes setup.py
 python -m unittest discover -v

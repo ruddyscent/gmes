@@ -3,10 +3,9 @@
 
 from threading import Thread
 
-from numpy import array, empty, arange, ndindex, linspace
 import numpy as np
-
-from matplotlib.pyplot import new_figure_manager, cm, show
+from matplotlib.pyplot import cm, new_figure_manager, show
+from numpy import arange, array, empty, linspace, ndindex
 
 # GMES modules
 from .constant import *

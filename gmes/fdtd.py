@@ -2,22 +2,23 @@
 # -*- coding: utf-8 -*-
 
 
-from copy import deepcopy
-from math import sqrt
 from cmath import exp as cexp
-from numpy import ndindex, arange, inf, array
+from copy import deepcopy
 from datetime import datetime, timedelta
+from math import sqrt
 
 import numpy as np
+from numpy import arange, array, inf, ndindex
+
+from .constant import *
+from .file_io import Probe
 
 # GMES modules
-from .geometry import GeomBoxTree, in_range, DefaultMedium
-from .file_io import Probe
+from .geometry import DefaultMedium, GeomBoxTree, in_range
 
 # from file_io import write_hdf5, snapshot
 from .material import Dummy
 from .pygeom import GeomBox
-from .constant import *
 
 
 class TimeStep(object):

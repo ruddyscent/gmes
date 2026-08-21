@@ -18,6 +18,7 @@ print("python version:", sys.version)
 start_time = datetime.now()
 
 from numpy import cross
+
 from gmes import *
 
 space = Cartesian(size=(6, 6, 6), resolution=20)

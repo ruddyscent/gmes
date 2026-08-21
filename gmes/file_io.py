@@ -1,9 +1,9 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-from sys import stderr
 from os.path import exists
 from pathlib import Path
+from sys import stderr
 
 
 class Probe(object):

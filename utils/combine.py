@@ -6,8 +6,9 @@
 #
 # usage: combine.py [splitted npy files]
 
-import numpy as np
 import sys
+
+import numpy as np
 
 fname = sys.argv[1]
 head = fname.split("(")[0][:-1]

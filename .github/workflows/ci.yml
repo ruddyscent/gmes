@@ -36,6 +36,7 @@ jobs:
           python -m pip install ".[dev,hdf5]"
       - name: Run quality checks
         run: |
+          python -m isort --check-only gmes examples tests utils setup.py
           python -m black --check gmes examples tests utils setup.py
           python -m pylint gmes setup.py
       - name: Run tests

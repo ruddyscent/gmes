@@ -1,9 +1,11 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 import unittest
+
 import numpy as np
-from gmes.material import Cpml
+
 from gmes.geometry import Cartesian
+from gmes.material import Cpml
 
 
 class TestSequence(unittest.TestCase):

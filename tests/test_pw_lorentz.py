@@ -1,10 +1,11 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 import unittest
+
 import numpy as np
 
-from gmes.material import Lorentz, LorentzPole
 from gmes.geometry import Cartesian
+from gmes.material import Lorentz, LorentzPole
 
 
 class TestSequence(unittest.TestCase):

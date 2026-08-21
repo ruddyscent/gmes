@@ -12,7 +12,12 @@
 # Kyungwon Chun <kwchun@gist.ac.kr>
 #
 
-import sys, math, dia, types, string
+import math
+import string
+import sys
+import types
+
+import dia
 
 
 def distribute_objects(objs):

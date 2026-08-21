@@ -1,9 +1,11 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 import unittest
+
 import numpy as np
-from gmes.material import Const
+
 from gmes.geometry import Cartesian
+from gmes.material import Const
 
 
 class TestSequence(unittest.TestCase):

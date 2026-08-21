@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-from math import cos, sin, pi, floor
 import sys
+from math import cos, floor, pi, sin
 
 import numpy as np
 from numpy import inf

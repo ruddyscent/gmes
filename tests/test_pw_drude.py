@@ -1,11 +1,12 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 import unittest
+
 import numpy as np
 
-from gmes.material import Drude, DrudePole
-from gmes.geometry import Cartesian
 from gmes.constant import c0
+from gmes.geometry import Cartesian
+from gmes.material import Drude, DrudePole
 
 
 class TestSequence(unittest.TestCase):

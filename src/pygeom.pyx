@@ -683,20 +683,23 @@ cdef class Cone(GeometricObject):
         """
         h = .5 * self.height
 
-        # radial is a vector consisting of Cartesian unit vectors
-        # which are orthogonal to the self.axis.
-        r = np.ones((3,), np.double)
-        radial = r - self.axis * r
+        # Project a radius perpendicular to the axis onto each Cartesian
+        # direction. Clamp roundoff before taking the square root.
+        radial = np.sqrt(np.maximum(0, 1 - self.axis * self.axis))
+        extent1 = np.zeros((3,), np.double)
+        extent2 = np.zeros((3,), np.double)
+        np.multiply(self.radius, radial, out=extent1, where=radial != 0)
+        np.multiply(self.radius2, radial, out=extent2, where=radial != 0)
 
         # bounding box for -h*axis cylinder end
         tmpBox1 = GeomBox(low=self.center, high=self.center)
-        tmpBox1.low -= h * self.axis + self.radius * radial
-        tmpBox1.high -= h * self.axis - self.radius * radial
+        tmpBox1.low -= h * self.axis + extent1
+        tmpBox1.high -= h * self.axis - extent1
 
         # bounding box for +h*axis cylinder end
         tmpBox2 = GeomBox(low=self.center, high=self.center)
-        tmpBox2.low += h * self.axis - self.radius2 * radial
-        tmpBox2.high += h * self.axis + self.radius2 * radial
+        tmpBox2.low += h * self.axis - extent2
+        tmpBox2.high += h * self.axis + extent2
 
         tmpBox1.union(tmpBox2)
 

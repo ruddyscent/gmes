@@ -6,6 +6,16 @@ import numpy as np
 
 from gmes.geometry import Cartesian
 from gmes.material import Upml
+from gmes.pw_material import (
+    UpmlElectricParamReal,
+    UpmlExReal,
+    UpmlEyReal,
+    UpmlEzReal,
+    UpmlHxReal,
+    UpmlHyReal,
+    UpmlHzReal,
+    UpmlMagneticParamReal,
+)
 
 
 class TestSequence(unittest.TestCase):
@@ -17,6 +27,44 @@ class TestSequence(unittest.TestCase):
 
         self.upml = Upml()
         self.upml.init(self.spc, ((0, 0, 0), (1, 1, 1), 0.5))
+
+    def test_auxiliary_state_persists_across_updates(self):
+        cases = (
+            (UpmlExReal, UpmlElectricParamReal, (2, 2, 1), 1),
+            (UpmlEyReal, UpmlElectricParamReal, (1, 2, 2), 1),
+            (UpmlEzReal, UpmlElectricParamReal, (2, 1, 2), 1),
+            (UpmlHxReal, UpmlMagneticParamReal, (1, 1, 0), -1),
+            (UpmlHyReal, UpmlMagneticParamReal, (0, 1, 1), -1),
+            (UpmlHzReal, UpmlMagneticParamReal, (1, 0, 1), -1),
+        )
+
+        for material_type, parameter_type, curl_idx, sign in cases:
+            with self.subTest(material=material_type.__name__):
+                parameter = parameter_type()
+                if isinstance(parameter, UpmlElectricParamReal):
+                    parameter.eps_inf = 1
+                    parameter.d = 0
+                else:
+                    parameter.mu_inf = 1
+                    parameter.b = 0
+                parameter.c1 = 0.5
+                parameter.c2 = 1
+                parameter.c3 = 0
+                parameter.c4 = 1
+                parameter.c5 = 1
+                parameter.c6 = 0
+
+                material = material_type()
+                material.attach(self.idx, parameter)
+                field, in_field1, in_field2 = [np.zeros((3, 3, 3)) for _ in range(3)]
+                in_field1[curl_idx] = 1
+
+                values = []
+                for step in range(3):
+                    material.update_all(field, in_field1, in_field2, 1, 1, 1, step)
+                    values.append(field[self.idx])
+
+                np.testing.assert_allclose(values, sign * np.array((1, 1.5, 1.75)))
 
     def testExReal(self):
         sample = self.upml.get_pw_material_ex(self.idx, (0, 0, 0))

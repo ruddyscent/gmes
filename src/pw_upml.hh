@@ -312,7 +312,7 @@ namespace gmes
 	   const T* const ey, int ey_x_size, int ey_y_size, int ey_z_size,
 	   double dy, double dz, double dt, double n,
 	   const Index3& idx,
-	   UpmlMagneticParam<T> upml_param) const
+	   UpmlMagneticParam<T>& upml_param) const
     {
       const int i = idx[0], j = idx[1], k = idx[2];
 

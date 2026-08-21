@@ -20,6 +20,16 @@ when work also needs plotting, MPI, and HDF5 support:
 uv sync --locked --extra all
 ```
 
+uv's editable-project cache tracks the C++, SWIG, and Cython inputs under
+`src/`. Changing a `*.cc`, `*.hh`, `*.i`, or `*.pyx` file makes the next
+`uv sync` rebuild the native extensions. Pure Python files remain directly
+editable and do not trigger a native rebuild. If a build input outside the
+configured cache keys changes, force a rebuild with:
+
+```sh
+uv sync --locked --extra hdf5 --reinstall-package gmes
+```
+
 ## Verification
 
 Run the narrowest relevant tests while developing, followed by the complete suite before submitting a change:

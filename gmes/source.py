@@ -249,7 +249,8 @@ class PointSource(Src):
         if self.comp is const.Ex or self.comp is const.Jx:
             idx = space.space_to_ex_index(*self.center)
             if in_range(idx, ex_field.shape, const.Ex):
-                mat_obj, underneath = geom_tree.material_of_point(tuple(self.center))
+                coords = space.ex_index_to_space(*idx)
+                mat_obj, underneath = geom_tree.material_of_point(coords)
                 pw_src_param = PointSourceParam(
                     self.src_time,
                     self.amp,
@@ -269,7 +270,8 @@ class PointSource(Src):
         if self.comp is const.Ey or self.comp is const.Jy:
             idx = space.space_to_ey_index(*self.center)
             if in_range(idx, ey_field.shape, const.Ey):
-                mat_obj, underneath = geom_tree.material_of_point(tuple(self.center))
+                coords = space.ey_index_to_space(*idx)
+                mat_obj, underneath = geom_tree.material_of_point(coords)
                 pw_src_param = PointSourceParam(
                     self.src_time,
                     self.amp,
@@ -289,7 +291,8 @@ class PointSource(Src):
         if self.comp is const.Ez or self.comp is const.Jz:
             idx = space.space_to_ez_index(*self.center)
             if in_range(idx, ez_field.shape, const.Ez):
-                mat_obj, underneath = geom_tree.material_of_point(tuple(self.center))
+                coords = space.ez_index_to_space(*idx)
+                mat_obj, underneath = geom_tree.material_of_point(coords)
                 pw_src_param = PointSourceParam(
                     self.src_time,
                     self.amp,
@@ -309,7 +312,8 @@ class PointSource(Src):
         if self.comp is const.Hx or self.comp is const.Mx:
             idx = space.space_to_hx_index(*self.center)
             if in_range(idx, hx_field.shape, const.Hx):
-                mat_obj, underneath = geom_tree.material_of_point(tuple(self.center))
+                coords = space.hx_index_to_space(*idx)
+                mat_obj, underneath = geom_tree.material_of_point(coords)
                 pw_src_param = PointSourceParam(
                     self.src_time,
                     self.amp,
@@ -329,7 +333,8 @@ class PointSource(Src):
         if self.comp is const.Hy or self.comp is const.My:
             idx = space.space_to_hy_index(*self.center)
             if in_range(idx, hy_field.shape, const.Hy):
-                mat_obj, underneath = geom_tree.material_of_point(tuple(self.center))
+                coords = space.hy_index_to_space(*idx)
+                mat_obj, underneath = geom_tree.material_of_point(coords)
                 pw_src_param = PointSourceParam(
                     self.src_time,
                     self.amp,
@@ -349,7 +354,8 @@ class PointSource(Src):
         if self.comp is const.Hz or self.comp is const.Mz:
             idx = space.space_to_hz_index(*self.center)
             if in_range(idx, hz_field.shape, const.Hz):
-                mat_obj, underneath = geom_tree.material_of_point(tuple(self.center))
+                coords = space.hz_index_to_space(*idx)
+                mat_obj, underneath = geom_tree.material_of_point(coords)
                 pw_src_param = PointSourceParam(
                     self.src_time,
                     self.amp,

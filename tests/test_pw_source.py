@@ -15,6 +15,7 @@ from gmes.constant import (
     My,
     Mz,
 )
+from gmes.geometry import Cartesian
 from gmes.pw_source import (
     PointSourceEx,
     PointSourceEy,
@@ -24,6 +25,20 @@ from gmes.pw_source import (
     PointSourceHz,
     PointSourceParam,
 )
+from gmes.source import PointSource
+
+
+class InterfaceGeometry:
+    def __init__(self, boundary, dense_on_high_side):
+        self.boundary = boundary
+        self.dense_on_high_side = dense_on_high_side
+        self.queries = []
+
+    def material_of_point(self, point):
+        self.queries.append(point)
+        on_high_side = point[0] >= self.boundary
+        value = 4 if on_high_side == self.dense_on_high_side else 1
+        return SimpleNamespace(eps_inf=value, mu_inf=value), None
 
 
 class PointSourceTest(unittest.TestCase):
@@ -64,6 +79,34 @@ class PointSourceTest(unittest.TestCase):
                 source.update_all(field, field, field, 1, 1, 0.5, 0)
 
                 self.assertEqual(field[0, 0, 0], -0.25)
+
+    def test_current_sources_use_material_at_snapped_yee_point(self):
+        source_time = SimpleNamespace(oscillator=lambda _time: 2.0)
+        space = Cartesian((2, 2, 2), resolution=2)
+        field = np.zeros((5, 5, 5))
+        cases = (
+            (Jx, "ex", (-0.01, 0, 0), -0.1, False),
+            (Jx, "ex", (0.01, 0, 0), 0.1, True),
+            (Mx, "hx", (-0.01, 0, 0), -0.005, True),
+            (Mx, "hx", (0.01, 0, 0), 0.005, False),
+        )
+
+        for component, name, center, boundary, dense_on_high_side in cases:
+            with self.subTest(component=component.str(), center=center):
+                geometry = InterfaceGeometry(boundary, dense_on_high_side)
+                source = PointSource(source_time, center, component)
+                index = getattr(space, f"space_to_{name}_index")(*center)
+                snapped = getattr(space, f"{name}_index_to_space")(*index)
+                get_source = getattr(source, f"get_pw_source_{name}")
+                pw_source = get_source(field, space, geometry)
+
+                request_material, _ = geometry.material_of_point(center)
+                self.assertEqual(request_material.eps_inf, 1)
+                np.testing.assert_allclose(geometry.queries[0], snapped)
+
+                updated = np.zeros_like(field)
+                pw_source.update_all(updated, updated, updated, 1, 1, 0.5, 0)
+                self.assertEqual(updated[index], -0.25)
 
 
 if __name__ == "__main__":

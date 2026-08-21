@@ -1989,9 +1989,8 @@ class Dm2(Dielectric):
         else:
             pw_param.eps_inf = underneath.eps_inf
 
-        pw_param.omega = self.omega
+        pw_param.set(self.omega, self.n_atom)
         pw_param.rho30 = self.rho30
-        pw_param.n_atom = self.n_atom
         pw_param.gamma = self.gamma
         pw_param.t1 = self.t1
         pw_param.t2 = self.t2
@@ -2013,9 +2012,8 @@ class Dm2(Dielectric):
         else:
             pw_param.eps_inf = underneath.eps_inf
 
-        pw_param.omega = self.omega
+        pw_param.set(self.omega, self.n_atom)
         pw_param.rho30 = self.rho30
-        pw_param.n_atom = self.n_atom
         pw_param.gamma = self.gamma
         pw_param.t1 = self.t1
         pw_param.t2 = self.t2

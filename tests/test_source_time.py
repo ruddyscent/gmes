@@ -1,5 +1,5 @@
 import unittest
-from math import pi
+from math import pi, sin
 from types import SimpleNamespace
 
 import numpy as np
@@ -28,6 +28,25 @@ class SourceTimeTest(unittest.TestCase):
         self.assertEqual(source.oscillator(0), 0j)
         self.assertAlmostEqual(source.oscillator(1).real, 0.0, places=12)
         self.assertAlmostEqual(source.oscillator(1).imag, -1.0, places=12)
+
+    def test_continuous_source_combines_overlapping_ramps(self):
+        cases = (
+            (4, 1, 0.5, 0.5),
+            (4, 1, 2, 1.0),
+            (4, 1, 3.5, 0.5),
+            (2, 1, 1, 1.0),
+            (1.5, 1, 0.75, sin(0.375 * pi) ** 4),
+            (1, 2, 0.5, sin(0.125 * pi) ** 4),
+        )
+
+        for end, width, time, expected_envelope in cases:
+            with self.subTest(end=end, width=width, time=time):
+                source = Continuous(freq=1, start=0, end=end, width=width)
+                source.init(cmplx=True)
+
+                self.assertAlmostEqual(abs(source.oscillator(time)), expected_envelope)
+                self.assertEqual(source.oscillator(end), 0j)
+                self.assertEqual(source.oscillator(end + 1e-12), 0)
 
     def test_bandpass_is_zero_outside_cutoff(self):
         source = Bandpass(freq=1, fwidth=0.5)

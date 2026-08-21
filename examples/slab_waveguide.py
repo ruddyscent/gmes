@@ -15,16 +15,26 @@ Comput. Phys. Commun. 181, 687-702 (2010).
 
 from gmes import *
 
-space = Cartesian(size=(16, 8, 0), resolution=10)
-geom_list = [
-    DefaultMedium(material=Dielectric()),
-    Block(material=Dielectric(12), size=(inf, 1, inf)),
-    Shell(material=Cpml()),
-]
-src_list = [
-    PointSource(src_time=Continuous(freq=0.15), component=Ez, center=(-7, 0, 0))
-]
-my_fdtd = TMzFDTD(space, geom_list, src_list)
-my_fdtd.init()
-my_fdtd.show_field(Ez, Z, 0)
-my_fdtd.step_until_t(200)
+
+def make_simulation(verbose=True):
+    space = Cartesian(size=(16, 8, 0), resolution=10)
+    geom_list = [
+        DefaultMedium(material=Dielectric()),
+        Block(material=Dielectric(12), size=(16, 1, 1)),
+        Shell(material=Cpml()),
+    ]
+    src_list = [
+        PointSource(src_time=Continuous(freq=0.15), component=Ez, center=(-7, 0, 0))
+    ]
+    return TMzFDTD(space, geom_list, src_list, verbose=verbose)
+
+
+def main():
+    simulation = make_simulation()
+    simulation.init()
+    simulation.show_field(Ez, Z, 0)
+    simulation.step_until_t(200)
+
+
+if __name__ == "__main__":
+    main()

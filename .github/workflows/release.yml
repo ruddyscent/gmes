@@ -76,6 +76,7 @@ jobs:
           persist-credentials: false
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
+          cache-suffix: ${{ github.job }}
           enable-cache: true
           version: "0.12.5"
       - name: Install Python
@@ -87,7 +88,12 @@ jobs:
           sudo apt-get install --yes libopenmpi-dev openmpi-bin swig
       - name: Install native dependencies on macOS
         if: runner.os == 'macOS'
-        run: brew install swig
+        run: |
+          if brew tap | grep --fixed-strings --line-regexp --quiet "aws/tap"; then
+            brew untap aws/tap
+          fi
+          brew install swig
+          swig -version
       - name: Install Linux test environment
         if: runner.os == 'Linux'
         run: uv sync --locked --extra hdf5 --extra plot --extra mpi
@@ -116,6 +122,7 @@ jobs:
           persist-credentials: false
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
+          cache-suffix: ${{ github.job }}
           enable-cache: true
           version: "0.12.5"
       - name: Install Python and native build dependencies
@@ -164,11 +171,17 @@ jobs:
           persist-credentials: false
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
+          cache-suffix: ${{ github.job }}
           enable-cache: true
           version: "0.12.5"
       - name: Install SWIG on macOS
         if: runner.os == 'macOS'
-        run: brew install swig
+        run: |
+          if brew tap | grep --fixed-strings --line-regexp --quiet "aws/tap"; then
+            brew untap aws/tap
+          fi
+          brew install swig
+          swig -version
       - name: Build, repair, and smoke-test wheel
         run: |
           uvx \
@@ -260,6 +273,7 @@ jobs:
     steps:
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
+          ignore-empty-workdir: true
           version: "0.12.5"
       - name: Install published wheel into a clean environment
         env:

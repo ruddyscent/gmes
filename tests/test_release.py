@@ -96,6 +96,17 @@ class ReleaseConfigurationTest(unittest.TestCase):
         self.assertIn("gh release create", github_release_job)
         self.assertIn("--verify-tag", github_release_job)
 
+    def test_release_workflow_avoids_known_runner_warnings(self):
+        verify_pypi_job = self.workflow.split("  verify-pypi:", 1)[1].split(
+            "  github-release:", 1
+        )[0]
+
+        self.assertEqual(self.workflow.count("cache-suffix: ${{ github.job }}"), 3)
+        self.assertIn("ignore-empty-workdir: true", verify_pypi_job)
+        self.assertEqual(self.workflow.count("brew untap aws/tap"), 2)
+        self.assertEqual(self.workflow.count("swig -version"), 2)
+        self.assertNotIn("HOMEBREW_NO_REQUIRE_TAP_TRUST", self.workflow)
+
     def test_distribution_set_rejects_local_or_extra_files(self):
         with tempfile.TemporaryDirectory() as directory:
             (Path(directory) / "developer-build.whl").touch()

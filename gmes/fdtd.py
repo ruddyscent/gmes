@@ -247,7 +247,8 @@ class FDTD(object):
         self.init_source()
 
         et = datetime.now()
-        print('Elapsed time:', (et - st))
+        if self.verbose:
+            print('Elapsed time:', (et - st))
 
     def _print_pw_obj(self, pw_obj):
         """Print information of the piecewise material and source.
@@ -1273,8 +1274,10 @@ class FDTD(object):
         else:
             raise TypeError
 
-        filename = 't=' + str(self.time_step[1] * space.dt)
-        snapshot(data, filename, comp)
+        from .file_io import snapshot
+
+        filename = 't=' + str(self.time_step.t)
+        snapshot(data, filename, comp.str())
 
 
 class TExFDTD(FDTD):

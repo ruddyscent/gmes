@@ -3,6 +3,7 @@
 
 from sys import stderr
 from os.path import exists
+from pathlib import Path
 
 class Probe(object):
     def __init__(self, idx, field, filename):
@@ -26,7 +27,11 @@ class Probe(object):
             print(('Warning: Can\'t open file ' + f_name + '.\n'))
 
     def __del__(self):
-        self.f.close()
+        self.close()
+
+    def close(self):
+        if self.f is not None and not self.f.closed:
+            self.f.close()
 
     def write_header(self, p, dt):
         """Write some meta-data on the header of the recording file.
@@ -42,13 +47,14 @@ class Probe(object):
         self.f.write(str(n) + ' ' + str(self.field[self.idx]) + '\n')
 
 def write_hdf5(data, name, low_index, high_index):
-    h5file = openFile(name + '.h5', mode='w')
-    group = h5file.createGroup('/')
-    h5file.createArray(group, name,
-                       data[low_index[0]:high_index[0],
-                            low_index[1]:high_index[1],
-                            low_index[2]:high_index[2]])
-    h5file.close()
+    from tables import open_file
+
+    node_name = Path(name).name
+    selection = data[low_index[0]:high_index[0],
+                     low_index[1]:high_index[1],
+                     low_index[2]:high_index[2]]
+    with open_file(name + '.h5', mode='w') as h5file:
+        h5file.create_array('/', node_name, selection)
 
 def snapshot(data, filename, title):
     from matplotlib import pyplot
@@ -56,4 +62,3 @@ def snapshot(data, filename, title):
     pyplot.title(title)
     pyplot.imshow(data, origin="lower")
     pyplot.savefig(filename)
-

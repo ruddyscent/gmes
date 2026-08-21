@@ -180,6 +180,8 @@ class Cartesian(object):
             return obj
 
         if root is None:
+            from mpi4py import MPI
+
             obj = self.cart_comm.recv(source = MPI.ANY_SOURCE)
         else:
             for dest in range(size):

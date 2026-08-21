@@ -84,6 +84,16 @@ namespace gmes
       return idx_list.size();
     }
 
+    bool
+    indices_in_bounds(int dim1, int dim2, int dim3) const
+    {
+      return std::ranges::all_of(idx_list, [=](const Index3& idx) {
+        return idx[0] >= 0 && idx[0] < dim1 &&
+               idx[1] >= 0 && idx[1] < dim2 &&
+               idx[2] >= 0 && idx[2] < dim3;
+      });
+    }
+
   protected:
     int
     position(const Index3& idx) const

@@ -59,6 +59,59 @@ class TestSequence(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "exactly three values"):
             sample.get_eps_inf((1, 1, 1, 1))
 
+    def test_update_rejects_out_of_bounds_attachment_indices(self):
+        invalid_indices = (
+            (-1, 1, 1),
+            (3, 1, 1),
+            (1, -1, 1),
+            (1, 3, 1),
+            (1, 1, -1),
+            (1, 1, 3),
+        )
+
+        for material in (self.const_real, self.const_cmplx):
+            dtype = complex if material is self.const_cmplx else float
+            for invalid_idx in invalid_indices:
+                with self.subTest(value=material.value, index=invalid_idx):
+                    sample = material.get_pw_material_ex(
+                        invalid_idx, (0, 0, 0), cmplx=dtype is complex
+                    )
+                    fields = [np.zeros((3, 3, 3), dtype=dtype) for _ in range(3)]
+
+                    with self.assertRaisesRegex(IndexError, "out of bounds"):
+                        sample.update_all(*fields, 1, 1, 1, 0)
+                    self.assertFalse(fields[0].any())
+
+    def test_update_validates_collapsed_field_dimensions(self):
+        invalid_indices = (
+            (-1, 0, 0),
+            (1, 0, 0),
+            (0, -1, 0),
+            (0, 1, 0),
+            (0, 0, -1),
+            (0, 0, 1),
+        )
+
+        for material in (self.const_real, self.const_cmplx):
+            dtype = complex if material is self.const_cmplx else float
+            for invalid_idx in invalid_indices:
+                with self.subTest(value=material.value, index=invalid_idx):
+                    sample = material.get_pw_material_ex(
+                        invalid_idx, (0, 0, 0), cmplx=dtype is complex
+                    )
+                    fields = [np.zeros((1, 1, 1), dtype=dtype) for _ in range(3)]
+
+                    with self.assertRaisesRegex(IndexError, "out of bounds"):
+                        sample.update_all(*fields, 1, 1, 1, 0)
+                    self.assertFalse(fields[0].any())
+
+            sample = material.get_pw_material_ex(
+                (0, 0, 0), (0, 0, 0), cmplx=dtype is complex
+            )
+            fields = [np.zeros((1, 1, 1), dtype=dtype) for _ in range(3)]
+            sample.update_all(*fields, 1, 1, 1, 0)
+            self.assertEqual(fields[0][0, 0, 0], material.value)
+
     def testEyReal(self):
         sample = self.const_real.get_pw_material_ey(self.idx, (0, 0, 0), cmplx=False)
 

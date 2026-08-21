@@ -45,15 +45,29 @@ the former `.[dev,hdf5]` pip workflow.
 
 ## Branch and merge workflow
 
-The active `Protect master` GitHub ruleset governs changes to `master`:
+The active `Protect master` GitHub ruleset governs the default branch. Follow
+this sequence for every change:
 
-- Make commits on a non-target feature or fix branch. Do not push commits directly to `master`.
-- Open a pull request targeting `master`; approving reviews are not currently required.
-- Bring the pull request branch up to date with the latest `master` before merging.
-- Wait for both required checks to pass: `Python 3.14 / ubuntu-latest` and `Python 3.14 / macos-latest`.
-- Resolve every pull request review conversation before merging.
-- Use **Squash and merge**. Merge commits and rebase merges are not allowed because `master` must retain a linear history and squash is the only permitted merge method.
-- Never force-push to or delete `master`. The ruleset has no bypass actors.
+1. Update the local `master` from `origin/master`, then create a non-target
+   feature or fix branch. Never commit or push directly to `master`.
+2. Commit and push the change branch, then open a pull request targeting
+   `master`. Approving reviews are not currently required.
+3. Before merging, bring the pull request branch up to date with the latest
+   `master`; the required status-check policy is strict.
+4. Wait for both required checks to pass:
+   `Python 3.14 / ubuntu-latest` and
+   `Python 3.14 / macos-latest`.
+5. Wait for required CodeQL code-scanning results. Error-level code-quality
+   alerts and security alerts rated High or higher block the update. A missing
+   or incomplete CodeQL result also does not satisfy the ruleset.
+6. Resolve every pull request review conversation and satisfy any additional
+   approval GitHub requests for unattributed changes.
+7. Use **Squash and merge**. Merge commits and rebase merges are not allowed
+   because `master` must retain a linear history and squash is the only
+   permitted merge method.
+
+Never force-push to or delete `master`. The ruleset has no bypass actors, so
+do not attempt to bypass a failed or pending requirement.
 
 Verify the current settings in the [Protect master ruleset](https://github.com/ruddyscent/gmes/settings/rules/21130311) if GitHub reports different requirements.
 

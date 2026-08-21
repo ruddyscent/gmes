@@ -84,6 +84,11 @@ Numerical behavior changes must include a deterministic regression test. Avoid u
 
 Generated SWIG proxies, Cython C/C++ output, compiled extensions, distributions, and simulation results must not be committed.
 
+Production distributions are created only by the tag-triggered release
+workflow. Follow [`docs/releasing.md`](docs/releasing.md) when preparing a
+release; never publish artifacts from a developer workstation or reuse files
+already present in `dist/`.
+
 ## Change scope and compatibility
 
 - Keep public API changes explicit and document their migration impact.

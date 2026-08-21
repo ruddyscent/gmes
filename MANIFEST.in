@@ -1,4 +1,4 @@
-include VERSION README.md LICENSE CHANGELOG.md CONTRIBUTING.md SECURITY.md
+include VERSION README.md LICENSE CHANGELOG.md CONTRIBUTING.md SECURITY.md build-constraints.txt
 recursive-include src *.cc *.hh *.i *.pyx
 recursive-include examples README *.md *.py
 recursive-include tests README *.py

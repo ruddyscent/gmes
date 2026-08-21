@@ -2,7 +2,7 @@ import unittest
 
 import numpy as np
 
-from gmes import Cone, Cylinder, DefaultMedium, Dielectric
+from gmes import Cartesian, Cone, Cylinder, DefaultMedium, Dielectric, Shell
 from gmes.pygeom import GeomBoxTree
 
 
@@ -70,6 +70,32 @@ class ConeBoundsTest(unittest.TestCase):
         shape, _ = tree.object_of_point(point)
 
         self.assertIs(shape, cylinder)
+
+
+class ShellBoundsTest(unittest.TestCase):
+    def test_shell_bounds_and_tree_follow_center(self):
+        space = Cartesian(size=(12, 4, 4), resolution=10)
+
+        for center in ((0, 0, 0), (5, 0, 0)):
+            with self.subTest(center=center):
+                default = DefaultMedium(Dielectric(1))
+                shell = Shell(
+                    Dielectric(4),
+                    center=center,
+                    size=(2, 2, 2),
+                    thickness=0.2,
+                )
+                default.init(space)
+                shell.init(space)
+                tree = GeomBoxTree((default, shell))
+                point = (center[0] + 0.9, center[1], center[2])
+
+                np.testing.assert_allclose(shell.box.low, np.array(center) - 1)
+                np.testing.assert_allclose(shell.box.high, np.array(center) + 1)
+                self.assertTrue(shell.in_object(point))
+                self.assertTrue(shell.box.in_box(point))
+                shape, _ = tree.object_of_point(point)
+                self.assertIs(shape, shell)
 
 
 if __name__ == "__main__":

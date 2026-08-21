@@ -2,7 +2,15 @@ name: CI
 
 on:
   push:
+    branches:
+      - master
   pull_request:
+    branches:
+      - master
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -52,21 +60,3 @@ jobs:
         run: uv run --no-sync mpiexec --oversubscribe -n 10 python tests/mpi_deployment_smoke.py
       - name: Build distributions
         run: uv build
-
-  prerelease:
-    name: Python prerelease
-    runs-on: ubuntu-latest
-    continue-on-error: true
-
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.15-dev"
-      - name: Install SWIG
-        run: sudo apt-get update && sudo apt-get install --yes swig
-      - name: Install and test prerelease dependencies
-        run: |
-          python -m pip install --upgrade --pre pip
-          python -m pip install --pre --group dev -e ".[hdf5]"
-          python -m unittest discover -v

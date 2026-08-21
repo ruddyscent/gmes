@@ -15,6 +15,8 @@ This script requires about 1.3GB of memory.
 
 """
 
+import argparse
+
 from numpy import *
 
 from gmes import *
@@ -29,6 +31,10 @@ PML_THICK = 0.5
 ZLENGTH = 3 * SLAB_THICK + 2 * PML_THICK
 SIZE = (15, 15, ZLENGTH)
 RESOLUTION = (25, 25, 10)
+UNTIL = 50
+QUICK_SIZE = (5, 5, ZLENGTH)
+QUICK_RESOLUTION = (5, 5, 4)
+QUICK_UNTIL = 1
 
 AIR = Dielectric(1)
 SiO2 = Dielectric(2.1316)
@@ -87,29 +93,49 @@ def make_line_defect(length):
     return line_defect
 
 
-geom_list = (
-    [
-        DefaultMedium(material=AIR),
-        Block(material=SiO2, size=(SIZE[0], SIZE[1], SLAB_THICK)),
-        Block(material=Si, size=(SIZE[0], SIZE[1], SLAB_CORE)),
-    ]
-    + make_crystals(*SIZE[:2])
-    + make_line_defect(SIZE[0])
-    + [Shell(material=Cpml(), thickness=PML_THICK)]
-)
-
-space = Cartesian(size=SIZE, resolution=RESOLUTION, parallel=True)
-
-src_list = [
-    PointSource(
-        src_time=Continuous(freq=FREQ), center=(-SIZE[0] / 2 + 1, 0, 0), component=Hz
+def run(size=SIZE, resolution=RESOLUTION, until=UNTIL):
+    """Run the three-dimensional photonic-crystal slab simulation."""
+    geom_list = (
+        [
+            DefaultMedium(material=AIR),
+            Block(material=SiO2, size=(size[0], size[1], SLAB_THICK)),
+            Block(material=Si, size=(size[0], size[1], SLAB_CORE)),
+        ]
+        + make_crystals(*size[:2])
+        + make_line_defect(size[0])
+        + [Shell(material=Cpml(), thickness=PML_THICK)]
     )
-]
+    space = Cartesian(size=size, resolution=resolution, parallel=True)
+    src_list = [
+        PointSource(
+            src_time=Continuous(freq=FREQ),
+            center=(-size[0] / 2 + 1, 0, 0),
+            component=Hz,
+        )
+    ]
 
-my_fdtd = fdtd.FDTD(space, geom_list, src_list)
-my_fdtd.init()
+    simulation = fdtd.FDTD(space, geom_list, src_list)
+    simulation.init()
+    simulation.show_permittivity(Ez, Z, 0)
+    simulation.show_field(Hz, Z, 0)
+    simulation.show_field(Hz, Y, 0)
+    simulation.step_until_t(until)
+    return simulation
 
-my_fdtd.show_permittivity(Ez, Z, 0)
-my_fdtd.show_field(Hz, Z, 0)
-my_fdtd.show_field(Hz, Y, 0)
-my_fdtd.step_until_t(50)
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--quick",
+        action="store_true",
+        help="use a smaller lattice, lower resolution, and shorter duration",
+    )
+    args = parser.parse_args()
+    if args.quick:
+        run(QUICK_SIZE, QUICK_RESOLUTION, QUICK_UNTIL)
+    else:
+        run()
+
+
+if __name__ == "__main__":
+    main()

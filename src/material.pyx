@@ -1903,10 +1903,11 @@ class Dm2(Dielectric):
         self.t2 = float(t2)
         self.hbar = float(hbar)
         self.rtol = float(rtol)
+        self.initialized = False
 
     def __getstate__(self):
-        d = Dielectric.__setstate__(self)
-        d['omega'] = deepcopoy(self.omega)
+        d = Dielectric.__getstate__(self)
+        d['omega'] = deepcopy(self.omega)
         d['n_atom'] = deepcopy(self.n_atom)
         d['rho30'] = self.rho30
         d['gamma'] = self.gamma
@@ -1919,7 +1920,11 @@ class Dm2(Dielectric):
         if self.initialized:
             d['dt'] = self.dt
 
+        return d
+
     def __setstate__(self, d):
+        Dielectric.__setstate__(self, d)
+
         self.omega = deepcopy(d['omega'])
         self.n_atom = deepcopy(d['n_atom'])
         self.rho30 = d['rho30']

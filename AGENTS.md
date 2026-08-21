@@ -38,6 +38,20 @@ Choose the narrowest tests that cover the change. If the required native build t
 - Update documentation or examples when a public API or user-facing workflow changes.
 - Do not commit generated extension artifacts, build outputs, or simulation results.
 
+## Branch and merge workflow
+
+The active `Protect master` GitHub ruleset governs changes to `master`:
+
+- Make commits on a non-target feature or fix branch. Do not push commits directly to `master`.
+- Open a pull request targeting `master`; approving reviews are not currently required.
+- Bring the pull request branch up to date with the latest `master` before merging.
+- Wait for both required checks to pass: `Python 3.14 / ubuntu-latest` and `Python 3.14 / macos-latest`.
+- Resolve every pull request review conversation before merging.
+- Use **Squash and merge**. Merge commits and rebase merges are not allowed because `master` must retain a linear history and squash is the only permitted merge method.
+- Never force-push to or delete `master`. The ruleset has no bypass actors.
+
+Verify the current settings in the [Protect master ruleset](https://github.com/ruddyscent/gmes/settings/rules/21130311) if GitHub reports different requirements.
+
 ## Commit messages
 
 - Write the commit title with an appropriate Conventional Commit prefix, using the form `<type>: <summary>` or `<type>(<scope>): <summary>`.

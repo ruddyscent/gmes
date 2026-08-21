@@ -74,6 +74,8 @@ class ReleaseConfigurationTest(unittest.TestCase):
         self.assertNotIn("skip-existing", self.workflow)
         self.assertIn("gh release create", self.workflow)
         self.assertIn("pull_request:\n    branches:\n      - master", self.workflow)
+        self.assertIn("--from cibuildwheel==4.2.0", self.workflow)
+        self.assertIn("--with uv==0.12.5", self.workflow)
 
     def test_publish_job_has_no_checkout_or_build_step(self):
         publish_job = self.workflow.split("  publish-pypi:", 1)[1].split(

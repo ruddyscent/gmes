@@ -9,5 +9,6 @@ Verification was performed on an Apple silicon MacBook with Python 3.14.6. Inter
 | `man.py` | Reduced construction run (`--quick`) | Pass (reduced) | 2.17 s / 130 MB | Mapped all six field components for the eight-object 3D geometry and rendered three permittivity cuts. The historical full-resolution run was not attempted. |
 | `metal_array.py` | Reduced run to `t=1` (`--quick`) | Pass (reduced) | 3.52 s / 127 MB | Completed 28 timesteps with six DCP silver spheres, CPML, a `Jy` source, and an Ey visualization. The 1.1 GB full run was not attempted. |
 | `phc_slab.py` | Reduced run to `t=1` (`--quick`) | Pass (reduced) | 2.34 s / 129 MB | Completed 9 timesteps for a reduced 3D silicon-on-insulator lattice with a line defect, CPML, an `Hz` source, and three visualizations. The 1.3 GB full run was not attempted. |
+| `phc_waveguide.py` | Full run to `t=200` | Pass | 9.93 s / 139 MB | Completed 5,714 timesteps. The `(321, 161, 1)` Ez field was finite with peak magnitude `0.9989081615432893`. |
 
 High-cost examples may receive construction or reduced-size checks instead of full simulation runs. Such cases are explicitly identified rather than reported as full passes.

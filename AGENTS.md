@@ -43,6 +43,21 @@ the former `.[dev,hdf5]` pip workflow.
 - Update documentation or examples when a public API or user-facing workflow changes.
 - Do not commit generated extension artifacts, build outputs, or simulation results.
 
+## GitHub CLI authentication
+
+Before performing GitHub operations with the CLI, run `gh auth status`. If
+the active account has an expired or invalid token, pause the GitHub operation
+and refresh authentication with:
+
+```sh
+gh auth login -h github.com -w
+```
+
+Complete the browser authorization flow, then rerun `gh auth status` and a
+read-only repository command such as `gh pr list` to verify access. Do not
+continue with GitHub mutations such as creating, closing, or merging pull
+requests until both checks succeed.
+
 ## Branch and merge workflow
 
 The active `Protect master` GitHub ruleset governs changes to `master`:

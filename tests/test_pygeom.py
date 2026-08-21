@@ -55,7 +55,7 @@ class ConeBoundsTest(unittest.TestCase):
                     if np.linalg.norm(perpendicular) < 1e-12:
                         perpendicular = np.cross(shape.axis, (0, 1, 0))
                     perpendicular /= np.linalg.norm(perpendicular)
-                    point = center - 0.75 * shape.axis + 0.9 * radius * perpendicular
+                    point = center - 0.7 * shape.axis + 0.9 * radius * perpendicular
                     self.assertTrue(shape.in_object(tuple(point)))
                     self.assertTrue(box.in_box(tuple(point)))
 

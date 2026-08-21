@@ -157,7 +157,7 @@ class Const(Material):
         return d
 
     def __setstate__(self, d):
-        Material.__setstate(self, d)
+        Material.__setstate__(self, d)
         self.value = d['value']
 
     def init(self, space, param=None):

@@ -125,6 +125,8 @@ namespace gmes
         return 0;
       else {
         const auto& p = param_list[i];
+        if (bin < 0 || static_cast<std::size_t>(bin) >= p.u.size())
+          throw std::out_of_range("transition bin is out of range");
 
         switch (rho_idx)
           {
@@ -150,6 +152,8 @@ namespace gmes
         return;
       else {
         const auto& p = param_list[i];
+        if (u_size < 0 || static_cast<std::size_t>(u_size) > p.u.size())
+          throw std::out_of_range("requested output size exceeds transition count");
 
         double factor = exp(-t / p.t2);
         for (int j = 0; j < u_size; ++j) {
@@ -168,6 +172,8 @@ namespace gmes
         return;
       else {
         const auto& p = param_list[i];
+        if (v_size < 0 || static_cast<std::size_t>(v_size) > p.u.size())
+          throw std::out_of_range("requested output size exceeds transition count");
 
         double factor = exp(-t / p.t2);
         for (int j = 0; j < v_size; ++j) {
@@ -186,6 +192,8 @@ namespace gmes
         return;
       else {
         const auto& p = param_list[i];
+        if (w_size < 0 || static_cast<std::size_t>(w_size) > p.u.size())
+          throw std::out_of_range("requested output size exceeds transition count");
 
         double factor = exp(-t / p.t1);
         for (int j = 0; j < w_size; ++j) {

@@ -4,12 +4,26 @@
 from threading import Thread
 
 import numpy as np
+from matplotlib.backend_bases import NonGuiException
 from matplotlib.pyplot import cm, new_figure_manager, show
 from numpy import arange, array, empty, linspace, ndindex
 
 # GMES modules
 from .constant import *
 from .geometry import in_range
+
+
+def _show_manager(manager, window_title):
+    """Display a figure when the active Matplotlib backend supports it."""
+    manager.set_window_title(window_title)
+    try:
+        manager.show()
+    except NonGuiException:
+        return
+
+    window = getattr(manager, "window", None)
+    if window is not None and hasattr(window, "mainloop"):
+        window.mainloop()
 
 
 class ShowLine(Thread):
@@ -155,8 +169,9 @@ class ShowLine(Thread):
         self.line.recache()
         self.time_note.set_text(self.note_form % self.time_step.t)
         self.manager.canvas.draw()
-        if self.manager.window is not None:
-            self.manager.window.after(self.interval, self.animate)
+        window = getattr(self.manager, "window", None)
+        if window is not None and hasattr(window, "after"):
+            window.after(self.interval, self.animate)
 
     def run(self):
         self.manager = new_figure_manager(self.id)
@@ -171,10 +186,8 @@ class ShowLine(Thread):
         self.time_note = self.manager.canvas.figure.text(
             0.6, 0.92, self.note_form % self.time_step.t
         )
-        self.manager.window.title(self.window_title)
         self.animate()
-        self.manager.show()
-        self.manager.window.mainloop()
+        _show_manager(self.manager, self.window_title)
 
 
 class ShowPlane(Thread):
@@ -331,8 +344,9 @@ class ShowPlane(Thread):
         self.im.set_data(self.data)
         self.time_note.set_text(self.note_form % self.time_step.t)
         self.manager.canvas.draw()
-        if self.manager.window is not None:
-            self.manager.window.after(self.interval, self.animate)
+        window = getattr(self.manager, "window", None)
+        if window is not None and hasattr(window, "after"):
+            window.after(self.interval, self.animate)
 
     def run(self):
         self.manager = new_figure_manager(self.id)
@@ -352,10 +366,8 @@ class ShowPlane(Thread):
         self.time_note = self.manager.canvas.figure.text(
             0.6, 0.92, self.note_form % self.time_step.t
         )
-        self.manager.window.title(self.window_title)
         self.animate()
-        self.manager.show()
-        self.manager.window.mainloop()
+        _show_manager(self.manager, self.window_title)
 
 
 class Snapshot(Thread):
@@ -540,8 +552,5 @@ class Snapshot(Thread):
         ax.set_ylabel(self.ylabel)
         ax.set_title(self.title)
         self.manager.canvas.figure.colorbar(self.im)
-        self.manager.window.title(self.window_title)
-
         self.manager.canvas.draw()
-        self.manager.show()
-        self.manager.window.mainloop()
+        _show_manager(self.manager, self.window_title)

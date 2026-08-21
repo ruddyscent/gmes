@@ -16,7 +16,6 @@ class SourceDistributionTest(unittest.TestCase):
                     "-m",
                     "build",
                     "--sdist",
-                    "--no-isolation",
                     "--outdir",
                     output_directory,
                 ],

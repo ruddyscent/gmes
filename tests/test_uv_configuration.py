@@ -6,9 +6,13 @@ from pathlib import Path
 class UvCacheKeyTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        project_file = Path(__file__).resolve().parents[1] / "pyproject.toml"
+        project_root = Path(__file__).resolve().parents[1]
+        project_file = project_root / "pyproject.toml"
         with project_file.open("rb") as stream:
-            cls.cache_keys = tomllib.load(stream)["tool"]["uv"]["cache-keys"]
+            cls.uv_configuration = tomllib.load(stream)["tool"]["uv"]
+        cls.cache_keys = cls.uv_configuration["cache-keys"]
+        with (project_root / "uv.lock").open("rb") as stream:
+            cls.lockfile = tomllib.load(stream)
 
     def test_preserves_default_and_dynamic_build_inputs(self):
         file_keys = {entry["file"] for entry in self.cache_keys if "file" in entry}
@@ -35,6 +39,28 @@ class UvCacheKeyTest(unittest.TestCase):
     def test_tracks_macos_deployment_target(self):
         environment_keys = {entry["env"] for entry in self.cache_keys if "env" in entry}
         self.assertIn("MACOSX_DEPLOYMENT_TARGET", environment_keys)
+
+    def test_pins_uv_and_native_build_dependencies(self):
+        self.assertEqual(self.uv_configuration["required-version"], "==0.12.5")
+        constraints = set(self.uv_configuration["build-constraint-dependencies"])
+        self.assertEqual(
+            constraints,
+            {
+                "setuptools==84.0.0",
+                "wheel==0.48.0",
+                "Cython==3.2.9",
+                "numpy==2.5.2",
+            },
+        )
+
+    def test_build_and_runtime_numpy_versions_match(self):
+        numpy_package = next(
+            package
+            for package in self.lockfile["package"]
+            if package["name"] == "numpy"
+        )
+        constraints = self.uv_configuration["build-constraint-dependencies"]
+        self.assertIn(f"numpy=={numpy_package['version']}", constraints)
 
 
 if __name__ == "__main__":

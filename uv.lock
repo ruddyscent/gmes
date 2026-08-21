@@ -2,6 +2,14 @@ version = 1
 revision = 3
 requires-python = ">=3.14"
 
+[manifest]
+build-constraints = [
+    { name = "cython", specifier = "==3.2.9" },
+    { name = "numpy", specifier = "==2.5.2" },
+    { name = "setuptools", specifier = "==84.0.0" },
+    { name = "wheel", specifier = "==0.48.0" },
+]
+
 [[package]]
 name = "annotated-types"
 version = "0.8.0"

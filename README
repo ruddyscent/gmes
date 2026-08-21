@@ -139,6 +139,6 @@ Bug reports and patches are welcome. When contributing, keep changes compatible 
 
 ## License
 
-GMES is distributed under the GNU General Public License version 3. See [`COPYING`](COPYING) for the full license text.
+GMES is distributed under the GNU General Public License version 3 or later (`GPL-3.0-or-later`). See [`LICENSE`](LICENSE) for the full license text.
 
 Copyright (C) 2007-2012 Kyungwon Chun.

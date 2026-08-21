@@ -346,6 +346,9 @@ double _dm2_relative_error(
   void set(const double* const omega, int omega_size,
            const double* const n, int n_size)
   {
+    if (omega_size != n_size)
+      throw std::invalid_argument("omega and n_atom must have equal lengths");
+
     for (int i = 0; i < omega_size; i++) {
       $self->omega.push_back(*(omega + i));
       $self->n_atom.push_back(*(n + i));

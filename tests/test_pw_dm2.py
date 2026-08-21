@@ -5,10 +5,26 @@ from types import SimpleNamespace
 import numpy as np
 
 from gmes.material import Dm2
-from gmes.pw_material import _dm2_relative_error
+from gmes.pw_material import Dm2ElectricParamReal, _dm2_relative_error
 
 
 class Dm2Test(unittest.TestCase):
+    def test_parameter_setup_validates_transition_lengths(self):
+        for omega, n_atom in (
+            (np.array([], dtype=float), np.array([], dtype=float)),
+            (np.array((1.0, 2.0)), np.array((3.0, 4.0))),
+        ):
+            with self.subTest(length=len(omega)):
+                Dm2ElectricParamReal().set(omega, n_atom)
+
+        for omega, n_atom in (
+            (np.array((1.0, 2.0)), np.array((3.0,))),
+            (np.array((1.0,)), np.array((2.0, 3.0))),
+        ):
+            with self.subTest(omega=len(omega), n_atom=len(n_atom)):
+                with self.assertRaisesRegex(ValueError, "must have equal lengths"):
+                    Dm2ElectricParamReal().set(omega, n_atom)
+
     def test_pickle_round_trip_before_and_after_init(self):
         for initialized in (False, True):
             with self.subTest(initialized=initialized):

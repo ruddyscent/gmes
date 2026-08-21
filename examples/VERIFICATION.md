@@ -12,5 +12,6 @@ Verification was performed on an Apple silicon MacBook with Python 3.14.6. Inter
 | `phc_waveguide.py` | Full run to `t=200` | Pass | 9.93 s / 139 MB | Completed 5,714 timesteps. The `(321, 161, 1)` Ez field was finite with peak magnitude `0.9989081615432893`. |
 | `slab_waveguide.py` | Full run to `t=200` | Pass | 2.23 s / 130 MB | Completed 2,857 timesteps. The `(161, 81, 1)` Ez field was finite with peak magnitude `0.9994622335025213`. |
 | `tfsf.py` | Full run to `t=200` | Pass | 4.50 s / 125 MB | Completed 5,714 timesteps. Ez, Hx, and Hy were finite and nonzero after fixing CPML grading at rounded outer boundaries. |
+| `tfsf_with_scatterer.py` | Full run to `t=200` | Pass | 4.96 s / 122 MB | Completed 5,714 timesteps with the dielectric cylinder. Ez, Hx, and Hy were finite and nonzero, with peak magnitudes `2.0727`, `1.9535`, and `1.9615`. |
 
 High-cost examples may receive construction or reduced-size checks instead of full simulation runs. Such cases are explicitly identified rather than reported as full passes.

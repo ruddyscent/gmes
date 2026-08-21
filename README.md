@@ -70,12 +70,14 @@ sources = [
 simulation = TMzFDTD(space, geometry, sources)
 simulation.init()
 simulation.step_until_t(10)
-simulation.write_field(Ez, (-5, -5, 0), (5, 5, 0))
 ```
 
-After installing GMES, run examples from the repository root:
+The quick-start code above uses only the base dependencies. To run the
+visualizing `air2d.py` example, install its plotting and HDF5 dependencies and
+then launch it from the repository root:
 
 ```sh
+python -m pip install -e ".[plot,hdf5]"
 python examples/air2d.py
 ```
 

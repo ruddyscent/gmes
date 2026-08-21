@@ -1700,7 +1700,7 @@ class Lorentz(Dielectric):
         self.initialized = False
 
     def __getstate__(self):
-        d = Dielectric.__setstate__(self)
+        d = Dielectric.__getstate__(self)
         d['sigma'] = self.sigma
         d['lps'] = self.lps
         d['initialized'] = self.initialized
@@ -1710,7 +1710,10 @@ class Lorentz(Dielectric):
             d['a'] = self.a
             d['c'] = self.c
 
+        return d
+
     def __setstate__(self, d):
+        Dielectric.__setstate__(self, d)
         self.sigma = d['sigma']
         self.lps = deepcopy(d['lps'])
         self.initialized = d['initialized']
@@ -1718,7 +1721,7 @@ class Lorentz(Dielectric):
         if self.initialized:
             self.dt = d['dt']
             self.a = d['a'].copy()
-            self.c = d['c'].coyp()
+            self.c = d['c'].copy()
 
     def init(self, space, param=None):
         self.dt = space.dt

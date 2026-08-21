@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
+import pickle
 import unittest
 
 import numpy as np
@@ -20,6 +21,34 @@ class TestSequence(unittest.TestCase):
         lp2 = LorentzPole(omega=0.5, gamma=0.1, amp=2e-5)
         self.meep = Lorentz(eps_inf=1, mu_inf=1, sigma=0, lps=(lp1, lp2))
         self.meep.init(self.spc)
+
+    def test_pickle_round_trip_before_and_after_init(self):
+        fresh = Lorentz(
+            eps_inf=2,
+            mu_inf=3,
+            sigma=0.25,
+            lps=(LorentzPole(amp=4, omega=5, gamma=6),),
+        )
+
+        for material in (fresh, self.meep):
+            with self.subTest(initialized=material.initialized):
+                restored = pickle.loads(pickle.dumps(material))
+
+                for name in ("eps_inf", "mu_inf", "sigma", "initialized"):
+                    self.assertEqual(getattr(restored, name), getattr(material, name))
+                self.assertEqual(len(restored.lps), len(material.lps))
+                for restored_pole, pole in zip(restored.lps, material.lps):
+                    self.assertEqual(
+                        (restored_pole.amp, restored_pole.omega, restored_pole.gamma),
+                        (pole.amp, pole.omega, pole.gamma),
+                    )
+
+                if material.initialized:
+                    self.assertEqual(restored.dt, material.dt)
+                    np.testing.assert_array_equal(restored.a, material.a)
+                    np.testing.assert_array_equal(restored.c, material.c)
+                    self.assertIsNot(restored.a, material.a)
+                    self.assertIsNot(restored.c, material.c)
 
     def testExReal(self):
         sample = self.meep.get_pw_material_ex(self.idx, (0, 0, 0))

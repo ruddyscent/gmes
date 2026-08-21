@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 """Launch a planewave in vacuum.
@@ -6,10 +6,6 @@
 A simple example which showing how to use launch a planewave.
 
 """
-
-import os, sys
-new_path = os.path.abspath('../')
-sys.path.append(new_path)
 
 from gmes import *
 

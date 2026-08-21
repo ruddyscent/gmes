@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 """ Shows a man-shaped structure.
@@ -9,10 +9,8 @@ dimensional space constructed using the script.
 
 """
 
-import os, sys, datetime
-new_path = os.path.abspath('../')
-sys.path.append(new_path)
-
+import os
+import sys
 from datetime import datetime
 print(os.uname())
 print('python version:', sys.version)

@@ -8,9 +8,9 @@ Core i3 with Ubuntu 12.04 LTS 64 bit. All scripts are executed on
 a single process. The display function was commented out during 
 measurement of the execution time.
 
-To run the examples enter 
+Install GMES first, then run an example from the repository root:
 
-$ python <example file name>
+$ python examples/<example file name>
 
 ###################################################################
 air2d.py
@@ -38,7 +38,7 @@ TE polarized light through a thin gold layer.
 Approximate run time: 4m30s
 
 ###################################################################
-mam.py
+man.py
 
 Shows a man-shaped structure.
 
@@ -58,10 +58,9 @@ This script models a plasmon waveguide consisting of six silver
 nanospheres in the air. A dipole source oscillating along the array
 is used for field excitation. A simple on-time visualization 
 display will show the Ey fields of the propagating longitudinal
-mode. This script was set to use the parallel environment when it 
-is executed using a MPI-enabled Python interpreter, like 
-'python-mpi' in the mpi4py package. This script requires about 1.1
-GB of memory.
+mode. Run this script through `mpiexec` after installing GMES with
+its `mpi` optional dependency to use multiple processes. This script
+requires about 1.1 GB of memory.
 
 Approximate run time: 1h43m6s
 

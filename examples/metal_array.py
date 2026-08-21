@@ -1,4 +1,4 @@
-#!/usr/bin/env python-mpi
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 """A plasmon waveguide consisting of six silver nanospheres in the
@@ -8,16 +8,11 @@ This script models a plasmon waveguide consisting of six silver
 nanospheres in the air. A dipole source oscilating along the array
 is used for field excitation. A simple on-time visualization 
 display will show the Ey fields of the propagating longitudinal
-mode. This script was set to use the parallel environment when it 
-is executed using a MPI-enabled Python interpreter, like 
-'python-mpi' in the mpi4py package. This script requires about 1.1
-GB of memory.
+mode. Run this script through ``mpiexec`` after installing GMES with
+the ``mpi`` optional dependency to use multiple processes. This script
+requires about 1.1 GB of memory.
 
 """
-
-import os, sys
-new_path = os.path.abspath('../')
-sys.path.append(new_path)
 
 from gmes import *
 

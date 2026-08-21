@@ -1,4 +1,4 @@
-#!/usr/local/bin/python2.5-mpi
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 """ Transmittance and reflectance through a thin gold layer.
@@ -10,17 +10,14 @@ TE polarized light through a thin gold layer.
 
 
 
-import os, sys, datetime
-new_path = os.path.abspath('../')
-sys.path.append(new_path)
-
+import os
+import sys
 from datetime import datetime
 print(os.uname())
 print('python version:', sys.version)
 start_time = datetime.now()
 print('starting initialization:', start_time)
 
-from sys import argv
 from math import pi, sin, cos
 from numpy import inf
 from gmes import *

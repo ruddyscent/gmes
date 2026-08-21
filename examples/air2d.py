@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 """Models two-dimensional TMz cylindrical-wave propagation in air.
@@ -12,10 +12,6 @@ properties of these fields with respect to the center of the space
 where the excitation is applied.
 
 """
-
-import os, sys
-new_path = os.path.abspath('../')
-sys.path.append(new_path)
 
 from gmes import *
 

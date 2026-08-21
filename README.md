@@ -3,7 +3,7 @@
 GMES (GIST Maxwell's Equations Solver) is a free electromagnetic simulator that solves Maxwell's equations with the explicit finite-difference time-domain (FDTD) method. It provides a Python interface backed by C++, SWIG, and Cython extensions for modeling photonic devices in one-, two-, and three-dimensional Cartesian domains.
 
 > [!IMPORTANT]
-> GMES 0.9.5 is a legacy project designed for Python 2.7 and C++11. Python 3 is not currently supported or tested. The last documented test environment was 64-bit Ubuntu 14.04 LTS; other platforms may work when built from source, but are not verified.
+> The current development line targets Python 3.14, C++17, NumPy 2, Cython 3, and SWIG 4. Python 2 and the former Distutils build are no longer supported.
 
 ## Features
 
@@ -15,59 +15,50 @@ GMES (GIST Maxwell's Equations Solver) is a free electromagnetic simulator that 
 - Geometric primitives including blocks, spheres, cylinders, cones, ellipsoids, and shells
 - Bloch-periodic simulations with complex-valued fields
 - Optional MPI-based parallel execution
-- Field visualization and output utilities
+- Field visualization and HDF5 output utilities
 
 ## Requirements
 
-To build and run GMES, install the following legacy-compatible dependencies:
+- Python 3.14 or newer
+- A C++17 compiler
+- SWIG 4
+- NumPy 2.3 or newer
+- SciPy 1.16 or newer
 
-- Python 2.7
-- A C++11 compiler such as `g++`
-- SWIG
-- Cython
-- NumPy
-- SciPy
-- Matplotlib
-- mpi4py (optional, for parallel execution)
-- PyTables (optional, for HDF5-related output)
+Matplotlib, mpi4py, and PyTables are available through the `plot`, `mpi`, and `hdf5` optional dependency groups.
 
-Dependency versions are not pinned. Modern releases of Cython, NumPy, or other build tools may no longer support Python 2, so a period-appropriate environment may be required.
+## Installation
 
-## Building from source
-
-Clone the repository and build the extension modules in place:
+Install SWIG with the package manager for your operating system, then create an isolated Python environment:
 
 ```sh
-git clone https://github.com/ruddyscent/gmes.git
-cd gmes
-python setup.py build_ext --inplace
+python3.14 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install .
 ```
 
-This lets you run the tests and examples without installing the package.
-
-To build and install through the legacy Distutils workflow:
+For development, install the package in editable mode with the development and optional runtime dependencies needed for the tests:
 
 ```sh
-python setup.py build_ext --swig-opts="-c++"
-python setup.py install
+python -m pip install -e ".[dev,hdf5]"
 ```
 
-Use an isolated environment or an appropriate installation prefix instead of installing into a system Python when possible.
+Other supported combinations include `.[plot]`, `.[mpi]`, and `.[all]`. The build uses the PEP 517 configuration in `pyproject.toml`; invoking `setup.py` directly is not supported.
 
 ## Quick start
 
 The following example creates a two-dimensional TMz domain in air, surrounds it with a CPML absorbing boundary, and excites an `Ez` point source:
 
 ```python
-from gmes import *
+from gmes import Cartesian, Continuous, Cpml, DefaultMedium, Dielectric
+from gmes import Ez, PointSource, Shell, TMzFDTD
 
 space = Cartesian(size=(10, 10, 0), resolution=20)
-
 geometry = [
     DefaultMedium(material=Dielectric()),
     Shell(material=Cpml()),
 ]
-
 sources = [
     PointSource(
         src_time=Continuous(freq=0.8),
@@ -82,36 +73,33 @@ simulation.step_until_t(10)
 simulation.write_field(Ez, (-5, -5, 0), (5, 5, 0))
 ```
 
-See [`examples/`](examples/) for complete simulations of wave propagation, Fresnel reflection, photonic-crystal waveguides, slab waveguides, plasmonic arrays, and total-field/scattered-field excitation. Some three-dimensional examples require more than 1 GB of memory and can take over an hour on the hardware documented in [`examples/README`](examples/README).
-
-Run an example from the `examples` directory so its relative import path resolves correctly:
+After installing GMES, run examples from the repository root:
 
 ```sh
-cd examples
-python air2d.py
+python examples/air2d.py
 ```
 
-## Testing
+See [`examples/`](examples/) for simulations of wave propagation, Fresnel reflection, photonic-crystal waveguides, slab waveguides, plasmonic arrays, and total-field/scattered-field excitation. Some three-dimensional examples require more than 1 GB of memory and are not suitable as routine smoke tests.
 
-Build the extensions in place first, then run the relevant test scripts from the `tests` directory:
+## Testing and packaging
+
+Run the complete test suite and build both distribution formats with:
 
 ```sh
-python setup.py build_ext --inplace
-cd tests
-python pw_dielectric_test.py
+python -m unittest discover -v
+python -m build
 ```
 
-The files in [`tests/`](tests/) are standalone `unittest` scripts rather than a single consolidated test command.
+The tests include component coverage, geometry and source-time checks, a deterministic FDTD regression, and optional HDF5 output coverage. The HDF5 tests are skipped when PyTables is not installed.
 
 ## Parallel execution
 
-GMES can use an MPI-enabled Python interpreter through mpi4py. The exact launcher and interpreter names depend on the MPI implementation. A typical command is:
+Install GMES with its MPI dependency and use the launcher supplied by your MPI implementation:
 
 ```sh
-mpiexec -l -n <process-count> python-mpi <simulation.py>
+python -m pip install ".[mpi]"
+mpiexec -n <process-count> python <simulation.py>
 ```
-
-Consult the documentation for the installed MPI implementation and mpi4py when adapting this command.
 
 ## Repository layout
 
@@ -119,23 +107,20 @@ Consult the documentation for the installed MPI implementation and mpi4py when a
 gmes/       Python package and public simulation API
 src/        C++, SWIG, and Cython extension sources
 examples/   Example electromagnetic simulations
-tests/      Standalone component tests
+tests/      Unit and numerical regression tests
 utils/      Data-processing and diagnostic utilities
+docs/       Maintenance and migration notes
 ```
 
-## Known issues
+## Known limitations
 
 - Do not use `numpy.inf` for simulation bounds; use a sufficiently large finite value instead. GMES does not consistently treat `numpy.inf` as infinity.
-- Generated Cython sources may produce `-Wunused-but-set-variable` compiler warnings. The warnings documented by the original project are harmless.
-- Python 3 compatibility has not been implemented or verified.
+- Some large examples retain their historical problem sizes and can consume substantial memory and execution time.
+- Linux and macOS are exercised by CI; other platforms may require build-system adjustments.
 
-## Documentation and support
+## Contributing and support
 
-GMES does not currently have a separate API manual. Start with the scripts in [`examples/`](examples/) and [`tests/`](tests/), and use Python's `help()` and `dir()` functions to inspect classes and parameters.
-
-Historical releases, discussions, and project information are also available on the [GMES SourceForge project](https://sourceforge.net/projects/gmes/).
-
-Bug reports and patches are welcome. When contributing, keep changes compatible with the documented legacy toolchain unless the change explicitly targets modernization, and follow the repository guidance in [`AGENTS.md`](AGENTS.md).
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the development workflow. Bug reports and patches are welcome through the [GitHub issue tracker](https://github.com/ruddyscent/gmes/issues). Historical releases and discussions remain available on the [GMES SourceForge project](https://sourceforge.net/projects/gmes/).
 
 ## License
 

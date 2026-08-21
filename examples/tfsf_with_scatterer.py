@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 """Launch a planwave in vacuum with a scatterer.
@@ -7,10 +7,6 @@ A simple example which showing how to launch a planewave in vacuum
 with a cylindrical dielectric scatterer.
 
 """
-
-import os, sys
-new_path = os.path.abspath('../')
-sys.path.append(new_path)
 
 from gmes import *
 

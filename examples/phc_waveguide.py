@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 """Shows a Ez field in a photonic crystal waveguide.
@@ -7,10 +7,6 @@ A simple example showing the Ez field in a two-dimensional
 photonic crystal waveguide.
 
 """
-
-import os, sys
-new_path = os.path.abspath('../')
-sys.path.append(new_path)
 
 from gmes import *
 

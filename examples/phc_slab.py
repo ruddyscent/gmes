@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 """Simulate a photonic crystal slab waveguide.
 
@@ -16,10 +16,6 @@ This script requires about 1.3GB of memory.
 """
 
 
-
-import os, sys
-new_path = os.path.abspath('../')
-sys.path.append(new_path)
 
 from numpy import *
 from gmes import *

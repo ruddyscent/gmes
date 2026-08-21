@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 """Shows an Ez field in a dielectric slab waveguide.
@@ -12,10 +12,6 @@ package for electromagnetic simulations by the FDTD method,"
 Comput. Phys. Commun. 181, 687-702 (2010).
 
 """
-
-import os, sys
-new_path = os.path.abspath('../')
-sys.path.append(new_path)
 
 from gmes import *
 

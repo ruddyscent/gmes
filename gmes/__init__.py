@@ -46,10 +46,10 @@ from .constant import *
 from .source import *
 from .material import *
 
-from . import constant, fdtd, geometry, material, pw_material, pw_source, show, source
+from . import constant, fdtd, geometry, material, pw_material, pw_source, source
 
 # List here only the objects we want to be publicly available
-_module = ['fdtd', 'geometry', 'show', 'constant', 'source', 'pw_source', 'material', 'pw_material']
+_module = ['fdtd', 'geometry', 'constant', 'source', 'pw_source', 'material', 'pw_material']
 _class = ['TimeStep', 'FDTD', 'TExFDTD', 'TEyFDTD', 'TEzFDTD', 'TMxFDTD', 'TMyFDTD', 'TMzFDTD', 'TEMxFDTD', 'TEMyFDTD', 'TEMzFDTD',
           'Cartesian', 'DefaultMedium', 'Cone', 'Cylinder', 'Block', 'Ellipsoid', 'Sphere', 'Shell',
           'Ex', 'Ey', 'Ez', 'Hx', 'Hy', 'Hz', 'Jx', 'Jy', 'Jz', 'Mx', 'My', 'Mz', 'X', 'Y', 'Z', 'PlusX', 'MinusX', 'PlusY', 'MinusY', 'PlusZ', 'MinusZ',

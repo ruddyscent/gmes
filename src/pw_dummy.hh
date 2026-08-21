@@ -5,21 +5,21 @@
 
 namespace gmes
 {
-  template <typename T> 
+  template <typename T>
   struct DummyElectricParam: public ElectricParam<T>
   {
   }; // template DummyElectricParam
 
-  template <typename T> 
+  template <typename T>
   struct DummyMagneticParam: public MagneticParam<T>
   {
   }; // template DummyMagneticParam
-  
-  template <typename T> 
+
+  template <typename T>
   class DummyElectric: public MaterialElectric<T>
   {
   public:
-    const std::string& 
+    const std::string&
     name() const
     {
       return DummyElectric<T>::tag;
@@ -43,7 +43,7 @@ namespace gmes
     {
       Index3 index;
       std::copy(idx, idx + idx_size, index.begin());
-      
+
       const auto& dummy_param = *static_cast<const DummyElectricParam<T>*>(pm_param_ptr);
 
       idx_list.push_back(index);
@@ -64,9 +64,9 @@ namespace gmes
     void
     update_all(T* const inplace_field,
 	       int inplace_dim1, int inplace_dim2, int inplace_dim3,
-	       const T* const in_field1, 
+	       const T* const in_field1,
 	       int in1_dim1, int in1_dim2, int in1_dim3,
-	       const T* const in_field2, 
+	       const T* const in_field2,
 	       int in2_dim1, int in2_dim2, int in2_dim3,
 	       double d1, double d2, double dt, double n)
     {
@@ -84,7 +84,7 @@ namespace gmes
 
   template <typename T>
   const std::string DummyElectric<T>::tag = "DummyElectric";
-  
+
   template <typename T> class DummyEx: public DummyElectric<T>
   {
   }; // template DummyEx
@@ -97,16 +97,16 @@ namespace gmes
   {
   }; // template DummyEz
 
-  template <typename T> 
+  template <typename T>
   class DummyMagnetic: public MaterialMagnetic<T>
   {
   public:
-    const std::string& 
+    const std::string&
     name() const
     {
       return DummyMagnetic<T>::tag;
     }
-    
+
     double
     get_mu_inf(const int* const idx, int idx_size) const
     {
@@ -127,10 +127,10 @@ namespace gmes
       std::copy(idx, idx + idx_size, index.begin());
 
       const auto& dummy_param = *static_cast<const DummyMagneticParam<T>*>(pm_param_ptr);
-      
+
       idx_list.push_back(index);
       param_list.push_back(dummy_param);
-      
+
       return this;
     }
 
@@ -142,13 +142,13 @@ namespace gmes
       std::copy(dummy_ptr->param_list.begin(), dummy_ptr->param_list.end(), std::back_inserter(param_list));
       return this;
     }
- 
+
     void
     update_all(T* const inplace_field,
 	       int inplace_dim1, int inplace_dim2, int inplace_dim3,
-	       const T* const in_field1, 
+	       const T* const in_field1,
 	       int in1_dim1, int in1_dim2, int in1_dim3,
-	       const T* const in_field2, 
+	       const T* const in_field2,
 	       int in2_dim1, int in2_dim2, int in2_dim3,
 	       double d1, double d2, double dt, double n)
     {
@@ -167,17 +167,17 @@ namespace gmes
   template <typename T>
   const std::string DummyMagnetic<T>::tag = "DummyMagnetic";
 
-  template <typename T> 
+  template <typename T>
   class DummyHx: public DummyMagnetic<T>
   {
   }; // template DummyHx
 
-  template <typename T> 
+  template <typename T>
   class DummyHy: public DummyMagnetic<T>
   {
   }; // template DummyHy
 
-  template <typename T> 
+  template <typename T>
   class DummyHz: public DummyMagnetic<T>
   {
   }; // template DummyHz

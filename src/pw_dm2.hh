@@ -1,16 +1,16 @@
 /* This implementation is based on the following articles:
  *
- * 1. Ziolkowski, R. W., Arnold, J. M. & Gogny, D. M. 
- * Ultrafast pulse interactions with two-level atoms. 
+ * 1. Ziolkowski, R. W., Arnold, J. M. & Gogny, D. M.
+ * Ultrafast pulse interactions with two-level atoms.
  * Phys. Rev. A 52, 3082–3094 (1995).
  *
- * 2. Schlottau, F., Piket-May, M. & Wagner, K. Modeling 
- * of femtosecond pulse interaction with inhomogeneously 
- * broadened media using an iterative predictor corrector 
+ * 2. Schlottau, F., Piket-May, M. & Wagner, K. Modeling
+ * of femtosecond pulse interaction with inhomogeneously
+ * broadened media using an iterative predictor corrector
  * FDTD method. Opt. Express 13, 182–194 (2005).
  *
  * This module just handles 1D case with Ex and Hy fields.
- * The dipole moments are assumed to be aligned along the 
+ * The dipole moments are assumed to be aligned along the
  * electric field.
  *
  * TODOs
@@ -36,22 +36,22 @@
 #define hz(i,j,k) hz[hz_x_size==1?0:((i)*hz_y_size+(j))*hz_z_size+(k)]
 
 namespace gmes
-{  
+{
   // TODO: l2_norm should be a local function.
   template <typename T>
-  double 
+  double
   l2_norm(const T& e, const std::vector<std::array<T, 3> >& u)
   {
     T accu = e * e;
-    for (std::size_t i = 0; i < u.size(); ++i) {  
-      accu += std::inner_product(u[i].begin(), u[i].end(), 
+    for (std::size_t i = 0; i < u.size(); ++i) {
+      accu += std::inner_product(u[i].begin(), u[i].end(),
                                  u[i].begin(), static_cast<T>(0));
     }
 
     // accu += std::accumulate(u.begin(), u.end(), 0,
     //                         [](int a, const std::array<int, 3>& b)
-    //                         { 
-    //                           return a + std::inner_product(b.begin(), b.end(), 
+    //                         {
+    //                           return a + std::inner_product(b.begin(), b.end(),
     //                                                         b.begin(),
     //                                                         static_cast<T>(0));
     //                         }
@@ -80,12 +80,12 @@ namespace gmes
 
     double denom = l2_norm(e_diff, u_diff);
     double num = l2_norm(e_ref, u_ref);
-    
+
     return denom / num;
   } // template rel_error
 
 
-  template <typename T> 
+  template <typename T>
   struct Dm2ElectricParam: public ElectricParam<T>
   {
     std::vector<double> omega;
@@ -98,15 +98,15 @@ namespace gmes
 
     std::vector<std::array<T, 3> > u;
   }; // template Dm2ElectricParam
-  
+
 
   template <typename T>
   struct Dm2MagneticParam: public MagneticParam<T>
   {
   }; // template Dm2MagneticParam
 
-  
-  template <typename T> 
+
+  template <typename T>
   class Dm2Electric: public MaterialElectric<T>
   {
   public:
@@ -122,7 +122,7 @@ namespace gmes
         return 0;
       else {
         const auto& p = param_list[i];
-	  
+
         switch (rho_idx)
           {
           case 0:
@@ -136,7 +136,7 @@ namespace gmes
 	  }
       }
     }
-    
+
     void
     get_u(const int* const idx, int idx_size, double t, double* const u, int u_size) const
     {
@@ -194,12 +194,12 @@ namespace gmes
       }
     }
 
-    const std::string& 
+    const std::string&
     name() const
     {
       return Dm2Electric<T>::tag;
     }
-    
+
     double
     get_eps_inf(const int* const idx, int idx_size) const
     {
@@ -230,17 +230,17 @@ namespace gmes
     PwMaterial<T>*
     merge(const PwMaterial<T>* const pm_ptr)
     {
-      auto dm2_ptr 
+      auto dm2_ptr
 	= static_cast<const Dm2Electric<T>*>(pm_ptr);
-      std::copy(dm2_ptr->idx_list.begin(), 
-		dm2_ptr->idx_list.end(), 
+      std::copy(dm2_ptr->idx_list.begin(),
+		dm2_ptr->idx_list.end(),
 		std::back_inserter(idx_list));
-      std::copy(dm2_ptr->param_list.begin(), 
-		dm2_ptr->param_list.end(), 
+      std::copy(dm2_ptr->param_list.begin(),
+		dm2_ptr->param_list.end(),
 		std::back_inserter(param_list));
       return this;
     }
-    
+
   protected:
     using MaterialElectric<T>::position;
     using MaterialElectric<T>::idx_list;
@@ -248,7 +248,7 @@ namespace gmes
 
     void
     a(double t, const Dm2ElectricParam<T>& dm2_param,
-      std::vector<double>& a_out) const 
+      std::vector<double>& a_out) const
     {
       const auto& n_atom = dm2_param.n_atom;
       const auto& gamma = dm2_param.gamma;
@@ -273,7 +273,7 @@ namespace gmes
       }
     }
 
-    void 
+    void
     c_plus(double t, const Dm2ElectricParam<T>& dm2_param,
            double& c_out) const
     {
@@ -281,7 +281,7 @@ namespace gmes
       const auto& t1 = dm2_param.t1;
       const auto& t2 = dm2_param.t2;
       const auto& hbar = dm2_param.hbar;
-      
+
       c_out = 2 / hbar * gamma * exp(-t * (1 / t1 - 1 / t2));
     }
 
@@ -308,7 +308,7 @@ namespace gmes
 
       d_out = 2 / hbar * gamma * rho30 * exp(t / t2);
     }
-    
+
   private:
     static const std::string tag; // "Dm2Electric"
   }; // template Dm2Electric
@@ -316,8 +316,8 @@ namespace gmes
   template <typename T>
   const std::string Dm2Electric<T>::tag = "Dm2Electric";
 
-  
-  template <typename T> 
+
+  template <typename T>
   class Dm2Ex: public Dm2Electric<T>
   {
   public:
@@ -327,8 +327,9 @@ namespace gmes
 	       const T* const hy, int hy_x_size, int hy_y_size, int hy_z_size,
 	       double dy, double dz, double dt, double n)
     {
-      for (auto idx = idx_list.begin(), param = param_list.begin();
-	   idx != idx_list.end(); ++idx, ++param) {
+      auto idx = idx_list.begin();
+      auto param = param_list.begin();
+      for (; idx != idx_list.end(); ++idx, ++param) {
     	update(ex, ex_x_size, ex_y_size, ex_z_size,
 	       hz, hz_x_size, hz_y_size, hz_z_size,
 	       hy, hy_x_size, hy_y_size, hy_z_size,
@@ -337,21 +338,21 @@ namespace gmes
     }
 
   private:
-    void 
+    void
     update(T* const ex, int ex_x_size, int ex_y_size, int ex_z_size,
 	   const T* const hz, int hz_x_size, int hz_y_size, int hz_z_size,
 	   const T* const hy, int hy_x_size, int hy_y_size, int hy_z_size,
 	   double dy, double dz, double dt, double n,
-	   const Index3& idx, 
+	   const Index3& idx,
 	   Dm2ElectricParam<T>& dm2_param)
     {
       const int i = idx[0], j = idx[1], k = idx[2];
       const std::vector<double>& omega = dm2_param.omega;
       const double rtol = dm2_param.rtol;
       std::vector<std::array<T, 3> >& u = dm2_param.u;
-      
+
       const double t = (n + 0.5) * dt;
-      
+
       std::vector<double> a, b;
       double c_plus, c_minus, d;
 
@@ -360,7 +361,7 @@ namespace gmes
       this->c_plus(t, dm2_param, c_plus);
       this->c_minus(t, dm2_param, c_minus);
       this->d(t, dm2_param, d);
-      
+
       T e_new = ex(i,j,k);
       std::vector<std::array<T, 3> > u_new = u;
 
@@ -371,7 +372,7 @@ namespace gmes
       do {
         T e_tmp = e_new;
         std::vector<std::array<T, 3> > u_tmp = u_new;
-        
+
 	e_new = e_old - dt * hy_dz;
         for (std::size_t i = 0; i < u.size(); ++i) {
 	  e_new -= .5 * dt * a[i] * (u_new[i][0] + u[i][0]);
@@ -379,28 +380,28 @@ namespace gmes
         }
 
         for (std::size_t i = 0; i < u.size(); ++i) {
-          u_new[i][0] = u[i][0] 
+          u_new[i][0] = u[i][0]
             + .5 * dt * omega[i] * (u_new[i][1] + u[i][1]);
-          u_new[i][1] = u[i][1] 
+          u_new[i][1] = u[i][1]
             - .5 * dt * omega[i] * (u_new[i][0] + u[i][0])
-            + .25 * dt * c_plus * (u_new[i][2] + u[i][2]) * (e_new + e_old) 
+            + .25 * dt * c_plus * (u_new[i][2] + u[i][2]) * (e_new + e_old)
             + .5 * dt * d * (e_new + e_old);
-          u_new[i][2] = u[i][2] 
+          u_new[i][2] = u[i][2]
             - .25 * dt * c_minus * (u_new[i][1] + u[i][1]) * (e_new + e_old);
         }
-        
+
         error = rel_error(e_new, u_new, e_tmp, u_tmp);
       } while (error > rtol);
-      
+
       ex(i,j,k) = e_new;
       std::copy(u_new.begin(), u_new.end(), u.begin());
     }
-    
+
   protected:
     using Dm2Electric<T>::idx_list;
     using Dm2Electric<T>::param_list;
   }; // template Dm2Ex
-  
+
 
   template <typename T>
   class Dm2Ey: public Dm2Electric<T>
@@ -412,8 +413,9 @@ namespace gmes
 	       const T* const hz, int hz_x_size, int hz_y_size, int hz_z_size,
 	       double dz, double dx, double dt, double n)
     {
-      for (auto idx = idx_list.begin(), param = param_list.begin();
-	   idx != idx_list.end(); ++idx, ++param) {
+      auto idx = idx_list.begin();
+      auto param = param_list.begin();
+      for (; idx != idx_list.end(); ++idx, ++param) {
 	update(ey, ey_x_size, ey_y_size, ey_z_size,
 	       hx, hx_x_size, hx_y_size, hx_z_size,
 	       hz, hz_x_size, hz_y_size, hz_z_size,
@@ -422,21 +424,21 @@ namespace gmes
     }
 
   private:
-    void 
+    void
     update(T* const ey, int ey_x_size, int ey_y_size, int ey_z_size,
 	   const T* const hx, int hx_x_size, int hx_y_size, int hx_z_size,
 	   const T* const hz, int hz_x_size, int hz_y_size, int hz_z_size,
-	   double dz, double dx, double dt, double n, 
-	   const Index3& idx, 
+	   double dz, double dx, double dt, double n,
+	   const Index3& idx,
 	   Dm2ElectricParam<T>& dm2_param)
     {
       const int i = idx[0], j = idx[1], k = idx[2];
       const std::vector<double>& omega = dm2_param.omega;
       const double rtol = dm2_param.rtol;
       std::vector<std::array<T, 3> >& u = dm2_param.u;
-      
+
       const double t = (n + 0.5) * dt;
-      
+
       std::vector<double> a, b;
       double c_plus, c_minus, d;
 
@@ -445,7 +447,7 @@ namespace gmes
       this->c_plus(t, dm2_param, c_plus);
       this->c_minus(t, dm2_param, c_minus);
       this->d(t, dm2_param, d);
-      
+
       T e_new = ey(i,j,k);
       std::vector<std::array<T, 3> > u_new = u;
 
@@ -456,7 +458,7 @@ namespace gmes
       do {
         T e_tmp = e_new;
         std::vector<std::array<T, 3> > u_tmp = u_new;
-        
+
 	e_new = e_old - dt * hz_dx;
         for (std::size_t i = 0; i < u.size(); ++i) {
 	  e_new -= .5 * dt * a[i] * (u_new[i][0] + u[i][0]);
@@ -464,19 +466,19 @@ namespace gmes
         }
 
         for (std::size_t i = 0; i < u.size(); ++i) {
-          u_new[i][0] = u[i][0] 
+          u_new[i][0] = u[i][0]
             + .5 * dt * omega[i] * (u_new[i][1] + u[i][1]);
-          u_new[i][1] = u[i][1] 
+          u_new[i][1] = u[i][1]
             - .5 * dt * omega[i] * (u_new[i][0] + u[i][0])
-            + .25 * dt * c_plus * (u_new[i][2] + u[i][2]) * (e_new + e_old) 
+            + .25 * dt * c_plus * (u_new[i][2] + u[i][2]) * (e_new + e_old)
             + .5 * dt * d * (e_new + e_old);
-          u_new[i][2] = u[i][2] 
+          u_new[i][2] = u[i][2]
             - .25 * dt * c_minus * (u_new[i][1] + u[i][1]) * (e_new + e_old);
         }
-        
+
         error = rel_error(e_new, u_new, e_tmp, u_tmp);
       } while (error > rtol);
-      
+
       ey(i,j,k) = e_new;
       std::copy(u_new.begin(), u_new.end(), u.begin());
     }
@@ -487,7 +489,7 @@ namespace gmes
   }; // template Dm2Ey
 
 
-  template <typename T> 
+  template <typename T>
   class Dm2Ez: public Dm2Electric<T>
   {
   public:
@@ -497,8 +499,9 @@ namespace gmes
 	       const T* const hx, int hx_x_size, int hx_y_size, int hx_z_size,
 	       double dx, double dy, double dt, double n)
     {
-      for (auto idx = idx_list.begin(), param = param_list.begin();
-	   idx != idx_list.end(); ++idx, ++param) {
+      auto idx = idx_list.begin();
+      auto param = param_list.begin();
+      for (; idx != idx_list.end(); ++idx, ++param) {
     	update(ez, ez_x_size, ez_y_size, ez_z_size,
 	       hy, hy_x_size, hy_y_size, hy_z_size,
 	       hx, hx_x_size, hx_y_size, hx_z_size,
@@ -507,21 +510,21 @@ namespace gmes
     }
 
   private:
-    void 
+    void
     update(T* const ez, int ez_x_size, int ez_y_size, int ez_z_size,
 	   const T* const hy, int hy_x_size, int hy_y_size, int hy_z_size,
 	   const T* const hx, int hx_x_size, int hx_y_size, int hx_z_size,
-	   double dx, double dy, double dt, double n, 
-	   const Index3& idx, 
+	   double dx, double dy, double dt, double n,
+	   const Index3& idx,
 	   Dm2ElectricParam<T>& dm2_param)
     {
       const int i = idx[0], j = idx[1], k = idx[2];
       const std::vector<double>& omega = dm2_param.omega;
       const double rtol = dm2_param.rtol;
       std::vector<std::array<T, 3> >& u = dm2_param.u;
-      
+
       const double t = (n + 0.5) * dt;
-      
+
       std::vector<double> a, b;
       double c_plus, c_minus, d;
 
@@ -530,7 +533,7 @@ namespace gmes
       this->c_plus(t, dm2_param, c_plus);
       this->c_minus(t, dm2_param, c_minus);
       this->d(t, dm2_param, d);
-      
+
       T e_new = ez(i,j,k);
       std::vector<std::array<T, 3> > u_new = u;
 
@@ -541,7 +544,7 @@ namespace gmes
       do {
         T e_tmp = e_new;
         std::vector<std::array<T, 3> > u_tmp = u_new;
-        
+
 	e_new = e_old - dt * hx_dy;
         for (std::size_t i = 0; i < u.size(); ++i) {
 	  e_new -= .5 * dt * a[i] * (u_new[i][0] + u[i][0]);
@@ -549,19 +552,19 @@ namespace gmes
         }
 
         for (std::size_t i = 0; i < u.size(); ++i) {
-          u_new[i][0] = u[i][0] 
+          u_new[i][0] = u[i][0]
             + .5 * dt * omega[i] * (u_new[i][1] + u[i][1]);
-          u_new[i][1] = u[i][1] 
+          u_new[i][1] = u[i][1]
             - .5 * dt * omega[i] * (u_new[i][0] + u[i][0])
-            + .25 * dt * c_plus * (u_new[i][2] + u[i][2]) * (e_new + e_old) 
+            + .25 * dt * c_plus * (u_new[i][2] + u[i][2]) * (e_new + e_old)
             + .5 * dt * d * (e_new + e_old);
-          u_new[i][2] = u[i][2] 
+          u_new[i][2] = u[i][2]
             - .25 * dt * c_minus * (u_new[i][1] + u[i][1]) * (e_new + e_old);
         }
-        
+
         error = rel_error(e_new, u_new, e_tmp, u_tmp);
       } while (error > rtol);
-      
+
       ez(i,j,k) = e_new;
       std::copy(u_new.begin(), u_new.end(), u.begin());
     }
@@ -590,7 +593,7 @@ namespace gmes
   const std::string Dm2Hx<T>::tag = "Dm2Magnetic";
 
 
-  template <typename T> 
+  template <typename T>
   class Dm2Hy: public DielectricHy<T>
   {
   public:
@@ -600,8 +603,9 @@ namespace gmes
 	       const T* const ez, int ez_x_size, int ez_y_size, int ez_z_size,
 	       double dz, double dx, double dt, double n)
     {
-      for (auto idx = idx_list.begin(), param = param_list.begin();
-	   idx != idx_list.end(); ++idx, ++param) {
+      auto idx = idx_list.begin();
+      auto param = param_list.begin();
+      for (; idx != idx_list.end(); ++idx, ++param) {
       	update(hy, hy_x_size, hy_y_size, hy_z_size,
 	       ex, ex_x_size, ex_y_size, ex_z_size,
 	       ez, ez_x_size, ez_y_size, ez_z_size,
@@ -609,28 +613,28 @@ namespace gmes
       }
     }
 
-    const std::string& 
+    const std::string&
     name() const
     {
       return Dm2Hy<T>::tag;
     }
 
   private:
-    void 
+    void
     update(T* const hy, int hy_x_size, int hy_y_size, int hy_z_size,
 	   const T* const ex, int ex_x_size, int ex_y_size, int ex_z_size,
 	   const T* const ez, int ez_x_size, int ez_y_size, int ez_z_size,
-	   double dz, double dx, double dt, double n, 
-	   const Index3& idx, 
+	   double dz, double dx, double dt, double n,
+	   const Index3& idx,
 	   const DielectricMagneticParam<T>& dielectric_param) const
     {
       const int i = idx[0], j = idx[1], k = idx[2];
       const double mu_inf = dielectric_param.mu_inf;
-      
+
       hy(i,j,k) += dt / mu_inf * ((ez(i,j,k-1) - ez(i-1,j,k-1)) / dx -
       				  (ex(i-1,j,k) - ex(i-1,j,k-1)) / dz);
     }
-    
+
     static const std::string tag; // "Dm2Magnetic"
 
   protected:
@@ -646,7 +650,7 @@ namespace gmes
   class Dm2Hz: public DielectricHz<T>
   {
   public:
-    const std::string& 
+    const std::string&
     name() const
     {
       return Dm2Hz<T>::tag;

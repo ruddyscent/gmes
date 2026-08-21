@@ -1,7 +1,7 @@
 /* This implementation is based on the following article:
  *
- * M. Okoniewski, M. Mrozowski, and M. A. Stuchly, "Simple 
- * treatment of multi-term dispersion in FDTD," IEEE Microw. 
+ * M. Okoniewski, M. Mrozowski, and M. A. Stuchly, "Simple
+ * treatment of multi-term dispersion in FDTD," IEEE Microw.
  * Guided Wave Lett. 7, 121-123 (1997).
  */
 
@@ -21,7 +21,7 @@
 
 namespace gmes
 {
-  template <typename T> 
+  template <typename T>
   struct LorentzElectricParam: public ElectricParam<T>
   {
     std::vector<std::array<double, 3> > a;
@@ -29,16 +29,16 @@ namespace gmes
     std::vector<T> l_now, l_new;
   }; // template LorentzElectricParam
 
-  template <typename T> 
+  template <typename T>
   struct LorentzMagneticParam: public MagneticParam<T>
   {
   }; // template LorentzMagneticParam
 
-  template <typename T> 
+  template <typename T>
   class LorentzElectric: public MaterialElectric<T>
   {
   public:
-    const std::string& 
+    const std::string&
     name() const
     {
       return LorentzElectric<T>::tag;
@@ -74,24 +74,24 @@ namespace gmes
     PwMaterial<T>*
     merge(const PwMaterial<T>* const pm_ptr)
     {
-      auto lorentz_ptr 
+      auto lorentz_ptr
 	= static_cast<const LorentzElectric<T>*>(pm_ptr);
-      std::copy(lorentz_ptr->idx_list.begin(), 
-		lorentz_ptr->idx_list.end(), 
+      std::copy(lorentz_ptr->idx_list.begin(),
+		lorentz_ptr->idx_list.end(),
 		std::back_inserter(idx_list));
-      std::copy(lorentz_ptr->param_list.begin(), 
-		lorentz_ptr->param_list.end(), 
+      std::copy(lorentz_ptr->param_list.begin(),
+		lorentz_ptr->param_list.end(),
 		std::back_inserter(param_list));
       return this;
     }
 
-    T 
+    T
     lps_sum(const T& init, const LorentzElectricParam<T>& lorentz_param) const
     {
       const auto& a = lorentz_param.a;
       const auto& l_now = lorentz_param.l_now;
       const auto& l_new = lorentz_param.l_new;
-      
+
       T sum(init);
       for (typename std::vector<T>::size_type i = 0; i < a.size(); ++i)	{
 	sum += l_new[i] - l_now[i];
@@ -100,7 +100,7 @@ namespace gmes
       return sum;
     }
 
-    void 
+    void
     update_l(const T& e_now, LorentzElectricParam<T>& lorentz_param)
     {
       const auto& a = lorentz_param.a;
@@ -125,8 +125,8 @@ namespace gmes
 
   template <typename T>
   const std::string LorentzElectric<T>::tag = "LorentzElectric";
-  
-  template <typename T> 
+
+  template <typename T>
   class LorentzEx: public LorentzElectric<T>
   {
   public:
@@ -136,8 +136,9 @@ namespace gmes
 	       const T* const hy, int hy_x_size, int hy_y_size, int hy_z_size,
 	       double dy, double dz, double dt, double n)
     {
-      for (auto idx = idx_list.begin(), param = param_list.begin();
-	   idx != idx_list.end(); ++idx, ++param) {
+      auto idx = idx_list.begin();
+      auto param = param_list.begin();
+      for (; idx != idx_list.end(); ++idx, ++param) {
     	update(ex, ex_x_size, ex_y_size, ex_z_size,
 	       hz, hz_x_size, hz_y_size, hz_z_size,
 	       hy, hy_x_size, hy_y_size, hy_z_size,
@@ -146,12 +147,12 @@ namespace gmes
     }
 
   private:
-    void 
+    void
     update(T* const ex, int ex_x_size, int ex_y_size, int ex_z_size,
 	   const T* const hz, int hz_x_size, int hz_y_size, int hz_z_size,
 	   const T* const hy, int hy_x_size, int hy_y_size, int hy_z_size,
 	   double dy, double dz, double dt, double n,
-	   const Index3& idx, 
+	   const Index3& idx,
 	   LorentzElectricParam<T>& lorentz_param)
     {
       const int i = idx[0], j = idx[1], k = idx[2];
@@ -160,7 +161,7 @@ namespace gmes
 
       const T& e_now = ex(i,j,k);
       update_l(e_now, lorentz_param);
-      ex(i,j,k) = c[0] * ((hz(i+1,j+1,k) - hz(i+1,j,k)) / dy - 
+      ex(i,j,k) = c[0] * ((hz(i+1,j+1,k) - hz(i+1,j,k)) / dy -
 			  (hy(i+1,j,k+1) - hy(i+1,j,k)) / dz)
 	+ c[1] * lps_sum(static_cast<T>(0), lorentz_param) + c[2] * e_now;
     }
@@ -172,7 +173,7 @@ namespace gmes
     using LorentzElectric<T>::lps_sum;
   }; // template LorentzEx
 
-  template <typename T> 
+  template <typename T>
   class LorentzEy: public LorentzElectric<T>
   {
   public:
@@ -182,8 +183,9 @@ namespace gmes
 	       const T* const hz, int hz_x_size, int hz_y_size, int hz_z_size,
 	       double dz, double dx, double dt, double n)
     {
-      for (auto idx = idx_list.begin(), param = param_list.begin();
-	   idx != idx_list.end(); ++idx, ++param) {
+      auto idx = idx_list.begin();
+      auto param = param_list.begin();
+      for (; idx != idx_list.end(); ++idx, ++param) {
 	update(ey, ey_x_size, ey_y_size, ey_z_size,
 	       hx, hx_x_size, hx_y_size, hx_z_size,
 	       hz, hz_x_size, hz_y_size, hz_z_size,
@@ -192,25 +194,25 @@ namespace gmes
     }
 
   private:
-    void 
+    void
     update(T* const ey, int ey_x_size, int ey_y_size, int ey_z_size,
 	   const T* const hx, int hx_x_size, int hx_y_size, int hx_z_size,
 	   const T* const hz, int hz_x_size, int hz_y_size, int hz_z_size,
 	   double dz, double dx, double dt, double n,
-	   const Index3& idx, 
+	   const Index3& idx,
 	   LorentzElectricParam<T>& lorentz_param)
     {
       const int i = idx[0], j = idx[1], k = idx[2];
 
       const auto& c = lorentz_param.c;
-      
+
       const T& e_now = ey(i,j,k);
       update_l(e_now, lorentz_param);
-      ey(i,j,k) = c[0] * ((hx(i,j+1,k+1) - hx(i,j+1,k)) / dz - 
+      ey(i,j,k) = c[0] * ((hx(i,j+1,k+1) - hx(i,j+1,k)) / dz -
 			  (hz(i+1,j+1,k) - hz(i,j+1,k)) / dx)
 	+ c[1] * lps_sum(static_cast<T>(0), lorentz_param) + c[2] * e_now;
     }
-    
+
   protected:
     using LorentzElectric<T>::idx_list;
     using LorentzElectric<T>::param_list;
@@ -218,7 +220,7 @@ namespace gmes
     using LorentzElectric<T>::lps_sum;
   }; // template LorentzEy
 
-  template <typename T> 
+  template <typename T>
   class LorentzEz: public LorentzElectric<T>
   {
   public:
@@ -228,8 +230,9 @@ namespace gmes
 	       const T* const hx, int hx_x_size, int hx_y_size, int hx_z_size,
 	       double dx, double dy, double dt, double n)
     {
-      for (auto idx = idx_list.begin(), param = param_list.begin();
-	   idx != idx_list.end(); ++idx, ++param) {
+      auto idx = idx_list.begin();
+      auto param = param_list.begin();
+      for (; idx != idx_list.end(); ++idx, ++param) {
     	update(ez, ez_x_size, ez_y_size, ez_z_size,
 	       hy, hy_x_size, hy_y_size, hy_z_size,
 	       hx, hx_x_size, hx_y_size, hx_z_size,
@@ -238,21 +241,21 @@ namespace gmes
     }
 
   private:
-    void 
+    void
     update(T* const ez, int ez_x_size, int ez_y_size, int ez_z_size,
 	   const T* const hy, int hy_x_size, int hy_y_size, int hy_z_size,
 	   const T* const hx, int hx_x_size, int hx_y_size, int hx_z_size,
 	   double dx, double dy, double dt, double n,
-	   const Index3& idx, 
+	   const Index3& idx,
 	   LorentzElectricParam<T>& lorentz_param)
     {
       const int i = idx[0], j = idx[1], k = idx[2];
 
       const auto& c = lorentz_param.c;
-      
+
       const T& e_now = ez(i,j,k);
       update_l(e_now, lorentz_param);
-      ez(i,j,k) = c[0] * ((hy(i+1,j,k+1) - hy(i,j,k+1)) / dx - 
+      ez(i,j,k) = c[0] * ((hy(i+1,j,k+1) - hy(i,j,k+1)) / dx -
 			  (hx(i,j+1,k+1) - hx(i,j,k+1)) / dy)
 	+ c[1] * lps_sum(static_cast<T>(0), lorentz_param) + c[2] * e_now;
     }
@@ -264,11 +267,11 @@ namespace gmes
     using LorentzElectric<T>::lps_sum;
   }; // template LorentzEz
 
-  template <typename T> 
+  template <typename T>
   class LorentzHx: public DielectricHx<T>
   {
   public:
-    const std::string& 
+    const std::string&
     name() const
     {
       return LorentzHx<T>::tag;
@@ -281,11 +284,11 @@ namespace gmes
   template <typename T>
   const std::string LorentzHx<T>::tag = "LorentzMagnetic";
 
-  template <typename T> 
+  template <typename T>
   class LorentzHy: public DielectricHy<T>
   {
   public:
-    const std::string& 
+    const std::string&
     name() const
     {
       return LorentzHy<T>::tag;
@@ -302,7 +305,7 @@ namespace gmes
   class LorentzHz: public DielectricHz<T>
   {
   public:
-    const std::string& 
+    const std::string&
     name() const
     {
       return LorentzHz<T>::tag;

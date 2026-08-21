@@ -19,7 +19,7 @@
 %include "numpy.i"
 
 %numpy_typemaps(std::complex<double>, NPY_CDOUBLE, int)
-%apply size_t { gmes::IdxCnt::size_type }; 
+%apply size_t { gmes::IdxCnt::size_type };
 
 %init %{
 import_array();
@@ -46,7 +46,7 @@ import_array();
       {(const TYPE* const hy, int hy_x_size, int hy_y_size, int hy_z_size)};
 %apply (TYPE* IN_ARRAY3, int DIM1, int DIM2, int DIM3)
       {(const TYPE* const hz, int hz_x_size, int hz_y_size, int hz_z_size)};
-      
+
 %apply (TYPE* INPLACE_ARRAY3, int DIM1, int DIM2, int DIM3)
       {(TYPE* const ex, int ex_x_size, int ex_y_size, int ex_z_size)};
 %apply (TYPE* INPLACE_ARRAY3, int DIM1, int DIM2, int DIM3)
@@ -177,9 +177,9 @@ import_array();
       std::copy(a + i * a_size2, a + i * a_size2 + 3, tmp.begin());
       $self->a.push_back(tmp);
     }
-    
+
     std::copy(c, c + c_size, $self->c.begin());
-    
+
     $self->q_now.resize(a_size1, T(0));
     $self->q_new.resize(a_size1, T(0));
   }
@@ -208,7 +208,7 @@ import_array();
     }
 
     std::copy(c, c + c_size, $self->c.begin());
-    
+
     $self->l_now.resize(a_size1);
     $self->l_new.resize(a_size1);
   }
@@ -244,7 +244,7 @@ import_array();
     }
 
     std::copy(c, c + c_size, $self->c.begin());
-    
+
     $self->q_old.resize(a_size1);
     $self->q_now.resize(a_size1);
     $self->p_old.resize(b_size1);
@@ -282,7 +282,7 @@ import_array();
     }
 
     std::copy(c, c + c_size, $self->c.begin());
-    
+
     $self->psi_dp_re.resize(a_size1);
     $self->psi_dp_im.resize(a_size1);
     $self->psi_cp_re.resize(b_size1);
@@ -313,7 +313,7 @@ import_array();
     for (int i = 0; i < omega_size; i++) {
       $self->omega.push_back(*(omega + i));
       $self->n_atom.push_back(*(n + i));
-      
+
       std::array<double, 3> u_tmp;
       u_tmp.fill(static_cast<T>(0));
       $self->u.push_back(u_tmp);

@@ -3,11 +3,25 @@
 
 # System imports
 from glob import glob
+from pathlib import Path
+
 from Cython.Build import cythonize
 from setuptools import Extension, setup
+from setuptools.command.build_ext import build_ext
 
 # Third-party modules - we depend on numpy for everything
 import numpy
+
+
+class BuildExt(build_ext):
+    """Copy SWIG's generated proxy modules into the wheel build tree."""
+
+    def run(self):
+        super().run()
+        package_dir = Path(self.build_lib) / 'gmes'
+        package_dir.mkdir(parents=True, exist_ok=True)
+        for module_name in ('constant.py', 'pw_material.py'):
+            self.copy_file(str(Path('gmes') / module_name), str(package_dir / module_name))
 
 # Obtain the numpy include directory. This logic works across numpy versions.
 try:
@@ -52,4 +66,5 @@ setup(
         [pw_material, constant, pygeom, material],
         compiler_directives={'language_level': 3},
     ),
+    cmdclass={'build_ext': BuildExt},
 )

@@ -53,7 +53,7 @@ namespace gmes
     {
       return tag;
     }
-    
+
   private:
     Component();
     static const int tag = 0;

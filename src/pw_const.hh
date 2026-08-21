@@ -9,23 +9,23 @@
 
 namespace gmes
 {
-  template <typename T> 
+  template <typename T>
   struct ConstElectricParam: public ElectricParam<T>
   {
     T value;
   }; // template ConstElectricParam
-    
-  template <typename T> 
+
+  template <typename T>
   struct ConstMagneticParam: public MagneticParam<T>
   {
     T value;
   }; // template ConstMagneticParam
 
-  template <typename T> 
+  template <typename T>
   class ConstElectric: public MaterialElectric<T>
   {
   public:
-    const std::string& 
+    const std::string&
     name() const
     {
       return ConstElectric<T>::tag;
@@ -44,20 +44,20 @@ namespace gmes
     }
 
     PwMaterial<T>*
-    attach(const int* const idx, int idx_size, 
+    attach(const int* const idx, int idx_size,
 	   const PwMaterialParam* const pm_param_ptr)
     {
       Index3 index;
       std::copy(idx, idx + idx_size, index.begin());
 
       const auto& const_param = *static_cast<const ConstElectricParam<T>*>(pm_param_ptr);
-      
+
       idx_list.push_back(index);
       param_list.push_back(const_param);
 
       return this;
     }
-    
+
     PwMaterial<T>*
     merge(const PwMaterial<T>* const pm_ptr)
     {
@@ -70,14 +70,15 @@ namespace gmes
     void
     update_all(T* const inplace_field,
 	       int inplace_dim1, int inplace_dim2, int inplace_dim3,
-	       const T* const in_field1, 
+	       const T* const in_field1,
 	       int in1_dim1, int in1_dim2, int in1_dim3,
-	       const T* const in_field2, 
+	       const T* const in_field2,
 	       int in2_dim1, int in2_dim2, int in2_dim3,
 	       double d1, double d2, double dt, double n)
     {
-      for (auto idx = idx_list.begin(), param = param_list.begin();
-	   idx != idx_list.end(); ++idx, ++param) {
+      auto idx = idx_list.begin();
+      auto param = param_list.begin();
+      for (; idx != idx_list.end(); ++idx, ++param) {
     	update(inplace_field, inplace_dim1, inplace_dim2, inplace_dim3,
     	       in_field1, in1_dim1, in1_dim2, in1_dim3,
     	       in_field2, in2_dim1, in2_dim2, in2_dim3,
@@ -86,13 +87,13 @@ namespace gmes
     }
 
   private:
-    void 
-    update(T * const inplace_field, 
+    void
+    update(T * const inplace_field,
 	   int inplace_dim1, int inplace_dim2, int inplace_dim3,
 	   const T * const in_field1, int in1_dim1, int in1_dim2, int in1_dim3,
 	   const T * const in_field2, int in2_dim1, int in2_dim2, int in2_dim3,
 	   double d1, double d2, double dt, double n,
-	   const Index3& idx, 
+	   const Index3& idx,
 	   const ConstElectricParam<T>& const_param) const
     {
       const int i = idx[0], j = idx[1], k = idx[2];
@@ -111,26 +112,26 @@ namespace gmes
   template <typename T>
   const std::string ConstElectric<T>::tag = "ConstElectric";
 
-  template <typename T> 
+  template <typename T>
   class ConstEx: public ConstElectric<T>
   {
   }; // template ConstEx
 
-  template <typename T> 
+  template <typename T>
   class ConstEy: public ConstElectric<T>
   {
   }; // template ConstEy
 
-  template <typename T> 
+  template <typename T>
   class ConstEz: public ConstElectric<T>
   {
   }; // template ConstEz
 
-  template <typename T> 
+  template <typename T>
   class ConstMagnetic: public MaterialMagnetic<T>
   {
   public:
-    const std::string& 
+    const std::string&
     name() const
     {
       return ConstMagnetic<T>::tag;
@@ -149,7 +150,7 @@ namespace gmes
     }
 
     PwMaterial<T>*
-    attach(const int* const idx, int idx_size, 
+    attach(const int* const idx, int idx_size,
 	   const PwMaterialParam* const pm_param_ptr)
     {
       Index3 index;
@@ -175,14 +176,15 @@ namespace gmes
     void
     update_all(T* const inplace_field,
 	       int inplace_dim1, int inplace_dim2, int inplace_dim3,
-	       const T* const in_field1, 
+	       const T* const in_field1,
 	       int in1_dim1, int in1_dim2, int in1_dim3,
-	       const T* const in_field2, 
+	       const T* const in_field2,
 	       int in2_dim1, int in2_dim2, int in2_dim3,
 	       double d1, double d2, double dt, double n)
     {
-      for (auto idx = idx_list.begin(), param = param_list.begin();
-	   idx != idx_list.end(); ++idx, ++param) {
+      auto idx = idx_list.begin();
+      auto param = param_list.begin();
+      for (; idx != idx_list.end(); ++idx, ++param) {
     	update(inplace_field, inplace_dim1, inplace_dim2, inplace_dim3,
     	       in_field1, in1_dim1, in1_dim2, in1_dim3,
     	       in_field2, in2_dim1, in2_dim2, in2_dim3,
@@ -191,13 +193,13 @@ namespace gmes
     }
 
   private:
-    void 
-    update(T * const inplace_field, 
+    void
+    update(T * const inplace_field,
 	   int inplace_dim1, int inplace_dim2, int inplace_dim3,
 	   const T * const in_field1, int in1_dim1, int in1_dim2, int in1_dim3,
 	   const T * const in_field2, int in2_dim1, int in2_dim2, int in2_dim3,
-	   double d1, double d2, double dt, double n, 
-	   const Index3& idx, 
+	   double d1, double d2, double dt, double n,
+	   const Index3& idx,
 	   const ConstMagneticParam<T>& const_param) const
     {
       const int i = idx[0], j = idx[1], k = idx[2];

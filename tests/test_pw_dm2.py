@@ -1,4 +1,6 @@
+import pickle
 import unittest
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -7,6 +9,43 @@ from gmes.pw_material import _dm2_relative_error
 
 
 class Dm2Test(unittest.TestCase):
+    def test_pickle_round_trip_before_and_after_init(self):
+        for initialized in (False, True):
+            with self.subTest(initialized=initialized):
+                material = Dm2(
+                    eps_inf=2,
+                    mu_inf=3,
+                    omega=(4, 5),
+                    n_atom=(6, 7),
+                    rho30=-0.5,
+                    gamma=0.25,
+                    t1=8,
+                    t2=9,
+                    hbar=10,
+                    rtol=1e-6,
+                )
+                if initialized:
+                    material.init(SimpleNamespace(dt=0.125))
+
+                restored = pickle.loads(pickle.dumps(material))
+
+                for name in (
+                    "eps_inf",
+                    "mu_inf",
+                    "omega",
+                    "n_atom",
+                    "rho30",
+                    "gamma",
+                    "t1",
+                    "t2",
+                    "hbar",
+                    "rtol",
+                    "initialized",
+                ):
+                    self.assertEqual(getattr(restored, name), getattr(material, name))
+                if initialized:
+                    self.assertEqual(restored.dt, material.dt)
+
     def test_relative_error_includes_fields_and_atomic_state(self):
         zero = np.zeros((1, 3))
         one = np.array(((1.0, 0, 0),))

@@ -18,13 +18,16 @@ class CartesianGridTest(unittest.TestCase):
 
     def test_partition_contains_every_process(self):
         space = Cartesian(size=(8, 6, 4), resolution=2)
-        space.numprocs = 8
+        process_counts = (2, 3, 5, 8, 10, 12, 16, 18, 25, 32, 64, 127, 256)
 
-        partition = space.find_best_deploy()
+        for process_count in process_counts:
+            with self.subTest(process_count=process_count):
+                space.numprocs = process_count
+                partition = space.find_best_deploy()
 
-        self.assertEqual(len(partition), 3)
-        self.assertEqual(np.prod(partition), space.numprocs)
-        self.assertTrue(all(isinstance(value, int) for value in partition))
+                self.assertEqual(len(partition), 3)
+                self.assertEqual(np.prod(partition), process_count)
+                self.assertTrue(all(isinstance(value, int) for value in partition))
 
     def test_component_coordinate_round_trips(self):
         space = Cartesian(size=(4, 6, 2), resolution=2)

@@ -229,7 +229,7 @@ class Cartesian(object):
                 if l * m > self.numprocs:
                     break
                 n = self.numprocs // (l * m)
-                if self.numprocs % n == 0:
+                if l * m * n == self.numprocs:
                     tmp_load = self.load_metric(l, m, n)
                     if tmp_load < min_load:
                         best_partition = l, m, n

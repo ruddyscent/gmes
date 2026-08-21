@@ -4,9 +4,13 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from gmes.constant import PlusX
+from gmes.constant import PlusX, PlusY
 from gmes.geometry import Cartesian
-from gmes.pw_source import TransparentElectricParam, TransparentMagneticParam
+from gmes.pw_source import (
+    TransparentElectricParam,
+    TransparentEx,
+    TransparentMagneticParam,
+)
 from gmes.source import Bandpass, Continuous, DifferentiatedGaussian
 
 
@@ -48,6 +52,32 @@ class SourceTimeTest(unittest.TestCase):
         for parameter in parameters:
             for index in parameter.samp_idx0[PlusX] + parameter.samp_idx1[PlusX]:
                 self.assertIsInstance(index, np.integer)
+
+    def test_transparent_source_merge_preserves_shared_edge_faces(self):
+        aux_fdtd = SimpleNamespace(space=Cartesian(size=(0, 0, 2), resolution=10))
+        first = TransparentEx()
+        second = TransparentEx()
+        first.attach(
+            (1, 2, 3),
+            TransparentElectricParam(2, 3, aux_fdtd, (0, 0, 0.13), PlusX),
+        )
+        second.attach(
+            (1, 2, 3),
+            TransparentElectricParam(2, 5, aux_fdtd, (0, 0, 0.27), PlusY),
+        )
+
+        first.merge(second)
+
+        parameter = first._param[(1, 2, 3)]
+        self.assertEqual(parameter.face_list, [PlusX, PlusY])
+        self.assertEqual(parameter.amp, {PlusX: 3, PlusY: 5})
+        for values in (
+            parameter.samp_idx0,
+            parameter.samp_idx1,
+            parameter.r0,
+            parameter.r1,
+        ):
+            self.assertEqual(set(values), {PlusX, PlusY})
 
 
 if __name__ == "__main__":

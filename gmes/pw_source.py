@@ -29,7 +29,11 @@ class PwSource(object):
         self._param[tuple(idx)] = parameter
 
     def merge(self, ps):
-        self._param.update(ps._param)
+        for idx, param in ps._param.items():
+            if idx in self._param and isinstance(self._param[idx], TransparentParam):
+                self._param[idx].merge(param)
+            else:
+                self._param[idx] = param
 
     def idx_size(self):
         return len(self._param)
@@ -127,6 +131,15 @@ class TransparentParam(PwSourceParam):
         self.face_list = [directional]
         self.amp = {directional: amp}
 
+    def merge(self, param):
+        if type(self) is not type(param) or self.aux_fdtd is not param.aux_fdtd:
+            raise ValueError("incompatible transparent source parameters")
+
+        for face in param.face_list:
+            if face not in self.face_list:
+                self.face_list.append(face)
+        self.amp.update(param.amp)
+
 
 class TransparentElectricParam(TransparentParam):
     def __init__(self, eps_inf, amp, aux_fdtd, samp_pnt, directional):
@@ -143,6 +156,13 @@ class TransparentElectricParam(TransparentParam):
         self.r1 = {directional: r1_value}
         self.r0 = {directional: 1 - r1_value}
 
+    def merge(self, param):
+        super().merge(param)
+        self.samp_idx0.update(param.samp_idx0)
+        self.samp_idx1.update(param.samp_idx1)
+        self.r0.update(param.r0)
+        self.r1.update(param.r1)
+
 
 class TransparentMagneticParam(TransparentParam):
     def __init__(self, mu_inf, amp, aux_fdtd, samp_pnt, directional):
@@ -158,6 +178,13 @@ class TransparentMagneticParam(TransparentParam):
         r1_value = samp_idx[2] - floor(samp_idx[2])
         self.r1 = {directional: r1_value}
         self.r0 = {directional: 1 - r1_value}
+
+    def merge(self, param):
+        super().merge(param)
+        self.samp_idx0.update(param.samp_idx0)
+        self.samp_idx1.update(param.samp_idx1)
+        self.r0.update(param.r0)
+        self.r1.update(param.r1)
 
 
 class TransparentElectric(PwSource):

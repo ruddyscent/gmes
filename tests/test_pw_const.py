@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 import unittest
+from pickle import dumps, loads
 
 import numpy as np
 
@@ -20,6 +21,15 @@ class TestSequence(unittest.TestCase):
 
         self.const_cmplx = Const(value=0.75 + 0.5j, eps_inf=2.5, mu_inf=1.25)
         self.const_cmplx.init(self.spc)
+
+    def test_pickle_round_trip(self):
+        for material in (self.const_real, self.const_cmplx):
+            with self.subTest(value=material.value):
+                restored = loads(dumps(material))
+
+                self.assertEqual(restored.value, material.value)
+                self.assertEqual(restored.eps_inf, material.eps_inf)
+                self.assertEqual(restored.mu_inf, material.mu_inf)
 
     def testExReal(self):
         sample = self.const_real.get_pw_material_ex(self.idx, (0, 0, 0), cmplx=False)

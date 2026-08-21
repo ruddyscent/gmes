@@ -302,6 +302,7 @@ jobs:
           path: dist
       - name: Create release and attach verified distributions
         env:
+          GH_REPO: ${{ github.repository }}
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.metadata.outputs.tag }}
           RELEASE_TITLE: ${{ needs.metadata.outputs.release-title }}

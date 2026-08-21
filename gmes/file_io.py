@@ -5,6 +5,7 @@ from sys import stderr
 from os.path import exists
 from pathlib import Path
 
+
 class Probe(object):
     def __init__(self, idx, field, filename):
         """
@@ -19,12 +20,12 @@ class Probe(object):
 
         f_name = str(filename)
         if exists(f_name):
-            stderr.write('Warning: ' + f_name + ' already exists.\n')
+            stderr.write("Warning: " + f_name + " already exists.\n")
         try:
-            self.f = open(f_name, 'w')
+            self.f = open(f_name, "w")
         except IOError:
             self.f = None
-            print(('Warning: Can\'t open file ' + f_name + '.\n'))
+            print(("Warning: Can't open file " + f_name + ".\n"))
 
     def __del__(self):
         self.close()
@@ -40,21 +41,25 @@ class Probe(object):
         dt: time-step. type: float
 
         """
-        self.f.write('# location=' + str(p) + '\n')
-        self.f.write('# dt=' + str(dt) + '\n')
+        self.f.write("# location=" + str(p) + "\n")
+        self.f.write("# dt=" + str(dt) + "\n")
 
     def write(self, n):
-        self.f.write(str(n) + ' ' + str(self.field[self.idx]) + '\n')
+        self.f.write(str(n) + " " + str(self.field[self.idx]) + "\n")
+
 
 def write_hdf5(data, name, low_index, high_index):
     from tables import open_file
 
     node_name = Path(name).name
-    selection = data[low_index[0]:high_index[0],
-                     low_index[1]:high_index[1],
-                     low_index[2]:high_index[2]]
-    with open_file(name + '.h5', mode='w') as h5file:
-        h5file.create_array('/', node_name, selection)
+    selection = data[
+        low_index[0] : high_index[0],
+        low_index[1] : high_index[1],
+        low_index[2] : high_index[2],
+    ]
+    with open_file(name + ".h5", mode="w") as h5file:
+        h5file.create_array("/", node_name, selection)
+
 
 def snapshot(data, filename, title):
     from matplotlib import pyplot

@@ -14,9 +14,8 @@ from .geometry import in_range
 
 
 class ShowLine(Thread):
-    """Animated 1-D on-time display.
+    """Animated 1-D on-time display."""
 
-    """
     def __init__(self, fdtd, component, start, end, vrange, interval, title, fig_id):
         """Constructor.
 
@@ -37,39 +36,54 @@ class ShowLine(Thread):
         self.vrange = array(vrange, np.double)
         self.interval = int(interval)
         self.time_step = fdtd.time_step
-        self.note_form = 'time: %f'
+        self.note_form = "time: %f"
         self.title = str(title)
         self.id = fig_id
 
         comp = component
 
-        spc2idx = {Ex: fdtd.space.space_to_ex_index,
-                   Ey: fdtd.space.space_to_ey_index,
-                   Ez: fdtd.space.space_to_ez_index,
-                   Hx: fdtd.space.space_to_hx_index,
-                   Hy: fdtd.space.space_to_hy_index,
-                   Hz: fdtd.space.space_to_hz_index}
+        spc2idx = {
+            Ex: fdtd.space.space_to_ex_index,
+            Ey: fdtd.space.space_to_ey_index,
+            Ez: fdtd.space.space_to_ez_index,
+            Hx: fdtd.space.space_to_hx_index,
+            Hy: fdtd.space.space_to_hy_index,
+            Hz: fdtd.space.space_to_hz_index,
+        }
 
-        idx2spc = {Ex: fdtd.space.ex_index_to_space,
-                   Ey: fdtd.space.ey_index_to_space,
-                   Ez: fdtd.space.ez_index_to_space,
-                   Hx: fdtd.space.hx_index_to_space,
-                   Hy: fdtd.space.hy_index_to_space,
-                   Hz: fdtd.space.hz_index_to_space}
+        idx2spc = {
+            Ex: fdtd.space.ex_index_to_space,
+            Ey: fdtd.space.ey_index_to_space,
+            Ez: fdtd.space.ez_index_to_space,
+            Hx: fdtd.space.hx_index_to_space,
+            Hy: fdtd.space.hy_index_to_space,
+            Hz: fdtd.space.hz_index_to_space,
+        }
 
         field = fdtd.field[comp].real
 
         if issubclass(comp, Electric):
             start_bndry_idx = (0, 0, 0)
             if comp is Ex:
-                end_bndry_idx = (field.shape[0] - 1, field.shape[1] - 2,
-                                    field.shape[2] - 2)
+                end_bndry_idx = (
+                    field.shape[0] - 1,
+                    field.shape[1] - 2,
+                    field.shape[2] - 2,
+                )
             elif comp is Ey:
-                end_bndry_idx = (field.shape[0] - 2, field.shape[1] - 1,
-                                    field.shape[2] - 2)
+                end_bndry_idx = (
+                    field.shape[0] - 2,
+                    field.shape[1] - 1,
+                    field.shape[2] - 2,
+                )
             elif comp is Ez:
-                end_bndry_idx = (field.shape[0] - 2, field.shape[1] - 2,
-                                    field.shape[2] - 1)
+                end_bndry_idx = (
+                    field.shape[0] - 2,
+                    field.shape[1] - 2,
+                    field.shape[2] - 1,
+                )
+            else:
+                raise ValueError("unsupported electric component")
         elif issubclass(comp, Magnetic):
             end_bndry_idx = [i - 1 for i in field.shape]
             if comp is Hx:
@@ -78,13 +92,15 @@ class ShowLine(Thread):
                 start_bndry_idx = (1, 0, 1)
             elif comp is Hz:
                 start_bndry_idx = (1, 1, 0)
+            else:
+                raise ValueError("unsupported magnetic component")
         else:
             msg = "component should be of class constant.Component."
             raise ValueError(msg)
 
         start_idx = array(spc2idx[comp](*start), int)
         end_idx = array(spc2idx[comp](*end), int)
-        label = 'x', 'y', 'z'
+        label = "x", "y", "z"
         for i, v in enumerate(end_idx - start_idx):
             if v > 0:
                 for j in (j for j in range(3) if j != i):
@@ -111,26 +127,29 @@ class ShowLine(Thread):
                         return None
 
                 if i == 0:
-                    self.ydata = field[start_idx[0]:(end_idx[0] + 1),
-                                       start_idx[1], start_idx[2]]
+                    self.ydata = field[
+                        start_idx[0] : (end_idx[0] + 1), start_idx[1], start_idx[2]
+                    ]
                 elif i == 1:
-                    self.ydata = field[start_idx[0],
-                                       start_idx[1]:(end_idx[1] + 1),
-                                       start_idx[2]]
+                    self.ydata = field[
+                        start_idx[0], start_idx[1] : (end_idx[1] + 1), start_idx[2]
+                    ]
                 elif i == 2:
-                    self.ydata = field[start_idx[0], start_idx[1],
-                                       start_idx[2]:(end_idx[2] + 1)]
+                    self.ydata = field[
+                        start_idx[0], start_idx[1], start_idx[2] : (end_idx[2] + 1)
+                    ]
 
                 local_start = idx2spc[comp](*start_idx)
                 local_end = idx2spc[comp](*end_idx)
-                self.xdata = linspace(local_start[i], local_end[i],
-                                      end_idx[i] - start_idx[i] + 1)
+                self.xdata = linspace(
+                    local_start[i], local_end[i], end_idx[i] - start_idx[i] + 1
+                )
                 self.xlabel = label[i]
 
                 break
 
-        self.ylabel = 'displacement'
-        self.window_title = 'GMES' + ' ' + str(fdtd.space.cart_comm.Get_topo()[2])
+        self.ylabel = "displacement"
+        self.window_title = "GMES" + " " + str(fdtd.space.cart_comm.Get_topo()[2])
 
     def animate(self):
         self.line.set_ydata(self.ydata)
@@ -143,14 +162,16 @@ class ShowLine(Thread):
     def run(self):
         self.manager = new_figure_manager(self.id)
         ax = self.manager.canvas.figure.add_subplot(111)
-        self.line, = ax.plot(self.xdata, self.ydata)
+        (self.line,) = ax.plot(self.xdata, self.ydata)
         ax.set_xlabel(self.xlabel)
         ax.set_ylabel(self.ylabel)
         ax.set_xlim(self.xdata[0], self.xdata[-1])
         ax.set_ylim(self.vrange[0], self.vrange[1])
         ax.grid(True)
         ax.set_title(self.title)
-        self.time_note = self.manager.canvas.figure.text(.6, .92, self.note_form % self.time_step.t)
+        self.time_note = self.manager.canvas.figure.text(
+            0.6, 0.92, self.note_form % self.time_step.t
+        )
         self.manager.window.title(self.window_title)
         self.animate()
         self.manager.show()
@@ -158,9 +179,8 @@ class ShowLine(Thread):
 
 
 class ShowPlane(Thread):
-    """Animated 2-D on-time display.
+    """Animated 2-D on-time display."""
 
-    """
     def __init__(self, fdtd, component, axis, cut, vrange, interval, title, fig_id):
         """Constructor.
 
@@ -188,36 +208,48 @@ class ShowPlane(Thread):
 
         comp = component
 
-        spc2idx = {Ex: fdtd.space.space_to_ex_index,
-                   Ey: fdtd.space.space_to_ey_index,
-                   Ez: fdtd.space.space_to_ez_index,
-                   Hx: fdtd.space.space_to_hx_index,
-                   Hy: fdtd.space.space_to_hy_index,
-                   Hz: fdtd.space.space_to_hz_index}
+        spc2idx = {
+            Ex: fdtd.space.space_to_ex_index,
+            Ey: fdtd.space.space_to_ey_index,
+            Ez: fdtd.space.space_to_ez_index,
+            Hx: fdtd.space.space_to_hx_index,
+            Hy: fdtd.space.space_to_hy_index,
+            Hz: fdtd.space.space_to_hz_index,
+        }
 
-        idx2spc = {Ex: fdtd.space.ex_index_to_space,
-                   Ey: fdtd.space.ey_index_to_space,
-                   Ez: fdtd.space.ez_index_to_space,
-                   Hx: fdtd.space.hx_index_to_space,
-                   Hy: fdtd.space.hy_index_to_space,
-                   Hz: fdtd.space.hz_index_to_space}
+        idx2spc = {
+            Ex: fdtd.space.ex_index_to_space,
+            Ey: fdtd.space.ey_index_to_space,
+            Ez: fdtd.space.ez_index_to_space,
+            Hx: fdtd.space.hx_index_to_space,
+            Hy: fdtd.space.hy_index_to_space,
+            Hz: fdtd.space.hz_index_to_space,
+        }
 
         field = fdtd.field[comp].real
 
         if issubclass(comp, Electric):
             start_bndry_idx = (0, 0, 0)
             if comp is Ex:
-                end_bndry_idx = (field.shape[0] - 1,
-                                 field.shape[1] - 2,
-                                 field.shape[2] - 2)
+                end_bndry_idx = (
+                    field.shape[0] - 1,
+                    field.shape[1] - 2,
+                    field.shape[2] - 2,
+                )
             elif comp is Ey:
-                end_bndry_idx = (field.shape[0] - 2,
-                                 field.shape[1] - 1,
-                                 field.shape[2] - 2)
+                end_bndry_idx = (
+                    field.shape[0] - 2,
+                    field.shape[1] - 1,
+                    field.shape[2] - 2,
+                )
             elif comp is Ez:
-                end_bndry_idx = (field.shape[0] - 2,
-                                 field.shape[1] - 2,
-                                 field.shape[2] - 1)
+                end_bndry_idx = (
+                    field.shape[0] - 2,
+                    field.shape[1] - 2,
+                    field.shape[2] - 1,
+                )
+            else:
+                raise ValueError("unsupported electric component")
         elif issubclass(comp, Magnetic):
             end_bndry_idx = [i - 1 for i in field.shape]
             if comp is Hx:
@@ -226,6 +258,8 @@ class ShowPlane(Thread):
                 start_bndry_idx = (1, 0, 1)
             elif comp is Hz:
                 start_bndry_idx = (1, 1, 0)
+            else:
+                raise ValueError("unsupported magnetic component")
         else:
             msg = "component should be of class constant.Component."
             raise ValueError(msg)
@@ -233,7 +267,7 @@ class ShowPlane(Thread):
         start_bndry_spc = idx2spc[comp](*start_bndry_idx)
         end_bndry_spc = idx2spc[comp](*end_bndry_idx)
 
-        axis2int = {X:0, Y:1, Z:2}
+        axis2int = {X: 0, Y: 1, Z: 2}
         axis_int = axis2int[axis]
         cut_spc = array(end_bndry_spc, np.double)
         cut_spc[axis_int] = cut
@@ -242,39 +276,57 @@ class ShowPlane(Thread):
             return None
 
         if axis is X:
-            self.xlabel = 'z'
-            self.ylabel = 'y'
-            self.extent = (start_bndry_spc[2], end_bndry_spc[2],
-                           end_bndry_spc[1], start_bndry_spc[1])
+            self.xlabel = "z"
+            self.ylabel = "y"
+            self.extent = (
+                start_bndry_spc[2],
+                end_bndry_spc[2],
+                end_bndry_spc[1],
+                start_bndry_spc[1],
+            )
         elif axis is Y:
-            self.xlabel = 'z'
-            self.ylabel = 'x'
-            self.extent = (start_bndry_spc[2], end_bndry_spc[2],
-                           end_bndry_spc[0], start_bndry_spc[0])
+            self.xlabel = "z"
+            self.ylabel = "x"
+            self.extent = (
+                start_bndry_spc[2],
+                end_bndry_spc[2],
+                end_bndry_spc[0],
+                start_bndry_spc[0],
+            )
         elif axis is Z:
-            self.xlabel = 'y'
-            self.ylabel = 'x'
-            self.extent = (start_bndry_spc[1], end_bndry_spc[1],
-                           end_bndry_spc[0], start_bndry_spc[0])
+            self.xlabel = "y"
+            self.ylabel = "x"
+            self.extent = (
+                start_bndry_spc[1],
+                end_bndry_spc[1],
+                end_bndry_spc[0],
+                start_bndry_spc[0],
+            )
 
         if axis is X:
-            self.data = field[cut_idx[0],
-                              start_bndry_idx[1]:end_bndry_idx[1],
-                              start_bndry_idx[2]:end_bndry_idx[2]]
+            self.data = field[
+                cut_idx[0],
+                start_bndry_idx[1] : end_bndry_idx[1],
+                start_bndry_idx[2] : end_bndry_idx[2],
+            ]
         elif axis is Y:
-            self.data = field[start_bndry_idx[0]:end_bndry_idx[0],
-                              cut_idx[1],
-                              start_bndry_idx[2]:end_bndry_idx[2]]
+            self.data = field[
+                start_bndry_idx[0] : end_bndry_idx[0],
+                cut_idx[1],
+                start_bndry_idx[2] : end_bndry_idx[2],
+            ]
         elif axis is Z:
-            self.data = field[start_bndry_idx[0]:end_bndry_idx[0],
-                              start_bndry_idx[1]:end_bndry_idx[1],
-                              cut_idx[2]]
+            self.data = field[
+                start_bndry_idx[0] : end_bndry_idx[0],
+                start_bndry_idx[1] : end_bndry_idx[1],
+                cut_idx[2],
+            ]
         else:
             msg = "axis must be gmes.constant.Directional."
             raise ValueError(msg)
 
-        self.window_title = 'GMES' + ' ' + str(fdtd.space.cart_comm.Get_topo()[2])
-        self.note_form = 'time: %f'
+        self.window_title = "GMES" + " " + str(fdtd.space.cart_comm.Get_topo()[2])
+        self.note_form = "time: %f"
 
     def animate(self):
         self.im.set_data(self.data)
@@ -286,14 +338,21 @@ class ShowPlane(Thread):
     def run(self):
         self.manager = new_figure_manager(self.id)
         ax = self.manager.canvas.figure.add_subplot(111)
-        self.im = ax.imshow(self.data, extent=self.extent, aspect='auto',
-                            vmin=self.vrange[0], vmax=self.vrange[1],
-                            cmap=cm.RdBu)
+        self.im = ax.imshow(
+            self.data,
+            extent=self.extent,
+            aspect="auto",
+            vmin=self.vrange[0],
+            vmax=self.vrange[1],
+            cmap=cm.RdBu,
+        )
         ax.set_xlabel(self.xlabel)
         ax.set_ylabel(self.ylabel)
         ax.set_title(self.title)
         self.manager.canvas.figure.colorbar(self.im)
-        self.time_note = self.manager.canvas.figure.text(.6, .92, self.note_form % self.time_step.t)
+        self.time_note = self.manager.canvas.figure.text(
+            0.6, 0.92, self.note_form % self.time_step.t
+        )
         self.manager.window.title(self.window_title)
         self.animate()
         self.manager.show()
@@ -306,6 +365,7 @@ class Snapshot(Thread):
     In this moment, Snapshot is only used to show the structures.
 
     """
+
     def __init__(self, fdtd, component, axis, cut, vrange, title, fig_id):
         """Constructor.
 
@@ -326,19 +386,23 @@ class Snapshot(Thread):
 
         comp = component
 
-        spc2idx = {Ex: fdtd.space.space_to_ex_index,
-                   Ey: fdtd.space.space_to_ey_index,
-                   Ez: fdtd.space.space_to_ez_index,
-                   Hx: fdtd.space.space_to_hx_index,
-                   Hy: fdtd.space.space_to_hy_index,
-                   Hz: fdtd.space.space_to_hz_index}
+        spc2idx = {
+            Ex: fdtd.space.space_to_ex_index,
+            Ey: fdtd.space.space_to_ey_index,
+            Ez: fdtd.space.space_to_ez_index,
+            Hx: fdtd.space.space_to_hx_index,
+            Hy: fdtd.space.space_to_hy_index,
+            Hz: fdtd.space.space_to_hz_index,
+        }
 
-        idx2spc = {Ex: fdtd.space.ex_index_to_space,
-                   Ey: fdtd.space.ey_index_to_space,
-                   Ez: fdtd.space.ez_index_to_space,
-                   Hx: fdtd.space.hx_index_to_space,
-                   Hy: fdtd.space.hy_index_to_space,
-                   Hz: fdtd.space.hz_index_to_space}
+        idx2spc = {
+            Ex: fdtd.space.ex_index_to_space,
+            Ey: fdtd.space.ey_index_to_space,
+            Ez: fdtd.space.ez_index_to_space,
+            Hx: fdtd.space.hx_index_to_space,
+            Hy: fdtd.space.hy_index_to_space,
+            Hz: fdtd.space.hz_index_to_space,
+        }
 
         material = fdtd.pw_material[comp]
         field = fdtd.field[comp]
@@ -346,17 +410,25 @@ class Snapshot(Thread):
         if issubclass(comp, Electric):
             start_bndry_idx = (0, 0, 0)
             if comp is Ex:
-                end_bndry_idx = (field.shape[0] - 1,
-                                 field.shape[1] - 2,
-                                 field.shape[2] - 2)
+                end_bndry_idx = (
+                    field.shape[0] - 1,
+                    field.shape[1] - 2,
+                    field.shape[2] - 2,
+                )
             elif comp is Ey:
-                end_bndry_idx = (field.shape[0] - 2,
-                                 field.shape[1] - 1,
-                                 field.shape[2] - 2)
+                end_bndry_idx = (
+                    field.shape[0] - 2,
+                    field.shape[1] - 1,
+                    field.shape[2] - 2,
+                )
             elif comp is Ez:
-                end_bndry_idx = (field.shape[0] - 2,
-                                 field.shape[1] - 2,
-                                 field.shape[2] - 1)
+                end_bndry_idx = (
+                    field.shape[0] - 2,
+                    field.shape[1] - 2,
+                    field.shape[2] - 1,
+                )
+            else:
+                raise ValueError("unsupported electric component")
         elif issubclass(comp, Magnetic):
             end_bndry_idx = [i - 1 for i in field.shape]
             if comp is Hx:
@@ -365,6 +437,8 @@ class Snapshot(Thread):
                 start_bndry_idx = idx2spc[comp](1, 0, 1)
             elif comp is Hz:
                 start_bndry_idx = idx2spc[comp](1, 1, 0)
+            else:
+                raise ValueError("unsupported magnetic component")
         else:
             msg = "component should be of class constant.Component."
             raise ValueError(msg)
@@ -372,7 +446,7 @@ class Snapshot(Thread):
         start_bndry_spc = idx2spc[comp](*start_bndry_idx)
         end_bndry_spc = idx2spc[comp](*end_bndry_idx)
 
-        axis2int = {X:0, Y:1, Z:2}
+        axis2int = {X: 0, Y: 1, Z: 2}
         axis_int = axis2int[axis]
         cut_spc = array(end_bndry_spc, np.double)
         cut_spc[axis_int] = cut
@@ -381,24 +455,35 @@ class Snapshot(Thread):
             return None
 
         if axis is X:
-            self.xlabel = 'z'
-            self.ylabel = 'y'
-            self.extent = (start_bndry_spc[2], end_bndry_spc[2],
-                           end_bndry_spc[1], start_bndry_spc[1])
+            self.xlabel = "z"
+            self.ylabel = "y"
+            self.extent = (
+                start_bndry_spc[2],
+                end_bndry_spc[2],
+                end_bndry_spc[1],
+                start_bndry_spc[1],
+            )
         elif axis is Y:
-            self.xlabel = 'z'
-            self.ylabel = 'x'
-            self.extent = (start_bndry_spc[2], end_bndry_spc[2],
-                           end_bndry_spc[0], start_bndry_spc[0])
+            self.xlabel = "z"
+            self.ylabel = "x"
+            self.extent = (
+                start_bndry_spc[2],
+                end_bndry_spc[2],
+                end_bndry_spc[0],
+                start_bndry_spc[0],
+            )
         elif axis is Z:
-            self.xlabel = 'y'
-            self.ylabel = 'x'
-            self.extent = (start_bndry_spc[1], end_bndry_spc[1],
-                           end_bndry_spc[0], start_bndry_spc[0])
+            self.xlabel = "y"
+            self.ylabel = "x"
+            self.extent = (
+                start_bndry_spc[1],
+                end_bndry_spc[1],
+                end_bndry_spc[0],
+                start_bndry_spc[0],
+            )
 
         data_shape_3d = array(end_bndry_idx) - array(start_bndry_idx) + 1
-        data_shape_2d = [v for i, v in enumerate(data_shape_3d)
-                         if i != axis_int]
+        data_shape_2d = [v for i, v in enumerate(data_shape_3d) if i != axis_int]
         self.data = empty(data_shape_2d, np.double)
 
         for idx in ndindex(*data_shape_2d):
@@ -420,10 +505,12 @@ class Snapshot(Thread):
                     value = pw_mat.get_eps_inf(tuple(mat_idx))
                 elif issubclass(comp, Magnetic):
                     value = pw_mat.get_mu_inf(tuple(mat_idx))
+                else:
+                    raise ValueError("unsupported field component")
                 if value != 0:
                     self.data[idx] = value
 
-        self.window_title = 'GMES' + ' ' + str(fdtd.space.cart_comm.Get_topo()[2])
+        self.window_title = "GMES" + " " + str(fdtd.space.cart_comm.Get_topo()[2])
 
         if vrange is None:
             data_min = self.data.min()
@@ -442,11 +529,14 @@ class Snapshot(Thread):
     def run(self):
         self.manager = new_figure_manager(self.id)
         ax = self.manager.canvas.figure.add_subplot(111)
-        self.im = ax.imshow(self.data, extent=self.extent,
-                            aspect='auto',
-                            vmin=self.vrange[0],
-                            vmax=self.vrange[1],
-                            cmap=cm.bone)
+        self.im = ax.imshow(
+            self.data,
+            extent=self.extent,
+            aspect="auto",
+            vmin=self.vrange[0],
+            vmax=self.vrange[1],
+            cmap=cm.bone,
+        )
         ax.set_xlabel(self.xlabel)
         ax.set_ylabel(self.ylabel)
         ax.set_title(self.title)

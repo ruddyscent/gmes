@@ -40,8 +40,7 @@ class FDTDSmokeTest(unittest.TestCase):
         self.assertEqual(simulation.ez.shape, (11, 11, 1))
         self.assertTrue(np.isfinite(simulation.ez).all())
         self.assertAlmostEqual(simulation.ez[5, 5, 0], -0.9996801161298625)
-        self.assertAlmostEqual(np.sum(np.abs(simulation.ez) ** 2),
-                               1.5780099423691636)
+        self.assertAlmostEqual(np.sum(np.abs(simulation.ez) ** 2), 1.5780099423691636)
 
 
 if __name__ == "__main__":

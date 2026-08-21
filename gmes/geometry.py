@@ -23,7 +23,8 @@ class AuxiCartComm(object):
     ndims -- dimensionality of this Cartesian topology
 
     """
-    def __init__(self, dims=(1,1,1), periods=None, reorder=(0,0,0)):
+
+    def __init__(self, dims=(1, 1, 1), periods=None, reorder=(0, 0, 0)):
         """Constructor.
 
         Keyword arguments:
@@ -38,7 +39,7 @@ class AuxiCartComm(object):
             cyclic = tuple(map(int, periods))
         else:
             cyclic = (0, 0, 0)
-        self.topo = ((1,1,1), cyclic, (0,0,0))
+        self.topo = ((1, 1, 1), cyclic, (0, 0, 0))
 
     def Get_cart_rank(self, coords):
         return 0
@@ -74,8 +75,9 @@ class AuxiCartComm(object):
         else:
             return -1, -1
 
-    def sendrecv(self, sendbuf, dest=0, sendtag=0,
-                 recvbuf=None, source=0, recvtag=0, status=None):
+    def sendrecv(
+        self, sendbuf, dest=0, sendtag=0, recvbuf=None, source=0, recvtag=0, status=None
+    ):
         """Mimic Sendrecv method.
 
         All arguments except message are ignored.
@@ -87,15 +89,11 @@ class AuxiCartComm(object):
             return sendbuf
 
     def reduce(self, value, root=0, op=None):
-        """Mimic reduce method.
-
-        """
+        """Mimic reduce method."""
         return value
 
     def bcast(self, obj=None, root=0):
-        """Mimic bcast method.
-
-        """
+        """Mimic bcast method."""
         return obj
 
 
@@ -119,6 +117,7 @@ class Cartesian(object):
         the electromagnetic field of this node except the communication buffers
 
     """
+
     def __init__(self, size, resolution=15, parallel=False):
         """Constructor
 
@@ -133,7 +132,7 @@ class Cartesian(object):
             if len(resolution) == 3:
                 self.res = array(resolution, np.double)
         except TypeError:
-            self.res = array((resolution,)*3, np.double)
+            self.res = array((resolution,) * 3, np.double)
 
         self.dr = array(1 / self.res, np.double)
 
@@ -141,21 +140,23 @@ class Cartesian(object):
 
         for i, v in enumerate(self.dr):
             if self.half_size[i] == 0:
-                self.half_size[i] = .5 * v
+                self.half_size[i] = 0.5 * v
 
         # the size of the whole field arrays
-        self.whole_field_size = \
-            array((2 * self.half_size * self.res).round(), np.intp)
+        self.whole_field_size = array((2 * self.half_size * self.res).round(), np.intp)
 
         self.my_id = 0
         self.numprocs = 1
-        self.cart_comm = AuxiCartComm((1,1,1), (1,1,1))
+        self.cart_comm = AuxiCartComm((1, 1, 1), (1, 1, 1))
         try:
             if parallel:
                 from mpi4py import MPI
+
                 self.my_id = MPI.COMM_WORLD.rank
                 self.numprocs = MPI.COMM_WORLD.size
-                self.cart_comm = MPI.COMM_WORLD.Create_cart(self.find_best_deploy(), (1, 1, 1))
+                self.cart_comm = MPI.COMM_WORLD.Create_cart(
+                    self.find_best_deploy(), (1, 1, 1)
+                )
         except ImportError:
             pass
 
@@ -163,8 +164,7 @@ class Cartesian(object):
 
         # Usually the my_field_size is general_field_size,
         # except the last node in each dimension.
-        self.general_field_size = \
-            self.whole_field_size // self.cart_comm.Get_topo()[0]
+        self.general_field_size = self.whole_field_size // self.cart_comm.Get_topo()[0]
 
         # my_field_size may be different than general_field_size at the last
         # node in each dimension.
@@ -182,7 +182,7 @@ class Cartesian(object):
         if root is None:
             from mpi4py import MPI
 
-            obj = self.cart_comm.recv(source = MPI.ANY_SOURCE)
+            obj = self.cart_comm.recv(source=MPI.ANY_SOURCE)
         else:
             for dest in range(size):
                 if dest != root:
@@ -205,9 +205,9 @@ class Cartesian(object):
         for i in range(3):
             # At the last node of that dimension.
             if self.my_cart_idx[i] == dims[i] - 1:
-                field_size[i] = \
-                self.whole_field_size[i] - (self.my_cart_idx[i] *
-                                            self.general_field_size[i])
+                field_size[i] = self.whole_field_size[i] - (
+                    self.my_cart_idx[i] * self.general_field_size[i]
+                )
             else:
                 field_size[i] = self.general_field_size[i]
 
@@ -230,10 +230,10 @@ class Cartesian(object):
                     break
                 n = self.numprocs // (l * m)
                 if self.numprocs % n == 0:
-                        tmp_load = self.load_metric(l, m, n)
-                        if tmp_load < min_load:
-                            best_partition = l, m, n
-                            min_load = tmp_load
+                    tmp_load = self.load_metric(l, m, n)
+                    if tmp_load < min_load:
+                        best_partition = l, m, n
+                        min_load = tmp_load
 
         return best_partition
 
@@ -252,11 +252,20 @@ class Cartesian(object):
         # network load ratio compared to CPU
         R = 1000
 
-        cpu_load = (self.whole_field_size[0] * self.whole_field_size[1] *
-                    self.whole_field_size[2]) / (l * m * n)
-        net_load = 4 * R * (self.whole_field_size[0] / l * self.whole_field_size[1] / m +
-                            self.whole_field_size[1] / m * self.whole_field_size[2] / n +
-                            self.whole_field_size[2] / n * self.whole_field_size[0] / l)
+        cpu_load = (
+            self.whole_field_size[0]
+            * self.whole_field_size[1]
+            * self.whole_field_size[2]
+        ) / (l * m * n)
+        net_load = (
+            4
+            * R
+            * (
+                self.whole_field_size[0] / l * self.whole_field_size[1] / m
+                + self.whole_field_size[1] / m * self.whole_field_size[2] / n
+                + self.whole_field_size[2] / n * self.whole_field_size[0] / l
+            )
+        )
 
         return cpu_load + net_load
 
@@ -267,72 +276,78 @@ class Cartesian(object):
             return zeros(shape, np.double)
 
     def get_ex_storage(self, field_compnt, cmplx=False):
-        """Return an initialized array for Ex field component.
-
-        """
+        """Return an initialized array for Ex field component."""
         if const.Ex in field_compnt:
-            shape = (self.my_field_size[0], self.my_field_size[1] + 1,
-                     self.my_field_size[2] + 1)
+            shape = (
+                self.my_field_size[0],
+                self.my_field_size[1] + 1,
+                self.my_field_size[2] + 1,
+            )
         else:
             shape = (1, 1, 1)
 
         return self._get_em_field_storage(shape, cmplx)
 
     def get_ey_storage(self, field_compnt, cmplx=False):
-        """Return an initialized array for Ey field component.
-
-        """
+        """Return an initialized array for Ey field component."""
         if const.Ey in field_compnt:
-            shape = (self.my_field_size[0] + 1, self.my_field_size[1],
-                     self.my_field_size[2] + 1)
+            shape = (
+                self.my_field_size[0] + 1,
+                self.my_field_size[1],
+                self.my_field_size[2] + 1,
+            )
         else:
             shape = (1, 1, 1)
 
         return self._get_em_field_storage(shape, cmplx)
 
     def get_ez_storage(self, field_compnt, cmplx=False):
-        """Return an initialized array for Ez field component.
-
-        """
+        """Return an initialized array for Ez field component."""
         if const.Ez in field_compnt:
-            shape = (self.my_field_size[0] + 1, self.my_field_size[1] + 1,
-                     self.my_field_size[2])
+            shape = (
+                self.my_field_size[0] + 1,
+                self.my_field_size[1] + 1,
+                self.my_field_size[2],
+            )
         else:
             shape = (1, 1, 1)
 
         return self._get_em_field_storage(shape, cmplx)
 
     def get_hx_storage(self, field_compnt, cmplx=False):
-        """Return an initialized array for Hx field component.
-
-        """
+        """Return an initialized array for Hx field component."""
         if const.Hx in field_compnt:
-            shape = (self.my_field_size[0], self.my_field_size[1] + 1,
-                     self.my_field_size[2] + 1)
+            shape = (
+                self.my_field_size[0],
+                self.my_field_size[1] + 1,
+                self.my_field_size[2] + 1,
+            )
         else:
             shape = (1, 1, 1)
 
         return self._get_em_field_storage(shape, cmplx)
 
     def get_hy_storage(self, field_compnt, cmplx=False):
-        """Return an initialized array for Hy field component.
-
-        """
+        """Return an initialized array for Hy field component."""
         if const.Hy in field_compnt:
-            shape = (self.my_field_size[0] + 1, self.my_field_size[1],
-                     self.my_field_size[2] + 1)
+            shape = (
+                self.my_field_size[0] + 1,
+                self.my_field_size[1],
+                self.my_field_size[2] + 1,
+            )
         else:
             shape = (1, 1, 1)
 
         return self._get_em_field_storage(shape, cmplx)
 
     def get_hz_storage(self, field_compnt, cmplx=False):
-        """Return an initialized array for Hz field component.
-
-        """
+        """Return an initialized array for Hz field component."""
         if const.Hz in field_compnt:
-            shape = (self.my_field_size[0] + 1, self.my_field_size[1] + 1,
-                     self.my_field_size[2])
+            shape = (
+                self.my_field_size[0] + 1,
+                self.my_field_size[1] + 1,
+                self.my_field_size[2],
+            )
         else:
             shape = (1, 1, 1)
 
@@ -351,7 +366,7 @@ class Cartesian(object):
         idx = array((i, j, k), np.intp)
         global_idx = idx + self.general_field_size * self.my_cart_idx
 
-        spc_0 = (global_idx[0] + .5) * self.dr[0] - self.half_size[0]
+        spc_0 = (global_idx[0] + 0.5) * self.dr[0] - self.half_size[0]
         spc_1 = global_idx[1] * self.dr[1] - self.half_size[1]
         spc_2 = global_idx[2] * self.dr[2] - self.half_size[2]
 
@@ -368,10 +383,10 @@ class Cartesian(object):
             x, y, z -- (global) space coordinate
 
         """
-        coords = array((x,y,z), np.double)
+        coords = array((x, y, z), np.double)
 
         global_idx = empty(3, np.double)
-        global_idx[0] = (coords[0] + self.half_size[0]) / self.dr[0] - .5
+        global_idx[0] = (coords[0] + self.half_size[0]) / self.dr[0] - 0.5
         global_idx[1] = (coords[1] + self.half_size[1]) / self.dr[1]
         global_idx[2] = (coords[2] + self.half_size[2]) / self.dr[2]
 
@@ -380,8 +395,9 @@ class Cartesian(object):
             if self.whole_field_size[i] == 1:
                 idx[i] = 0
             else:
-                idx[i] = global_idx[i] - (self.my_cart_idx[i] *
-                                          self.general_field_size[i])
+                idx[i] = global_idx[i] - (
+                    self.my_cart_idx[i] * self.general_field_size[i]
+                )
 
         return tuple(idx)
 
@@ -396,20 +412,21 @@ class Cartesian(object):
         x, y, z -- (global) space coordinate
 
         """
-        spc = array((x,y,z), np.double)
+        spc = array((x, y, z), np.double)
 
         global_idx = empty(3, np.intp)
         global_idx[0] = (spc[0] + self.half_size[0]) / self.dr[0]
-        global_idx[1] = (spc[1] + self.half_size[1]) / self.dr[1] + .5
-        global_idx[2] = (spc[2] + self.half_size[2]) / self.dr[2] + .5
+        global_idx[1] = (spc[1] + self.half_size[1]) / self.dr[1] + 0.5
+        global_idx[2] = (spc[2] + self.half_size[2]) / self.dr[2] + 0.5
 
         idx = empty(3, np.intp)
         for i in range(3):
             if self.whole_field_size[i] == 1:
                 idx[i] = 0
             else:
-                idx[i] = global_idx[i] - (self.my_cart_idx[i] *
-                                          self.general_field_size[i])
+                idx[i] = global_idx[i] - (
+                    self.my_cart_idx[i] * self.general_field_size[i]
+                )
 
         return tuple(idx)
 
@@ -423,12 +440,12 @@ class Cartesian(object):
         i, j, k -- array index
 
         """
-        idx = array((i,j,k), np.intp)
+        idx = array((i, j, k), np.intp)
 
         global_idx = idx + self.general_field_size * self.my_cart_idx
 
         coords_0 = global_idx[0] * self.dr[0] - self.half_size[0]
-        coords_1 = (global_idx[1] + .5) * self.dr[1] - self.half_size[1]
+        coords_1 = (global_idx[1] + 0.5) * self.dr[1] - self.half_size[1]
         coords_2 = global_idx[2] * self.dr[2] - self.half_size[2]
 
         return coords_0, coords_1, coords_2
@@ -444,11 +461,11 @@ class Cartesian(object):
         x, y, z -- (global) space coordinate
 
         """
-        coords = array((x,y,z), np.double)
+        coords = array((x, y, z), np.double)
 
         global_idx = empty(3, np.double)
         global_idx[0] = (coords[0] + self.half_size[0]) / self.dr[0]
-        global_idx[1] = (coords[1] + self.half_size[1]) / self.dr[1] - .5
+        global_idx[1] = (coords[1] + self.half_size[1]) / self.dr[1] - 0.5
         global_idx[2] = (coords[2] + self.half_size[2]) / self.dr[2]
 
         idx = empty(3, np.double)
@@ -456,8 +473,9 @@ class Cartesian(object):
             if self.whole_field_size[i] == 1:
                 idx[i] = 0
             else:
-                idx[i] = global_idx[i] - (self.my_cart_idx[i] *
-                                          self.general_field_size[i])
+                idx[i] = global_idx[i] - (
+                    self.my_cart_idx[i] * self.general_field_size[i]
+                )
 
         return tuple(idx)
 
@@ -472,20 +490,21 @@ class Cartesian(object):
         x, y, z -- (global) space coordinate
 
         """
-        coords = array((x,y,z), np.double)
+        coords = array((x, y, z), np.double)
 
         global_idx = empty(3, np.intp)
-        global_idx[0] = (coords[0] + self.half_size[0]) / self.dr[0] + .5
+        global_idx[0] = (coords[0] + self.half_size[0]) / self.dr[0] + 0.5
         global_idx[1] = (coords[1] + self.half_size[1]) / self.dr[1]
-        global_idx[2] = (coords[2] + self.half_size[2]) / self.dr[2] + .5
+        global_idx[2] = (coords[2] + self.half_size[2]) / self.dr[2] + 0.5
 
         idx = empty(3, np.intp)
         for i in range(3):
             if self.whole_field_size[i] == 1:
                 idx[i] = 0
             else:
-                idx[i] = global_idx[i] - (self.my_cart_idx[i] *
-                                          self.general_field_size[i])
+                idx[i] = global_idx[i] - (
+                    self.my_cart_idx[i] * self.general_field_size[i]
+                )
 
         return tuple(idx)
 
@@ -505,7 +524,7 @@ class Cartesian(object):
 
         coords_0 = global_idx[0] * self.dr[0] - self.half_size[0]
         coords_1 = global_idx[1] * self.dr[1] - self.half_size[1]
-        coords_2 = (global_idx[2] + .5) * self.dr[2] - self.half_size[2]
+        coords_2 = (global_idx[2] + 0.5) * self.dr[2] - self.half_size[2]
 
         return coords_0, coords_1, coords_2
 
@@ -525,15 +544,16 @@ class Cartesian(object):
         global_idx = empty(3, np.double)
         global_idx[0] = (coords[0] + self.half_size[0]) / self.dr[0]
         global_idx[1] = (coords[1] + self.half_size[1]) / self.dr[1]
-        global_idx[2] = (coords[2] + self.half_size[2]) / self.dr[2] - .5
+        global_idx[2] = (coords[2] + self.half_size[2]) / self.dr[2] - 0.5
 
         idx = empty(3, np.double)
         for i in range(3):
             if self.whole_field_size[i] == 1:
                 idx[i] = 0
             else:
-                idx[i] = global_idx[i] - (self.my_cart_idx[i] *
-                                          self.general_field_size[i])
+                idx[i] = global_idx[i] - (
+                    self.my_cart_idx[i] * self.general_field_size[i]
+                )
 
         return tuple(idx)
 
@@ -548,11 +568,11 @@ class Cartesian(object):
         x, y, z -- (global) space coordinate
 
         """
-        coords = array((x,y,z), np.double)
+        coords = array((x, y, z), np.double)
 
         global_idx = empty(3, np.intp)
-        global_idx[0] = (coords[0] + self.half_size[0]) / self.dr[0] + .5
-        global_idx[1] = (coords[1] + self.half_size[1]) / self.dr[1] + .5
+        global_idx[0] = (coords[0] + self.half_size[0]) / self.dr[0] + 0.5
+        global_idx[1] = (coords[1] + self.half_size[1]) / self.dr[1] + 0.5
         global_idx[2] = (coords[2] + self.half_size[2]) / self.dr[2]
 
         idx = empty(3, np.intp)
@@ -560,8 +580,9 @@ class Cartesian(object):
             if self.whole_field_size[i] == 1:
                 idx[i] = 0
             else:
-                idx[i] = global_idx[i] - (self.my_cart_idx[i] *
-                                          self.general_field_size[i])
+                idx[i] = global_idx[i] - (
+                    self.my_cart_idx[i] * self.general_field_size[i]
+                )
 
         return tuple(idx)
 
@@ -580,8 +601,8 @@ class Cartesian(object):
         global_idx = idx + self.general_field_size * self.my_cart_idx
 
         coords_0 = global_idx[0] * self.dr[0] - self.half_size[0]
-        coords_1 = (global_idx[1] - .5) * self.dr[1] - self.half_size[1]
-        coords_2 = (global_idx[2] - .5) * self.dr[2] - self.half_size[2]
+        coords_1 = (global_idx[1] - 0.5) * self.dr[1] - self.half_size[1]
+        coords_2 = (global_idx[2] - 0.5) * self.dr[2] - self.half_size[2]
 
         return coords_0, coords_1, coords_2
 
@@ -596,12 +617,12 @@ class Cartesian(object):
         x, y, z -- (global) space coordinate
 
         """
-        coords = array((x,y,z), np.double)
+        coords = array((x, y, z), np.double)
 
         global_idx = empty(3, np.double)
         global_idx[0] = (coords[0] + self.half_size[0]) / self.dr[0]
-        global_idx[1] = (coords[1] + self.half_size[1]) / self.dr[1] + .5
-        global_idx[2] = (coords[2] + self.half_size[2]) / self.dr[2] + .5
+        global_idx[1] = (coords[1] + self.half_size[1]) / self.dr[1] + 0.5
+        global_idx[2] = (coords[2] + self.half_size[2]) / self.dr[2] + 0.5
 
         idx = global_idx - self.my_cart_idx * self.general_field_size
         if self.whole_field_size[0] == 1:
@@ -624,10 +645,10 @@ class Cartesian(object):
         x, y, z -- (global) space coordinate
 
         """
-        coords = array((x,y,z), np.double)
+        coords = array((x, y, z), np.double)
 
         global_idx = empty(3, np.intp)
-        global_idx[0] = (coords[0] + self.half_size[0]) / self.dr[0] + .5
+        global_idx[0] = (coords[0] + self.half_size[0]) / self.dr[0] + 0.5
         global_idx[1] = (coords[1] + self.half_size[1]) / self.dr[1] + 1
         global_idx[2] = (coords[2] + self.half_size[2]) / self.dr[2] + 1
 
@@ -651,13 +672,13 @@ class Cartesian(object):
         i, j, k -- array index
 
         """
-        idx = array((i,j,k), np.intp)
+        idx = array((i, j, k), np.intp)
 
         global_idx = idx + self.general_field_size * self.my_cart_idx
 
-        coords_0 = (global_idx[0] - .5) * self.dr[0] - self.half_size[0]
+        coords_0 = (global_idx[0] - 0.5) * self.dr[0] - self.half_size[0]
         coords_1 = global_idx[1] * self.dr[1] - self.half_size[1]
-        coords_2 = (global_idx[2] - .5) * self.dr[2] - self.half_size[2]
+        coords_2 = (global_idx[2] - 0.5) * self.dr[2] - self.half_size[2]
 
         return coords_0, coords_1, coords_2
 
@@ -672,12 +693,12 @@ class Cartesian(object):
         x, y, z -- (global) space coordinate
 
         """
-        coords = array((x,y,z), np.double)
+        coords = array((x, y, z), np.double)
 
         global_idx = empty(3, np.double)
-        global_idx[0] = (coords[0] + self.half_size[0]) / self.dr[0] + .5
+        global_idx[0] = (coords[0] + self.half_size[0]) / self.dr[0] + 0.5
         global_idx[1] = (coords[1] + self.half_size[1]) / self.dr[1]
-        global_idx[2] = (coords[2] + self.half_size[2]) / self.dr[2] + .5
+        global_idx[2] = (coords[2] + self.half_size[2]) / self.dr[2] + 0.5
 
         idx = global_idx - self.my_cart_idx * self.general_field_size
         if self.whole_field_size[0] == 1:
@@ -700,11 +721,11 @@ class Cartesian(object):
         x, y, z -- (global) space coordinate
 
         """
-        coords = array((x,y,z), np.double)
+        coords = array((x, y, z), np.double)
 
         global_idx = empty(3, np.intp)
         global_idx[0] = (coords[0] + self.half_size[0]) / self.dr[0] + 1
-        global_idx[1] = (coords[1] + self.half_size[1]) / self.dr[1] + .5
+        global_idx[1] = (coords[1] + self.half_size[1]) / self.dr[1] + 0.5
         global_idx[2] = (coords[2] + self.half_size[2]) / self.dr[2] + 1
 
         idx = global_idx - self.my_cart_idx * self.general_field_size
@@ -727,12 +748,12 @@ class Cartesian(object):
         i, j, k -- array index
 
         """
-        idx = array((i,j,k), np.intp)
+        idx = array((i, j, k), np.intp)
 
         global_idx = idx + self.general_field_size * self.my_cart_idx
 
-        coords_0 = (global_idx[0] - .5) * self.dr[0] - self.half_size[0]
-        coords_1 = (global_idx[1] - .5) * self.dr[1] - self.half_size[1]
+        coords_0 = (global_idx[0] - 0.5) * self.dr[0] - self.half_size[0]
+        coords_1 = (global_idx[1] - 0.5) * self.dr[1] - self.half_size[1]
         coords_2 = global_idx[2] * self.dr[2] - self.half_size[2]
 
         return coords_0, coords_1, coords_2
@@ -748,11 +769,11 @@ class Cartesian(object):
         x, y, z -- (global) space coordinate
 
         """
-        coords = array((x,y,z), np.double)
+        coords = array((x, y, z), np.double)
 
         global_idx = empty(3, np.double)
-        global_idx[0] = (coords[0] + self.half_size[0]) / self.dr[0] + .5
-        global_idx[1] = (coords[1] + self.half_size[1]) / self.dr[1] + .5
+        global_idx[0] = (coords[0] + self.half_size[0]) / self.dr[0] + 0.5
+        global_idx[1] = (coords[1] + self.half_size[1]) / self.dr[1] + 0.5
         global_idx[2] = (coords[2] + self.half_size[2]) / self.dr[2]
 
         idx = global_idx - self.my_cart_idx * self.general_field_size
@@ -776,12 +797,12 @@ class Cartesian(object):
          x, y, z -- (global) space coordinate
 
         """
-        coords = array((x,y,z), np.double)
+        coords = array((x, y, z), np.double)
 
         global_idx = empty(3, np.intp)
         global_idx[0] = (coords[0] + self.half_size[0]) / self.dr[0] + 1
         global_idx[1] = (coords[1] + self.half_size[1]) / self.dr[1] + 1
-        global_idx[2] = (coords[2] + self.half_size[2]) / self.dr[2] + .5
+        global_idx[2] = (coords[2] + self.half_size[2]) / self.dr[2] + 0.5
 
         idx = global_idx - self.my_cart_idx * self.general_field_size
         if self.whole_field_size[0] == 1:
@@ -796,17 +817,17 @@ class Cartesian(object):
     def display_info(self, indent=0):
         print(" " * indent, "Cartesian space")
 
-        print(" " * indent, "MPI topology:", end=' ')
-        print(self.my_id, 'of', self.numprocs)
+        print(" " * indent, "MPI topology:", end=" ")
+        print(self.my_id, "of", self.numprocs)
 
-        print(" " * indent, end=' ')
-        print("size:", 2 * self.half_size, end=' ')
+        print(" " * indent, end=" ")
+        print("size:", 2 * self.half_size, end=" ")
         print("resolution:", self.res)
 
-        print(" " * indent, end=' ')
+        print(" " * indent, end=" ")
         print("dx:", self.dr[0], "dy:", self.dr[1], "dz:", self.dr[2])
 
-        print(" " * indent, end=' ')
+        print(" " * indent, end=" ")
         print("number of participating nodes:", self.numprocs)
 
 
@@ -872,24 +893,3 @@ def in_range(idx, shape, component):
         raise ValueError
 
     return True
-
-
-if __name__ == '__main__':
-    from material import Dielectric
-
-    geom_list = [DefaultMedium(material=Dielectric()),
-                 Cone(0, (1, 0, 0), 1, 1, Dielectric(), (0, 0, 2)),
-                 Cone(0, (1, 0, 0), 1, 1, Dielectric(), (0, 0, -2))]
-    t = GeomBoxTree(geom_list)
-    t.display_info()
-    space = Cartesian(size=(5, 5, 5))
-    ex = space.get_ex_storage()
-    print("ex shape:", ex.shape)
-    print("ex:", space.ex_index_to_space(0, 0, 0))
-    print("ex:", space.ex_index_to_space(74, 75, 75))
-    print("ex:", space.space_to_ex_index(0, 0, 0))
-    print("ey:", space.space_to_ey_index(0, 0, 0))
-    print("ez:", space.space_to_ez_index(0, 0, 0))
-    print("hx:", space.space_to_hx_index(0, 0, 0))
-    print("hy:", space.space_to_hy_index(0, 0, 0))
-    print("hz:", space.space_to_hz_index(0, 0, 0))

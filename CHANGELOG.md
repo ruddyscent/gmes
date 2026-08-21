@@ -17,6 +17,7 @@ Notable changes to GMES are documented in this file.
 - Linux and macOS CI for tests and distribution builds.
 - An allowed-to-fail Python prerelease compatibility check.
 - Automated monthly dependency update checks.
+- Black formatting and Pylint error-level quality gates.
 
 ### Fixed
 

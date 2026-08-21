@@ -29,9 +29,9 @@ class CartesianGridTest(unittest.TestCase):
     def test_component_coordinate_round_trips(self):
         space = Cartesian(size=(4, 6, 2), resolution=2)
 
-        for component in ('ex', 'ey', 'ez', 'hx', 'hy', 'hz'):
-            index_to_space = getattr(space, component + '_index_to_space')
-            space_to_index = getattr(space, 'space_to_' + component + '_index')
+        for component in ("ex", "ey", "ez", "hx", "hy", "hz"):
+            index_to_space = getattr(space, component + "_index_to_space")
+            space_to_index = getattr(space, "space_to_" + component + "_index")
             point = index_to_space(2, 3, 1)
 
             self.assertEqual(space_to_index(*point), (2, 3, 1))

@@ -45,8 +45,10 @@ all = [
     "tables>=3.10",
 ]
 dev = [
+    "black>=26.5",
     "build>=1.2",
     "coverage>=7.10",
+    "pylint>=4.0",
 ]
 
 [project.urls]
@@ -59,3 +61,28 @@ packages = ["gmes"]
 
 [tool.setuptools.dynamic]
 version = {file = "VERSION"}
+
+[tool.black]
+target-version = ["py314"]
+
+[tool.pylint.main]
+py-version = "3.14"
+extension-pkg-allow-list = [
+    "gmes._constant",
+    "gmes._pw_material",
+    "gmes.material",
+    "gmes.pygeom",
+]
+ignore-patterns = [
+    "^constant\\.py$",
+    "^pw_material\\.py$",
+]
+
+[tool.pylint.messages_control]
+disable = ["all"]
+enable = [
+    "possibly-used-before-assignment",
+    "syntax-error",
+    "undefined-variable",
+    "used-before-assignment",
+]

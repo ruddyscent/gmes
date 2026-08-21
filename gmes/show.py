@@ -443,11 +443,11 @@ class Snapshot(Thread):
         elif issubclass(comp, Magnetic):
             end_bndry_idx = [i - 1 for i in field.shape]
             if comp is Hx:
-                start_bndry_idx = idx2spc[comp](0, 1, 1)
+                start_bndry_idx = (0, 1, 1)
             elif comp is Hy:
-                start_bndry_idx = idx2spc[comp](1, 0, 1)
+                start_bndry_idx = (1, 0, 1)
             elif comp is Hz:
-                start_bndry_idx = idx2spc[comp](1, 1, 0)
+                start_bndry_idx = (1, 1, 0)
             else:
                 raise ValueError("unsupported magnetic component")
         else:

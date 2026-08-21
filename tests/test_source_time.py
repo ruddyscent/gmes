@@ -1,6 +1,12 @@
 import unittest
 from math import pi
+from types import SimpleNamespace
 
+import numpy as np
+
+from gmes.constant import PlusX
+from gmes.geometry import Cartesian
+from gmes.pw_source import TransparentElectricParam, TransparentMagneticParam
 from gmes.source import Bandpass, Continuous, DifferentiatedGaussian
 
 
@@ -31,6 +37,17 @@ class SourceTimeTest(unittest.TestCase):
 
         self.assertAlmostEqual(source.oscillator(4), -source.oscillator(6))
         self.assertEqual(source.oscillator(5), 0.0)
+
+    def test_transparent_source_sampling_indices_are_integral(self):
+        aux_fdtd = SimpleNamespace(space=Cartesian(size=(0, 0, 2), resolution=10))
+        parameters = (
+            TransparentElectricParam(1, 1, aux_fdtd, (0, 0, 0.13), PlusX),
+            TransparentMagneticParam(1, 1, aux_fdtd, (0, 0, 0.13), PlusX),
+        )
+
+        for parameter in parameters:
+            for index in parameter.samp_idx0[PlusX] + parameter.samp_idx1[PlusX]:
+                self.assertIsInstance(index, np.integer)
 
 
 if __name__ == "__main__":

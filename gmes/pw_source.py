@@ -135,8 +135,9 @@ class TransparentElectricParam(TransparentParam):
         self.eps_inf = float(eps_inf)
 
         samp_idx = aux_fdtd.space.spc_to_exact_hy_idx(*samp_pnt)
-        self.samp_idx0 = {directional: tuple(np.floor(samp_idx))}
-        self.samp_idx1 = {directional: tuple(np.floor(samp_idx) + (0, 0, 1))}
+        low_idx = np.floor(samp_idx).astype(np.intp)
+        self.samp_idx0 = {directional: tuple(low_idx)}
+        self.samp_idx1 = {directional: tuple(low_idx + (0, 0, 1))}
 
         r1_value = samp_idx[2] - floor(samp_idx[2])
         self.r1 = {directional: r1_value}
@@ -150,8 +151,9 @@ class TransparentMagneticParam(TransparentParam):
         self.mu_inf = float(mu_inf)
 
         samp_idx = aux_fdtd.space.spc_to_exact_ex_idx(*samp_pnt)
-        self.samp_idx0 = {directional: tuple(np.floor(samp_idx))}
-        self.samp_idx1 = {directional: tuple(np.floor(samp_idx) + (0, 0, 1))}
+        low_idx = np.floor(samp_idx).astype(np.intp)
+        self.samp_idx0 = {directional: tuple(low_idx)}
+        self.samp_idx1 = {directional: tuple(low_idx + (0, 0, 1))}
 
         r1_value = samp_idx[2] - floor(samp_idx[2])
         self.r1 = {directional: r1_value}

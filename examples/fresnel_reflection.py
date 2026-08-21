@@ -30,12 +30,17 @@ wl = 10
 k0 = 2 * pi / wl
 
 a = 20e-9
+# DCP parameters in rad PHz (10^15 rad/s), from
+# https://doi.org/10.2528/PIER12112207
 dp = DrudePole(omega=13.1839e15 * a / c0, gamma=0.109173e15 * a / c0)
 cp1 = CriticalPoint(
     amp=0.273222, phi=-1.18299, omega=3.88123e15 * a / c0, gamma=0.452006e15 * a / c0
 )
 cp2 = CriticalPoint(
-    amp=3.04155, phi=-1.09115, omega=4.20737 * a / c0, gamma=2.35409 * a / c0
+    amp=3.04155,
+    phi=-1.09115,
+    omega=4.20737e15 * a / c0,
+    gamma=2.35409e15 * a / c0,
 )
 gold = DcpPlrc(eps_inf=1.11683, mu_inf=1, dps=(dp,), cps=(cp1, cp2))
 

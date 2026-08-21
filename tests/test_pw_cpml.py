@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
+import pickle
 import unittest
 
 import numpy as np
@@ -17,6 +18,28 @@ class TestSequence(unittest.TestCase):
 
         self.cpml = Cpml()
         self.cpml.init(self.spc, ((0, 0, 0), (1, 1, 1), 0.5))
+
+    def test_initialized_pickle_round_trip(self):
+        restored = pickle.loads(pickle.dumps(self.cpml))
+
+        for name in (
+            "eps_inf",
+            "mu_inf",
+            "initialized",
+            "d",
+            "dt",
+            "m",
+            "kappa_max",
+            "m_a",
+            "a_max",
+            "sigma_max_ratio",
+        ):
+            self.assertEqual(getattr(restored, name), getattr(self.cpml, name))
+        for name in ("center", "half_size", "dw", "sigma_max"):
+            np.testing.assert_array_equal(
+                getattr(restored, name), getattr(self.cpml, name)
+            )
+            self.assertIsNot(getattr(restored, name), getattr(self.cpml, name))
 
     def testExReal(self):
         sample = self.cpml.get_pw_material_ex(self.idx, (0, 0, 0))

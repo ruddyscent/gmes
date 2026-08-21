@@ -1303,9 +1303,10 @@ class DcpPlrc(Dielectric):
                     [self.xi_cp_0(point) for point in self.cps]) + 0j).real
 
         self.c = empty(3, np.double)
-        denom = self.eps_inf - xi_0 + chi_0
+        conductivity = 0.5 * self.dt * self.sigma
+        denom = self.eps_inf - xi_0 + chi_0 + conductivity
         self.c[0] = self.dt / denom
-        self.c[1] = (self.eps_inf - xi_0) / denom
+        self.c[1] = (self.eps_inf - xi_0 - conductivity) / denom
         self.c[2] = 1 / denom
 
         self.initialized = True

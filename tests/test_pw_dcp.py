@@ -6,7 +6,7 @@ import numpy as np
 
 from gmes.constant import c0
 from gmes.geometry import Cartesian
-from gmes.material import CriticalPoint, DcpAde, DcpPlrc, DrudePole
+from gmes.material import CriticalPoint, DcpAde, DcpPlrc, DcpRc, DrudePole
 
 
 class Gold(DcpAde):
@@ -75,6 +75,38 @@ class Silver(DcpPlrc):
         DcpPlrc.__init__(
             self, eps_inf=0.89583, mu_inf=1, sigma=0, dps=(dp1,), cps=(cp1, cp2)
         )
+
+
+class ConductivityTest(unittest.TestCase):
+    def test_plrc_and_rc_follow_nondispersive_conductive_decay(self):
+        idx = (1, 1, 1)
+        space = Cartesian((0, 0, 0))
+        space.dt = 0.1
+        eps_inf = 2
+        sigma = 3
+        conductivity = 0.5 * space.dt * sigma
+        decay = (eps_inf - conductivity) / (eps_inf + conductivity)
+
+        for material_class in (DcpPlrc, DcpRc):
+            with self.subTest(material=material_class.__name__):
+                material = material_class(eps_inf=eps_inf, sigma=sigma)
+                material.init(space)
+                sample = material.get_pw_material_ex(idx, (0, 0, 0))
+                ex, hz, hy = [np.zeros((3, 3, 3)) for _ in range(3)]
+                ex[idx] = 1
+
+                np.testing.assert_allclose(
+                    material.c,
+                    (
+                        space.dt / (eps_inf + conductivity),
+                        decay,
+                        1 / (eps_inf + conductivity),
+                    ),
+                )
+
+                for step in range(1, 5):
+                    sample.update_all(ex, hz, hy, 1, 1, space.dt, step)
+                    self.assertAlmostEqual(ex[idx], decay**step)
 
 
 class TestSequence(unittest.TestCase):

@@ -34,6 +34,19 @@ class TestSequence(unittest.TestCase):
         for idx in np.ndindex(3, 3, 3):
             self.assertEqual(ex[idx], 0)
 
+    def test_grading_is_finite_at_rounded_outer_boundaries(self):
+        epsilon = np.finfo(float).eps
+
+        for coordinate in (-1 - epsilon, 1 + epsilon):
+            coefficients = (
+                self.cpml.sigma(coordinate, 0),
+                self.cpml.kappa(coordinate, 0),
+                self.cpml.a(coordinate, 0),
+                self.cpml.b(coordinate, 0),
+                self.cpml.c(coordinate, 0),
+            )
+            self.assertTrue(np.isfinite(coefficients).all())
+
     def testEyReal(self):
         sample = self.cpml.get_pw_material_ey(self.idx, (0, 0, 0))
 

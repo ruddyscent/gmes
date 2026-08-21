@@ -477,9 +477,11 @@ class Pml(Material, Compound):
         half_size = self.half_size[component]
 
         if w <= self.d - half_size:
-            return self.sigma_max[component] * (1 - (half_size + w) / self.d)**self.m
+            depth = min(max((half_size + w) / self.d, 0), 1)
+            return self.sigma_max[component] * (1 - depth)**self.m
         elif half_size - self.d <= w:
-            return self.sigma_max[component] * (1 - (half_size - w) / self.d)**self.m
+            depth = min(max((half_size - w) / self.d, 0), 1)
+            return self.sigma_max[component] * (1 - depth)**self.m
         else:
             return 0
 
@@ -490,9 +492,11 @@ class Pml(Material, Compound):
         w -= self.center[component]
         half_size = self.half_size[component]
         if w <= self.d - half_size:
-            return 1 + (self.kappa_max - 1) * (1 - (half_size + w) / self.d)**self.m
+            depth = min(max((half_size + w) / self.d, 0), 1)
+            return 1 + (self.kappa_max - 1) * (1 - depth)**self.m
         elif half_size - self.d <= w:
-            return 1 + (self.kappa_max - 1) * (1 - (half_size - w) / self.d)**self.m
+            depth = min(max((half_size - w) / self.d, 0), 1)
+            return 1 + (self.kappa_max - 1) * (1 - depth)**self.m
         else:
             return 1
 
@@ -792,9 +796,11 @@ class Cpml(Pml):
         half_size = self.half_size[component]
 
         if w <= self.d - half_size:
-            return self.a_max * ((half_size + w) / self.d)**self.m_a
+            depth = min(max((half_size + w) / self.d, 0), 1)
+            return self.a_max * depth**self.m_a
         elif half_size - self.d <= w:
-            return self.a_max * ((half_size - w) / self.d)**self.m_a
+            depth = min(max((half_size - w) / self.d, 0), 1)
+            return self.a_max * depth**self.m_a
         else:
             return 0
 

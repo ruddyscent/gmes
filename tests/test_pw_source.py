@@ -1,4 +1,6 @@
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 
 import numpy as np
@@ -6,6 +8,8 @@ import numpy as np
 from gmes.constant import (
     Electric,
     ElectricCurrent,
+    Ex,
+    Hx,
     Jx,
     Jy,
     Jz,
@@ -42,6 +46,36 @@ class InterfaceGeometry:
 
 
 class PointSourceTest(unittest.TestCase):
+    def test_real_and_complex_source_recordings(self):
+        cases = ((PointSourceEx, Ex), (PointSourceHx, Hx))
+        values = ((2.0, (0.5, 2.0)), (2 + 3j, (0.5, 2.0, 3.0)))
+
+        for source_type, component in cases:
+            for value, expected in values:
+                with self.subTest(source=source_type.__name__, value=value):
+                    with TemporaryDirectory() as directory:
+                        output = Path(directory, "source.dat")
+                        parameter = PointSourceParam(
+                            src_time=SimpleNamespace(oscillator=lambda _time: value),
+                            comp=component,
+                            filename=output,
+                        )
+                        source = source_type()
+                        source.attach((0, 0, 0), parameter)
+                        field = np.zeros(
+                            (1, 1, 1),
+                            dtype=complex if np.iscomplexobj(value) else float,
+                        )
+
+                        source.update_all(field, field, field, 1, 1, 0.25, 2)
+                        parameter.f.close()
+
+                        columns = tuple(
+                            float(item) for item in output.read_text().split()
+                        )
+                        self.assertEqual(columns, expected)
+                        self.assertEqual(field[0, 0, 0], value)
+
     def test_current_component_hierarchy(self):
         for component in (Jx, Jy, Jz):
             self.assertTrue(issubclass(component, ElectricCurrent))

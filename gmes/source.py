@@ -121,12 +121,9 @@ class Continuous(SrcTime):
         # D. T. Prescott and N. V. Shuley, "Reducing solution time in
         # monochromatic FDTD waveguide simulations", IEEE Trans. Microwave
         # Theory Tech., vol. 42, no. 8, pp. 1582-1584, 8. 1994.
-        if ts < self.width:
-            env = sin(0.5 * pi * ts / self.width) ** 2
-        elif te < self.width:
-            env = sin(0.5 * pi * te / self.width) ** 2
-        else:
-            env = 1
+        rise = sin(0.5 * pi * ts / self.width) ** 2 if ts < self.width else 1
+        fall = sin(0.5 * pi * te / self.width) ** 2 if te < self.width else 1
+        env = rise * fall
 
         osc = env * cexp(2j * pi * self.freq * time + 1j * self.phase)
         if self.cmplx:

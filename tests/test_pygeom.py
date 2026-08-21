@@ -2,7 +2,16 @@ import unittest
 
 import numpy as np
 
-from gmes import Cartesian, Cone, Cylinder, DefaultMedium, Dielectric, Shell
+from gmes import (
+    Block,
+    Cartesian,
+    Cone,
+    Cylinder,
+    DefaultMedium,
+    Dielectric,
+    Ellipsoid,
+    Shell,
+)
 from gmes.pygeom import GeomBoxTree
 
 
@@ -96,6 +105,40 @@ class ShellBoundsTest(unittest.TestCase):
                 self.assertTrue(shell.box.in_box(point))
                 shape, _ = tree.object_of_point(point)
                 self.assertIs(shape, shell)
+
+
+class SkewBasisTest(unittest.TestCase):
+    def test_block_uses_inverse_basis_coordinates(self):
+        block = Block(
+            Dielectric(),
+            center=(0.25, -0.5, 0.75),
+            e1=(1, 0, 0),
+            e2=(1, 1, 0),
+            e3=(0, 0, 1),
+            size=(2, 2, 2),
+        )
+
+        inside = block.center + 0.9 * block.e1 + 0.9 * block.e2
+        outside = block.center + 1.1 * block.e1
+
+        self.assertTrue(block.in_object(tuple(inside)))
+        self.assertFalse(block.in_object(tuple(outside)))
+
+    def test_ellipsoid_uses_inverse_basis_coordinates(self):
+        ellipsoid = Ellipsoid(
+            Dielectric(),
+            center=(-0.25, 0.5, -0.75),
+            e1=(1, 0, 0),
+            e2=(1, 1, 0),
+            e3=(0, 0, 1),
+            size=(2, 2, 2),
+        )
+
+        inside = ellipsoid.center + 0.6 * ellipsoid.e1 + 0.6 * ellipsoid.e2
+        outside = ellipsoid.center + 0.8 * ellipsoid.e1 + 0.8 * ellipsoid.e2
+
+        self.assertTrue(ellipsoid.in_object(tuple(inside)))
+        self.assertFalse(ellipsoid.in_object(tuple(outside)))
 
 
 if __name__ == "__main__":

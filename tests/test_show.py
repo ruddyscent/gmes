@@ -4,9 +4,16 @@ from gmes.constant import Ex, Ey, Ez, Hx, Hy, Hz, X, Y, Z
 from gmes.fdtd import FDTD
 from gmes.geometry import Cartesian, DefaultMedium
 from gmes.material import Dielectric
-from gmes.show import Snapshot
+
+try:
+    from gmes.show import Snapshot
+except ModuleNotFoundError as error:
+    if error.name != "matplotlib":
+        raise
+    Snapshot = None
 
 
+@unittest.skipIf(Snapshot is None, "matplotlib is not installed")
 class PlaneDisplayTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

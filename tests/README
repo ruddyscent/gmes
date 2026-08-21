@@ -1,7 +1,7 @@
-The scripts in this directory test the instantiation and basic 
-functioning of the individual classes in the aspect of software 
-engineering.
+The tests in this directory cover component behavior and numerical
+migration contracts.
 
-To run the test, enter
+Install the package in an isolated environment, then run all tests from
+the repository root:
 
-$ python <test file name>
+$ python -m unittest discover -v

@@ -8,26 +8,27 @@ GMES (GIST Maxwell's Equations Solver) is a Python package for electromagnetic s
 
 ## Compatibility
 
-- Treat the current Python 2.7 and C++11 compatibility as intentional unless a task explicitly requests modernization.
-- Preserve the existing public API and numerical behavior when making internal changes.
-- Do not replace the Distutils, SWIG, or Cython build system as part of an unrelated change.
+- Target the latest stable Python 3 release and a modern C++ toolchain.
+- Python 2 compatibility is not required.
+- Preserve numerical behavior unless a change is explicitly documented and covered by regression tests.
+- Use the PEP 517 build declared in `pyproject.toml`; keep SWIG and Cython sources compatible with their current stable releases.
 - Be mindful that some examples require substantial memory and execution time; do not use them as routine smoke tests.
 
 ## Building and testing
 
-Build extensions in place from the repository root:
+Build and install the package in an isolated environment from the repository root:
 
 ```sh
-python setup.py build_ext --inplace
+python -m pip install -e .
 ```
 
-Run relevant tests individually:
+Run the test suite:
 
 ```sh
-python tests/<test_file>.py
+python -m unittest discover -v
 ```
 
-Choose the narrowest tests that cover the change. If the required legacy toolchain is unavailable, report which checks could not be run instead of claiming full verification.
+Choose the narrowest tests that cover the change. If the required native build toolchain is unavailable, report which checks could not be run instead of claiming full verification.
 
 ## Change guidelines
 

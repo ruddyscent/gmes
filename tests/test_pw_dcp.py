@@ -1,10 +1,5 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-
-import os, sys
-new_path = os.path.abspath('../')
-sys.path.append(new_path)
-
 import unittest
 import numpy as np
 
@@ -93,7 +88,7 @@ class TestSequence(unittest.TestCase):
             else:
                 self.assertEqual(sample.get_eps_inf(idx), 0)
 
-        ex = hz = hy = np.zeros((3,3,3))
+        ex, hz, hy = [np.zeros((3,3,3)) for _ in range(3)]
         dy = dz = dt = self.spc.dt
         n = 0
         sample.update_all(ex, hz, hy, dy, dz, dt, n)
@@ -109,7 +104,7 @@ class TestSequence(unittest.TestCase):
             else:
                 self.assertEqual(sample.get_eps_inf(idx), 0)
 
-        ey = hx = hz = np.zeros((3,3,3))
+        ey, hx, hz = [np.zeros((3,3,3)) for _ in range(3)]
         dz = dx = dt = 1
         n = 0
         sample.update_all(ey, hx, hz, dz, dx, dt, n)
@@ -125,7 +120,7 @@ class TestSequence(unittest.TestCase):
             else:
                 self.assertEqual(sample.get_eps_inf(idx), 0)
 
-        ez = hy = hx = np.zeros((3,3,3))
+        ez, hy, hx = [np.zeros((3,3,3)) for _ in range(3)]
         dx = dy = dt = 1
         n = 0
         sample.update_all(ez, hy, hx, dx, dy, dt, n)
@@ -141,7 +136,7 @@ class TestSequence(unittest.TestCase):
             else:
                 self.assertEqual(sample.get_mu_inf(idx), 0)
 
-        hx = ez = ey = np.zeros((3,3,3))
+        hx, ez, ey = [np.zeros((3,3,3)) for _ in range(3)]
         dy = dz = dt = 1
         n = 0
         sample.update_all(hx, ez, ey, dy, dz, dt, n)
@@ -157,7 +152,7 @@ class TestSequence(unittest.TestCase):
             else:
                 self.assertEqual(sample.get_mu_inf(idx), 0)
 
-        hy = ex = ez = np.zeros((3,3,3))
+        hy, ex, ez = [np.zeros((3,3,3)) for _ in range(3)]
         dz = dx = dt = 1
         n = 0
         sample.update_all(hy, ex, ez, dz, dx, dt, n)
@@ -173,7 +168,7 @@ class TestSequence(unittest.TestCase):
             else:
                 self.assertEqual(sample.get_mu_inf(idx), 0)
 
-        hz = ey = ex = np.zeros((3,3,3))
+        hz, ey, ex = [np.zeros((3,3,3)) for _ in range(3)]
         dx = dy = dt = 1
         n = 0
         sample.update_all(hz, ey, ex, dx, dy, dt, n)
@@ -189,7 +184,7 @@ class TestSequence(unittest.TestCase):
             else:
                 self.assertEqual(sample.get_eps_inf(idx), 0)
 
-        ex = hz = hy = np.zeros((3,3,3), complex)
+        ex, hz, hy = [np.zeros((3,3,3), complex) for _ in range(3)]
         dy = dz = dt = 1
         n = 0
         sample.update_all(ex, hz, hy, dy, dz, dt, n)
@@ -205,7 +200,7 @@ class TestSequence(unittest.TestCase):
             else:
                 self.assertEqual(sample.get_eps_inf(idx), 0)
 
-        ey = hx = hz = np.zeros((3,3,3), complex)
+        ey, hx, hz = [np.zeros((3,3,3), complex) for _ in range(3)]
         dz = dx = dt = 1
         n = 0
         sample.update_all(ey, hx, hz, dz, dx, dt, n)
@@ -221,7 +216,7 @@ class TestSequence(unittest.TestCase):
             else:
                 self.assertEqual(sample.get_eps_inf(idx), 0)
 
-        ez = hy = hx = np.zeros((3,3,3), complex)
+        ez, hy, hx = [np.zeros((3,3,3), complex) for _ in range(3)]
         dx = dy = dt = 1
         n = 0
         sample.update_all(ez, hy, hx, dx, dy, dt, n)
@@ -237,7 +232,7 @@ class TestSequence(unittest.TestCase):
             else:
                 self.assertEqual(sample.get_mu_inf(idx), 0)
 
-        hx = ez = ey = np.zeros((3,3,3), complex)
+        hx, ez, ey = [np.zeros((3,3,3), complex) for _ in range(3)]
         dy = dz = dt = 1
         n = 0
         sample.update_all(hx, ez, ey, dy, dz, dt, n)
@@ -253,7 +248,7 @@ class TestSequence(unittest.TestCase):
             else:
                 self.assertEqual(sample.get_mu_inf(idx), 0)
 
-        hy = ex = ez = np.zeros((3,3,3), complex)
+        hy, ex, ez = [np.zeros((3,3,3), complex) for _ in range(3)]
         dz = dx = dt = 1
         n = 0
         sample.update_all(hy, ex, ez, dz, dx, dt, n)
@@ -269,7 +264,7 @@ class TestSequence(unittest.TestCase):
             else:
                 self.assertEqual(sample.get_mu_inf(idx), 0)
 
-        hz = ey = ex = np.zeros((3,3,3), complex)
+        hz, ey, ex = [np.zeros((3,3,3), complex) for _ in range(3)]
         dx = dy = dt = 1
         n = 0
         sample.update_all(hz, ey, ex, dx, dy, dt, n)
@@ -285,7 +280,7 @@ class TestSequence(unittest.TestCase):
             else:
                 self.assertEqual(sample.get_eps_inf(idx), 0)
 
-        ex = hz = hy = np.zeros((3,3,3))
+        ex, hz, hy = [np.zeros((3,3,3)) for _ in range(3)]
         dy = dz = dt = self.spc.dt
         n = 0
         sample.update_all(ex, hz, hy, dy, dz, dt, n)
@@ -301,7 +296,7 @@ class TestSequence(unittest.TestCase):
             else:
                 self.assertEqual(sample.get_eps_inf(idx), 0)
 
-        ey = hx = hz = np.zeros((3,3,3))
+        ey, hx, hz = [np.zeros((3,3,3)) for _ in range(3)]
         dz = dx = dt = 1
         n = 0
         sample.update_all(ey, hx, hz, dz, dx, dt, n)
@@ -317,7 +312,7 @@ class TestSequence(unittest.TestCase):
             else:
                 self.assertEqual(sample.get_eps_inf(idx), 0)
 
-        ez = hy = hx = np.zeros((3,3,3))
+        ez, hy, hx = [np.zeros((3,3,3)) for _ in range(3)]
         dx = dy = dt = 1
         n = 0
         sample.update_all(ez, hy, hx, dx, dy, dt, n)
@@ -333,7 +328,7 @@ class TestSequence(unittest.TestCase):
             else:
                 self.assertEqual(sample.get_mu_inf(idx), 0)
 
-        hx = ez = ey = np.zeros((3,3,3))
+        hx, ez, ey = [np.zeros((3,3,3)) for _ in range(3)]
         dy = dz = dt = 1
         n = 0
         sample.update_all(hx, ez, ey, dy, dz, dt, n)
@@ -349,7 +344,7 @@ class TestSequence(unittest.TestCase):
             else:
                 self.assertEqual(sample.get_mu_inf(idx), 0)
 
-        hy = ex = ez = np.zeros((3,3,3))
+        hy, ex, ez = [np.zeros((3,3,3)) for _ in range(3)]
         dz = dx = dt = 1
         n = 0
         sample.update_all(hy, ex, ez, dz, dx, dt, n)
@@ -365,7 +360,7 @@ class TestSequence(unittest.TestCase):
             else:
                 self.assertEqual(sample.get_mu_inf(idx), 0)
 
-        hz = ey = ex = np.zeros((3,3,3))
+        hz, ey, ex = [np.zeros((3,3,3)) for _ in range(3)]
         dx = dy = dt = 1
         n = 0
         sample.update_all(hz, ey, ex, dx, dy, dt, n)
@@ -381,7 +376,7 @@ class TestSequence(unittest.TestCase):
             else:
                 self.assertEqual(sample.get_eps_inf(idx), 0)
 
-        ex = hz = hy = np.zeros((3,3,3), complex)
+        ex, hz, hy = [np.zeros((3,3,3), complex) for _ in range(3)]
         dy = dz = dt = 1
         n = 0
         sample.update_all(ex, hz, hy, dy, dz, dt, n)
@@ -397,7 +392,7 @@ class TestSequence(unittest.TestCase):
             else:
                 self.assertEqual(sample.get_eps_inf(idx), 0)
 
-        ey = hx = hz = np.zeros((3,3,3), complex)
+        ey, hx, hz = [np.zeros((3,3,3), complex) for _ in range(3)]
         dz = dx = dt = 1
         n = 0
         sample.update_all(ey, hx, hz, dz, dx, dt, n)
@@ -413,7 +408,7 @@ class TestSequence(unittest.TestCase):
             else:
                 self.assertEqual(sample.get_eps_inf(idx), 0)
 
-        ez = hy = hx = np.zeros((3,3,3), complex)
+        ez, hy, hx = [np.zeros((3,3,3), complex) for _ in range(3)]
         dx = dy = dt = 1
         n = 0
         sample.update_all(ez, hy, hx, dx, dy, dt, n)
@@ -429,7 +424,7 @@ class TestSequence(unittest.TestCase):
             else:
                 self.assertEqual(sample.get_mu_inf(idx), 0)
 
-        hx = ez = ey = np.zeros((3,3,3), complex)
+        hx, ez, ey = [np.zeros((3,3,3), complex) for _ in range(3)]
         dy = dz = dt = 1
         n = 0
         sample.update_all(hx, ez, ey, dy, dz, dt, n)
@@ -445,7 +440,7 @@ class TestSequence(unittest.TestCase):
             else:
                 self.assertEqual(sample.get_mu_inf(idx), 0)
 
-        hy = ex = ez = np.zeros((3,3,3), complex)
+        hy, ex, ez = [np.zeros((3,3,3), complex) for _ in range(3)]
         dz = dx = dt = 1
         n = 0
         sample.update_all(hy, ex, ez, dz, dx, dt, n)
@@ -461,7 +456,7 @@ class TestSequence(unittest.TestCase):
             else:
                 self.assertEqual(sample.get_mu_inf(idx), 0)
 
-        hz = ey = ex = np.zeros((3,3,3), complex)
+        hz, ey, ex = [np.zeros((3,3,3), complex) for _ in range(3)]
         dx = dy = dt = 1
         n = 0
         sample.update_all(hz, ey, ex, dx, dy, dt, n)

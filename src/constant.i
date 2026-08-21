@@ -124,7 +124,7 @@ class Jz(ElectricCurrent):
 class MagneticCurrent(Component):
     tag = _magneticcurrent.get_tag()
 
-class Mx(Magnetic):
+class Mx(MagneticCurrent):
     tag = _mx.get_tag()
 
     @classmethod

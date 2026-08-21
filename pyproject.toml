@@ -59,6 +59,21 @@ Homepage = "https://github.com/ruddyscent/gmes"
 Repository = "https://github.com/ruddyscent/gmes"
 Issues = "https://github.com/ruddyscent/gmes/issues"
 
+[tool.uv]
+cache-keys = [
+    {file = "pyproject.toml"},
+    {file = "setup.py"},
+    {file = "VERSION"},
+    {file = "MANIFEST.in"},
+    {file = "README.md"},
+    {file = "utils/macos_build.py"},
+    {file = "src/*.cc"},
+    {file = "src/*.hh"},
+    {file = "src/*.i"},
+    {file = "src/*.pyx"},
+    {env = "MACOSX_DEPLOYMENT_TARGET"},
+]
+
 [tool.setuptools]
 packages = ["gmes"]
 

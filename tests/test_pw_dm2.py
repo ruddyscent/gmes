@@ -9,6 +9,25 @@ from gmes.pw_material import Dm2ElectricParamReal, _dm2_relative_error
 
 
 class Dm2Test(unittest.TestCase):
+    def test_diagnostic_getters_validate_transition_bounds(self):
+        pointwise = Dm2(omega=(1, 2), n_atom=(3, 4)).get_pw_material_ex(
+            (1, 1, 1), (0, 0, 0)
+        )
+
+        self.assertEqual(pointwise.get_rho((1, 1, 1), 0, 0, 0), 0)
+        self.assertEqual(pointwise.get_rho((1, 1, 1), 1, 0, 0), 0)
+        for bin_index in (-1, 2):
+            with self.subTest(bin=bin_index):
+                with self.assertRaisesRegex(IndexError, "transition bin"):
+                    pointwise.get_rho((1, 1, 1), bin_index, 0, 0)
+
+        for name in ("get_u", "get_v", "get_w"):
+            with self.subTest(getter=name):
+                values = getattr(pointwise, name)((1, 1, 1), 0, 2)
+                self.assertEqual(values.shape, (2,))
+                with self.assertRaisesRegex(IndexError, "exceeds transition count"):
+                    getattr(pointwise, name)((1, 1, 1), 0, 3)
+
     def test_parameter_setup_validates_transition_lengths(self):
         for omega, n_atom in (
             (np.array([], dtype=float), np.array([], dtype=float)),

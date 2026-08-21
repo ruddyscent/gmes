@@ -429,14 +429,15 @@ class Pml(Material, Compound):
 
     def __setstate__(self, d):
         Material.__setstate__(self, d)
+        self.initialized = d['initialized']
 
-        if d['initialized']:
-            self.center.setfield(d['center'])
-            self.half_size.setfield(d['half_size'])
+        if self.initialized:
+            self.center = np.array(d['center'], copy=True)
+            self.half_size = np.array(d['half_size'], copy=True)
             self.d = d['d']
             self.dt = d['dt']
             self.dw = d['dw'].copy()
-            self.sigma_max.setfield(d['sigma_max'])
+            self.sigma_max = np.array(d['sigma_max'], copy=True)
 
     def init(self, space, param):
         """

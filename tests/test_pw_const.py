@@ -40,6 +40,15 @@ class TestSequence(unittest.TestCase):
             else:
                 self.assertEqual(ex[idx], 0)
 
+    def test_field_index_requires_three_values(self):
+        sample = self.const_real.get_pw_material_ex(self.idx, (0, 0, 0), cmplx=False)
+
+        with self.assertRaisesRegex(ValueError, "exactly three values"):
+            sample.get_eps_inf((1, 1))
+
+        with self.assertRaisesRegex(ValueError, "exactly three values"):
+            sample.get_eps_inf((1, 1, 1, 1))
+
     def testEyReal(self):
         sample = self.const_real.get_pw_material_ey(self.idx, (0, 0, 0), cmplx=False)
 

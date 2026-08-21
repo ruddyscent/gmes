@@ -4,7 +4,9 @@ GMES targets the latest stable Python 3 release. Python 2 compatibility and the 
 
 ## Development setup
 
-Install a C++17 compiler and SWIG 4, then create an isolated Python 3.14 environment from the repository root:
+Install a C++23 compiler and standard library with `std::mdspan` support plus
+SWIG 4, then create an isolated Python 3.14 environment from the repository
+root:
 
 ```sh
 python3.14 -m venv .venv

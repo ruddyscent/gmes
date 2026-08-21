@@ -28,12 +28,6 @@
 
 #include "pw_dielectric.hh"
 
-#define ex(i,j,k) ex[ex_y_size==1?0:((i)*ex_y_size+(j))*ex_z_size+(k)]
-#define ey(i,j,k) ey[ey_z_size==1?0:((i)*ey_y_size+(j))*ey_z_size+(k)]
-#define ez(i,j,k) ez[ez_x_size==1?0:((i)*ez_y_size+(j))*ez_z_size+(k)]
-#define hx(i,j,k) hx[hx_y_size==1?0:((i)*hx_y_size+(j))*hx_z_size+(k)]
-#define hy(i,j,k) hy[hy_z_size==1?0:((i)*hy_y_size+(j))*hy_z_size+(k)]
-#define hz(i,j,k) hz[hz_x_size==1?0:((i)*hz_y_size+(j))*hz_z_size+(k)]
 
 namespace gmes
 {
@@ -114,8 +108,7 @@ namespace gmes
     T
     get_rho(const int* const idx, int idx_size, int bin, int rho_idx, double t) const
     {
-      Index3 index;
-      std::copy(idx, idx + idx_size, index.begin());
+      const Index3 index = make_index(idx, idx_size);
       const int i = position(index);
 
       if (i < 0)
@@ -140,8 +133,7 @@ namespace gmes
     void
     get_u(const int* const idx, int idx_size, double t, double* const u, int u_size) const
     {
-      Index3 index;
-      std::copy(idx, idx + idx_size, index.begin());
+      const Index3 index = make_index(idx, idx_size);
       const int i = position(index);
 
       if (i < 0)
@@ -159,8 +151,7 @@ namespace gmes
     void
     get_v(const int* const idx, int idx_size, double t, double* const v, int v_size) const
     {
-      Index3 index;
-      std::copy(idx, idx + idx_size, index.begin());
+      const Index3 index = make_index(idx, idx_size);
       const int i = position(index);
 
       if (i < 0)
@@ -178,8 +169,7 @@ namespace gmes
     void
     get_w(const int* const idx, int idx_size, double t, double* const w, int w_size) const
     {
-      Index3 index;
-      std::copy(idx, idx + idx_size, index.begin());
+      const Index3 index = make_index(idx, idx_size);
       const int i = position(index);
 
       if (i < 0)
@@ -203,8 +193,7 @@ namespace gmes
     double
     get_eps_inf(const int* const idx, int idx_size) const
     {
-      Index3 index;
-      std::copy(idx, idx + idx_size, index.begin());
+      const Index3 index = make_index(idx, idx_size);
       const int i = position(index);
       if (i < 0)
 	return 0;
@@ -216,8 +205,7 @@ namespace gmes
     attach(const int* const idx, int idx_size,
 	   const PwMaterialParam* const pm_param_ptr)
     {
-      Index3 index;
-      std::copy(idx, idx + idx_size, index.begin());
+      const Index3 index = make_index(idx, idx_size);
 
       const auto& dm2_param = *static_cast<const Dm2ElectricParam<T> * const>(pm_param_ptr);
 
@@ -327,13 +315,11 @@ namespace gmes
 	       const T* const hy, int hy_x_size, int hy_y_size, int hy_z_size,
 	       double dy, double dz, double dt, double n)
     {
-      auto idx = idx_list.begin();
-      auto param = param_list.begin();
-      for (; idx != idx_list.end(); ++idx, ++param) {
+      for (auto&& [idx, param] : zip_equal(idx_list, param_list)) {
     	update(ex, ex_x_size, ex_y_size, ex_z_size,
 	       hz, hz_x_size, hz_y_size, hz_z_size,
 	       hy, hy_x_size, hy_y_size, hy_z_size,
-	       dy, dz, dt, n, *idx, *param);
+	       dy, dz, dt, n, idx, param);
       }
     }
 
@@ -362,11 +348,11 @@ namespace gmes
       this->c_minus(t, dm2_param, c_minus);
       this->d(t, dm2_param, d);
 
-      T e_new = ex(i,j,k);
+      T e_new = field_at(ex, ex_x_size, ex_y_size, ex_z_size, ex_y_size == 1, i,j,k);
       std::vector<std::array<T, 3> > u_new = u;
 
-      const T e_old = ex(i,j,k);
-      const T hy_dz = (hy(i+1,j,k+1) - hy(i+1,j,k)) / dz;
+      const T e_old = field_at(ex, ex_x_size, ex_y_size, ex_z_size, ex_y_size == 1, i,j,k);
+      const T hy_dz = (field_at(hy, hy_x_size, hy_y_size, hy_z_size, hy_z_size == 1, i+1,j,k+1) - field_at(hy, hy_x_size, hy_y_size, hy_z_size, hy_z_size == 1, i+1,j,k)) / dz;
 
       double error;
       do {
@@ -393,7 +379,7 @@ namespace gmes
         error = rel_error(e_new, u_new, e_tmp, u_tmp);
       } while (error > rtol);
 
-      ex(i,j,k) = e_new;
+      field_at(ex, ex_x_size, ex_y_size, ex_z_size, ex_y_size == 1, i,j,k) = e_new;
       std::copy(u_new.begin(), u_new.end(), u.begin());
     }
 
@@ -413,13 +399,11 @@ namespace gmes
 	       const T* const hz, int hz_x_size, int hz_y_size, int hz_z_size,
 	       double dz, double dx, double dt, double n)
     {
-      auto idx = idx_list.begin();
-      auto param = param_list.begin();
-      for (; idx != idx_list.end(); ++idx, ++param) {
+      for (auto&& [idx, param] : zip_equal(idx_list, param_list)) {
 	update(ey, ey_x_size, ey_y_size, ey_z_size,
 	       hx, hx_x_size, hx_y_size, hx_z_size,
 	       hz, hz_x_size, hz_y_size, hz_z_size,
-	       dz, dx, dt, n, *idx, *param);
+	       dz, dx, dt, n, idx, param);
       }
     }
 
@@ -448,11 +432,11 @@ namespace gmes
       this->c_minus(t, dm2_param, c_minus);
       this->d(t, dm2_param, d);
 
-      T e_new = ey(i,j,k);
+      T e_new = field_at(ey, ey_x_size, ey_y_size, ey_z_size, ey_z_size == 1, i,j,k);
       std::vector<std::array<T, 3> > u_new = u;
 
-      const T e_old = ey(i,j,k);
-      const T hz_dx = (hz(i+1,j+1,k) - hz(i,j+1,k)) / dx;
+      const T e_old = field_at(ey, ey_x_size, ey_y_size, ey_z_size, ey_z_size == 1, i,j,k);
+      const T hz_dx = (field_at(hz, hz_x_size, hz_y_size, hz_z_size, hz_x_size == 1, i+1,j+1,k) - field_at(hz, hz_x_size, hz_y_size, hz_z_size, hz_x_size == 1, i,j+1,k)) / dx;
 
       double error;
       do {
@@ -479,7 +463,7 @@ namespace gmes
         error = rel_error(e_new, u_new, e_tmp, u_tmp);
       } while (error > rtol);
 
-      ey(i,j,k) = e_new;
+      field_at(ey, ey_x_size, ey_y_size, ey_z_size, ey_z_size == 1, i,j,k) = e_new;
       std::copy(u_new.begin(), u_new.end(), u.begin());
     }
 
@@ -499,13 +483,11 @@ namespace gmes
 	       const T* const hx, int hx_x_size, int hx_y_size, int hx_z_size,
 	       double dx, double dy, double dt, double n)
     {
-      auto idx = idx_list.begin();
-      auto param = param_list.begin();
-      for (; idx != idx_list.end(); ++idx, ++param) {
+      for (auto&& [idx, param] : zip_equal(idx_list, param_list)) {
     	update(ez, ez_x_size, ez_y_size, ez_z_size,
 	       hy, hy_x_size, hy_y_size, hy_z_size,
 	       hx, hx_x_size, hx_y_size, hx_z_size,
-	       dx, dy, dt, n, *idx, *param);
+	       dx, dy, dt, n, idx, param);
       }
     }
 
@@ -534,11 +516,11 @@ namespace gmes
       this->c_minus(t, dm2_param, c_minus);
       this->d(t, dm2_param, d);
 
-      T e_new = ez(i,j,k);
+      T e_new = field_at(ez, ez_x_size, ez_y_size, ez_z_size, ez_x_size == 1, i,j,k);
       std::vector<std::array<T, 3> > u_new = u;
 
-      const T e_old = ez(i,j,k);
-      const T hx_dy = (hx(i,j+1,k+1) - hx(i,j,k+1)) / dy;
+      const T e_old = field_at(ez, ez_x_size, ez_y_size, ez_z_size, ez_x_size == 1, i,j,k);
+      const T hx_dy = (field_at(hx, hx_x_size, hx_y_size, hx_z_size, hx_y_size == 1, i,j+1,k+1) - field_at(hx, hx_x_size, hx_y_size, hx_z_size, hx_y_size == 1, i,j,k+1)) / dy;
 
       double error;
       do {
@@ -565,7 +547,7 @@ namespace gmes
         error = rel_error(e_new, u_new, e_tmp, u_tmp);
       } while (error > rtol);
 
-      ez(i,j,k) = e_new;
+      field_at(ez, ez_x_size, ez_y_size, ez_z_size, ez_x_size == 1, i,j,k) = e_new;
       std::copy(u_new.begin(), u_new.end(), u.begin());
     }
 
@@ -603,13 +585,11 @@ namespace gmes
 	       const T* const ez, int ez_x_size, int ez_y_size, int ez_z_size,
 	       double dz, double dx, double dt, double n)
     {
-      auto idx = idx_list.begin();
-      auto param = param_list.begin();
-      for (; idx != idx_list.end(); ++idx, ++param) {
+      for (auto&& [idx, param] : zip_equal(idx_list, param_list)) {
       	update(hy, hy_x_size, hy_y_size, hy_z_size,
 	       ex, ex_x_size, ex_y_size, ex_z_size,
 	       ez, ez_x_size, ez_y_size, ez_z_size,
-	       dz, dx, dt, n, *idx, *param);
+	       dz, dx, dt, n, idx, param);
       }
     }
 
@@ -631,8 +611,8 @@ namespace gmes
       const int i = idx[0], j = idx[1], k = idx[2];
       const double mu_inf = dielectric_param.mu_inf;
 
-      hy(i,j,k) += dt / mu_inf * ((ez(i,j,k-1) - ez(i-1,j,k-1)) / dx -
-      				  (ex(i-1,j,k) - ex(i-1,j,k-1)) / dz);
+      field_at(hy, hy_x_size, hy_y_size, hy_z_size, hy_z_size == 1, i,j,k) += dt / mu_inf * ((field_at(ez, ez_x_size, ez_y_size, ez_z_size, ez_x_size == 1, i,j,k-1) - field_at(ez, ez_x_size, ez_y_size, ez_z_size, ez_x_size == 1, i-1,j,k-1)) / dx -
+                                  (field_at(ex, ex_x_size, ex_y_size, ex_z_size, ex_y_size == 1, i-1,j,k) - field_at(ex, ex_x_size, ex_y_size, ex_z_size, ex_y_size == 1, i-1,j,k-1)) / dz);
     }
 
     static const std::string tag; // "Dm2Magnetic"

@@ -12,12 +12,6 @@
 #include <utility>
 #include "pw_material.hh"
 
-#define ex(i,j,k) ex[ex_y_size==1?0:((i)*ex_y_size+(j))*ex_z_size+(k)]
-#define ey(i,j,k) ey[ey_z_size==1?0:((i)*ey_y_size+(j))*ey_z_size+(k)]
-#define ez(i,j,k) ez[ez_x_size==1?0:((i)*ez_y_size+(j))*ez_z_size+(k)]
-#define hx(i,j,k) hx[hx_y_size==1?0:((i)*hx_y_size+(j))*hx_z_size+(k)]
-#define hy(i,j,k) hy[hy_z_size==1?0:((i)*hy_y_size+(j))*hy_z_size+(k)]
-#define hz(i,j,k) hz[hz_x_size==1?0:((i)*hz_y_size+(j))*hz_z_size+(k)]
 
 namespace gmes
 {
@@ -48,8 +42,7 @@ namespace gmes
     double
     get_eps_inf(const int* const idx, int idx_size) const
     {
-      Index3 index;
-      std::copy(idx, idx + idx_size, index.begin());
+      const Index3 index = make_index(idx, idx_size);
       const int i = position(index);
       if (i < 0)
 	return 0;
@@ -61,8 +54,7 @@ namespace gmes
     attach(const int* const idx, int idx_size,
 	   const PwMaterialParam* const pm_param_ptr)
     {
-      Index3 index;
-      std::copy(idx, idx + idx_size, index.begin());
+      const Index3 index = make_index(idx, idx_size);
 
       const auto& cpml_param = *static_cast<const CpmlElectricParam<T>*>(pm_param_ptr);
 
@@ -103,13 +95,11 @@ namespace gmes
 	       const T* const hy, int hy_x_size, int hy_y_size, int hy_z_size,
 	       double dy, double dz, double dt, double n)
     {
-      auto idx = idx_list.begin();
-      auto param = param_list.begin();
-      for (; idx != idx_list.end(); ++idx, ++param) {
+      for (auto&& [idx, param] : zip_equal(idx_list, param_list)) {
     	update(ex, ex_x_size, ex_y_size, ex_z_size,
 	       hz, hz_x_size, hz_y_size, hz_z_size,
 	       hy, hy_x_size, hy_y_size, hy_z_size,
-	       dy, dz, dt, n, *idx, *param);
+	       dy, dz, dt, n, idx, param);
       }
     }
 
@@ -134,11 +124,11 @@ namespace gmes
       T& psi1 = cpml_param.psi1;
       T& psi2 = cpml_param.psi2;
 
-      psi1 = by * psi1 + cy * (hz(i+1,j+1,k) - hz(i+1,j,k)) / dy;
-      psi2 = bz * psi2 + cz * (hy(i+1,j,k+1) - hy(i+1,j,k)) / dz;
+      psi1 = by * psi1 + cy * (field_at(hz, hz_x_size, hz_y_size, hz_z_size, hz_x_size == 1, i+1,j+1,k) - field_at(hz, hz_x_size, hz_y_size, hz_z_size, hz_x_size == 1, i+1,j,k)) / dy;
+      psi2 = bz * psi2 + cz * (field_at(hy, hy_x_size, hy_y_size, hy_z_size, hy_z_size == 1, i+1,j,k+1) - field_at(hy, hy_x_size, hy_y_size, hy_z_size, hy_z_size == 1, i+1,j,k)) / dz;
 
-      ex(i,j,k) += dt / eps_inf * ((hz(i+1,j+1,k) - hz(i+1,j,k)) / dy / kappay -
-				   (hy(i+1,j,k+1) - hy(i+1,j,k)) / dz / kappaz +
+      field_at(ex, ex_x_size, ex_y_size, ex_z_size, ex_y_size == 1, i,j,k) += dt / eps_inf * ((field_at(hz, hz_x_size, hz_y_size, hz_z_size, hz_x_size == 1, i+1,j+1,k) - field_at(hz, hz_x_size, hz_y_size, hz_z_size, hz_x_size == 1, i+1,j,k)) / dy / kappay -
+				   (field_at(hy, hy_x_size, hy_y_size, hy_z_size, hy_z_size == 1, i+1,j,k+1) - field_at(hy, hy_x_size, hy_y_size, hy_z_size, hy_z_size == 1, i+1,j,k)) / dz / kappaz +
 				   psi1 - psi2);
     }
 
@@ -157,13 +147,11 @@ namespace gmes
 	       const T* const hz, int hz_x_size, int hz_y_size, int hz_z_size,
 	       double dz, double dx, double dt, double n)
     {
-      auto idx = idx_list.begin();
-      auto param = param_list.begin();
-      for (; idx != idx_list.end(); ++idx, ++param) {
+      for (auto&& [idx, param] : zip_equal(idx_list, param_list)) {
     	update(ey, ey_x_size, ey_y_size, ey_z_size,
 	       hx, hx_x_size, hx_y_size, hx_z_size,
 	       hz, hz_x_size, hz_y_size, hz_z_size,
-	       dz, dx, dt, n, *idx, *param);
+	       dz, dx, dt, n, idx, param);
       }
     }
 
@@ -188,11 +176,11 @@ namespace gmes
       T& psi1 = cpml_param.psi1;
       T& psi2 = cpml_param.psi2;
 
-      psi1 = bz * psi1 + cz * (hx(i,j+1,k+1) - hx(i,j+1,k)) / dz;
-      psi2 = bx * psi2 + cx * (hz(i+1,j+1,k) - hz(i,j+1,k)) / dx;
+      psi1 = bz * psi1 + cz * (field_at(hx, hx_x_size, hx_y_size, hx_z_size, hx_y_size == 1, i,j+1,k+1) - field_at(hx, hx_x_size, hx_y_size, hx_z_size, hx_y_size == 1, i,j+1,k)) / dz;
+      psi2 = bx * psi2 + cx * (field_at(hz, hz_x_size, hz_y_size, hz_z_size, hz_x_size == 1, i+1,j+1,k) - field_at(hz, hz_x_size, hz_y_size, hz_z_size, hz_x_size == 1, i,j+1,k)) / dx;
 
-      ey(i,j,k) += dt / eps_inf * ((hx(i,j+1,k+1) - hx(i,j+1,k)) / dz / kappaz -
-				   (hz(i+1,j+1,k) - hz(i,j+1,k)) / dx / kappax +
+      field_at(ey, ey_x_size, ey_y_size, ey_z_size, ey_z_size == 1, i,j,k) += dt / eps_inf * ((field_at(hx, hx_x_size, hx_y_size, hx_z_size, hx_y_size == 1, i,j+1,k+1) - field_at(hx, hx_x_size, hx_y_size, hx_z_size, hx_y_size == 1, i,j+1,k)) / dz / kappaz -
+				   (field_at(hz, hz_x_size, hz_y_size, hz_z_size, hz_x_size == 1, i+1,j+1,k) - field_at(hz, hz_x_size, hz_y_size, hz_z_size, hz_x_size == 1, i,j+1,k)) / dx / kappax +
 				   psi1 - psi2);
     }
 
@@ -211,13 +199,11 @@ namespace gmes
 	       const T* const hx, int hx_x_size, int hx_y_size, int hx_z_size,
 	       double dx, double dy, double dt, double n)
     {
-      auto idx = idx_list.begin();
-      auto param = param_list.begin();
-      for (; idx != idx_list.end(); ++idx, ++param) {
+      for (auto&& [idx, param] : zip_equal(idx_list, param_list)) {
 	update(ez, ez_x_size, ez_y_size, ez_z_size,
 	       hy, hy_x_size, hy_y_size, hy_z_size,
 	       hx, hx_x_size, hx_y_size, hx_z_size,
-	       dx, dy, dt, n, *idx, *param);
+	       dx, dy, dt, n, idx, param);
       }
     }
 
@@ -242,11 +228,11 @@ namespace gmes
       T& psi1 = cpml_param.psi1;
       T& psi2 = cpml_param.psi2;
 
-      psi1 = bx * psi1 + cx * (hy(i+1,j,k+1) - hy(i,j,k+1)) / dx;
-      psi2 = by * psi2 + cy * (hx(i,j+1,k+1) - hx(i,j,k+1)) / dy;
+      psi1 = bx * psi1 + cx * (field_at(hy, hy_x_size, hy_y_size, hy_z_size, hy_z_size == 1, i+1,j,k+1) - field_at(hy, hy_x_size, hy_y_size, hy_z_size, hy_z_size == 1, i,j,k+1)) / dx;
+      psi2 = by * psi2 + cy * (field_at(hx, hx_x_size, hx_y_size, hx_z_size, hx_y_size == 1, i,j+1,k+1) - field_at(hx, hx_x_size, hx_y_size, hx_z_size, hx_y_size == 1, i,j,k+1)) / dy;
 
-      ez(i,j,k) += dt / eps_inf * ((hy(i+1,j,k+1) - hy(i,j,k+1)) / dx / kappax -
-				   (hx(i,j+1,k+1) - hx(i,j,k+1)) / dy / kappay +
+      field_at(ez, ez_x_size, ez_y_size, ez_z_size, ez_x_size == 1, i,j,k) += dt / eps_inf * ((field_at(hy, hy_x_size, hy_y_size, hy_z_size, hy_z_size == 1, i+1,j,k+1) - field_at(hy, hy_x_size, hy_y_size, hy_z_size, hy_z_size == 1, i,j,k+1)) / dx / kappax -
+				   (field_at(hx, hx_x_size, hx_y_size, hx_z_size, hx_y_size == 1, i,j+1,k+1) - field_at(hx, hx_x_size, hx_y_size, hx_z_size, hx_y_size == 1, i,j,k+1)) / dy / kappay +
 				   psi1 - psi2);
     }
 
@@ -268,8 +254,7 @@ namespace gmes
     double
     get_mu_inf(const int* const idx, int idx_size) const
     {
-      Index3 index;
-      std::copy(idx, idx + idx_size, index.begin());
+      const Index3 index = make_index(idx, idx_size);
       const int i = position(index);
       if (i < 0)
 	return 0;
@@ -281,8 +266,7 @@ namespace gmes
     attach(const int* const idx, int idx_size,
 	   const PwMaterialParam* const pm_param_ptr)
     {
-      Index3 index;
-      std::copy(idx, idx + idx_size, index.begin());
+      const Index3 index = make_index(idx, idx_size);
 
       const auto& cpml_param = *static_cast<const CpmlMagneticParam<T>*>(pm_param_ptr);
 
@@ -323,13 +307,11 @@ namespace gmes
 	       const T* const ey, int ey_x_size, int ey_y_size, int ey_z_size,
 	       double dy, double dz, double dt, double n)
     {
-      auto idx = idx_list.begin();
-      auto param = param_list.begin();
-      for (; idx != idx_list.end(); ++idx, ++param) {
+      for (auto&& [idx, param] : zip_equal(idx_list, param_list)) {
     	update(hx, hx_x_size, hx_y_size, hx_z_size,
 	       ez, ez_x_size, ez_y_size, ez_z_size,
 	       ey, ey_x_size, ey_y_size, ey_z_size,
-	       dy, dz, dt, n, *idx, *param);
+	       dy, dz, dt, n, idx, param);
       }
     }
 
@@ -354,11 +336,11 @@ namespace gmes
       T& psi1 = cpml_param.psi1;
       T& psi2 = cpml_param.psi2;
 
-      psi1 = by * psi1 + cy * (ez(i,j,k-1) - ez(i,j-1,k-1)) / dy;
-      psi2 = bz * psi2 + cz * (ey(i,j-1,k) - ey(i,j-1,k-1)) / dz;
+      psi1 = by * psi1 + cy * (field_at(ez, ez_x_size, ez_y_size, ez_z_size, ez_x_size == 1, i,j,k-1) - field_at(ez, ez_x_size, ez_y_size, ez_z_size, ez_x_size == 1, i,j-1,k-1)) / dy;
+      psi2 = bz * psi2 + cz * (field_at(ey, ey_x_size, ey_y_size, ey_z_size, ey_z_size == 1, i,j-1,k) - field_at(ey, ey_x_size, ey_y_size, ey_z_size, ey_z_size == 1, i,j-1,k-1)) / dz;
 
-      hx(i,j,k) -= dt / mu_inf * ((ez(i,j,k-1) - ez(i,j-1,k-1)) / dy / kappay -
-				  (ey(i,j-1,k) - ey(i,j-1,k-1)) / dz / kappaz +
+      field_at(hx, hx_x_size, hx_y_size, hx_z_size, hx_y_size == 1, i,j,k) -= dt / mu_inf * ((field_at(ez, ez_x_size, ez_y_size, ez_z_size, ez_x_size == 1, i,j,k-1) - field_at(ez, ez_x_size, ez_y_size, ez_z_size, ez_x_size == 1, i,j-1,k-1)) / dy / kappay -
+				  (field_at(ey, ey_x_size, ey_y_size, ey_z_size, ey_z_size == 1, i,j-1,k) - field_at(ey, ey_x_size, ey_y_size, ey_z_size, ey_z_size == 1, i,j-1,k-1)) / dz / kappaz +
 				  psi1 - psi2);
     }
 
@@ -377,13 +359,11 @@ namespace gmes
 	       const T* const ez, int ez_x_size, int ez_y_size, int ez_z_size,
 	       double dz, double dx, double dt, double n)
     {
-      auto idx = idx_list.begin();
-      auto param = param_list.begin();
-      for (; idx != idx_list.end(); ++idx, ++param) {
+      for (auto&& [idx, param] : zip_equal(idx_list, param_list)) {
     	update(hy, hy_x_size, hy_y_size, hy_z_size,
 	       ex, ex_x_size, ex_y_size, ex_z_size,
 	       ez, ez_x_size, ez_y_size, ez_z_size,
-	       dz, dx, dt, n, *idx, *param);
+	       dz, dx, dt, n, idx, param);
       }
     }
 
@@ -408,11 +388,11 @@ namespace gmes
       T& psi1 = cpml_param.psi1;
       T& psi2 = cpml_param.psi2;
 
-      psi1 = bz * psi1 + cz * (ex(i-1,j,k) - ex(i-1,j,k-1)) / dz;
-      psi2 = bx * psi2 + cx * (ez(i,j,k-1) - ez(i-1,j,k-1)) / dx;
+      psi1 = bz * psi1 + cz * (field_at(ex, ex_x_size, ex_y_size, ex_z_size, ex_y_size == 1, i-1,j,k) - field_at(ex, ex_x_size, ex_y_size, ex_z_size, ex_y_size == 1, i-1,j,k-1)) / dz;
+      psi2 = bx * psi2 + cx * (field_at(ez, ez_x_size, ez_y_size, ez_z_size, ez_x_size == 1, i,j,k-1) - field_at(ez, ez_x_size, ez_y_size, ez_z_size, ez_x_size == 1, i-1,j,k-1)) / dx;
 
-      hy(i,j,k) -= dt / mu_inf * ((ex(i-1,j,k) - ex(i-1,j,k-1)) / dz / kappaz -
-				  (ez(i,j,k-1) - ez(i-1,j,k-1)) / dx / kappax +
+      field_at(hy, hy_x_size, hy_y_size, hy_z_size, hy_z_size == 1, i,j,k) -= dt / mu_inf * ((field_at(ex, ex_x_size, ex_y_size, ex_z_size, ex_y_size == 1, i-1,j,k) - field_at(ex, ex_x_size, ex_y_size, ex_z_size, ex_y_size == 1, i-1,j,k-1)) / dz / kappaz -
+				  (field_at(ez, ez_x_size, ez_y_size, ez_z_size, ez_x_size == 1, i,j,k-1) - field_at(ez, ez_x_size, ez_y_size, ez_z_size, ez_x_size == 1, i-1,j,k-1)) / dx / kappax +
 				  psi1 - psi2);
     }
 
@@ -430,13 +410,11 @@ namespace gmes
 	       const T* const ex, int ex_x_size, int ex_y_size, int ex_z_size,
 	       double dx, double dy, double dt, double n)
     {
-      auto idx = idx_list.begin();
-      auto param = param_list.begin();
-      for (; idx != idx_list.end(); ++idx, ++param) {
+      for (auto&& [idx, param] : zip_equal(idx_list, param_list)) {
     	update(hz, hz_x_size, hz_y_size, hz_z_size,
 	       ey, ey_x_size, ey_y_size, ey_z_size,
 	       ex, ex_x_size, ex_y_size, ex_z_size,
-	       dx, dy, dt, n, *idx, *param);
+	       dx, dy, dt, n, idx, param);
       }
     }
 
@@ -461,11 +439,11 @@ namespace gmes
       T& psi1 = cpml_param.psi1;
       T& psi2 = cpml_param.psi2;
 
-      psi1 = bx * psi1 + cx * (ey(i,j-1,k) - ey(i-1,j-1,k)) / dx;
-      psi2 = by * psi2 + cy * (ex(i-1,j,k) - ex(i-1,j-1,k)) / dy;
+      psi1 = bx * psi1 + cx * (field_at(ey, ey_x_size, ey_y_size, ey_z_size, ey_z_size == 1, i,j-1,k) - field_at(ey, ey_x_size, ey_y_size, ey_z_size, ey_z_size == 1, i-1,j-1,k)) / dx;
+      psi2 = by * psi2 + cy * (field_at(ex, ex_x_size, ex_y_size, ex_z_size, ex_y_size == 1, i-1,j,k) - field_at(ex, ex_x_size, ex_y_size, ex_z_size, ex_y_size == 1, i-1,j-1,k)) / dy;
 
-      hz(i,j,k) -= dt / mu_inf * ((ey(i,j-1,k) - ey(i-1,j-1,k)) / dx / kappax -
-				  (ex(i-1,j,k) - ex(i-1,j-1,k)) / dy / kappay +
+      field_at(hz, hz_x_size, hz_y_size, hz_z_size, hz_x_size == 1, i,j,k) -= dt / mu_inf * ((field_at(ey, ey_x_size, ey_y_size, ey_z_size, ey_z_size == 1, i,j-1,k) - field_at(ey, ey_x_size, ey_y_size, ey_z_size, ey_z_size == 1, i-1,j-1,k)) / dx / kappax -
+				  (field_at(ex, ex_x_size, ex_y_size, ex_z_size, ex_y_size == 1, i-1,j,k) - field_at(ex, ex_x_size, ex_y_size, ex_z_size, ex_y_size == 1, i-1,j-1,k)) / dy / kappay +
 				  psi1 - psi2);
     }
 

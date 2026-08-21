@@ -43,7 +43,7 @@ pw_material = Extension(
     include_dirs=[numpy_include],
     swig_opts=["-c++", "-outdir", "gmes"],
     language="c++",
-    extra_compile_args=["-std=c++17"],
+    extra_compile_args=["-std=c++23"],
 )
 
 # constant module
@@ -54,7 +54,7 @@ constant = Extension(
     include_dirs=[numpy_include],
     swig_opts=["-c++", "-outdir", "gmes"],
     language="c++",
-    extra_compile_args=["-std=c++17"],
+    extra_compile_args=["-std=c++23"],
 )
 
 # pygeom module

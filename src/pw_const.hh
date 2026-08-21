@@ -34,8 +34,7 @@ namespace gmes
     double
     get_eps_inf(const int* const idx, int idx_size) const
     {
-      Index3 index;
-      std::copy(idx, idx + idx_size, index.begin());
+      const Index3 index = make_index(idx, idx_size);
       const int i = position(index);
       if (i < 0)
 	return 0;
@@ -47,8 +46,7 @@ namespace gmes
     attach(const int* const idx, int idx_size,
 	   const PwMaterialParam* const pm_param_ptr)
     {
-      Index3 index;
-      std::copy(idx, idx + idx_size, index.begin());
+      const Index3 index = make_index(idx, idx_size);
 
       const auto& const_param = *static_cast<const ConstElectricParam<T>*>(pm_param_ptr);
 
@@ -76,13 +74,11 @@ namespace gmes
 	       int in2_dim1, int in2_dim2, int in2_dim3,
 	       double d1, double d2, double dt, double n)
     {
-      auto idx = idx_list.begin();
-      auto param = param_list.begin();
-      for (; idx != idx_list.end(); ++idx, ++param) {
+      for (auto&& [idx, param] : zip_equal(idx_list, param_list)) {
     	update(inplace_field, inplace_dim1, inplace_dim2, inplace_dim3,
     	       in_field1, in1_dim1, in1_dim2, in1_dim3,
     	       in_field2, in2_dim1, in2_dim2, in2_dim3,
-    	       d1, d2, dt, n, *idx, *param);
+               d1, d2, dt, n, idx, param);
       }
     }
 
@@ -140,8 +136,7 @@ namespace gmes
     double
     get_mu_inf(const int* const idx, int idx_size) const
     {
-      Index3 index;
-      std::copy(idx, idx + idx_size, index.begin());
+      const Index3 index = make_index(idx, idx_size);
       const int i = position(index);
       if (i < 0)
 	return 0;
@@ -153,8 +148,7 @@ namespace gmes
     attach(const int* const idx, int idx_size,
 	   const PwMaterialParam* const pm_param_ptr)
     {
-      Index3 index;
-      std::copy(idx, idx + idx_size, index.begin());
+      const Index3 index = make_index(idx, idx_size);
 
       const auto& const_param = *static_cast<const ConstMagneticParam<T>*>(pm_param_ptr);
 
@@ -182,13 +176,11 @@ namespace gmes
 	       int in2_dim1, int in2_dim2, int in2_dim3,
 	       double d1, double d2, double dt, double n)
     {
-      auto idx = idx_list.begin();
-      auto param = param_list.begin();
-      for (; idx != idx_list.end(); ++idx, ++param) {
+      for (auto&& [idx, param] : zip_equal(idx_list, param_list)) {
     	update(inplace_field, inplace_dim1, inplace_dim2, inplace_dim3,
     	       in_field1, in1_dim1, in1_dim2, in1_dim3,
     	       in_field2, in2_dim1, in2_dim2, in2_dim3,
-    	       d1, d2, dt, n, *idx, *param);
+               d1, d2, dt, n, idx, param);
       }
     }
 

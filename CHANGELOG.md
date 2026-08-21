@@ -8,7 +8,9 @@ Notable changes to GMES are documented in this file.
 
 - Require Python 3.14 or newer and remove Python 2 compatibility.
 - Replace direct Distutils builds with a PEP 517 setuptools build.
-- Update native bindings for C++17, SWIG 4, Cython 3, and NumPy 2.
+- Update native bindings for C++23, SWIG 4, Cython 3, and NumPy 2.
+- Replace field-indexing macros with `std::mdspan` views, validate index spans,
+  and use zipped ranges for synchronized material updates.
 - Modernize package imports, iterator behavior, integer indexing, examples, and optional I/O integrations.
 
 ### Added

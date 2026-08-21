@@ -48,6 +48,9 @@ uv python install 3.14
 uv sync --locked --extra hdf5
 ```
 
+This checkout requires uv 0.12.5; uv exits with an actionable version error
+when a different release is used.
+
 The `dev` dependency group is installed by default. Other supported runtime
 combinations include `--extra plot`, `--extra mpi`, and `--extra all`. The
 build uses the PEP 517 configuration in `pyproject.toml`; invoking `setup.py`

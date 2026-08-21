@@ -60,6 +60,13 @@ Repository = "https://github.com/ruddyscent/gmes"
 Issues = "https://github.com/ruddyscent/gmes/issues"
 
 [tool.uv]
+required-version = "==0.12.5"
+build-constraint-dependencies = [
+    "setuptools==84.0.0",
+    "wheel==0.48.0",
+    "Cython==3.2.9",
+    "numpy==2.5.2",
+]
 cache-keys = [
     {file = "pyproject.toml"},
     {file = "setup.py"},

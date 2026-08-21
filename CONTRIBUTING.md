@@ -30,6 +30,26 @@ configured cache keys changes, force a rebuild with:
 uv sync --locked --extra hdf5 --reinstall-package gmes
 ```
 
+## Dependency updates
+
+Local development and CI use uv 0.12.5. Check `uv --version` before updating
+the environment. Update runtime and development dependencies only in a
+dedicated change:
+
+```sh
+uv lock --upgrade
+uv sync --locked --extra hdf5
+uv run --no-sync python -m unittest discover -v
+uv build
+```
+
+The native build constraints in `pyproject.toml` pin setuptools, wheel,
+Cython, and NumPy for isolated builds. Build-time NumPy must remain identical
+to the NumPy version in `uv.lock`; update both together, then verify an
+editable sync and a distribution build. When changing the required uv release,
+update both `[tool.uv].required-version` and the `setup-uv` workflow input in
+the same pull request.
+
 ## Verification
 
 Run the narrowest relevant tests while developing, followed by the complete suite before submitting a change:

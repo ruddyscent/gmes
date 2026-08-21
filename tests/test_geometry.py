@@ -39,6 +39,47 @@ class CartesianGridTest(unittest.TestCase):
 
             self.assertEqual(space_to_index(*point), (2, 3, 1))
 
+    def test_component_indices_floor_negative_nearest_grid_values(self):
+        space = Cartesian(size=(2, 2, 2), resolution=2)
+
+        self.assertEqual(space.space_to_ex_index(-1.3, 0, 0)[0], -1)
+
+        for component in ("ex", "ey", "ez", "hx", "hy", "hz"):
+            with self.subTest(component=component):
+                index_to_space = getattr(space, component + "_index_to_space")
+                space_to_index = getattr(space, "space_to_" + component + "_index")
+                first_point = np.array(index_to_space(0, 0, 0))
+                below_first = first_point - 0.6 * space.dr
+
+                self.assertEqual(space_to_index(*below_first), (-1, -1, -1))
+
+    def test_component_indices_handle_both_nearest_grid_boundaries(self):
+        space = Cartesian(size=(4, 4, 4), resolution=2)
+        base_index = np.array((2, 2, 2))
+        boundaries = (
+            (-0.500001, -1),
+            (-0.5, 0),
+            (-0.499999, 0),
+            (0.499999, 0),
+            (0.5, 1),
+            (0.500001, 1),
+        )
+
+        for component in ("ex", "ey", "ez", "hx", "hy", "hz"):
+            index_to_space = getattr(space, component + "_index_to_space")
+            space_to_index = getattr(space, "space_to_" + component + "_index")
+            base_point = np.array(index_to_space(*base_index))
+
+            for axis in range(3):
+                for offset, expected_delta in boundaries:
+                    with self.subTest(component=component, axis=axis, offset=offset):
+                        point = base_point.copy()
+                        point[axis] += offset * space.dr[axis]
+                        expected = base_index.copy()
+                        expected[axis] += expected_delta
+
+                        self.assertEqual(space_to_index(*point), tuple(expected))
+
 
 if __name__ == "__main__":
     unittest.main()

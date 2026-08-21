@@ -412,23 +412,8 @@ class Cartesian(object):
         x, y, z -- (global) space coordinate
 
         """
-        spc = array((x, y, z), np.double)
-
-        global_idx = empty(3, np.intp)
-        global_idx[0] = (spc[0] + self.half_size[0]) / self.dr[0]
-        global_idx[1] = (spc[1] + self.half_size[1]) / self.dr[1] + 0.5
-        global_idx[2] = (spc[2] + self.half_size[2]) / self.dr[2] + 0.5
-
-        idx = empty(3, np.intp)
-        for i in range(3):
-            if self.whole_field_size[i] == 1:
-                idx[i] = 0
-            else:
-                idx[i] = global_idx[i] - (
-                    self.my_cart_idx[i] * self.general_field_size[i]
-                )
-
-        return tuple(idx)
+        exact_idx = self.spc_to_exact_ex_idx(x, y, z)
+        return tuple(np.floor(array(exact_idx) + 0.5).astype(np.intp))
 
     def ey_index_to_space(self, i, j, k):
         """Return space coordinate of the given index.
@@ -490,23 +475,8 @@ class Cartesian(object):
         x, y, z -- (global) space coordinate
 
         """
-        coords = array((x, y, z), np.double)
-
-        global_idx = empty(3, np.intp)
-        global_idx[0] = (coords[0] + self.half_size[0]) / self.dr[0] + 0.5
-        global_idx[1] = (coords[1] + self.half_size[1]) / self.dr[1]
-        global_idx[2] = (coords[2] + self.half_size[2]) / self.dr[2] + 0.5
-
-        idx = empty(3, np.intp)
-        for i in range(3):
-            if self.whole_field_size[i] == 1:
-                idx[i] = 0
-            else:
-                idx[i] = global_idx[i] - (
-                    self.my_cart_idx[i] * self.general_field_size[i]
-                )
-
-        return tuple(idx)
+        exact_idx = self.spc_to_exact_ey_idx(x, y, z)
+        return tuple(np.floor(array(exact_idx) + 0.5).astype(np.intp))
 
     def ez_index_to_space(self, i, j, k):
         """Return space coordinate of the given index.
@@ -568,23 +538,8 @@ class Cartesian(object):
         x, y, z -- (global) space coordinate
 
         """
-        coords = array((x, y, z), np.double)
-
-        global_idx = empty(3, np.intp)
-        global_idx[0] = (coords[0] + self.half_size[0]) / self.dr[0] + 0.5
-        global_idx[1] = (coords[1] + self.half_size[1]) / self.dr[1] + 0.5
-        global_idx[2] = (coords[2] + self.half_size[2]) / self.dr[2]
-
-        idx = empty(3, np.intp)
-        for i in range(3):
-            if self.whole_field_size[i] == 1:
-                idx[i] = 0
-            else:
-                idx[i] = global_idx[i] - (
-                    self.my_cart_idx[i] * self.general_field_size[i]
-                )
-
-        return tuple(idx)
+        exact_idx = self.spc_to_exact_ez_idx(x, y, z)
+        return tuple(np.floor(array(exact_idx) + 0.5).astype(np.intp))
 
     def hx_index_to_space(self, i, j, k):
         """Return space coordinate of the given index.
@@ -645,22 +600,8 @@ class Cartesian(object):
         x, y, z -- (global) space coordinate
 
         """
-        coords = array((x, y, z), np.double)
-
-        global_idx = empty(3, np.intp)
-        global_idx[0] = (coords[0] + self.half_size[0]) / self.dr[0] + 0.5
-        global_idx[1] = (coords[1] + self.half_size[1]) / self.dr[1] + 1
-        global_idx[2] = (coords[2] + self.half_size[2]) / self.dr[2] + 1
-
-        idx = global_idx - self.my_cart_idx * self.general_field_size
-        if self.whole_field_size[0] == 1:
-            idx[0] = 0
-        if self.whole_field_size[1] == 1:
-            idx[1] = 1
-        if self.whole_field_size[2] == 1:
-            idx[2] = 1
-
-        return tuple(idx)
+        exact_idx = self.spc_to_exact_hx_idx(x, y, z)
+        return tuple(np.floor(array(exact_idx) + 0.5).astype(np.intp))
 
     def hy_index_to_space(self, i, j, k):
         """Return space coordinate of the given index.
@@ -721,22 +662,8 @@ class Cartesian(object):
         x, y, z -- (global) space coordinate
 
         """
-        coords = array((x, y, z), np.double)
-
-        global_idx = empty(3, np.intp)
-        global_idx[0] = (coords[0] + self.half_size[0]) / self.dr[0] + 1
-        global_idx[1] = (coords[1] + self.half_size[1]) / self.dr[1] + 0.5
-        global_idx[2] = (coords[2] + self.half_size[2]) / self.dr[2] + 1
-
-        idx = global_idx - self.my_cart_idx * self.general_field_size
-        if self.whole_field_size[0] == 1:
-            idx[0] = 1
-        if self.whole_field_size[1] == 1:
-            idx[1] = 0
-        if self.whole_field_size[2] == 1:
-            idx[2] = 1
-
-        return tuple(idx)
+        exact_idx = self.spc_to_exact_hy_idx(x, y, z)
+        return tuple(np.floor(array(exact_idx) + 0.5).astype(np.intp))
 
     def hz_index_to_space(self, i, j, k):
         """Return space coordinate of the given index.
@@ -797,22 +724,8 @@ class Cartesian(object):
          x, y, z -- (global) space coordinate
 
         """
-        coords = array((x, y, z), np.double)
-
-        global_idx = empty(3, np.intp)
-        global_idx[0] = (coords[0] + self.half_size[0]) / self.dr[0] + 1
-        global_idx[1] = (coords[1] + self.half_size[1]) / self.dr[1] + 1
-        global_idx[2] = (coords[2] + self.half_size[2]) / self.dr[2] + 0.5
-
-        idx = global_idx - self.my_cart_idx * self.general_field_size
-        if self.whole_field_size[0] == 1:
-            idx[0] = 1
-        if self.whole_field_size[1] == 1:
-            idx[1] = 1
-        if self.whole_field_size[2] == 1:
-            idx[2] = 0
-
-        return tuple(idx)
+        exact_idx = self.spc_to_exact_hz_idx(x, y, z)
+        return tuple(np.floor(array(exact_idx) + 0.5).astype(np.intp))
 
     def display_info(self, indent=0):
         print(" " * indent, "Cartesian space")

@@ -415,6 +415,19 @@ void free_cap(PyObject * cap)
     return native;
   }
 
+  /* Require that a numpy array permits writes through its data pointer. */
+  int require_writeable(PyArrayObject* ary)
+  {
+    int writeable = 1;
+    if (!PyArray_ISWRITEABLE(ary))
+    {
+      PyErr_SetString(PyExc_TypeError,
+                      "Array must be writeable.  A read-only array was given");
+      writeable = 0;
+    }
+    return writeable;
+  }
+
   /* Require the given PyArrayObject to have a specified number of
    * dimensions.  If the array has the specified number of dimensions,
    * return 1.  Otherwise, set the python error string and return 0.
@@ -1442,7 +1455,8 @@ void free_cap(PyObject * cap)
   npy_intp size[1] = { $1_dim0 };
   array = obj_to_array_no_conversion($input, DATA_TYPECODE);
   if (!array || !require_dimensions(array,1) || !require_size(array, size, 1) ||
-      !require_contiguous(array) || !require_native(array)) SWIG_fail;
+      !require_contiguous(array) || !require_native(array) ||
+      !require_writeable(array)) SWIG_fail;
   $1 = ($1_ltype) array_data(array);
 }
 
@@ -1462,7 +1476,7 @@ void free_cap(PyObject * cap)
 {
   array = obj_to_array_no_conversion($input, DATA_TYPECODE);
   if (!array || !require_dimensions(array,1) || !require_contiguous(array)
-      || !require_native(array)) SWIG_fail;
+      || !require_native(array) || !require_writeable(array)) SWIG_fail;
   $1 = (DATA_TYPE*) array_data(array);
   $2 = 1;
   for (i=0; i < array_numdims(array); ++i) $2 *= array_size(array,i);
@@ -1484,7 +1498,7 @@ void free_cap(PyObject * cap)
 {
   array = obj_to_array_no_conversion($input, DATA_TYPECODE);
   if (!array || !require_dimensions(array,1) || !require_contiguous(array)
-      || !require_native(array)) SWIG_fail;
+      || !require_native(array) || !require_writeable(array)) SWIG_fail;
   $1 = 1;
   for (i=0; i < array_numdims(array); ++i) $1 *= array_size(array,i);
   $2 = (DATA_TYPE*) array_data(array);
@@ -1507,7 +1521,8 @@ void free_cap(PyObject * cap)
   npy_intp size[2] = { $1_dim0, $1_dim1 };
   array = obj_to_array_no_conversion($input, DATA_TYPECODE);
   if (!array || !require_dimensions(array,2) || !require_size(array, size, 2) ||
-      !require_contiguous(array) || !require_native(array)) SWIG_fail;
+      !require_contiguous(array) || !require_native(array) ||
+      !require_writeable(array)) SWIG_fail;
   $1 = ($1_ltype) array_data(array);
 }
 
@@ -1527,7 +1542,7 @@ void free_cap(PyObject * cap)
 {
   array = obj_to_array_no_conversion($input, DATA_TYPECODE);
   if (!array || !require_dimensions(array,2) || !require_contiguous(array)
-      || !require_native(array)) SWIG_fail;
+      || !require_native(array) || !require_writeable(array)) SWIG_fail;
   $1 = (DATA_TYPE*) array_data(array);
   $2 = (DIM_TYPE) array_size(array,0);
   $3 = (DIM_TYPE) array_size(array,1);
@@ -1549,7 +1564,7 @@ void free_cap(PyObject * cap)
 {
   array = obj_to_array_no_conversion($input, DATA_TYPECODE);
   if (!array || !require_dimensions(array,2) || !require_contiguous(array) ||
-      !require_native(array)) SWIG_fail;
+      !require_native(array) || !require_writeable(array)) SWIG_fail;
   $1 = (DIM_TYPE) array_size(array,0);
   $2 = (DIM_TYPE) array_size(array,1);
   $3 = (DATA_TYPE*) array_data(array);
@@ -1571,7 +1586,8 @@ void free_cap(PyObject * cap)
 {
   array = obj_to_array_no_conversion($input, DATA_TYPECODE);
   if (!array || !require_dimensions(array,2) || !require_contiguous(array)
-      || !require_native(array) || !require_fortran(array)) SWIG_fail;
+      || !require_native(array) || !require_writeable(array) ||
+      !require_fortran(array)) SWIG_fail;
   $1 = (DATA_TYPE*) array_data(array);
   $2 = (DIM_TYPE) array_size(array,0);
   $3 = (DIM_TYPE) array_size(array,1);
@@ -1593,7 +1609,8 @@ void free_cap(PyObject * cap)
 {
   array = obj_to_array_no_conversion($input, DATA_TYPECODE);
   if (!array || !require_dimensions(array,2) || !require_contiguous(array) ||
-      !require_native(array) || !require_fortran(array)) SWIG_fail;
+      !require_native(array) || !require_writeable(array) ||
+      !require_fortran(array)) SWIG_fail;
   $1 = (DIM_TYPE) array_size(array,0);
   $2 = (DIM_TYPE) array_size(array,1);
   $3 = (DATA_TYPE*) array_data(array);
@@ -1616,7 +1633,8 @@ void free_cap(PyObject * cap)
   npy_intp size[3] = { $1_dim0, $1_dim1, $1_dim2 };
   array = obj_to_array_no_conversion($input, DATA_TYPECODE);
   if (!array || !require_dimensions(array,3) || !require_size(array, size, 3) ||
-      !require_contiguous(array) || !require_native(array)) SWIG_fail;
+      !require_contiguous(array) || !require_native(array) ||
+      !require_writeable(array)) SWIG_fail;
   $1 = ($1_ltype) array_data(array);
 }
 
@@ -1637,7 +1655,7 @@ void free_cap(PyObject * cap)
 {
   array = obj_to_array_no_conversion($input, DATA_TYPECODE);
   if (!array || !require_dimensions(array,3) || !require_contiguous(array) ||
-      !require_native(array)) SWIG_fail;
+      !require_native(array) || !require_writeable(array)) SWIG_fail;
   $1 = (DATA_TYPE*) array_data(array);
   $2 = (DIM_TYPE) array_size(array,0);
   $3 = (DIM_TYPE) array_size(array,1);
@@ -1684,6 +1702,7 @@ void free_cap(PyObject * cap)
     if ( !temp_array || !require_dimensions(temp_array, 2) ||
       !require_contiguous(temp_array) ||
       !require_native(temp_array) ||
+      !require_writeable(temp_array) ||
       !PyArray_EquivTypenums(array_type(temp_array), DATA_TYPECODE)
     ) SWIG_fail;
 
@@ -1727,7 +1746,7 @@ void free_cap(PyObject * cap)
 {
   array = obj_to_array_no_conversion($input, DATA_TYPECODE);
   if (!array || !require_dimensions(array,3) || !require_contiguous(array)
-      || !require_native(array)) SWIG_fail;
+      || !require_native(array) || !require_writeable(array)) SWIG_fail;
   $1 = (DIM_TYPE) array_size(array,0);
   $2 = (DIM_TYPE) array_size(array,1);
   $3 = (DIM_TYPE) array_size(array,2);
@@ -1751,7 +1770,8 @@ void free_cap(PyObject * cap)
 {
   array = obj_to_array_no_conversion($input, DATA_TYPECODE);
   if (!array || !require_dimensions(array,3) || !require_contiguous(array) ||
-      !require_native(array) || !require_fortran(array)) SWIG_fail;
+      !require_native(array) || !require_writeable(array) ||
+      !require_fortran(array)) SWIG_fail;
   $1 = (DATA_TYPE*) array_data(array);
   $2 = (DIM_TYPE) array_size(array,0);
   $3 = (DIM_TYPE) array_size(array,1);
@@ -1775,7 +1795,8 @@ void free_cap(PyObject * cap)
 {
   array = obj_to_array_no_conversion($input, DATA_TYPECODE);
   if (!array || !require_dimensions(array,3) || !require_contiguous(array)
-      || !require_native(array) || !require_fortran(array)) SWIG_fail;
+      || !require_native(array) || !require_writeable(array) ||
+      !require_fortran(array)) SWIG_fail;
   $1 = (DIM_TYPE) array_size(array,0);
   $2 = (DIM_TYPE) array_size(array,1);
   $3 = (DIM_TYPE) array_size(array,2);
@@ -1799,7 +1820,8 @@ void free_cap(PyObject * cap)
   npy_intp size[4] = { $1_dim0, $1_dim1, $1_dim2 , $1_dim3 };
   array = obj_to_array_no_conversion($input, DATA_TYPECODE);
   if (!array || !require_dimensions(array,4) || !require_size(array, size, 4) ||
-      !require_contiguous(array) || !require_native(array)) SWIG_fail;
+      !require_contiguous(array) || !require_native(array) ||
+      !require_writeable(array)) SWIG_fail;
   $1 = ($1_ltype) array_data(array);
 }
 
@@ -1820,7 +1842,7 @@ void free_cap(PyObject * cap)
 {
   array = obj_to_array_no_conversion($input, DATA_TYPECODE);
   if (!array || !require_dimensions(array,4) || !require_contiguous(array) ||
-      !require_native(array)) SWIG_fail;
+      !require_native(array) || !require_writeable(array)) SWIG_fail;
   $1 = (DATA_TYPE*) array_data(array);
   $2 = (DIM_TYPE) array_size(array,0);
   $3 = (DIM_TYPE) array_size(array,1);
@@ -1868,6 +1890,7 @@ void free_cap(PyObject * cap)
     if ( !temp_array || !require_dimensions(temp_array, 3) ||
       !require_contiguous(temp_array) ||
       !require_native(temp_array) ||
+      !require_writeable(temp_array) ||
       !PyArray_EquivTypenums(array_type(temp_array), DATA_TYPECODE)
     ) SWIG_fail;
 
@@ -1913,7 +1936,7 @@ void free_cap(PyObject * cap)
 {
   array = obj_to_array_no_conversion($input, DATA_TYPECODE);
   if (!array || !require_dimensions(array,4) || !require_contiguous(array)
-      || !require_native(array)) SWIG_fail;
+      || !require_native(array) || !require_writeable(array)) SWIG_fail;
   $1 = (DIM_TYPE) array_size(array,0);
   $2 = (DIM_TYPE) array_size(array,1);
   $3 = (DIM_TYPE) array_size(array,2);
@@ -1938,7 +1961,8 @@ void free_cap(PyObject * cap)
 {
   array = obj_to_array_no_conversion($input, DATA_TYPECODE);
   if (!array || !require_dimensions(array,4) || !require_contiguous(array) ||
-      !require_native(array) || !require_fortran(array)) SWIG_fail;
+      !require_native(array) || !require_writeable(array) ||
+      !require_fortran(array)) SWIG_fail;
   $1 = (DATA_TYPE*) array_data(array);
   $2 = (DIM_TYPE) array_size(array,0);
   $3 = (DIM_TYPE) array_size(array,1);
@@ -1963,7 +1987,8 @@ void free_cap(PyObject * cap)
 {
   array = obj_to_array_no_conversion($input, DATA_TYPECODE);
   if (!array || !require_dimensions(array,4) || !require_contiguous(array)
-      || !require_native(array) || !require_fortran(array)) SWIG_fail;
+      || !require_native(array) || !require_writeable(array) ||
+      !require_fortran(array)) SWIG_fail;
   $1 = (DIM_TYPE) array_size(array,0);
   $2 = (DIM_TYPE) array_size(array,1);
   $3 = (DIM_TYPE) array_size(array,2);

@@ -1131,7 +1131,8 @@ cdef class Shell(GeometricObject):
         return False
 
     def geom_box(self):
-        return GeomBox(-self.half_size, self.half_size)
+        return GeomBox(self.center - self.half_size,
+                       self.center + self.half_size)
 
     def display_info(self, indent=0):
         print(' ' * indent, 'shell')

@@ -48,7 +48,9 @@ API token is stored in GitHub.
    request.
 2. Confirm that the release workflow's expected wheel platforms match the
    documentation. All third-party Actions must remain pinned to immutable
-   commit SHAs.
+   commit SHAs. Keep `build-constraints.txt` synchronized with
+   `[tool.uv].build-constraint-dependencies` so uv and cibuildwheel use the
+   same native build dependencies.
 3. Run the local checks:
 
    ```sh

@@ -72,6 +72,7 @@ cache-keys = [
     {file = "setup.py"},
     {file = "VERSION"},
     {file = "MANIFEST.in"},
+    {file = "build-constraints.txt"},
     {file = "README.md"},
     {file = "utils/macos_build.py"},
     {file = "src/*.cc"},
@@ -122,7 +123,7 @@ enable = [
 
 [tool.cibuildwheel]
 build = "cp314-manylinux_x86_64 cp314-macosx_arm64"
-build-frontend = "build[uv]"
+environment = {PIP_CONSTRAINT = "$(pwd)/build-constraints.txt"}
 test-command = "python -c 'import gmes, gmes._constant, gmes._pw_material, gmes.material, gmes.pygeom'"
 
 [tool.cibuildwheel.linux]

@@ -7,6 +7,7 @@ class UvCacheKeyTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         project_root = Path(__file__).resolve().parents[1]
+        cls.project_root = project_root
         project_file = project_root / "pyproject.toml"
         with project_file.open("rb") as stream:
             cls.uv_configuration = tomllib.load(stream)["tool"]["uv"]
@@ -52,6 +53,14 @@ class UvCacheKeyTest(unittest.TestCase):
                 "numpy==2.5.2",
             },
         )
+        pip_constraints = {
+            line.strip()
+            for line in (self.project_root / "build-constraints.txt")
+            .read_text()
+            .splitlines()
+            if line.strip()
+        }
+        self.assertEqual(pip_constraints, constraints)
 
     def test_build_and_runtime_numpy_versions_match(self):
         numpy_package = next(

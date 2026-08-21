@@ -10,6 +10,7 @@ on:
       - "MANIFEST.in"
       - "README.md"
       - "VERSION"
+      - "build-constraints.txt"
       - "docs/releasing.md"
       - "pyproject.toml"
       - "setup.py"
@@ -172,7 +173,6 @@ jobs:
         run: |
           uvx \
             --from cibuildwheel==4.2.0 \
-            --with uv==0.12.5 \
             cibuildwheel \
             --output-dir wheelhouse
       - name: Validate wheel metadata and contents

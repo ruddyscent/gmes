@@ -59,6 +59,10 @@ class ReleaseConfigurationTest(unittest.TestCase):
             cibuildwheel["macos"]["environment"]["MACOSX_DEPLOYMENT_TARGET"],
             "11.0",
         )
+        self.assertEqual(
+            cibuildwheel["environment"]["PIP_CONSTRAINT"],
+            "$(pwd)/build-constraints.txt",
+        )
 
     def test_release_actions_are_immutable_and_publish_with_oidc(self):
         action_references = re.findall(
@@ -75,7 +79,6 @@ class ReleaseConfigurationTest(unittest.TestCase):
         self.assertIn("gh release create", self.workflow)
         self.assertIn("pull_request:\n    branches:\n      - master", self.workflow)
         self.assertIn("--from cibuildwheel==4.2.0", self.workflow)
-        self.assertIn("--with uv==0.12.5", self.workflow)
 
     def test_publish_job_has_no_checkout_or_build_step(self):
         publish_job = self.workflow.split("  publish-pypi:", 1)[1].split(

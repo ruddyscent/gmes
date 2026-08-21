@@ -20,6 +20,7 @@ REQUIRED_SDIST_PATHS = {
     "MANIFEST.in",
     "README.md",
     "VERSION",
+    "build-constraints.txt",
     "gmes/__init__.py",
     "pyproject.toml",
     "setup.py",

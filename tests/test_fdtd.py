@@ -17,6 +17,26 @@ from gmes import (
 
 
 class FDTDSmokeTest(unittest.TestCase):
+    def test_step_while_zero_validates_observation_point_owner(self):
+        simulation = TMzFDTD(
+            space=Cartesian(size=(2, 2, 0), resolution=3),
+            geom_list=[DefaultMedium(material=Dielectric())],
+            verbose=False,
+        )
+        simulation.init()
+
+        point = (0, 0, 0)
+        idx = simulation.space.space_to_ez_index(*point)
+        simulation.ez[idx] = 1
+        simulation.step_while_zero(Ez, point)
+
+        self.assertEqual(simulation.time_step.n, 1)
+        with self.assertRaisesRegex(
+            ValueError, "observation point is outside the simulation domain"
+        ):
+            simulation.step_while_zero(Ez, (100, 100, 100))
+        self.assertEqual(simulation.time_step.n, 1)
+
     def test_source_free_simulation_uses_default_empty_source_list(self):
         simulation = TMzFDTD(
             space=Cartesian(size=(2, 2, 0), resolution=3),

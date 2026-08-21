@@ -96,6 +96,10 @@ class AuxiCartComm(object):
         """Mimic bcast method."""
         return obj
 
+    def allgather(self, obj=None):
+        """Mimic allgather method."""
+        return [obj]
+
 
 class Cartesian(object):
     """Define the calculation space with Cartesian coordinates.

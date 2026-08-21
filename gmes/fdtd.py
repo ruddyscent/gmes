@@ -1143,12 +1143,21 @@ class FDTD(object):
 
         idx = spc_to_idx[component](*point)
 
-        if in_range(idx, self.field[component].shape, component):
-            hot_node = self.space.my_id
-        else:
-            hot_node = None
-
-        hot_node = self.space.bcast(hot_node, hot_node)
+        local_owner = (
+            self.space.my_id
+            if in_range(idx, self.field[component].shape, component)
+            else None
+        )
+        hot_node = next(
+            (
+                owner
+                for owner in self.space.cart_comm.allgather(local_owner)
+                if owner is not None
+            ),
+            None,
+        )
+        if hot_node is None:
+            raise ValueError("observation point is outside the simulation domain")
 
         flag = True
         while flag:

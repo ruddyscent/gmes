@@ -25,9 +25,11 @@ class CiConfigurationTest(unittest.TestCase):
     def test_required_ci_exercises_all_openmp_paths(self):
         self.assertIn("brew install swig libomp", self.ci_workflow)
         self.assertIn("assert pw_material.openmp_enabled()", self.ci_workflow)
+        self.assertIn("assert not pw_material.openmp_enabled()", self.ci_workflow)
         self.assertIn("GMES_OPENMP_THRESHOLD=0", self.ci_workflow)
         self.assertIn("GMES_ENABLE_OPENMP=0", self.ci_workflow)
         self.assertIn("GMES_ENABLE_OPENMP=1 uv build", self.ci_workflow)
+        self.assertIn("GMES_ENABLE_OPENMP=auto uv build", self.ci_workflow)
 
     def test_prerelease_is_scheduled_advisory_using_nightly_wheels(self):
         self.assertIn("name: Python prerelease (advisory)", self.prerelease_workflow)

@@ -76,8 +76,16 @@ class ZiolkowskiSourceTest(unittest.TestCase):
         field = 3.0 * np.sin(OMEGA0_RAD_S * times)
 
         intensity = carrier_intensity(field, sample_interval, 3.0)
+        hann_intensity = carrier_intensity(
+            field, sample_interval, 3.0, periods=3, window="hann"
+        )
 
         self.assertTrue(np.allclose(intensity[100:-100], 1.0, atol=0.01))
+        self.assertTrue(np.allclose(hann_intensity[200:-200], 1.0, atol=0.01))
+        with self.assertRaisesRegex(ValueError, "period count"):
+            carrier_intensity(field, sample_interval, 3.0, periods=0)
+        with self.assertRaisesRegex(ValueError, "unsupported envelope window"):
+            carrier_intensity(field, sample_interval, 3.0, window="triangle")
 
     def test_sech_pulse_support_and_envelope_area(self):
         width = UNITS.time(20 / F0_HZ)

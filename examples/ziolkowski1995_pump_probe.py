@@ -42,12 +42,14 @@ def generate(
         print_scenario(scenario)
         results[delay_periods] = run_gain(
             scenario,
-            # Continue beyond the displayed interval so the one-period
+            # Continue beyond the displayed interval so the centered
             # envelope is not evaluated at the end of the sampled record.
             duration_s=625e-15,
             sample_stride=1 if quick else 10,
             verbose=verbose,
             normalization_amplitude_v_m=scenario.amplitude_v_m * 1.0e-4,
+            envelope_periods=3,
+            envelope_window="hann",
         )
         print_intensity_summary(
             results[delay_periods],

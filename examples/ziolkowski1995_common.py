@@ -285,17 +285,31 @@ def carrier_intensity(
     field: np.ndarray,
     sample_interval_s: float,
     normalization_amplitude: float,
+    *,
+    periods: float = 1,
+    window: str = "boxcar",
 ) -> np.ndarray:
-    """Return a one-carrier-period moving intensity-envelope estimate.
+    """Return a local moving intensity-envelope estimate.
 
     Ziolkowski et al. (1995) do not specify their envelope-extraction
-    algorithm. This local average of ``2 E**2`` avoids the nonlocal edge
-    ringing that a finite-record Hilbert transform introduces after the much
-    larger pump pulse. Short pump-induced transients can therefore differ
-    from the smoother published curves; see ``VERIFICATION.md``.
+    algorithm. This weighted local average of ``2 E**2`` avoids the nonlocal
+    edge ringing that a finite-record Hilbert transform introduces after the
+    much larger pump pulse. Fig. 10 uses the default one-period boxcar; Fig. 12
+    uses a three-period Hann window to resolve its pump-induced free-induction
+    decay. See ``VERIFICATION.md`` for the comparison.
     """
 
-    window_size = max(2, round(PERIOD_S / sample_interval_s))
+    if periods <= 0:
+        raise ValueError("the envelope period count must be positive")
+    window_size = max(2, round(periods * PERIOD_S / sample_interval_s))
+    if window == "boxcar":
+        weights = np.ones(window_size)
+    elif window == "hann":
+        window_size = max(3, window_size)
+        weights = np.hanning(window_size)
+    else:
+        raise ValueError(f"unsupported envelope window: {window}")
+    weights /= weights.sum()
     left_padding = (window_size - 1) // 2
     right_padding = window_size - 1 - left_padding
     padded = np.pad(
@@ -303,9 +317,7 @@ def carrier_intensity(
         (left_padding, right_padding),
         mode="reflect",
     )
-    mean_square = np.convolve(
-        padded, np.full(window_size, 1 / window_size), mode="valid"
-    )
+    mean_square = np.convolve(padded, weights, mode="valid")
     return 2 * mean_square / normalization_amplitude**2
 
 
@@ -525,6 +537,8 @@ def run_gain(
     sample_stride: int = 10,
     verbose: bool = False,
     normalization_amplitude_v_m: float | None = None,
+    envelope_periods: float = 1,
+    envelope_window: str = "boxcar",
 ) -> GainResult:
     """Run a gain case and record the probes used by Figs. 10 and 12."""
 
@@ -554,10 +568,18 @@ def run_gain(
     normalization_amplitude = UNITS.electric_field(normalization_amplitude_v_m)
     sample_interval_s = sample_stride * UNITS.time_si(simulation.time_step.dt)
     input_intensity = carrier_intensity(
-        np.asarray(input_field), sample_interval_s, normalization_amplitude
+        np.asarray(input_field),
+        sample_interval_s,
+        normalization_amplitude,
+        periods=envelope_periods,
+        window=envelope_window,
     )
     output_intensity = carrier_intensity(
-        np.asarray(output_field), sample_interval_s, normalization_amplitude
+        np.asarray(output_field),
+        sample_interval_s,
+        normalization_amplitude,
+        periods=envelope_periods,
+        window=envelope_window,
     )
     return GainResult(
         np.asarray(times),

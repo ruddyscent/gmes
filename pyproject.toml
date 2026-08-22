@@ -79,6 +79,8 @@ cache-keys = [
     {file = "src/*.hh"},
     {file = "src/*.i"},
     {file = "src/*.pyx"},
+    {env = "GMES_ENABLE_OPENMP"},
+    {env = "GMES_OPENMP_PREFIX"},
     {env = "MACOSX_DEPLOYMENT_TARGET"},
 ]
 

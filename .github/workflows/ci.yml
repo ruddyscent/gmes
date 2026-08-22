@@ -41,22 +41,34 @@ jobs:
           sudo apt-get install --yes libopenmpi-dev openmpi-bin swig
       - name: Install SWIG on macOS
         if: runner.os == 'macOS'
-        run: brew install swig
+        run: brew install swig libomp
       - name: Install Linux test dependencies
         if: runner.os == 'Linux'
         run: uv sync --locked --extra hdf5 --extra plot --extra mpi
       - name: Install macOS test dependencies
         if: runner.os == 'macOS'
         run: uv sync --locked --extra hdf5 --extra plot
+      - name: Verify default build OpenMP support
+        run: uv run --no-sync python -c "from gmes import pw_material; assert pw_material.openmp_enabled()"
       - name: Run quality checks
         run: |
-          uv run --no-sync python -m isort --check-only gmes examples tests utils setup.py
-          uv run --no-sync python -m black --check gmes examples tests utils setup.py
+          uv run --no-sync python -m isort --check-only gmes examples tests benchmarks utils setup.py
+          uv run --no-sync python -m black --check gmes examples tests benchmarks utils setup.py
           uv run --no-sync python -m pylint gmes setup.py
-      - name: Run tests
+      - name: Run tests with the default threshold
         run: uv run --no-sync python -m unittest discover -v
+      - name: Run tests with forced parallel updates
+        run: OMP_NUM_THREADS=4 GMES_OPENMP_THRESHOLD=0 uv run --no-sync python -m unittest discover -v
+      - name: Rebuild without OpenMP on Linux
+        if: runner.os == 'Linux'
+        run: GMES_ENABLE_OPENMP=0 uv sync --locked --extra hdf5 --extra plot --extra mpi --reinstall-package gmes
+      - name: Rebuild without OpenMP on macOS
+        if: runner.os == 'macOS'
+        run: GMES_ENABLE_OPENMP=0 uv sync --locked --extra hdf5 --extra plot --reinstall-package gmes
+      - name: Run tests with the serial build
+        run: GMES_ENABLE_OPENMP=0 uv run --no-sync python -m unittest discover -v
       - name: Run MPI deployment smoke test
         if: runner.os == 'Linux'
         run: uv run --no-sync mpiexec --oversubscribe -n 10 python tests/mpi_deployment_smoke.py
       - name: Build distributions
-        run: uv build
+        run: GMES_ENABLE_OPENMP=1 uv build

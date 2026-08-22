@@ -6,6 +6,7 @@ import os
 import sys
 from glob import glob
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -27,7 +28,56 @@ from setuptools.command.build_ext import build_ext
 
 
 class BuildExt(build_ext):
-    """Copy SWIG's generated proxy modules into the wheel build tree."""
+    """Configure native extensions and copy generated SWIG proxies."""
+
+    def build_extensions(self):
+        self._configure_openmp()
+        super().build_extensions()
+
+    def _configure_openmp(self):
+        setting, options = openmp_options()
+        if setting == "disabled" or options is None:
+            return
+
+        compile_args, link_args = options
+        try:
+            self._probe_openmp(compile_args, link_args)
+        except Exception as error:
+            if setting == "required":
+                raise RuntimeError(
+                    "OpenMP was requested but the compiler or runtime probe failed"
+                ) from error
+            self.announce(
+                f"OpenMP probe failed; building the serial fallback: {error}",
+                level=2,
+            )
+            return
+
+        extension = next(
+            item for item in self.extensions if item.name == "gmes._pw_material"
+        )
+        extension.extra_compile_args.extend(compile_args)
+        extension.extra_link_args.extend(link_args)
+
+    def _probe_openmp(self, compile_args, link_args):
+        with TemporaryDirectory(prefix="gmes-openmp-") as directory:
+            source = Path(directory) / "probe.cc"
+            source.write_text(
+                "#include <omp.h>\n"
+                'extern "C" int gmes_openmp_probe() {\n'
+                "  return omp_get_max_threads();\n"
+                "}\n"
+            )
+            objects = self.compiler.compile(
+                [str(source)],
+                output_dir=directory,
+                extra_postargs=compile_args,
+            )
+            self.compiler.link_shared_object(
+                objects,
+                str(Path(directory) / "probe.so"),
+                extra_postargs=link_args,
+            )
 
     def run(self):
         super().run()
@@ -37,6 +87,60 @@ class BuildExt(build_ext):
             self.copy_file(
                 str(Path("gmes") / module_name), str(package_dir / module_name)
             )
+
+
+def openmp_options():
+    """Return the requested OpenMP mode and platform-specific flags."""
+    value = os.environ.get("GMES_ENABLE_OPENMP", "auto").strip().lower()
+    if value in {"0", "false", "no", "off"}:
+        return "disabled", None
+    if value in {"1", "true", "yes", "on"}:
+        setting = "required"
+    elif value == "auto":
+        setting = "auto"
+    else:
+        raise RuntimeError("GMES_ENABLE_OPENMP must be auto, 1/true/on, or 0/false/off")
+
+    if sys.platform.startswith("linux"):
+        return setting, (["-fopenmp"], ["-fopenmp"])
+
+    if sys.platform == "darwin":
+        configured_prefix = os.environ.get("GMES_OPENMP_PREFIX")
+        prefixes = (
+            [Path(configured_prefix)]
+            if configured_prefix
+            else [
+                Path("/opt/homebrew/opt/libomp"),
+                Path("/usr/local/opt/libomp"),
+            ]
+        )
+        prefix = next(
+            (
+                candidate
+                for candidate in prefixes
+                if (candidate / "include" / "omp.h").is_file()
+                and (candidate / "lib").is_dir()
+            ),
+            None,
+        )
+        if prefix is not None:
+            include_directory = prefix / "include"
+            library_directory = prefix / "lib"
+            return setting, (
+                ["-Xpreprocessor", "-fopenmp", f"-I{include_directory}"],
+                [
+                    f"-L{library_directory}",
+                    "-lomp",
+                    f"-Wl,-rpath,{library_directory}",
+                ],
+            )
+
+    if setting == "required":
+        raise RuntimeError(
+            "OpenMP was requested but no supported runtime was found; "
+            "install libomp on macOS or use an OpenMP compiler on Linux"
+        )
+    return setting, None
 
 
 class BdistWheel(bdist_wheel):
@@ -73,6 +177,7 @@ pw_material = Extension(
     swig_opts=["-c++", "-outdir", "gmes"],
     language="c++",
     extra_compile_args=["-std=c++23"],
+    extra_link_args=[],
 )
 
 # constant module

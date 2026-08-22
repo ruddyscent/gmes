@@ -2,6 +2,14 @@
 
 Notable changes to GMES are documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- Optional OpenMP parallelism for large native material-update loops, with
+  build-time fallback, runtime introspection, and a tunable cell threshold.
+- Repeatable field-update benchmarks for dielectric and dispersive workloads.
+
 ## [0.10.0] - 2026-08-22
 
 ### Changed

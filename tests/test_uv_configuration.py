@@ -39,7 +39,14 @@ class UvCacheKeyTest(unittest.TestCase):
 
     def test_tracks_macos_deployment_target(self):
         environment_keys = {entry["env"] for entry in self.cache_keys if "env" in entry}
-        self.assertIn("MACOSX_DEPLOYMENT_TARGET", environment_keys)
+        self.assertGreaterEqual(
+            environment_keys,
+            {
+                "GMES_ENABLE_OPENMP",
+                "GMES_OPENMP_PREFIX",
+                "MACOSX_DEPLOYMENT_TARGET",
+            },
+        )
 
     def test_pins_uv_and_native_build_dependencies(self):
         self.assertEqual(self.uv_configuration["required-version"], "==0.12.5")

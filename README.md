@@ -51,11 +51,12 @@ c++ --version
 swig -version
 ```
 
-On macOS, install the current Xcode Command Line Tools and SWIG:
+On macOS, install the current Xcode Command Line Tools and SWIG. Install
+Homebrew `libomp` as well to enable native OpenMP field updates:
 
 ```sh
 xcode-select --install
-brew install swig
+brew install swig libomp
 c++ --version
 swig -version
 ```
@@ -64,6 +65,15 @@ The native extensions are always compiled in C++23 mode. They use
 `std::mdspan` when the standard library provides `<mdspan>` and otherwise use
 the internal contiguous-indexing fallback. That fallback does not add support
 for older C++ language modes.
+
+OpenMP support is detected while building the native material extension. The
+default `GMES_ENABLE_OPENMP=auto` mode uses OpenMP when a compile-and-link
+probe succeeds and otherwise builds the serial fallback. On macOS, auto mode
+also rejects a `libomp` whose minimum deployment target is newer than the
+extension target. Set the variable to `0` to require a serial build or to `1`
+to require OpenMP and fail the build when the toolchain or runtime is
+unavailable or incompatible. `GMES_OPENMP_PREFIX` can point to a nonstandard
+`libomp` installation.
 
 ## Installation
 
@@ -173,6 +183,37 @@ See [`docs/releasing.md`](docs/releasing.md) for the release checklist.
 
 ## Parallel execution
 
+When OpenMP is present, native material-update loops with at least 8,192 cells
+run in parallel. Select the thread count before starting Python:
+
+```sh
+OMP_NUM_THREADS=4 uv run --no-sync python examples/air3d.py
+```
+
+Use `GMES_OPENMP_THRESHOLD` to tune the cutoff at runtime; `0` forces every
+eligible loop through OpenMP. The following functions report the active build
+and runtime configuration:
+
+```python
+from gmes import pw_material
+
+pw_material.openmp_enabled()
+pw_material.openmp_max_threads()
+pw_material.openmp_cell_threshold()
+```
+
+Build-time controls require reinstalling the native extension. For example,
+the locked development environment can switch to its serial fallback with:
+
+```sh
+GMES_ENABLE_OPENMP=0 uv sync --locked --extra hdf5 --reinstall-package gmes
+```
+
+See [`benchmarks/`](benchmarks/) for repeatable performance measurements and
+the threshold-selection record.
+
+### MPI
+
 Install an MPI implementation (`libopenmpi-dev openmpi-bin` on Ubuntu or
 `open-mpi` with Homebrew on macOS), then install the Python extra and use its
 launcher through the uv environment:
@@ -190,6 +231,10 @@ uv sync --locked --extra mpi
 uv run --no-sync mpiexec -n <process-count> python <simulation.py>
 ```
 
+When combining MPI and OpenMP, set `OMP_NUM_THREADS` explicitly and keep the
+process count times the thread count within the available physical cores to
+avoid oversubscription.
+
 ## Repository layout
 
 ```text
@@ -197,6 +242,7 @@ gmes/       Python package and public simulation API
 src/        C++, SWIG, and Cython extension sources
 examples/   Example electromagnetic simulations
 tests/      Unit and numerical regression tests
+benchmarks/ Repeatable field-update performance measurements
 utils/      Data-processing and diagnostic utilities
 docs/       Maintenance and migration notes
 ```

@@ -75,10 +75,13 @@ cache-keys = [
     {file = "build-constraints.txt"},
     {file = "README.md"},
     {file = "utils/macos_build.py"},
+    {file = "utils/openmp_build.py"},
     {file = "src/*.cc"},
     {file = "src/*.hh"},
     {file = "src/*.i"},
     {file = "src/*.pyx"},
+    {env = "GMES_ENABLE_OPENMP"},
+    {env = "GMES_OPENMP_PREFIX"},
     {env = "MACOSX_DEPLOYMENT_TARGET"},
 ]
 

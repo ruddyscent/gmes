@@ -7,8 +7,9 @@ GMES targets the latest stable Python 3 release. Python 2 compatibility and the 
 Install a C++23 compiler, SWIG 4, and [uv](https://docs.astral.sh/uv/). On
 Ubuntu 24.04 or newer use `sudo apt-get install --yes build-essential swig`;
 on macOS install the current Xcode Command Line Tools and run
-`brew install swig`. Verify the selected tools with `c++ --version` and
-`swig -version`.
+`brew install swig libomp`. Verify the selected tools with `c++ --version` and
+`swig -version`. Homebrew `libomp` is optional for serial-only development but
+required when testing OpenMP changes on macOS.
 
 The build uses `std::mdspan` when `<mdspan>` is available and otherwise uses
 its internal contiguous-indexing fallback; C++23 mode itself is required.
@@ -73,16 +74,32 @@ Run the narrowest relevant tests while developing, followed by the complete suit
 
 ```sh
 uv run --no-sync python -m unittest tests.test_geometry -v
-uv run --no-sync python -m isort --check-only gmes examples tests utils setup.py
-uv run --no-sync python -m black --check gmes examples tests utils setup.py
+uv run --no-sync python -m isort --check-only gmes examples tests benchmarks utils setup.py
+uv run --no-sync python -m black --check gmes examples tests benchmarks utils setup.py
 uv run --no-sync python -m pylint gmes setup.py
 uv run --no-sync python -m unittest discover -v
 uv build
 ```
 
+Changes to native update loops must also cover the forced-parallel and serial
+build paths:
+
+```sh
+GMES_ENABLE_OPENMP=1 uv sync --locked --extra hdf5 --reinstall-package gmes
+OMP_NUM_THREADS=4 GMES_OPENMP_THRESHOLD=0 uv run --no-sync python -m unittest discover -v
+GMES_ENABLE_OPENMP=0 uv sync --locked --extra hdf5 --reinstall-package gmes
+GMES_ENABLE_OPENMP=0 uv run --no-sync python -m unittest discover -v
+```
+
 Numerical behavior changes must include a deterministic regression test. Avoid using the large examples as routine tests because some need more than 1 GB of memory and run for a long time.
 
 Generated SWIG proxies, Cython C/C++ output, compiled extensions, distributions, and simulation results must not be committed.
+
+Use `benchmarks/field_updates.py` to evaluate field-update performance. Run
+each thread count or threshold in a separate process and compare both timing
+and checksum output. Keep visualization, generated JSON, and simulation output
+out of the repository. The reference measurements and threshold rationale are
+recorded in [`docs/openmp-benchmark.md`](docs/openmp-benchmark.md).
 
 Production distributions are created only by the tag-triggered release
 workflow. Follow [`docs/releasing.md`](docs/releasing.md) when preparing a

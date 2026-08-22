@@ -6,6 +6,7 @@ import os
 import sys
 from glob import glob
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -14,6 +15,7 @@ from utils.macos_build import (
     verify_extension_targets,
     verify_wheel_platform_tag,
 )
+from utils.openmp_build import openmp_options
 
 if sys.platform == "darwin":
     os.environ.setdefault("MACOSX_DEPLOYMENT_TARGET", MINIMUM_MACOS_VERSION)
@@ -27,7 +29,61 @@ from setuptools.command.build_ext import build_ext
 
 
 class BuildExt(build_ext):
-    """Copy SWIG's generated proxy modules into the wheel build tree."""
+    """Configure native extensions and copy generated SWIG proxies."""
+
+    def build_extensions(self):
+        self._configure_openmp()
+        super().build_extensions()
+
+    def _configure_openmp(self):
+        setting, options, diagnostic = openmp_options()
+        if setting == "disabled" or options is None:
+            if diagnostic:
+                self.announce(
+                    f"{diagnostic}; building the serial fallback",
+                    level=3,
+                )
+            return
+
+        compile_args, link_args = options
+        try:
+            self._probe_openmp(compile_args, link_args)
+        except Exception as error:
+            if setting == "required":
+                raise RuntimeError(
+                    "OpenMP was requested but the compiler or runtime probe failed"
+                ) from error
+            self.announce(
+                f"OpenMP probe failed; building the serial fallback: {error}",
+                level=2,
+            )
+            return
+
+        extension = next(
+            item for item in self.extensions if item.name == "gmes._pw_material"
+        )
+        extension.extra_compile_args.extend(compile_args)
+        extension.extra_link_args.extend(link_args)
+
+    def _probe_openmp(self, compile_args, link_args):
+        with TemporaryDirectory(prefix="gmes-openmp-") as directory:
+            source = Path(directory) / "probe.cc"
+            source.write_text(
+                "#include <omp.h>\n"
+                'extern "C" int gmes_openmp_probe() {\n'
+                "  return omp_get_max_threads();\n"
+                "}\n"
+            )
+            objects = self.compiler.compile(
+                [str(source)],
+                output_dir=directory,
+                extra_postargs=compile_args,
+            )
+            self.compiler.link_shared_object(
+                objects,
+                str(Path(directory) / "probe.so"),
+                extra_postargs=link_args,
+            )
 
     def run(self):
         super().run()
@@ -73,6 +129,7 @@ pw_material = Extension(
     swig_opts=["-c++", "-outdir", "gmes"],
     language="c++",
     extra_compile_args=["-std=c++23"],
+    extra_link_args=[],
 )
 
 # constant module

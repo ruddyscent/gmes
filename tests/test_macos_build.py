@@ -1,9 +1,13 @@
 import unittest
-from unittest.mock import patch
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import Mock, patch
 
 from utils.macos_build import (
     extract_macos_targets,
+    select_macos_openmp_prefix,
     verify_extension_targets,
+    verify_macos_dependency_target,
     verify_wheel_platform_tag,
 )
 
@@ -45,6 +49,40 @@ class MacosBuildTest(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "expected 11.0"):
             verify_extension_targets(["build/gmes/material.so"], "11.0")
+
+    @patch("utils.macos_build.subprocess.run")
+    def test_dependency_target_accepts_older_minos(self, run):
+        run.return_value.stdout = "cmd LC_BUILD_VERSION\n  minos 10.15\n"
+
+        verify_macos_dependency_target("/opt/lib/libomp.dylib", "11.0")
+
+    @patch("utils.macos_build.subprocess.run")
+    def test_dependency_target_rejects_newer_minos(self, run):
+        run.return_value.stdout = "cmd LC_BUILD_VERSION\n  minos 26.0\n"
+
+        with self.assertRaisesRegex(RuntimeError, "newer than requested 11.0"):
+            verify_macos_dependency_target("/opt/lib/libomp.dylib", "11.0")
+
+    @patch("utils.macos_build.subprocess.run")
+    def test_openmp_prefix_selection_skips_incompatible_runtime(self, run):
+        run.side_effect = [
+            Mock(stdout="cmd LC_BUILD_VERSION\n minos 26.0\n"),
+            Mock(stdout="cmd LC_BUILD_VERSION\n minos 11.0\n"),
+        ]
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            prefixes = [root / "newer", root / "compatible"]
+            for prefix in prefixes:
+                (prefix / "include").mkdir(parents=True)
+                (prefix / "include" / "omp.h").touch()
+                (prefix / "lib").mkdir()
+                (prefix / "lib" / "libomp.dylib").touch()
+
+            selected, incompatibilities = select_macos_openmp_prefix(prefixes, "11.0")
+
+        self.assertEqual(selected, prefixes[1])
+        self.assertEqual(len(incompatibilities), 1)
+        self.assertIn("newer than requested 11.0", incompatibilities[0])
 
 
 if __name__ == "__main__":

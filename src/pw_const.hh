@@ -74,12 +74,12 @@ namespace gmes
 	       int in2_dim1, int in2_dim2, int in2_dim3,
 	       double d1, double d2, double dt, double n)
     {
-      for (auto&& [idx, param] : zip_equal(idx_list, param_list)) {
+      for_each_equal(idx_list, param_list, [&](const auto& idx, auto& param) {
     	update(inplace_field, inplace_dim1, inplace_dim2, inplace_dim3,
     	       in_field1, in1_dim1, in1_dim2, in1_dim3,
     	       in_field2, in2_dim1, in2_dim2, in2_dim3,
                d1, d2, dt, n, idx, param);
-      }
+      });
     }
 
   private:
@@ -176,12 +176,12 @@ namespace gmes
 	       int in2_dim1, int in2_dim2, int in2_dim3,
 	       double d1, double d2, double dt, double n)
     {
-      for (auto&& [idx, param] : zip_equal(idx_list, param_list)) {
+      for_each_equal(idx_list, param_list, [&](const auto& idx, auto& param) {
     	update(inplace_field, inplace_dim1, inplace_dim2, inplace_dim3,
     	       in_field1, in1_dim1, in1_dim2, in1_dim3,
     	       in_field2, in2_dim1, in2_dim2, in2_dim3,
                d1, d2, dt, n, idx, param);
-      }
+      });
     }
 
   private:

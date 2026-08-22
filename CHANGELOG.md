@@ -2,6 +2,20 @@
 
 Notable changes to GMES are documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- Optional OpenMP parallelism for large native material-update loops, with
+  build-time fallback, runtime introspection, and a tunable cell threshold.
+- Repeatable field-update benchmarks for dielectric and dispersive workloads.
+
+### Fixed
+
+- macOS auto-detection now skips `libomp` runtimes whose minimum deployment
+  target is newer than the extension target instead of producing a
+  deceptively tagged wheel with a linker warning.
+
 ## [0.10.0] - 2026-08-22
 
 ### Changed

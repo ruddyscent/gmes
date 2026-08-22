@@ -60,30 +60,55 @@ viable reproduction fix. Focused tests also verify that the initial
 Bloch drive is independent of `T1` and that the lossless Bloch-sphere
 norm is conserved.
 
-### Fig. 10 turn-on precursor
+### Fig. 10 smooth turn-on
 
 Equation (29) describes a resonant sinusoid multiplied during the first five
-periods by `(1 - x^2)^4`, followed by a continuous-wave branch. Interpreting
-the five-period interval as `x = 2t / (5 Tp) - 1` makes this envelope rise
-from zero, return to zero at `5 Tp`, and then jump to one. It therefore
-produces a separate turn-on lobe before the main continuous-wave envelope.
-The narrow onset feature is also visible in the published Fig. 10, although
-the one-carrier-period average of `2 E^2` used here makes it more prominent.
-The equation and its description as a "smooth turn-on" are internally
-ambiguous; replacing it with a monotone ramp would remove the precursor but
-would no longer be a literal reproduction of Eq. (29).
+periods by `(1 - x^2)^4`, followed by a continuous-wave branch, but its
+printed definition of `x` is inconsistent with that five-period interval. An
+earlier implementation used the full symmetric window
+`x = 2t / (5 Tp) - 1`. That envelope rises from zero, returns to zero at
+`5 Tp`, and then jumps to one, creating artificial preceding peaks in both
+the input and output envelopes.
+
+A high-resolution inspection of the published Fig. 10 shows no such peaks.
+The dotted `I_left` curve rises monotonically from zero to one and remains
+there; its steep leading edge is not a separate peak. The source now uses the
+monotone half-window `x = t / (5 Tp) - 1`, which rises smoothly from zero to
+one and joins the continuous-wave branch with zero slope. This interpretation
+is consistent with both the paper's phrase "smooth turn-on over 5 periods"
+and the plotted `I_left` trace.
 
 ### Fig. 10 gain transient
 
 The published Fig. 10 reports an early output-intensity gain of `1.483` that
 falls near `0.55 ps` to `1.223`. The GMES result approaches `1.223` directly
-and does not contain the decrease. This difference follows an internal
-factor-of-two inconsistency between Eqs. (19) and (20). Equation (19) has the
-form `k^2 = (omega0/c)^2 (1 - i delta)`, so its small-signal square root is
-`k = (omega0/c) (1 - i delta/2)`. Equation (20) omits this factor of one-half
-when defining the gain coefficient. The correctly expanded coefficient gives
-the normalized intensity `exp(g L) = 1.224`, consistent with the GMES value;
-the doubled coefficient used by Eq. (20) gives `exp(2 g L) = 1.498`.
+and does not contain the decrease. The discrepancy is associated with a chain
+of factor-of-two inconsistencies in the paper's small-signal derivation, not
+with the turn-on envelope.
+
+Let
+
+```text
+G = N_atom gamma^2 omega0 T2 / (hbar epsilon0 c).
+```
+
+For the reported parameters, `G = 0.02245 micrometer^-1`. Direct solution of
+Bloch Eqs. (12a)-(12b) at resonance gives the polarization amplitude
+`rho1 = i gamma E T2 rho30 / hbar`. Combining this with Maxwell Eq. (11b) and
+expanding the resulting square root gives the electric-field gain coefficient
+`G/2`; the normalized intensity after a length `L` is therefore
+`exp(G L) = 1.224`.
+
+In contrast, Eq. (17b) retains only `1/T2` in the second-order damping term;
+direct differentiation of Eqs. (12a)-(12b) gives `2/T2`. Consequently,
+Eq. (18b) doubles the resonant polarization, and Eq. (19) carries twice the
+susceptibility obtained from the original Bloch equations. Equation (20) has
+an additional notational inconsistency: its printed coefficient contains
+`2 N_atom`, while the quoted numerical value `g = 0.0225 micrometer^-1`
+corresponds to `G`, not `2G`. The paper then uses `exp(2 g L) = 1.498` for the
+early intensity and describes a later halving of the coefficient, which gives
+`exp(g L) = 1.224`. The latter is the value obtained directly by GMES from the
+stated Maxwell-Bloch equations.
 
 A controlled run with only `N_atom` doubled from `1.0e24` to `2.0e24 m^-3`
 produced a peak intensity of `1.49720` and a `0.70-0.84 ps` median of

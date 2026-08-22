@@ -16,7 +16,7 @@ Verification was performed on an Apple silicon MacBook with Python 3.14.6. Inter
 | `ziolkowski1995_sit.py` | Full Figs. 1-4 | Pass | 270.5 s total | Used 20,000 cells. The pi, 2-pi, and 4-pi cases reached the expected inversion cycles; maximum `rho3` ranged from `0.9954` to `0.9985`, with minimum Bloch norm at least `0.9955`. |
 | `ziolkowski1995_ultrafast.py` | Full Figs. 5-9 | Pass | 8.2 s total | Used the paper cell counts. Figs. 5 and 9 reached essentially complete inversion and de-excitation, and the lossless Bloch norm remained near one. |
 | `ziolkowski1995_gain.py` | Full Figs. 10-11 | Partial | 56.3 s | Completed 150,000 steps over 2,000 cells. The late normalized intensity and final field reproduce the paper's approximately `1.223` and `1.106` values, but the reported early `1.483` intensity peak was not recovered. |
-| `ziolkowski1995_pump_probe.py` | Full Fig. 12 | Pass | 147.1 s for both delays | At `lambda0/400`, recovered the 20- and 40-period probe turn-ons, free-induction decay, late intensities `1.2093` and `1.2086`, and residual inversion near `0.938`. The reported targets are `1.2073` and `0.9317`. |
+| `ziolkowski1995_pump_probe.py` | Full Fig. 12 | Pass | 178.4 s for both delays | At `lambda0/400`, recovered the corrected monotone 20- and 40-period probe turn-ons, free-induction decay, late intensities `1.2093` and `1.2086`, and residual inversion near `0.938`. The reported targets are `1.2073` and `0.9317`. |
 
 High-cost examples may receive construction or reduced-size checks instead of full simulation runs. Such cases are explicitly identified rather than reported as full passes.
 
@@ -119,6 +119,41 @@ published information is insufficient to determine whether the transition
 came from the original implementation or an undocumented envelope-processing
 choice. The test-only Appendix `1/T1` variant suppresses the gain and does not
 recover this transient.
+
+### Fig. 12 probe turn-on
+
+The weak probe in Fig. 12 is the delayed version of the same resonant source
+defined by Eq. (29), so it must use the corrected monotone half-window from
+the Fig. 10 audit as well. Full-resolution reruns at delays of $20T_p$ and
+$40T_p$ show monotone input turn-ons. Their late normalized output intensities
+are `1.209255` and `1.208602`, respectively, and the final inversion $\rho_3$
+ranges are `0.937946-0.938031` and `0.938006-0.938106`. These remain close to
+the paper's reported `1.2073` intensity and `0.9317` inversion; the turn-on
+correction does not require a change to the Dm2 material parameters.
+
+The small structure near 120 fs on the reconstructed $I_{\mathrm{right},40}$
+curve cannot be caused by the $20T_p$ input: the $20T_p$ and $40T_p$ traces
+come from separate simulations. A full-resolution diagnostic found that the
+two output histories agree to within `1.01e-4` from 100 to 140 fs, before the
+$20T_p$ probe can reach the output plane. The structure is in the
+pump-induced free-induction decay and remains visible after the reproducible
+one-period local average used here. An additional 10 fs moving average
+removes its local extrema. The paper identifies the traces only as intensity
+envelopes and does not state its extraction or smoothing algorithm, so its
+smoother $I_{\mathrm{right},40}$ curve does not establish a Dm2 discrepancy.
+
+The tiny mark near the start of the published $I_{\mathrm{left},20}$ trace is
+also not sufficient evidence for a physical prepeak. That trace is printed
+with a long-dashed line, and its first visible dash lies on the low-amplitude
+part of the monotone turn-on. The corrected run rises continuously from
+`0.0348` at 120 fs to `0.9863` at 135 fs. By contrast, the literal symmetric
+interpretation of the printed Eq. (29) creates an order-one lobe and returns
+to zero before jumping to the continuous-wave branch, which is qualitatively
+larger than the small published mark. The mark could additionally contain a
+small residual pump field at the input plane, but the paper provides neither
+the sampled data nor the envelope algorithm needed to separate that effect
+from dashed-line rendering. It therefore does not justify restoring the
+discontinuous source.
 
 ### Other reproduction notes
 

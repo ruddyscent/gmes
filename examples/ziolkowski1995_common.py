@@ -223,7 +223,12 @@ class SmoothSine(PaperSourceTime):
 
 
 class PumpProbe(PaperSourceTime):
-    """Ultrafast pump followed by a weak resonant probe."""
+    """Ultrafast pump followed by the weak resonant probe in Fig. 12.
+
+    The probe uses the same corrected monotone interpretation of Ziolkowski
+    et al. (1995), Eq. (29), as Fig. 10. See ``SmoothSine`` and
+    ``VERIFICATION.md`` for the equation audit.
+    """
 
     def __init__(self, omega: float, pulse_width: float, beta: float, delay: float):
         self.pump = UltrafastPulse(pulse_width)
@@ -281,11 +286,13 @@ def carrier_intensity(
     sample_interval_s: float,
     normalization_amplitude: float,
 ) -> np.ndarray:
-    """Return a one-carrier-period moving intensity envelope.
+    """Return a one-carrier-period moving intensity-envelope estimate.
 
-    A local average of ``2 E**2`` reproduces the envelope detector used for
-    Figs. 10 and 12 without the nonlocal edge ringing that a finite-record
-    Hilbert transform introduces after the much larger pump pulse.
+    Ziolkowski et al. (1995) do not specify their envelope-extraction
+    algorithm. This local average of ``2 E**2`` avoids the nonlocal edge
+    ringing that a finite-record Hilbert transform introduces after the much
+    larger pump pulse. Short pump-induced transients can therefore differ
+    from the smoother published curves; see ``VERIFICATION.md``.
     """
 
     window_size = max(2, round(PERIOD_S / sample_interval_s))

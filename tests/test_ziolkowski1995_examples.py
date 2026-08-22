@@ -121,6 +121,13 @@ class ZiolkowskiSourceTest(unittest.TestCase):
         self.assertAlmostEqual(sine.oscillator(5 * width + width / 4), 1)
 
         signal = PumpProbe(omega, width, beta=1e-4, delay=20 * width)
+        delayed_turn_on = np.array(
+            [
+                signal.probe.envelope(time - signal.delay)
+                for time in np.linspace(signal.delay, signal.delay + 5 * width, 101)
+            ]
+        )
+        self.assertTrue(np.all(np.diff(delayed_turn_on) >= 0))
         self.assertEqual(signal.probe.oscillator(-1), 0)
         self.assertEqual(signal.oscillator(10 * width), 0)
         self.assertNotEqual(signal.oscillator(20 * width + width / 4), 0)

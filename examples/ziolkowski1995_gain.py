@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""Reproduce Figs. 10-11 (small-signal gain) from Ziolkowski 1995."""
+"""Reproduce Ziolkowski, Arnold, and Gogny, Figs. 10-11 (gain).
+
+Reference: Phys. Rev. A 52, 3082-3094 (1995),
+https://doi.org/10.1103/PhysRevA.52.3082. The published Fig. 10 transient
+is not fully reproduced; see VERIFICATION.md for the equation audit.
+"""
 
 from argparse import ArgumentParser
 from pathlib import Path

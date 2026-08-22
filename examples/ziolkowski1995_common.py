@@ -197,7 +197,14 @@ class UltrafastPulseTrain(PaperSourceTime):
 
 
 class SmoothSine(PaperSourceTime):
-    """Resonant sinusoid with the five-period turn-on from Eq. (29)."""
+    """Resonant sinusoid from Ziolkowski et al. (1995), Eq. (29).
+
+    Interpreting the printed five-period interval as ``x = 2t/(5Tp) - 1``
+    makes the polynomial envelope return to zero before the continuous-wave
+    branch starts. This produces the narrow precursor visible at the start of
+    the input and output traces in Fig. 10. See ``VERIFICATION.md`` for the
+    ambiguity in the paper's description of this function as a smooth turn-on.
+    """
 
     def __init__(self, omega: float, period: float):
         self.omega = float(omega)
@@ -358,6 +365,8 @@ def ultrafast_scenario(figure: int, quick: bool = False) -> Scenario:
 
 
 def gain_scenario(quick: bool = False) -> Scenario:
+    """Return the parameters reported for Figs. 10-11 and Eq. (29)."""
+
     return Scenario(
         domain_um=15.0,
         cells=_quick_cells(2_000, quick),

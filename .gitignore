@@ -1,5 +1,19 @@
-# Created by https://www.toptal.com/developers/gitignore/api/python,c++,macos,windows,linux,vim,visualstudiocode
-# Edit at https://www.toptal.com/developers/gitignore?templates=python,c++,macos,windows,linux,vim,visualstudiocode
+# Created by https://www.toptal.com/developers/gitignore/api/python,c++,macos,windows,linux,vim,visualstudiocode,video,images,audio
+# Edit at https://www.toptal.com/developers/gitignore?templates=python,c++,macos,windows,linux,vim,visualstudiocode,video,images,audio
+
+### Audio ###
+*.aif
+*.iff
+*.m3u
+*.m4a
+*.mid
+*.mp3
+*.mpa
+*.ra
+*.wav
+*.wma
+*.ogg
+*.flac
 
 ### C++ ###
 # Prerequisites
@@ -34,6 +48,71 @@
 *.exe
 *.out
 *.app
+
+### Images ###
+# JPEG
+*.jpg
+*.jpeg
+*.jpe
+*.jif
+*.jfif
+*.jfi
+
+# JPEG 2000
+*.jp2
+*.j2k
+*.jpf
+*.jpx
+*.jpm
+*.mj2
+
+# JPEG XR
+*.jxr
+*.hdp
+*.wdp
+
+# Graphics Interchange Format
+*.gif
+
+# RAW
+*.raw
+
+# Web P
+*.webp
+
+# Portable Network Graphics
+*.png
+
+# Animated Portable Network Graphics
+*.apng
+
+# Multiple-image Network Graphics
+*.mng
+
+# Tagged Image File Format
+*.tiff
+*.tif
+
+# Scalable Vector Graphics
+*.svg
+*.svgz
+
+# Portable Document Format
+*.pdf
+
+# X BitMap
+*.xbm
+
+# BMP
+*.bmp
+*.dib
+
+# ICO
+*.ico
+
+# 3D Images
+*.3dm
+*.max
 
 ### Linux ###
 *~
@@ -254,6 +333,24 @@ poetry.toml
 # LSP config files
 pyrightconfig.json
 
+### Video ###
+*.3g2
+*.3gp
+*.asf
+*.asx
+*.avi
+*.flv
+*.mkv
+*.mov
+*.mp4
+*.mpg
+*.ogv
+*.rm
+*.swf
+*.vob
+*.wmv
+*.webm
+
 ### Vim ###
 # Swap
 [._]*.s[a-v][a-z]
@@ -319,6 +416,8 @@ $RECYCLE.BIN/
 # Windows shortcuts
 *.lnk
 
+# End of https://www.toptal.com/developers/gitignore/api/python,c++,macos,windows,linux,vim,visualstudiocode,video,images,audio
+
 ### GMES ###
 # SWIG-generated Python modules and wrapper sources
 /gmes/constant.py
@@ -333,5 +432,3 @@ $RECYCLE.BIN/
 
 # Emacs auto-save files
 *#
-
-# End of https://www.toptal.com/developers/gitignore/api/python,c++,macos,windows,linux,vim,visualstudiocode

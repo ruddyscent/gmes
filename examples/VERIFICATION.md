@@ -13,5 +13,37 @@ Verification was performed on an Apple silicon MacBook with Python 3.14.6. Inter
 | `slab_waveguide.py` | Full run to `t=200` | Pass | 2.23 s / 130 MB | Completed 2,857 timesteps. The `(161, 81, 1)` Ez field was finite with peak magnitude `0.9994622335025213`. |
 | `tfsf.py` | Full run to `t=200` | Pass | 4.50 s / 125 MB | Completed 5,714 timesteps. Ez, Hx, and Hy were finite and nonzero after fixing CPML grading at rounded outer boundaries. |
 | `tfsf_with_scatterer.py` | Full run to `t=200` | Pass | 4.96 s / 122 MB | Completed 5,714 timesteps with the dielectric cylinder. Ez, Hx, and Hy were finite and nonzero, with peak magnitudes `2.0727`, `1.9535`, and `1.9615`. |
+| `ziolkowski1995_sit.py` | Full Figs. 1-4 | Pass | 270.5 s total | Used 20,000 cells. The pi, 2-pi, and 4-pi cases reached the expected inversion cycles; maximum `rho3` ranged from `0.9954` to `0.9985`, with minimum Bloch norm at least `0.9955`. |
+| `ziolkowski1995_ultrafast.py` | Full Figs. 5-9 | Pass | 8.2 s total | Used the paper cell counts. Figs. 5 and 9 reached essentially complete inversion and de-excitation, and the lossless Bloch norm remained near one. |
+| `ziolkowski1995_gain.py` | Full Figs. 10-11 | Partial | 56.3 s | Completed 150,000 steps over 2,000 cells. The late normalized intensity and final field reproduce the paper's approximately `1.223` and `1.106` values, but the reported early `1.483` intensity peak was not recovered. |
+| `ziolkowski1995_pump_probe.py` | Full Fig. 12 | Pass | 147.1 s for both delays | At `lambda0/400`, recovered the 20- and 40-period probe turn-ons, free-induction decay, late intensities `1.2093` and `1.2086`, and residual inversion near `0.938`. The reported targets are `1.2073` and `0.9317`. |
 
 High-cost examples may receive construction or reduced-size checks instead of full simulation runs. Such cases are explicitly identified rather than reported as full passes.
+
+## Ziolkowski 1995 reproduction notes
+
+Appendix Eq. (A3e) prints `D(t) = rho30 / T1 exp(t / T1)`. Direct
+substitution of Eqs. (A1) into Bloch Eq. (12b) instead gives the
+additive coefficient
+
+```text
+D(t) = 2 gamma rho30 / hbar exp(t / T2),
+```
+
+which is the expression implemented by `Dm2`. A test-only A/B build
+with the extra dimensionless `1/T1` factor removed the Fig. 10 gain
+(approximately `1.22` became `1.00`), so the printed form is not a
+viable reproduction fix. Focused tests also verify that the initial
+Bloch drive is independent of `T1` and that the lossless Bloch-sphere
+norm is conserved.
+
+For Figs. 5-8, the caption says `t=12.5 fs`, but a source at `z=0`
+cannot reach the plotted `6-7.5 micrometer` interval by that time.
+The examples use a documented 12.5 fs pre-roll and preserve the
+paper's displayed time label. This produces the reported spatial
+profiles without changing material or pulse parameters.
+
+Intensity envelopes in Figs. 10 and 12 use a one-carrier-period local
+average of `2 E^2`. A whole-record Hilbert transform is unsuitable for
+Fig. 12 because its nonlocal edge ringing leaks the pump, which is
+10,000 times larger in amplitude, into the later probe interval.

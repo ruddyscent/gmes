@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Benchmark native FDTD field updates without visualization or file output."""
+"""Benchmark FDTD initialization and field updates without simulation output."""
 
 import argparse
 import json
@@ -11,58 +11,63 @@ from time import perf_counter
 import numpy as np
 
 
-def build_simulation(case):
-    """Construct and initialize one representative benchmark simulation."""
-    from gmes import (
-        FDTD,
-        Cartesian,
-        Continuous,
-        Cpml,
-        DefaultMedium,
-        Dielectric,
-        Drude,
-        DrudePole,
-        Ex,
-        Ez,
-        PointSource,
-        Shell,
-        TMzFDTD,
-    )
-
+def build_simulation(case, gmes):
+    """Construct one representative benchmark simulation without initializing it."""
     if case == "small":
-        space = Cartesian(size=(2, 2, 0), resolution=20)
-        medium = Dielectric()
-        simulation_type = TMzFDTD
-        source_component = Ez
+        space = gmes.Cartesian(size=(2, 2, 0), resolution=20)
+        medium = gmes.Dielectric()
+        simulation_type = gmes.TMzFDTD
+        source_component = gmes.Ez
     elif case == "2d":
-        space = Cartesian(size=(10, 10, 0), resolution=20)
-        medium = Dielectric()
-        simulation_type = TMzFDTD
-        source_component = Ez
+        space = gmes.Cartesian(size=(10, 10, 0), resolution=20)
+        medium = gmes.Dielectric()
+        simulation_type = gmes.TMzFDTD
+        source_component = gmes.Ez
     elif case == "3d":
-        space = Cartesian(size=(5, 5, 5), resolution=10)
-        medium = Dielectric()
-        simulation_type = FDTD
-        source_component = Ex
+        space = gmes.Cartesian(size=(5, 5, 5), resolution=10)
+        medium = gmes.Dielectric()
+        simulation_type = gmes.FDTD
+        source_component = gmes.Ex
     elif case == "dispersive":
-        space = Cartesian(size=(12, 12, 0), resolution=20)
-        medium = Drude(dps=(DrudePole(omega=1.0, gamma=0.1),))
-        simulation_type = TMzFDTD
-        source_component = Ez
+        space = gmes.Cartesian(size=(12, 12, 0), resolution=20)
+        medium = gmes.Drude(dps=(gmes.DrudePole(omega=1.0, gamma=0.1),))
+        simulation_type = gmes.TMzFDTD
+        source_component = gmes.Ez
+    elif case == "heterogeneous":
+        space = gmes.Cartesian(size=(10, 10, 0), resolution=20)
+        medium = gmes.Dielectric()
+        simulation_type = gmes.TMzFDTD
+        source_component = gmes.Ez
+    elif case == "complex":
+        space = gmes.Cartesian(size=(10, 10, 0), resolution=20)
+        medium = gmes.Dielectric()
+        simulation_type = gmes.TMzFDTD
+        source_component = gmes.Ez
     else:
         raise ValueError(f"unknown benchmark case: {case}")
 
-    geometry = [DefaultMedium(material=medium), Shell(material=Cpml())]
+    geometry = [gmes.DefaultMedium(material=medium)]
+    if case == "heterogeneous":
+        geometry.extend(
+            gmes.Cylinder(
+                material=gmes.Dielectric(eps_inf=4.0),
+                center=(x, y, 0),
+                axis=(0, 0, 1),
+                radius=0.6,
+            )
+            for x in (-3, -1, 1, 3)
+            for y in (-3, -1, 1, 3)
+        )
+    geometry.append(gmes.Shell(material=gmes.Cpml()))
     sources = [
-        PointSource(
-            src_time=Continuous(freq=0.8),
+        gmes.PointSource(
+            src_time=gmes.Continuous(freq=0.8),
             center=(0, 0, 0),
             component=source_component,
         )
     ]
-    simulation = simulation_type(space, geometry, sources, verbose=False)
-    simulation.init()
-    return simulation
+    kwargs = {"bloch": (0.1, 0.2, 0)} if case == "complex" else {}
+    return simulation_type(space, geometry, sources, verbose=False, **kwargs)
 
 
 def field_checksum(simulation):
@@ -91,24 +96,62 @@ def material_update_sizes(simulation):
     )
 
 
-def run_case(case, warmup, steps, repeats):
-    """Measure one case and return timing samples plus its final checksum."""
-    simulation = build_simulation(case)
+def field_shapes(simulation):
+    """Return array shapes and dtypes for every field component."""
+    return {
+        component.__name__: {
+            "dtype": str(field.dtype),
+            "shape": list(field.shape),
+        }
+        for component, field in simulation.field.items()
+    }
+
+
+def initialize_simulation(case, gmes):
+    """Time construction and FDTD.init() independently for one simulation."""
+    start = perf_counter()
+    simulation = build_simulation(case, gmes)
+    construction_seconds = perf_counter() - start
+
+    start = perf_counter()
+    simulation.init()
+    initialization_seconds = perf_counter() - start
+    return simulation, construction_seconds, initialization_seconds
+
+
+def run_case(case, warmup, steps, repeats, gmes):
+    """Measure repeated initialization and step timings for one case."""
+    construction_samples = []
+    initialization_samples = []
+    simulation = None
+    for _ in range(repeats):
+        simulation = None
+        simulation, construction_seconds, initialization_seconds = (
+            initialize_simulation(case, gmes)
+        )
+        construction_samples.append(construction_seconds)
+        initialization_samples.append(initialization_seconds)
+
     for _ in range(warmup):
         simulation.step()
 
-    samples = []
+    step_samples = []
     for _ in range(repeats):
         start = perf_counter()
         for _ in range(steps):
             simulation.step()
-        samples.append((perf_counter() - start) / steps)
+        step_samples.append((perf_counter() - start) / steps)
 
     return {
         "case": case,
-        "seconds_per_step": samples,
-        "median_seconds_per_step": median(samples),
+        "seconds_per_construction": construction_samples,
+        "median_seconds_per_construction": median(construction_samples),
+        "seconds_per_initialization": initialization_samples,
+        "median_seconds_per_initialization": median(initialization_samples),
+        "seconds_per_step": step_samples,
+        "median_seconds_per_step": median(step_samples),
         "checksum": field_checksum(simulation),
+        "field_shapes": field_shapes(simulation),
         "material_update_sizes": material_update_sizes(simulation),
     }
 
@@ -118,7 +161,15 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--case",
-        choices=("small", "2d", "3d", "dispersive", "all"),
+        choices=(
+            "small",
+            "2d",
+            "3d",
+            "dispersive",
+            "heterogeneous",
+            "complex",
+            "all",
+        ),
         default="all",
     )
     parser.add_argument("--warmup", type=int, default=10)
@@ -143,18 +194,26 @@ def main():
     if args.threshold is not None:
         os.environ["GMES_OPENMP_THRESHOLD"] = str(args.threshold)
 
-    from gmes import pw_material
+    import gmes
 
-    cases = ("small", "2d", "3d", "dispersive") if args.case == "all" else (args.case,)
+    cases = (
+        ("small", "2d", "3d", "dispersive", "heterogeneous", "complex")
+        if args.case == "all"
+        else (args.case,)
+    )
     result = {
         "platform": platform.platform(),
         "python": platform.python_version(),
-        "openmp_enabled": pw_material.openmp_enabled(),
-        "openmp_max_threads": pw_material.openmp_max_threads(),
-        "openmp_cell_threshold": pw_material.openmp_cell_threshold(),
+        "openmp_enabled": gmes.pw_material.openmp_enabled(),
+        "openmp_max_threads": gmes.pw_material.openmp_max_threads(),
+        "openmp_cell_threshold": gmes.pw_material.openmp_cell_threshold(),
         "openmp_threads": args.threads,
+        "warmup_steps": args.warmup,
+        "steps_per_repeat": args.steps,
+        "repeats": args.repeats,
         "cases": [
-            run_case(case, args.warmup, args.steps, args.repeats) for case in cases
+            run_case(case, args.warmup, args.steps, args.repeats, gmes)
+            for case in cases
         ],
     }
     print(json.dumps(result, indent=2, sort_keys=True))

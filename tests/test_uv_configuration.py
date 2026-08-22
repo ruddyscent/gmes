@@ -26,6 +26,7 @@ class UvCacheKeyTest(unittest.TestCase):
                 "MANIFEST.in",
                 "README.md",
                 "utils/macos_build.py",
+                "utils/openmp_build.py",
             },
         )
 

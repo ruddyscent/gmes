@@ -12,10 +12,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from utils.macos_build import (
     MINIMUM_MACOS_VERSION,
-    select_macos_openmp_prefix,
     verify_extension_targets,
     verify_wheel_platform_tag,
 )
+from utils.openmp_build import openmp_options
 
 if sys.platform == "darwin":
     os.environ.setdefault("MACOSX_DEPLOYMENT_TARGET", MINIMUM_MACOS_VERSION)
@@ -93,64 +93,6 @@ class BuildExt(build_ext):
             self.copy_file(
                 str(Path("gmes") / module_name), str(package_dir / module_name)
             )
-
-
-def openmp_options():
-    """Return the requested OpenMP mode and platform-specific flags."""
-    value = os.environ.get("GMES_ENABLE_OPENMP", "auto").strip().lower()
-    if value in {"0", "false", "no", "off"}:
-        return "disabled", None, None
-    if value in {"1", "true", "yes", "on"}:
-        setting = "required"
-    elif value == "auto":
-        setting = "auto"
-    else:
-        raise RuntimeError("GMES_ENABLE_OPENMP must be auto, 1/true/on, or 0/false/off")
-
-    if sys.platform.startswith("linux"):
-        return setting, (["-fopenmp"], ["-fopenmp"]), None
-
-    if sys.platform == "darwin":
-        configured_prefix = os.environ.get("GMES_OPENMP_PREFIX")
-        prefixes = (
-            [Path(configured_prefix)]
-            if configured_prefix
-            else [
-                Path("/opt/homebrew/opt/libomp"),
-                Path("/usr/local/opt/libomp"),
-            ]
-        )
-        target = os.environ["MACOSX_DEPLOYMENT_TARGET"]
-        prefix, incompatibilities = select_macos_openmp_prefix(prefixes, target)
-
-        if prefix is not None:
-            include_directory = prefix / "include"
-            library_directory = prefix / "lib"
-            return (
-                setting,
-                (
-                    ["-Xpreprocessor", "-fopenmp", f"-I{include_directory}"],
-                    [
-                        f"-L{library_directory}",
-                        "-lomp",
-                        f"-Wl,-rpath,{library_directory}",
-                    ],
-                ),
-                None,
-            )
-
-        if incompatibilities:
-            diagnostic = "; ".join(incompatibilities)
-            if setting == "required":
-                raise RuntimeError(f"OpenMP was requested but {diagnostic}")
-            return setting, None, diagnostic
-
-    if setting == "required":
-        raise RuntimeError(
-            "OpenMP was requested but no supported runtime was found; "
-            "install libomp on macOS or use an OpenMP compiler on Linux"
-        )
-    return setting, None, None
 
 
 class BdistWheel(bdist_wheel):

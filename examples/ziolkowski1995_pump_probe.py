@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""Reproduce Fig. 12 (ultrafast pump-probe gain) from Ziolkowski 1995."""
+"""Reproduce Ziolkowski, Arnold, and Gogny, Fig. 12 (pump-probe gain).
+
+Reference: Phys. Rev. A 52, 3082-3094 (1995),
+https://doi.org/10.1103/PhysRevA.52.3082.
+"""
 
 from argparse import ArgumentParser
 from pathlib import Path

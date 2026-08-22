@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""Reproduce Figs. 1-4 (self-induced transparency) from Ziolkowski 1995."""
+"""Reproduce Ziolkowski, Arnold, and Gogny, Figs. 1-4 (SIT).
+
+Reference: Phys. Rev. A 52, 3082-3094 (1995),
+https://doi.org/10.1103/PhysRevA.52.3082.
+"""
 
 from argparse import ArgumentParser
 from pathlib import Path

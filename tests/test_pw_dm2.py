@@ -10,7 +10,12 @@ from gmes.pw_material import Dm2ElectricParamReal, _dm2_relative_error
 
 class Dm2Test(unittest.TestCase):
     def test_initial_bloch_drive_does_not_gain_an_inverse_t1_factor(self):
-        """Appendix Eq. (A3e) contains a dimensionally inconsistent /T1."""
+        """Check Ziolkowski et al. (1995), Appendix Eq. (A3e).
+
+        https://doi.org/10.1103/PhysRevA.52.3082 prints a dimensionally
+        inconsistent inverse-T1 coefficient, whereas Eqs. (A1) and (12b)
+        make the initial Bloch drive independent of T1.
+        """
 
         dt = 1e-7
         expected = 2 * 0.25 / 2 * 4 * -1

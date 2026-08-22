@@ -22,6 +22,29 @@ High-cost examples may receive construction or reduced-size checks instead of fu
 
 ## Ziolkowski 1995 reproduction notes
 
+All figure numbers and equation numbers in this section refer to
+R. W. Ziolkowski, J. M. Arnold, and D. M. Gogny, "Ultrafast pulse
+interactions with two-level atoms," Phys. Rev. A 52, 3082-3094 (1995),
+https://doi.org/10.1103/PhysRevA.52.3082.
+
+### Dm2 implementation citation audit
+
+The two references at the start of `src/pw_dm2.hh` are appropriate, but they
+support different parts of the implementation. The Ziolkowski paper is the
+primary source for the homogeneous two-level Maxwell-Bloch equations,
+exponential variables, and predictor-corrector updates in Eqs. (11)-(12) and
+Appendix Eqs. (A1)-(A4). F. Schlottau, M. Piket-May, and K. Wagner,
+"Modeling of femtosecond pulse interaction with inhomogeneously broadened
+media using an iterative predictor corrector FDTD method," Opt. Express 13,
+182-194 (2005), https://doi.org/10.1364/OPEX.13.000182, is the appropriate
+source for extending that scheme to discrete `omega[j]` and `N_atom[j]`
+transition bins. It is supporting, rather than primary, evidence for the
+single-transition homogeneous core. The header now states these roles and no
+longer claims that the implementation is limited to one-dimensional Ex/Hy;
+the current code supplies Ex, Ey, and Ez electric-update classes.
+
+### Appendix Eq. (A3e)
+
 Appendix Eq. (A3e) prints `D(t) = rho30 / T1 exp(t / T1)`. Direct
 substitution of Eqs. (A1) into Bloch Eq. (12b) instead gives the
 additive coefficient
@@ -36,6 +59,43 @@ with the extra dimensionless `1/T1` factor removed the Fig. 10 gain
 viable reproduction fix. Focused tests also verify that the initial
 Bloch drive is independent of `T1` and that the lossless Bloch-sphere
 norm is conserved.
+
+### Fig. 10 turn-on precursor
+
+Equation (29) describes a resonant sinusoid multiplied during the first five
+periods by `(1 - x^2)^4`, followed by a continuous-wave branch. Interpreting
+the five-period interval as `x = 2t / (5 Tp) - 1` makes this envelope rise
+from zero, return to zero at `5 Tp`, and then jump to one. It therefore
+produces a separate turn-on lobe before the main continuous-wave envelope.
+The narrow onset feature is also visible in the published Fig. 10, although
+the one-carrier-period average of `2 E^2` used here makes it more prominent.
+The equation and its description as a "smooth turn-on" are internally
+ambiguous; replacing it with a monotone ramp would remove the precursor but
+would no longer be a literal reproduction of Eq. (29).
+
+### Fig. 10 gain transient
+
+The published Fig. 10 reports an early output-intensity gain of `1.483` that
+falls near `0.55 ps` to `1.223`. The GMES result approaches `1.223` directly
+and does not contain the decrease. This difference follows an internal
+factor-of-two inconsistency between Eqs. (19) and (20). Equation (19) has the
+form `k^2 = (omega0/c)^2 (1 - i delta)`, so its small-signal square root is
+`k = (omega0/c) (1 - i delta/2)`. Equation (20) omits this factor of one-half
+when defining the gain coefficient. The correctly expanded coefficient gives
+the normalized intensity `exp(g L) = 1.224`, consistent with the GMES value;
+the doubled coefficient used by Eq. (20) gives `exp(2 g L) = 1.498`.
+
+A controlled run with only `N_atom` doubled from `1.0e24` to `2.0e24 m^-3`
+produced a peak intensity of `1.49720` and a `0.70-0.84 ps` median of
+`1.49726`, with no late decrease. This confirms that the missing peak is a
+coupling-factor issue and that the reported `1.483 -> 1.223` transition does
+not follow from the stated constant-parameter Maxwell-Bloch system. The
+published information is insufficient to determine whether the transition
+came from the original implementation or an undocumented envelope-processing
+choice. The test-only Appendix `1/T1` variant suppresses the gain and does not
+recover this transient.
+
+### Other reproduction notes
 
 For Figs. 5-8, the caption says `t=12.5 fs`, but a source at `z=0`
 cannot reach the plotted `6-7.5 micrometer` interval by that time.

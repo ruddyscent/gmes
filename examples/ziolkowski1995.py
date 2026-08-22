@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""Generate any of Figs. 1-12 from Ziolkowski, Arnold, and Gogny (1995)."""
+"""Generate Figs. 1-12 from Ziolkowski, Arnold, and Gogny.
+
+Reference: R. W. Ziolkowski, J. M. Arnold, and D. M. Gogny,
+"Ultrafast pulse interactions with two-level atoms," Phys. Rev. A 52,
+3082-3094 (1995), https://doi.org/10.1103/PhysRevA.52.3082.
+"""
 
 from argparse import ArgumentParser
 from pathlib import Path

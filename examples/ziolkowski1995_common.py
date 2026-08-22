@@ -199,11 +199,10 @@ class UltrafastPulseTrain(PaperSourceTime):
 class SmoothSine(PaperSourceTime):
     """Resonant sinusoid from Ziolkowski et al. (1995), Eq. (29).
 
-    Interpreting the printed five-period interval as ``x = 2t/(5Tp) - 1``
-    makes the polynomial envelope return to zero before the continuous-wave
-    branch starts. This produces the narrow precursor visible at the start of
-    the input and output traces in Fig. 10. See ``VERIFICATION.md`` for the
-    ambiguity in the paper's description of this function as a smooth turn-on.
+    The printed definition of ``x`` is inconsistent with the five-period
+    interval. The monotone half-window below follows the paper's description
+    of a smooth turn-on and the absence of a precursor in Fig. 10. See
+    ``VERIFICATION.md`` for the equation audit.
     """
 
     def __init__(self, omega: float, period: float):
@@ -211,14 +210,16 @@ class SmoothSine(PaperSourceTime):
         self.period = float(period)
         self.rise_time = 5 * self.period
 
-    def oscillator(self, time):
+    def envelope(self, time: float) -> float:
         if time < 0:
             return 0.0
-        envelope = 1.0
-        if time <= self.rise_time:
-            x_value = 2 * time / self.rise_time - 1
-            envelope = (1 - x_value**2) ** 4
-        return envelope * sin(self.omega * time)
+        if time >= self.rise_time:
+            return 1.0
+        x_value = time / self.rise_time - 1
+        return (1 - x_value**2) ** 4
+
+    def oscillator(self, time):
+        return self.envelope(time) * sin(self.omega * time)
 
 
 class PumpProbe(PaperSourceTime):
@@ -365,7 +366,12 @@ def ultrafast_scenario(figure: int, quick: bool = False) -> Scenario:
 
 
 def gain_scenario(quick: bool = False) -> Scenario:
-    """Return the parameters reported for Figs. 10-11 and Eq. (29)."""
+    """Return the parameters reported for Figs. 10-11 and Eq. (29).
+
+    The exact weak-signal gain obtained from Bloch Eqs. (12a)-(12b) is one
+    half of the coefficient used for the early-time gain in Fig. 10. See
+    ``VERIFICATION.md`` for the factor-of-two audit of Eqs. (17b)-(20).
+    """
 
     return Scenario(
         domain_um=15.0,

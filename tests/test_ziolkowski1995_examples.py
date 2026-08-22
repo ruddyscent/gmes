@@ -112,6 +112,12 @@ class ZiolkowskiSourceTest(unittest.TestCase):
         omega = UNITS.angular_frequency(OMEGA0_RAD_S)
         sine = SmoothSine(omega, width)
         self.assertEqual(sine.oscillator(-1), 0)
+        turn_on = np.array(
+            [sine.envelope(time) for time in np.linspace(0, sine.rise_time, 101)]
+        )
+        self.assertEqual(turn_on[0], 0)
+        self.assertEqual(turn_on[-1], 1)
+        self.assertTrue(np.all(np.diff(turn_on) >= 0))
         self.assertAlmostEqual(sine.oscillator(5 * width + width / 4), 1)
 
         signal = PumpProbe(omega, width, beta=1e-4, delay=20 * width)

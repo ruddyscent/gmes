@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from utils.macos_build import (
     MINIMUM_MACOS_VERSION,
+    select_macos_openmp_prefix,
     verify_extension_targets,
     verify_wheel_platform_tag,
 )
@@ -35,8 +36,13 @@ class BuildExt(build_ext):
         super().build_extensions()
 
     def _configure_openmp(self):
-        setting, options = openmp_options()
+        setting, options, diagnostic = openmp_options()
         if setting == "disabled" or options is None:
+            if diagnostic:
+                self.announce(
+                    f"{diagnostic}; building the serial fallback",
+                    level=3,
+                )
             return
 
         compile_args, link_args = options
@@ -93,7 +99,7 @@ def openmp_options():
     """Return the requested OpenMP mode and platform-specific flags."""
     value = os.environ.get("GMES_ENABLE_OPENMP", "auto").strip().lower()
     if value in {"0", "false", "no", "off"}:
-        return "disabled", None
+        return "disabled", None, None
     if value in {"1", "true", "yes", "on"}:
         setting = "required"
     elif value == "auto":
@@ -102,7 +108,7 @@ def openmp_options():
         raise RuntimeError("GMES_ENABLE_OPENMP must be auto, 1/true/on, or 0/false/off")
 
     if sys.platform.startswith("linux"):
-        return setting, (["-fopenmp"], ["-fopenmp"])
+        return setting, (["-fopenmp"], ["-fopenmp"]), None
 
     if sys.platform == "darwin":
         configured_prefix = os.environ.get("GMES_OPENMP_PREFIX")
@@ -114,33 +120,37 @@ def openmp_options():
                 Path("/usr/local/opt/libomp"),
             ]
         )
-        prefix = next(
-            (
-                candidate
-                for candidate in prefixes
-                if (candidate / "include" / "omp.h").is_file()
-                and (candidate / "lib").is_dir()
-            ),
-            None,
-        )
+        target = os.environ["MACOSX_DEPLOYMENT_TARGET"]
+        prefix, incompatibilities = select_macos_openmp_prefix(prefixes, target)
+
         if prefix is not None:
             include_directory = prefix / "include"
             library_directory = prefix / "lib"
-            return setting, (
-                ["-Xpreprocessor", "-fopenmp", f"-I{include_directory}"],
-                [
-                    f"-L{library_directory}",
-                    "-lomp",
-                    f"-Wl,-rpath,{library_directory}",
-                ],
+            return (
+                setting,
+                (
+                    ["-Xpreprocessor", "-fopenmp", f"-I{include_directory}"],
+                    [
+                        f"-L{library_directory}",
+                        "-lomp",
+                        f"-Wl,-rpath,{library_directory}",
+                    ],
+                ),
+                None,
             )
+
+        if incompatibilities:
+            diagnostic = "; ".join(incompatibilities)
+            if setting == "required":
+                raise RuntimeError(f"OpenMP was requested but {diagnostic}")
+            return setting, None, diagnostic
 
     if setting == "required":
         raise RuntimeError(
             "OpenMP was requested but no supported runtime was found; "
             "install libomp on macOS or use an OpenMP compiler on Linux"
         )
-    return setting, None
+    return setting, None, None
 
 
 class BdistWheel(bdist_wheel):

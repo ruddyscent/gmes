@@ -41,7 +41,11 @@ jobs:
           sudo apt-get install --yes libopenmpi-dev openmpi-bin swig
       - name: Install SWIG on macOS
         if: runner.os == 'macOS'
-        run: brew install swig libomp
+        run: |
+          brew install swig libomp
+          libomp_target="$(otool -l "$(brew --prefix libomp)/lib/libomp.dylib" | awk '$1 == "minos" { print $2; exit }')"
+          test -n "$libomp_target"
+          echo "MACOSX_DEPLOYMENT_TARGET=${libomp_target}" >> "$GITHUB_ENV"
       - name: Install Linux test dependencies
         if: runner.os == 'Linux'
         run: uv sync --locked --extra hdf5 --extra plot --extra mpi

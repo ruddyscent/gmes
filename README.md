@@ -68,10 +68,12 @@ for older C++ language modes.
 
 OpenMP support is detected while building the native material extension. The
 default `GMES_ENABLE_OPENMP=auto` mode uses OpenMP when a compile-and-link
-probe succeeds and otherwise builds the serial fallback. Set the variable to
-`0` to require a serial build or to `1` to require OpenMP and fail the build
-when the toolchain is unavailable. On macOS, `GMES_OPENMP_PREFIX` can point to
-a nonstandard `libomp` installation.
+probe succeeds and otherwise builds the serial fallback. On macOS, auto mode
+also rejects a `libomp` whose minimum deployment target is newer than the
+extension target. Set the variable to `0` to require a serial build or to `1`
+to require OpenMP and fail the build when the toolchain or runtime is
+unavailable or incompatible. `GMES_OPENMP_PREFIX` can point to a nonstandard
+`libomp` installation.
 
 ## Installation
 

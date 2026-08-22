@@ -35,6 +35,57 @@ def extract_macos_targets(otool_output):
     return targets
 
 
+def inspect_macos_targets(path):
+    """Return the minimum macOS versions recorded in a Mach-O binary."""
+    try:
+        result = subprocess.run(
+            ["otool", "-l", str(path)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise RuntimeError(
+            f"could not inspect macOS target metadata in {path}"
+        ) from error
+    targets = extract_macos_targets(result.stdout)
+    if not targets:
+        raise RuntimeError(f"could not find a minimum macOS version in {path}")
+    return targets
+
+
+def verify_macos_dependency_target(path, target):
+    """Reject a Mach-O dependency that requires a newer macOS target."""
+    expected = _version_tuple(target)
+    targets = inspect_macos_targets(path)
+    incompatible = [
+        version for version in targets if _version_tuple(version) > expected
+    ]
+    if incompatible:
+        versions = ", ".join(incompatible)
+        raise RuntimeError(
+            f"OpenMP runtime {path} targets macOS {versions}, "
+            f"newer than requested {target}"
+        )
+
+
+def select_macos_openmp_prefix(prefixes, target):
+    """Select the first complete libomp installation compatible with target."""
+    incompatibilities = []
+    for candidate in map(Path, prefixes):
+        header = candidate / "include" / "omp.h"
+        runtime = candidate / "lib" / "libomp.dylib"
+        if not header.is_file() or not runtime.is_file():
+            continue
+        try:
+            verify_macos_dependency_target(runtime, target)
+        except RuntimeError as error:
+            incompatibilities.append(str(error))
+            continue
+        return candidate, incompatibilities
+    return None, incompatibilities
+
+
 def verify_extension_targets(extension_paths, target):
     """Ensure built Mach-O extensions use the requested minimum macOS version."""
     expected = _version_tuple(target)
@@ -45,15 +96,7 @@ def verify_extension_targets(extension_paths, target):
         raise RuntimeError("macOS wheel build produced no native extensions")
 
     for path in native_paths:
-        result = subprocess.run(
-            ["otool", "-l", str(path)],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        targets = extract_macos_targets(result.stdout)
-        if not targets:
-            raise RuntimeError(f"could not find a minimum macOS version in {path}")
+        targets = inspect_macos_targets(path)
         mismatches = [
             version for version in targets if _version_tuple(version) != expected
         ]

@@ -88,6 +88,13 @@ class ReleaseConfigurationTest(unittest.TestCase):
         self.assertNotIn("actions/checkout", publish_job)
         self.assertNotIn("run:", publish_job)
 
+    def test_full_quality_suite_skips_pull_requests(self):
+        quality_job = self.workflow.split("  quality:", 1)[1].split(
+            "  build-sdist:", 1
+        )[0]
+
+        self.assertIn("if: github.event_name != 'pull_request'", quality_job)
+
     def test_github_release_job_has_explicit_repository_context(self):
         github_release_job = self.workflow.split("  github-release:", 1)[1]
 

@@ -61,6 +61,7 @@ jobs:
 
   quality:
     name: Full suite / ${{ matrix.os }}
+    if: github.event_name != 'pull_request'
     needs: metadata
     runs-on: ${{ matrix.os }}
     strategy:

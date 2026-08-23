@@ -108,7 +108,8 @@ namespace gmes
 	       const T* const hy, int hy_x_size, int hy_y_size, int hy_z_size,
 	       double dy, double dz, double dt, double n)
     {
-      for_each_equal(idx_list, param_list, [&](const auto& idx, auto& param) {
+      this->finalize_update_plan(0, ex_x_size, ex_y_size, ex_z_size, hz_x_size, hz_y_size, hz_z_size, hy_x_size, hy_y_size, hy_z_size);
+      this->for_each_planned(param_list, [&](const auto& idx, auto& param) {
     	update(ex, ex_x_size, ex_y_size, ex_z_size,
 	       hz, hz_x_size, hz_y_size, hz_z_size,
 	       hy, hy_x_size, hy_y_size, hy_z_size,
@@ -122,14 +123,13 @@ namespace gmes
 	   const T* const hz, int hz_x_size, int hz_y_size, int hz_z_size,
 	   const T* const hy, int hy_x_size, int hy_y_size, int hy_z_size,
 	   double dy, double dz, double dt, double n,
-	   const Index3& idx,
+	   const UpdateOffsets& offsets,
 	   const DielectricElectricParam<T>& dielectric_param) const
     {
-      const int i = idx[0], j = idx[1], k = idx[2];
       const double eps_inf = dielectric_param.eps_inf;
 
-      field_at(ex, ex_x_size, ex_y_size, ex_z_size, ex_y_size == 1, i,j,k) += dt / eps_inf * ((field_at(hz, hz_x_size, hz_y_size, hz_z_size, hz_x_size == 1, i+1,j+1,k) - field_at(hz, hz_x_size, hz_y_size, hz_z_size, hz_x_size == 1, i+1,j,k)) / dy -
-				   (field_at(hy, hy_x_size, hy_y_size, hy_z_size, hy_z_size == 1, i+1,j,k+1) - field_at(hy, hy_x_size, hy_y_size, hy_z_size, hy_z_size == 1, i+1,j,k)) / dz);
+      ex[offsets.target] += dt / eps_inf * ((hz[offsets.in1_first] - hz[offsets.in1_second]) / dy -
+				   (hy[offsets.in2_first] - hy[offsets.in2_second]) / dz);
     }
 
   protected:
@@ -147,7 +147,8 @@ namespace gmes
 	       const T* const hz, int hz_x_size, int hz_y_size, int hz_z_size,
 	       double dz, double dx, double dt, double n)
     {
-      for_each_equal(idx_list, param_list, [&](const auto& idx, auto& param) {
+      this->finalize_update_plan(1, ey_x_size, ey_y_size, ey_z_size, hx_x_size, hx_y_size, hx_z_size, hz_x_size, hz_y_size, hz_z_size);
+      this->for_each_planned(param_list, [&](const auto& idx, auto& param) {
       	update(ey, ey_x_size, ey_y_size, ey_z_size,
 	       hx, hx_x_size, hx_y_size, hx_z_size,
 	       hz, hz_x_size, hz_y_size, hz_z_size,
@@ -161,14 +162,13 @@ namespace gmes
 	   const T* const hx, int hx_x_size, int hx_y_size, int hx_z_size,
 	   const T* const hz, int hz_x_size, int hz_y_size, int hz_z_size,
 	   double dz, double dx, double dt, double n,
-	   const Index3& idx,
+	   const UpdateOffsets& offsets,
 	   const DielectricElectricParam<T>& dielectric_param) const
     {
-      const int i = idx[0], j = idx[1], k = idx[2];
       const double eps_inf = dielectric_param.eps_inf;
 
-      field_at(ey, ey_x_size, ey_y_size, ey_z_size, ey_z_size == 1, i,j,k) += dt / eps_inf * ((field_at(hx, hx_x_size, hx_y_size, hx_z_size, hx_y_size == 1, i,j+1,k+1) - field_at(hx, hx_x_size, hx_y_size, hx_z_size, hx_y_size == 1, i,j+1,k)) / dz -
-				   (field_at(hz, hz_x_size, hz_y_size, hz_z_size, hz_x_size == 1, i+1,j+1,k) - field_at(hz, hz_x_size, hz_y_size, hz_z_size, hz_x_size == 1, i,j+1,k)) / dx);
+      ey[offsets.target] += dt / eps_inf * ((hx[offsets.in1_first] - hx[offsets.in1_second]) / dz -
+				   (hz[offsets.in2_first] - hz[offsets.in2_second]) / dx);
     }
 
   protected:
@@ -186,7 +186,8 @@ namespace gmes
 	       const T* const hx, int hx_x_size, int hx_y_size, int hx_z_size,
 	       double dx, double dy, double dt, double n)
     {
-      for_each_equal(idx_list, param_list, [&](const auto& idx, auto& param) {
+      this->finalize_update_plan(2, ez_x_size, ez_y_size, ez_z_size, hy_x_size, hy_y_size, hy_z_size, hx_x_size, hx_y_size, hx_z_size);
+      this->for_each_planned(param_list, [&](const auto& idx, auto& param) {
 	update(ez, ez_x_size, ez_y_size, ez_z_size,
 	       hy, hy_x_size, hy_y_size, hy_z_size,
 	       hx, hx_x_size, hx_y_size, hx_z_size,
@@ -201,14 +202,13 @@ namespace gmes
 	   const T* const hy, int hy_x_size, int hy_y_size, int hy_z_size,
 	   const T* const hx, int hx_x_size, int hx_y_size, int hx_z_size,
 	   double dx, double dy, double dt, double n,
-	   const Index3& idx,
+	   const UpdateOffsets& offsets,
 	   const DielectricElectricParam<T>& dielectric_param) const
     {
-      const int i = idx[0], j = idx[1], k = idx[2];
       const double eps_inf = dielectric_param.eps_inf;
 
-      field_at(ez, ez_x_size, ez_y_size, ez_z_size, ez_x_size == 1, i,j,k) += dt / eps_inf * ((field_at(hy, hy_x_size, hy_y_size, hy_z_size, hy_z_size == 1, i+1,j,k+1) - field_at(hy, hy_x_size, hy_y_size, hy_z_size, hy_z_size == 1, i,j,k+1)) / dx -
-                                   (field_at(hx, hx_x_size, hx_y_size, hx_z_size, hx_y_size == 1, i,j+1,k+1) - field_at(hx, hx_x_size, hx_y_size, hx_z_size, hx_y_size == 1, i,j,k+1)) / dy);
+      ez[offsets.target] += dt / eps_inf * ((hy[offsets.in1_first] - hy[offsets.in1_second]) / dx -
+                                   (hx[offsets.in2_first] - hx[offsets.in2_second]) / dy);
     }
 
   protected:
@@ -297,7 +297,8 @@ namespace gmes
 	       const T* const ey, int ey_x_size, int ey_y_size, int ey_z_size,
 	       double dy, double dz, double dt, double n)
     {
-      for_each_equal(idx_list, param_list, [&](const auto& idx, auto& param) {
+      this->finalize_update_plan(3, hx_x_size, hx_y_size, hx_z_size, ez_x_size, ez_y_size, ez_z_size, ey_x_size, ey_y_size, ey_z_size);
+      this->for_each_planned(param_list, [&](const auto& idx, auto& param) {
       	update(hx, hx_x_size, hx_y_size, hx_z_size,
 	       ez, ez_x_size, ez_y_size, ez_z_size,
 	       ey, ey_x_size, ey_y_size, ey_z_size,
@@ -311,14 +312,13 @@ namespace gmes
 	   const T* const ez, int ez_x_size, int ez_y_size, int ez_z_size,
 	   const T* const ey, int ey_x_size, int ey_y_size, int ey_z_size,
 	   double dy, double dz, double dt, double n,
-	   const Index3& idx,
+	   const UpdateOffsets& offsets,
 	   const DielectricMagneticParam<T>& dielectric_param) const
     {
-      const int i = idx[0], j = idx[1], k = idx[2];
       const double mu_inf = dielectric_param.mu_inf;
 
-      field_at(hx, hx_x_size, hx_y_size, hx_z_size, hx_y_size == 1, i,j,k) += dt / mu_inf * ((field_at(ey, ey_x_size, ey_y_size, ey_z_size, ey_z_size == 1, i,j-1,k) - field_at(ey, ey_x_size, ey_y_size, ey_z_size, ey_z_size == 1, i,j-1,k-1)) / dz -
-                                  (field_at(ez, ez_x_size, ez_y_size, ez_z_size, ez_x_size == 1, i,j,k-1) - field_at(ez, ez_x_size, ez_y_size, ez_z_size, ez_x_size == 1, i,j-1,k-1)) / dy);
+      hx[offsets.target] += dt / mu_inf * ((ey[offsets.in2_first] - ey[offsets.in2_second]) / dz -
+                                  (ez[offsets.in1_first] - ez[offsets.in1_second]) / dy);
     }
 
   protected:
@@ -336,7 +336,8 @@ namespace gmes
 	       const T* const ez, int ez_x_size, int ez_y_size, int ez_z_size,
 	       double dz, double dx, double dt, double n)
     {
-      for_each_equal(idx_list, param_list, [&](const auto& idx, auto& param) {
+      this->finalize_update_plan(4, hy_x_size, hy_y_size, hy_z_size, ex_x_size, ex_y_size, ex_z_size, ez_x_size, ez_y_size, ez_z_size);
+      this->for_each_planned(param_list, [&](const auto& idx, auto& param) {
       	update(hy, hy_x_size, hy_y_size, hy_z_size,
 	       ex, ex_x_size, ex_y_size, ex_z_size,
 	       ez, ez_x_size, ez_y_size, ez_z_size,
@@ -350,14 +351,13 @@ namespace gmes
 	   const T* const ex, int ex_x_size, int ex_y_size, int ex_z_size,
 	   const T* const ez, int ez_x_size, int ez_y_size, int ez_z_size,
 	   double dz, double dx, double dt, double n,
-	   const Index3& idx,
+	   const UpdateOffsets& offsets,
 	   const DielectricMagneticParam<T>& dielectric_param) const
     {
-      const int i = idx[0], j = idx[1], k = idx[2];
       const double mu_inf = dielectric_param.mu_inf;
 
-      field_at(hy, hy_x_size, hy_y_size, hy_z_size, hy_z_size == 1, i,j,k) += dt / mu_inf * ((field_at(ez, ez_x_size, ez_y_size, ez_z_size, ez_x_size == 1, i,j,k-1) - field_at(ez, ez_x_size, ez_y_size, ez_z_size, ez_x_size == 1, i-1,j,k-1)) / dx -
-                                  (field_at(ex, ex_x_size, ex_y_size, ex_z_size, ex_y_size == 1, i-1,j,k) - field_at(ex, ex_x_size, ex_y_size, ex_z_size, ex_y_size == 1, i-1,j,k-1)) / dz);
+      hy[offsets.target] += dt / mu_inf * ((ez[offsets.in2_first] - ez[offsets.in2_second]) / dx -
+                                  (ex[offsets.in1_first] - ex[offsets.in1_second]) / dz);
     }
 
   protected:
@@ -375,7 +375,8 @@ namespace gmes
 	       const T* const ex, int ex_x_size, int ex_y_size, int ex_z_size,
 	       double dx, double dy, double dt, double n)
     {
-      for_each_equal(idx_list, param_list, [&](const auto& idx, auto& param) {
+      this->finalize_update_plan(5, hz_x_size, hz_y_size, hz_z_size, ey_x_size, ey_y_size, ey_z_size, ex_x_size, ex_y_size, ex_z_size);
+      this->for_each_planned(param_list, [&](const auto& idx, auto& param) {
     	update(hz, hz_x_size, hz_y_size, hz_z_size,
 	       ey, ey_x_size, ey_y_size, ey_z_size,
 	       ex, ex_x_size, ex_y_size, ex_z_size,
@@ -389,14 +390,13 @@ namespace gmes
 	   const T* const ey, int ey_x_size, int ey_y_size, int ey_z_size,
 	   const T* const ex, int ex_x_size, int ex_y_size, int ex_z_size,
 	   double dx, double dy, double dt, double n,
-	   const Index3& idx,
+	   const UpdateOffsets& offsets,
 	   const DielectricMagneticParam<T>& dielectric_param) const
     {
-      const int i = idx[0], j = idx[1], k = idx[2];
       const double mu_inf = dielectric_param.mu_inf;
 
-      field_at(hz, hz_x_size, hz_y_size, hz_z_size, hz_x_size == 1, i,j,k) += dt / mu_inf * ((field_at(ex, ex_x_size, ex_y_size, ex_z_size, ex_y_size == 1, i-1,j,k) - field_at(ex, ex_x_size, ex_y_size, ex_z_size, ex_y_size == 1, i-1,j-1,k)) / dy -
-				  (field_at(ey, ey_x_size, ey_y_size, ey_z_size, ey_z_size == 1, i,j-1,k) - field_at(ey, ey_x_size, ey_y_size, ey_z_size, ey_z_size == 1, i-1,j-1,k)) / dx);
+      hz[offsets.target] += dt / mu_inf * ((ex[offsets.in2_first] - ex[offsets.in2_second]) / dy -
+				  (ey[offsets.in1_first] - ey[offsets.in1_second]) / dx);
     }
 
   protected:

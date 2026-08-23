@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 import platform
+import resource
 from statistics import median
 from time import perf_counter
 
@@ -33,6 +34,34 @@ def build_simulation(case, gmes):
         medium = gmes.Drude(dps=(gmes.DrudePole(omega=1.0, gamma=0.1),))
         simulation_type = gmes.TMzFDTD
         source_component = gmes.Ez
+    elif case == "lorentz":
+        space = gmes.Cartesian(size=(12, 12, 0), resolution=20)
+        medium = gmes.Lorentz(lps=(gmes.LorentzPole(amp=0.2, omega=1.0, gamma=0.1),))
+        simulation_type = gmes.TMzFDTD
+        source_component = gmes.Ez
+    elif case == "dcp":
+        space = gmes.Cartesian(size=(12, 12, 0), resolution=20)
+        medium = gmes.DcpAde(
+            dps=(gmes.DrudePole(omega=1.0, gamma=0.1),),
+            cps=(gmes.CriticalPoint(amp=0.1, phi=0.2, omega=1.5, gamma=0.1),),
+        )
+        simulation_type = gmes.TMzFDTD
+        source_component = gmes.Ez
+    elif case == "dm2":
+        space = gmes.Cartesian(size=(4, 4, 0), resolution=10)
+        medium = gmes.Dm2(
+            omega=(0.9, 1.1),
+            n_atom=(0.05, 0.05),
+            gamma=0.05,
+            rtol=1e-4,
+        )
+        simulation_type = gmes.TMzFDTD
+        source_component = gmes.Ez
+    elif case == "pml":
+        space = gmes.Cartesian(size=(10, 10, 0), resolution=20)
+        medium = gmes.Dielectric()
+        simulation_type = gmes.TMzFDTD
+        source_component = gmes.Ez
     elif case == "heterogeneous":
         space = gmes.Cartesian(size=(10, 10, 0), resolution=20)
         medium = gmes.Dielectric()
@@ -58,7 +87,8 @@ def build_simulation(case, gmes):
             for x in (-3, -1, 1, 3)
             for y in (-3, -1, 1, 3)
         )
-    geometry.append(gmes.Shell(material=gmes.Cpml()))
+    shell_material = gmes.Upml() if case == "pml" else gmes.Cpml()
+    geometry.append(gmes.Shell(material=shell_material))
     sources = [
         gmes.PointSource(
             src_time=gmes.Continuous(freq=0.8),
@@ -88,6 +118,8 @@ def material_update_sizes(simulation):
                 "cells": updater.idx_size(),
                 "component": component.__name__,
                 "material": type(updater).__name__,
+                "plan_bytes": updater.plan_bytes(),
+                "plan_runs": updater.plan_run_count(),
             }
             for component, updaters in simulation.pw_material.items()
             for updater in updaters.values()
@@ -117,6 +149,12 @@ def initialize_simulation(case, gmes):
     simulation.init()
     initialization_seconds = perf_counter() - start
     return simulation, construction_seconds, initialization_seconds
+
+
+def peak_rss_bytes():
+    """Return the process peak resident-set size in bytes."""
+    maximum = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return int(maximum if platform.system() == "Darwin" else maximum * 1024)
 
 
 def run_case(case, warmup, steps, repeats, gmes):
@@ -153,6 +191,12 @@ def run_case(case, warmup, steps, repeats, gmes):
         "checksum": field_checksum(simulation),
         "field_shapes": field_shapes(simulation),
         "material_update_sizes": material_update_sizes(simulation),
+        "native_update_plan_bytes": sum(
+            updater.plan_bytes()
+            for updaters in simulation.pw_material.values()
+            for updater in updaters.values()
+        ),
+        "peak_rss_bytes": peak_rss_bytes(),
     }
 
 
@@ -166,6 +210,10 @@ def main():
             "2d",
             "3d",
             "dispersive",
+            "lorentz",
+            "dcp",
+            "dm2",
+            "pml",
             "heterogeneous",
             "complex",
             "all",
@@ -197,7 +245,18 @@ def main():
     import gmes
 
     cases = (
-        ("small", "2d", "3d", "dispersive", "heterogeneous", "complex")
+        (
+            "small",
+            "2d",
+            "3d",
+            "dispersive",
+            "lorentz",
+            "dcp",
+            "dm2",
+            "pml",
+            "heterogeneous",
+            "complex",
+        )
         if args.case == "all"
         else (args.case,)
     )

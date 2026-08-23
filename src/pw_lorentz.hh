@@ -100,10 +100,10 @@ namespace gmes
       auto& l_now = lorentz_param.l_now;
       auto& l_new = lorentz_param.l_new;
 
-      const auto l_old = l_now;
-      std::copy(l_new.begin(), l_new.end(), l_now.begin());
       for (typename std::vector<T>::size_type i = 0; i < a.size(); ++i)	{
-	l_new[i] = a[i][0] * l_old[i] + a[i][1] * l_now[i] + a[i][2] * e_now;
+	const T l_old = l_now[i];
+	l_now[i] = l_new[i];
+	l_new[i] = a[i][0] * l_old + a[i][1] * l_now[i] + a[i][2] * e_now;
       }
     }
 
@@ -141,7 +141,8 @@ namespace gmes
 	       const T* const hy, int hy_x_size, int hy_y_size, int hy_z_size,
 	       double dy, double dz, double dt, double n)
     {
-      for_each_equal(idx_list, param_list, [&](const auto& idx, auto& param) {
+      this->finalize_update_plan(0, ex_x_size, ex_y_size, ex_z_size, hz_x_size, hz_y_size, hz_z_size, hy_x_size, hy_y_size, hy_z_size);
+      this->for_each_planned(param_list, [&](const auto& idx, auto& param) {
     	update(ex, ex_x_size, ex_y_size, ex_z_size,
 	       hz, hz_x_size, hz_y_size, hz_z_size,
 	       hy, hy_x_size, hy_y_size, hy_z_size,
@@ -155,17 +156,16 @@ namespace gmes
 	   const T* const hz, int hz_x_size, int hz_y_size, int hz_z_size,
 	   const T* const hy, int hy_x_size, int hy_y_size, int hy_z_size,
 	   double dy, double dz, double dt, double n,
-	   const Index3& idx,
+	   const UpdateOffsets& offsets,
 	   LorentzElectricParam<T>& lorentz_param)
     {
-      const int i = idx[0], j = idx[1], k = idx[2];
 
       const auto& c = lorentz_param.c;
 
-      const T& e_now = field_at(ex, ex_x_size, ex_y_size, ex_z_size, ex_y_size == 1, i,j,k);
+      const T& e_now = ex[offsets.target];
       update_l(e_now, lorentz_param);
-      field_at(ex, ex_x_size, ex_y_size, ex_z_size, ex_y_size == 1, i,j,k) = c[0] * ((field_at(hz, hz_x_size, hz_y_size, hz_z_size, hz_x_size == 1, i+1,j+1,k) - field_at(hz, hz_x_size, hz_y_size, hz_z_size, hz_x_size == 1, i+1,j,k)) / dy -
-			  (field_at(hy, hy_x_size, hy_y_size, hy_z_size, hy_z_size == 1, i+1,j,k+1) - field_at(hy, hy_x_size, hy_y_size, hy_z_size, hy_z_size == 1, i+1,j,k)) / dz)
+      ex[offsets.target] = c[0] * ((hz[offsets.in1_first] - hz[offsets.in1_second]) / dy -
+			  (hy[offsets.in2_first] - hy[offsets.in2_second]) / dz)
 	+ c[1] * lps_sum(static_cast<T>(0), lorentz_param) + c[2] * e_now;
     }
 
@@ -186,7 +186,8 @@ namespace gmes
 	       const T* const hz, int hz_x_size, int hz_y_size, int hz_z_size,
 	       double dz, double dx, double dt, double n)
     {
-      for_each_equal(idx_list, param_list, [&](const auto& idx, auto& param) {
+      this->finalize_update_plan(1, ey_x_size, ey_y_size, ey_z_size, hx_x_size, hx_y_size, hx_z_size, hz_x_size, hz_y_size, hz_z_size);
+      this->for_each_planned(param_list, [&](const auto& idx, auto& param) {
 	update(ey, ey_x_size, ey_y_size, ey_z_size,
 	       hx, hx_x_size, hx_y_size, hx_z_size,
 	       hz, hz_x_size, hz_y_size, hz_z_size,
@@ -200,17 +201,16 @@ namespace gmes
 	   const T* const hx, int hx_x_size, int hx_y_size, int hx_z_size,
 	   const T* const hz, int hz_x_size, int hz_y_size, int hz_z_size,
 	   double dz, double dx, double dt, double n,
-	   const Index3& idx,
+	   const UpdateOffsets& offsets,
 	   LorentzElectricParam<T>& lorentz_param)
     {
-      const int i = idx[0], j = idx[1], k = idx[2];
 
       const auto& c = lorentz_param.c;
 
-      const T& e_now = field_at(ey, ey_x_size, ey_y_size, ey_z_size, ey_z_size == 1, i,j,k);
+      const T& e_now = ey[offsets.target];
       update_l(e_now, lorentz_param);
-      field_at(ey, ey_x_size, ey_y_size, ey_z_size, ey_z_size == 1, i,j,k) = c[0] * ((field_at(hx, hx_x_size, hx_y_size, hx_z_size, hx_y_size == 1, i,j+1,k+1) - field_at(hx, hx_x_size, hx_y_size, hx_z_size, hx_y_size == 1, i,j+1,k)) / dz -
-			  (field_at(hz, hz_x_size, hz_y_size, hz_z_size, hz_x_size == 1, i+1,j+1,k) - field_at(hz, hz_x_size, hz_y_size, hz_z_size, hz_x_size == 1, i,j+1,k)) / dx)
+      ey[offsets.target] = c[0] * ((hx[offsets.in1_first] - hx[offsets.in1_second]) / dz -
+			  (hz[offsets.in2_first] - hz[offsets.in2_second]) / dx)
 	+ c[1] * lps_sum(static_cast<T>(0), lorentz_param) + c[2] * e_now;
     }
 
@@ -231,7 +231,8 @@ namespace gmes
 	       const T* const hx, int hx_x_size, int hx_y_size, int hx_z_size,
 	       double dx, double dy, double dt, double n)
     {
-      for_each_equal(idx_list, param_list, [&](const auto& idx, auto& param) {
+      this->finalize_update_plan(2, ez_x_size, ez_y_size, ez_z_size, hy_x_size, hy_y_size, hy_z_size, hx_x_size, hx_y_size, hx_z_size);
+      this->for_each_planned(param_list, [&](const auto& idx, auto& param) {
     	update(ez, ez_x_size, ez_y_size, ez_z_size,
 	       hy, hy_x_size, hy_y_size, hy_z_size,
 	       hx, hx_x_size, hx_y_size, hx_z_size,
@@ -245,17 +246,16 @@ namespace gmes
 	   const T* const hy, int hy_x_size, int hy_y_size, int hy_z_size,
 	   const T* const hx, int hx_x_size, int hx_y_size, int hx_z_size,
 	   double dx, double dy, double dt, double n,
-	   const Index3& idx,
+	   const UpdateOffsets& offsets,
 	   LorentzElectricParam<T>& lorentz_param)
     {
-      const int i = idx[0], j = idx[1], k = idx[2];
 
       const auto& c = lorentz_param.c;
 
-      const T& e_now = field_at(ez, ez_x_size, ez_y_size, ez_z_size, ez_x_size == 1, i,j,k);
+      const T& e_now = ez[offsets.target];
       update_l(e_now, lorentz_param);
-      field_at(ez, ez_x_size, ez_y_size, ez_z_size, ez_x_size == 1, i,j,k) = c[0] * ((field_at(hy, hy_x_size, hy_y_size, hy_z_size, hy_z_size == 1, i+1,j,k+1) - field_at(hy, hy_x_size, hy_y_size, hy_z_size, hy_z_size == 1, i,j,k+1)) / dx -
-			  (field_at(hx, hx_x_size, hx_y_size, hx_z_size, hx_y_size == 1, i,j+1,k+1) - field_at(hx, hx_x_size, hx_y_size, hx_z_size, hx_y_size == 1, i,j,k+1)) / dy)
+      ez[offsets.target] = c[0] * ((hy[offsets.in1_first] - hy[offsets.in1_second]) / dx -
+			  (hx[offsets.in2_first] - hx[offsets.in2_second]) / dy)
 	+ c[1] * lps_sum(static_cast<T>(0), lorentz_param) + c[2] * e_now;
     }
 

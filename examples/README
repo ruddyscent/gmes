@@ -15,6 +15,48 @@ $ uv sync --locked --extra plot --extra hdf5
 $ uv run --no-sync python examples/<example file name>
 
 ###################################################################
+ziolkowski1995.py
+
+Reproduces Figs. 1-12 from R. W. Ziolkowski, J. M. Arnold, and
+D. M. Gogny, "Ultrafast pulse interactions with two-level atoms,"
+Phys. Rev. A 52, 3082-3094 (1995),
+https://doi.org/10.1103/PhysRevA.52.3082. The scripts exercise the
+Dm2 Maxwell-Bloch material with the paper's SIT, ultrafast inversion,
+small-signal gain, and pump-probe cases. Known equation and figure
+discrepancies are documented in VERIFICATION.md.
+
+Generate all figures at the paper resolution:
+
+$ uv run --no-sync python examples/ziolkowski1995.py \
+    --output-dir /tmp/ziolkowski1995
+
+Select individual figures or run the reduced-resolution smoke mode:
+
+$ uv run --no-sync python examples/ziolkowski1995.py \
+    --figures 5 8 9 --output-dir /tmp/ziolkowski1995
+$ uv run --no-sync python examples/ziolkowski1995.py \
+    --quick --output-dir /tmp/ziolkowski1995-quick
+
+The family scripts can also be run separately:
+
+$ uv run --no-sync python examples/ziolkowski1995_sit.py
+$ uv run --no-sync python examples/ziolkowski1995_ultrafast.py
+$ uv run --no-sync python examples/ziolkowski1995_gain.py
+$ uv run --no-sync python examples/ziolkowski1995_pump_probe.py
+
+The default mode uses 20,000 cells for Figs. 1-4, 2,000 or 5,000
+cells for Figs. 5-11, and 4,000 cells for Fig. 12. Figs. 1-4,
+10-11, and 12 are long-running cases. `--quick` reduces each cell
+count by ten and labels its plots as smoke-test output; those plots
+are not paper-resolution reproductions.
+
+The paper reports SI parameters, while GMES uses c=1. The shared
+helper converts length, time, angular frequency, electric field,
+atomic density, and dipole coupling together so that both the Bloch
+and Maxwell coupling strengths are preserved. Generated PNG files
+are simulation output and should not be committed.
+
+###################################################################
 air2d.py
 
 Models two-dimensional TMz cylindrical-wave propagation in air.

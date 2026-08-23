@@ -1,21 +1,26 @@
-/* This implementation is based on the following articles:
+/* Literature basis for this implementation:
  *
- * 1. Ziolkowski, R. W., Arnold, J. M. & Gogny, D. M.
- * Ultrafast pulse interactions with two-level atoms.
- * Phys. Rev. A 52, 3082–3094 (1995).
+ * [1] R. W. Ziolkowski, J. M. Arnold, and D. M. Gogny,
+ *     "Ultrafast pulse interactions with two-level atoms,"
+ *     Phys. Rev. A 52, 3082-3094 (1995).
+ *     https://doi.org/10.1103/PhysRevA.52.3082
  *
- * 2. Schlottau, F., Piket-May, M. & Wagner, K. Modeling
- * of femtosecond pulse interaction with inhomogeneously
- * broadened media using an iterative predictor corrector
- * FDTD method. Opt. Express 13, 182–194 (2005).
+ * [2] F. Schlottau, M. Piket-May, and K. Wagner,
+ *     "Modeling of femtosecond pulse interaction with inhomogeneously
+ *     broadened media using an iterative predictor corrector FDTD method,"
+ *     Opt. Express 13, 182-194 (2005).
+ *     https://doi.org/10.1364/OPEX.13.000182
  *
- * This module just handles 1D case with Ex and Hy fields.
- * The dipole moments are assumed to be aligned along the
- * electric field.
+ * Reference [1], Eqs. (11)-(12) and Appendix Eqs. (A1)-(A4), is the
+ * primary source for the homogeneous two-level Maxwell-Bloch equations,
+ * exponential change of variables, and iterative predictor-corrector
+ * update. Reference [2] extends that method to an inhomogeneously broadened
+ * medium represented by discrete transition-frequency and atom-density
+ * bins; it is the basis for the omega/n_atom arrays used here.
  *
- * TODOs
- * 1. Replace array with valarray.
- * 2. multi dimension support
+ * Electric update classes are provided for Ex, Ey, and Ez. In each case the
+ * dipole moment is assumed to be aligned with the updated electric-field
+ * component.
  */
 
 #ifndef PW_DM2_HH_
@@ -312,6 +317,10 @@ namespace gmes
       const auto& t2 = dm2_param.t2;
       const auto& hbar = dm2_param.hbar;
 
+      // Substitution of [1, Eqs. (A1b) and (A1c)] into Bloch Eq. (12b)
+      // gives this additive drive. The printed Eq. (A3e),
+      // rho30 / T1 * exp(t / T1), is dimensionally inconsistent with
+      // Eq. (A2c) and does not reproduce the reported gain.
       d_out = 2 / hbar * gamma * rho30 * exp(t / t2);
     }
 

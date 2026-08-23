@@ -9,6 +9,70 @@ from gmes.pw_material import Dm2ElectricParamReal, _dm2_relative_error
 
 
 class Dm2Test(unittest.TestCase):
+    def test_initial_bloch_drive_does_not_gain_an_inverse_t1_factor(self):
+        """Check Ziolkowski et al. (1995), Appendix Eq. (A3e).
+
+        https://doi.org/10.1103/PhysRevA.52.3082 prints a dimensionally
+        inconsistent inverse-T1 coefficient, whereas Eqs. (A1) and (12b)
+        make the initial Bloch drive independent of T1.
+        """
+
+        dt = 1e-7
+        expected = 2 * 0.25 / 2 * 4 * -1
+        for component in ("ex", "ey", "ez"):
+            with self.subTest(component=component):
+                slopes = []
+                for t1 in (0.5, 2.0):
+                    material = Dm2(
+                        omega=(0,),
+                        n_atom=(0,),
+                        rho30=-1,
+                        gamma=0.25,
+                        t1=t1,
+                        t2=3,
+                        hbar=2,
+                        rtol=1e-12,
+                    )
+                    pointwise = getattr(material, f"get_pw_material_{component}")(
+                        (1, 1, 1), (0, 0, 0)
+                    )
+                    field = np.zeros((3, 3, 3))
+                    field[1, 1, 1] = 4
+                    magnetic1, magnetic2 = [np.zeros((3, 3, 3)) for _ in range(2)]
+
+                    pointwise.update_all(field, magnetic1, magnetic2, 1, 1, dt, 0)
+                    rho2 = pointwise.get_rho((1, 1, 1), 0, 1, dt)
+                    slopes.append(rho2 / dt)
+
+                for slope in slopes:
+                    self.assertAlmostEqual(slope, expected, places=5)
+                self.assertAlmostEqual(slopes[0], slopes[1], places=5)
+
+    def test_lossless_bloch_sphere_invariant(self):
+        material = Dm2(
+            omega=(1.25,),
+            n_atom=(0,),
+            rho30=-1,
+            gamma=0.2,
+            t1=np.inf,
+            t2=np.inf,
+            hbar=1,
+            rtol=1e-10,
+        )
+        pointwise = material.get_pw_material_ex((1, 1, 1), (0, 0, 0))
+        field = np.zeros((3, 3, 3))
+        field[1, 1, 1] = 0.75
+        magnetic1, magnetic2 = [np.zeros((3, 3, 3)) for _ in range(2)]
+        dt = 0.01
+
+        for step in range(500):
+            pointwise.update_all(field, magnetic1, magnetic2, 1, 1, dt, float(step))
+
+        rho = np.array(
+            [pointwise.get_rho((1, 1, 1), 0, index, 500 * dt) for index in range(3)]
+        )
+        self.assertAlmostEqual(float(rho @ rho), 1, places=8)
+
     def test_diagnostic_getters_validate_transition_bounds(self):
         pointwise = Dm2(omega=(1, 2), n_atom=(3, 4)).get_pw_material_ex(
             (1, 1, 1), (0, 0, 0)

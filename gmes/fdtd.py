@@ -17,7 +17,7 @@ from .file_io import Probe
 from .geometry import DefaultMedium, GeomBoxTree, in_range
 
 # from file_io import write_hdf5, snapshot
-from .material import Dummy
+from .material import _BUILTIN_MATERIAL_TYPES, Dummy
 from .pygeom import GeomBox
 
 
@@ -358,18 +358,14 @@ class FDTD(object):
 
         """
         self.pw_material[Ex] = {}
+        aggregates = {}
         shape = self.ex.shape
         for idx in ndindex(shape):
             spc = self.space.ex_index_to_space(*idx)
             mat_obj, underneath = self.geom_tree.material_of_point(spc)
             if idx[1] == shape[1] - 1 or idx[2] == shape[2] - 1:
                 mat_obj = Dummy(mat_obj.eps_inf, mat_obj.mu_inf)
-            pw_obj = mat_obj.get_pw_material_ex(idx, spc, underneath, self.cmplx)
-
-            if type(pw_obj) in self.pw_material[Ex]:
-                self.pw_material[Ex][type(pw_obj)].merge(pw_obj)
-            else:
-                self.pw_material[Ex][type(pw_obj)] = pw_obj
+            self._attach_material(Ex, mat_obj, idx, spc, underneath, aggregates)
 
     def init_material_ey(self):
         """Set up the update mechanism for Ey field.
@@ -379,18 +375,14 @@ class FDTD(object):
 
         """
         self.pw_material[Ey] = {}
+        aggregates = {}
         shape = self.ey.shape
         for idx in ndindex(shape):
             spc = self.space.ey_index_to_space(*idx)
             mat_obj, underneath = self.geom_tree.material_of_point(spc)
             if idx[2] == shape[2] - 1 or idx[0] == shape[0] - 1:
                 mat_obj = Dummy(mat_obj.eps_inf, mat_obj.mu_inf)
-            pw_obj = mat_obj.get_pw_material_ey(idx, spc, underneath, self.cmplx)
-
-            if type(pw_obj) in self.pw_material[Ey]:
-                self.pw_material[Ey][type(pw_obj)].merge(pw_obj)
-            else:
-                self.pw_material[Ey][type(pw_obj)] = pw_obj
+            self._attach_material(Ey, mat_obj, idx, spc, underneath, aggregates)
 
     def init_material_ez(self):
         """Set up the update mechanism for Ez field.
@@ -400,18 +392,14 @@ class FDTD(object):
 
         """
         self.pw_material[Ez] = {}
+        aggregates = {}
         shape = self.ez.shape
         for idx in ndindex(shape):
             spc = self.space.ez_index_to_space(*idx)
             mat_obj, underneath = self.geom_tree.material_of_point(spc)
             if idx[0] == shape[0] - 1 or idx[1] == shape[1] - 1:
                 mat_obj = Dummy(mat_obj.eps_inf, mat_obj.mu_inf)
-            pw_obj = mat_obj.get_pw_material_ez(idx, spc, underneath, self.cmplx)
-
-            if type(pw_obj) in self.pw_material[Ez]:
-                self.pw_material[Ez][type(pw_obj)].merge(pw_obj)
-            else:
-                self.pw_material[Ez][type(pw_obj)] = pw_obj
+            self._attach_material(Ez, mat_obj, idx, spc, underneath, aggregates)
 
     def init_material_hx(self):
         """Set up the update mechanism for Hx field.
@@ -421,18 +409,14 @@ class FDTD(object):
 
         """
         self.pw_material[Hx] = {}
+        aggregates = {}
         shape = self.hx.shape
         for idx in ndindex(shape):
             spc = self.space.hx_index_to_space(*idx)
             mat_obj, underneath = self.geom_tree.material_of_point(spc)
             if idx[1] == 0 or idx[2] == 0:
                 mat_obj = Dummy(mat_obj.eps_inf, mat_obj.mu_inf)
-            pw_obj = mat_obj.get_pw_material_hx(idx, spc, underneath, self.cmplx)
-
-            if type(pw_obj) in self.pw_material[Hx]:
-                self.pw_material[Hx][type(pw_obj)].merge(pw_obj)
-            else:
-                self.pw_material[Hx][type(pw_obj)] = pw_obj
+            self._attach_material(Hx, mat_obj, idx, spc, underneath, aggregates)
 
     def init_material_hy(self):
         """Set up the update mechanism for Hy field.
@@ -442,18 +426,14 @@ class FDTD(object):
 
         """
         self.pw_material[Hy] = {}
+        aggregates = {}
         shape = self.hy.shape
         for idx in ndindex(shape):
             spc = self.space.hy_index_to_space(*idx)
             mat_obj, underneath = self.geom_tree.material_of_point(spc)
             if idx[2] == 0 or idx[0] == 0:
                 mat_obj = Dummy(mat_obj.eps_inf, mat_obj.mu_inf)
-            pw_obj = mat_obj.get_pw_material_hy(idx, spc, underneath, self.cmplx)
-
-            if type(pw_obj) in self.pw_material[Hy]:
-                self.pw_material[Hy][type(pw_obj)].merge(pw_obj)
-            else:
-                self.pw_material[Hy][type(pw_obj)] = pw_obj
+            self._attach_material(Hy, mat_obj, idx, spc, underneath, aggregates)
 
     def init_material_hz(self):
         """Set up the update mechanism for Hz field.
@@ -463,18 +443,48 @@ class FDTD(object):
 
         """
         self.pw_material[Hz] = {}
+        aggregates = {}
         shape = self.hz.shape
         for idx in ndindex(shape):
             spc = self.space.hz_index_to_space(*idx)
             mat_obj, underneath = self.geom_tree.material_of_point(spc)
             if idx[0] == 0 or idx[1] == 0:
                 mat_obj = Dummy(mat_obj.eps_inf, mat_obj.mu_inf)
-            pw_obj = mat_obj.get_pw_material_hz(idx, spc, underneath, self.cmplx)
+            self._attach_material(Hz, mat_obj, idx, spc, underneath, aggregates)
 
-            if type(pw_obj) in self.pw_material[Hz]:
-                self.pw_material[Hz][type(pw_obj)].merge(pw_obj)
+    def _attach_material(
+        self, component, material, idx, coords, underneath, aggregates
+    ):
+        getter = getattr(material, f"get_pw_material_{component.__name__.lower()}")
+        material_type = type(material)
+
+        if material_type in _BUILTIN_MATERIAL_TYPES:
+            aggregate = aggregates.get(material_type)
+            pw_obj = getter(
+                idx,
+                coords,
+                underneath,
+                self.cmplx,
+                _aggregate=aggregate,
+            )
+            if aggregate is not None:
+                return
+
+            aggregate = self.pw_material[component].get(type(pw_obj))
+            if aggregate is None:
+                aggregate = pw_obj
+                self.pw_material[component][type(pw_obj)] = aggregate
             else:
-                self.pw_material[Hz][type(pw_obj)] = pw_obj
+                aggregate.merge(pw_obj)
+            aggregates[material_type] = aggregate
+            return
+
+        pw_obj = getter(idx, coords, underneath, self.cmplx)
+        aggregate = self.pw_material[component].get(type(pw_obj))
+        if aggregate is None:
+            self.pw_material[component][type(pw_obj)] = pw_obj
+        else:
+            aggregate.merge(pw_obj)
 
     def init_material(self):
         init_mat_func = {

@@ -30,12 +30,14 @@ class Dummy(Material):
         print("frequency independent permittivity:", self.eps_inf, end=" ")
         print("frequency independent permeability:", self.mu_inf)
 
-    def get_pw_material_ex(self, idx, coords, underneath=None, cmplx=False):
+    def get_pw_material_ex(
+        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
+    ):
         if cmplx:
-            pw_obj = DummyExCmplx()
+            pw_obj = _aggregate if _aggregate is not None else DummyExCmplx()
             pw_param = DummyElectricParamCmplx()
         else:
-            pw_obj = DummyExReal()
+            pw_obj = _aggregate if _aggregate is not None else DummyExReal()
             pw_param = DummyElectricParamReal()
 
         if underneath is None:
@@ -46,12 +48,14 @@ class Dummy(Material):
         pw_obj.attach(idx, pw_param)
         return pw_obj
 
-    def get_pw_material_ey(self, idx, coords, underneath=None, cmplx=False):
+    def get_pw_material_ey(
+        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
+    ):
         if cmplx:
-            pw_obj = DummyEyCmplx()
+            pw_obj = _aggregate if _aggregate is not None else DummyEyCmplx()
             pw_param = DummyElectricParamCmplx()
         else:
-            pw_obj = DummyEyReal()
+            pw_obj = _aggregate if _aggregate is not None else DummyEyReal()
             pw_param = DummyElectricParamReal()
 
         if underneath is None:
@@ -62,12 +66,14 @@ class Dummy(Material):
         pw_obj.attach(idx, pw_param)
         return pw_obj
 
-    def get_pw_material_ez(self, idx, coords, underneath=None, cmplx=False):
+    def get_pw_material_ez(
+        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
+    ):
         if cmplx:
-            pw_obj = DummyEzCmplx()
+            pw_obj = _aggregate if _aggregate is not None else DummyEzCmplx()
             pw_param = DummyElectricParamCmplx()
         else:
-            pw_obj = DummyEzReal()
+            pw_obj = _aggregate if _aggregate is not None else DummyEzReal()
             pw_param = DummyElectricParamReal()
 
         if underneath is None:
@@ -78,12 +84,14 @@ class Dummy(Material):
         pw_obj.attach(idx, pw_param)
         return pw_obj
 
-    def get_pw_material_hx(self, idx, coords, underneath=None, cmplx=False):
+    def get_pw_material_hx(
+        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
+    ):
         if cmplx:
-            pw_obj = DummyHxCmplx()
+            pw_obj = _aggregate if _aggregate is not None else DummyHxCmplx()
             pw_param = DummyMagneticParamCmplx()
         else:
-            pw_obj = DummyHxReal()
+            pw_obj = _aggregate if _aggregate is not None else DummyHxReal()
             pw_param = DummyMagneticParamReal()
 
         if underneath is None:
@@ -94,12 +102,14 @@ class Dummy(Material):
         pw_obj.attach(idx, pw_param)
         return pw_obj
 
-    def get_pw_material_hy(self, idx, coords, underneath=None, cmplx=False):
+    def get_pw_material_hy(
+        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
+    ):
         if cmplx:
-            pw_obj = DummyHyCmplx()
+            pw_obj = _aggregate if _aggregate is not None else DummyHyCmplx()
             pw_param = DummyMagneticParamCmplx()
         else:
-            pw_obj = DummyHyReal()
+            pw_obj = _aggregate if _aggregate is not None else DummyHyReal()
             pw_param = DummyMagneticParamReal()
 
         if underneath is None:
@@ -110,12 +120,14 @@ class Dummy(Material):
         pw_obj.attach(idx, pw_param)
         return pw_obj
 
-    def get_pw_material_hz(self, idx, coords, underneath=None, cmplx=False):
+    def get_pw_material_hz(
+        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
+    ):
         if cmplx:
-            pw_obj = DummyHzCmplx()
+            pw_obj = _aggregate if _aggregate is not None else DummyHzCmplx()
             pw_param = DummyMagneticParamCmplx()
         else:
-            pw_obj = DummyHzReal()
+            pw_obj = _aggregate if _aggregate is not None else DummyHzReal()
             pw_param = DummyMagneticParamReal()
 
         if underneath is None:
@@ -164,12 +176,14 @@ class Const(Material):
         print("frequency independent permittivity:", self.eps_inf, end=" ")
         print("frequency independent permeability:", self.mu_inf)
 
-    def get_pw_material_ex(self, idx, coords, underneath=None, cmplx=False):
+    def get_pw_material_ex(
+        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
+    ):
         if cmplx:
-            pw_obj = ConstExCmplx()
+            pw_obj = _aggregate if _aggregate is not None else ConstExCmplx()
             pw_param = ConstElectricParamCmplx()
         else:
-            pw_obj = ConstExReal()
+            pw_obj = _aggregate if _aggregate is not None else ConstExReal()
             pw_param = ConstElectricParamReal()
 
         pw_param.value = self.value
@@ -181,12 +195,14 @@ class Const(Material):
         pw_obj.attach(idx, pw_param)
         return pw_obj
 
-    def get_pw_material_ey(self, idx, coords, underneath=None, cmplx=False):
+    def get_pw_material_ey(
+        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
+    ):
         if cmplx:
-            pw_obj = ConstEyCmplx()
+            pw_obj = _aggregate if _aggregate is not None else ConstEyCmplx()
             pw_param = ConstElectricParamCmplx()
         else:
-            pw_obj = ConstEyReal()
+            pw_obj = _aggregate if _aggregate is not None else ConstEyReal()
             pw_param = ConstElectricParamReal()
 
         pw_param.value = self.value
@@ -198,12 +214,14 @@ class Const(Material):
         pw_obj.attach(idx, pw_param)
         return pw_obj
 
-    def get_pw_material_ez(self, idx, coords, underneath=None, cmplx=False):
+    def get_pw_material_ez(
+        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
+    ):
         if cmplx:
-            pw_obj = ConstEzCmplx()
+            pw_obj = _aggregate if _aggregate is not None else ConstEzCmplx()
             pw_param = ConstElectricParamCmplx()
         else:
-            pw_obj = ConstEzReal()
+            pw_obj = _aggregate if _aggregate is not None else ConstEzReal()
             pw_param = ConstElectricParamReal()
 
         pw_param.value = self.value
@@ -215,12 +233,14 @@ class Const(Material):
         pw_obj.attach(idx, pw_param)
         return pw_obj
 
-    def get_pw_material_hx(self, idx, coords, underneath=None, cmplx=False):
+    def get_pw_material_hx(
+        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
+    ):
         if cmplx:
-            pw_obj = ConstHxCmplx()
+            pw_obj = _aggregate if _aggregate is not None else ConstHxCmplx()
             pw_param = ConstMagneticParamCmplx()
         else:
-            pw_obj = ConstHxReal()
+            pw_obj = _aggregate if _aggregate is not None else ConstHxReal()
             pw_param = ConstMagneticParamReal()
 
         pw_param.value = self.value
@@ -232,12 +252,14 @@ class Const(Material):
         pw_obj.attach(idx, pw_param)
         return pw_obj
 
-    def get_pw_material_hy(self, idx, coords, underneath=None, cmplx=False):
+    def get_pw_material_hy(
+        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
+    ):
         if cmplx:
-            pw_obj = ConstHyCmplx()
+            pw_obj = _aggregate if _aggregate is not None else ConstHyCmplx()
             pw_param = ConstMagneticParamCmplx()
         else:
-            pw_obj = ConstHyReal()
+            pw_obj = _aggregate if _aggregate is not None else ConstHyReal()
             pw_param = ConstMagneticParamReal()
 
         pw_param.value = self.value
@@ -249,12 +271,14 @@ class Const(Material):
         pw_obj.attach(idx, pw_param)
         return pw_obj
 
-    def get_pw_material_hz(self, idx, coords, underneath=None, cmplx=False):
+    def get_pw_material_hz(
+        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
+    ):
         if cmplx:
-            pw_obj = ConstHzCmplx()
+            pw_obj = _aggregate if _aggregate is not None else ConstHzCmplx()
             pw_param = ConstMagneticParamCmplx()
         else:
-            pw_obj = ConstHzReal()
+            pw_obj = _aggregate if _aggregate is not None else ConstHzReal()
             pw_param = ConstMagneticParamReal()
 
         pw_param.value = self.value
@@ -288,12 +312,14 @@ class Dielectric(Material):
         print("frequency independent permittivity:", self.eps_inf, end=" ")
         print("frequency independent permeability:", self.mu_inf)
 
-    def get_pw_material_ex(self, idx, coords, underneath=None, cmplx=False):
+    def get_pw_material_ex(
+        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
+    ):
         if cmplx:
-            pw_obj = DielectricExCmplx()
+            pw_obj = _aggregate if _aggregate is not None else DielectricExCmplx()
             pw_param = DielectricElectricParamCmplx()
         else:
-            pw_obj = DielectricExReal()
+            pw_obj = _aggregate if _aggregate is not None else DielectricExReal()
             pw_param = DielectricElectricParamReal()
 
         if underneath is None:
@@ -304,12 +330,14 @@ class Dielectric(Material):
         pw_obj.attach(idx, pw_param)
         return pw_obj
 
-    def get_pw_material_ey(self, idx, coords, underneath=None, cmplx=False):
+    def get_pw_material_ey(
+        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
+    ):
         if cmplx:
-            pw_obj = DielectricEyCmplx()
+            pw_obj = _aggregate if _aggregate is not None else DielectricEyCmplx()
             pw_param = DielectricElectricParamCmplx()
         else:
-            pw_obj = DielectricEyReal()
+            pw_obj = _aggregate if _aggregate is not None else DielectricEyReal()
             pw_param = DielectricElectricParamReal()
 
         if underneath is None:
@@ -320,12 +348,14 @@ class Dielectric(Material):
         pw_obj.attach(idx, pw_param)
         return pw_obj
 
-    def get_pw_material_ez(self, idx, coords, underneath=None, cmplx=False):
+    def get_pw_material_ez(
+        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
+    ):
         if cmplx:
-            pw_obj = DielectricEzCmplx()
+            pw_obj = _aggregate if _aggregate is not None else DielectricEzCmplx()
             pw_param = DielectricElectricParamCmplx()
         else:
-            pw_obj = DielectricEzReal()
+            pw_obj = _aggregate if _aggregate is not None else DielectricEzReal()
             pw_param = DielectricElectricParamReal()
 
         if underneath is None:
@@ -336,12 +366,14 @@ class Dielectric(Material):
         pw_obj.attach(idx, pw_param)
         return pw_obj
 
-    def get_pw_material_hx(self, idx, coords, underneath=None, cmplx=False):
+    def get_pw_material_hx(
+        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
+    ):
         if cmplx:
-            pw_obj = DielectricHxCmplx()
+            pw_obj = _aggregate if _aggregate is not None else DielectricHxCmplx()
             pw_param = DielectricMagneticParamCmplx()
         else:
-            pw_obj = DielectricHxReal()
+            pw_obj = _aggregate if _aggregate is not None else DielectricHxReal()
             pw_param = DielectricMagneticParamReal()
 
         if underneath is None:
@@ -352,12 +384,14 @@ class Dielectric(Material):
         pw_obj.attach(idx, pw_param)
         return pw_obj
 
-    def get_pw_material_hy(self, idx, coords, underneath=None, cmplx=False):
+    def get_pw_material_hy(
+        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
+    ):
         if cmplx:
-            pw_obj = DielectricHyCmplx()
+            pw_obj = _aggregate if _aggregate is not None else DielectricHyCmplx()
             pw_param = DielectricMagneticParamCmplx()
         else:
-            pw_obj = DielectricHyReal()
+            pw_obj = _aggregate if _aggregate is not None else DielectricHyReal()
             pw_param = DielectricMagneticParamReal()
 
         if underneath is None:
@@ -368,12 +402,14 @@ class Dielectric(Material):
         pw_obj.attach(idx, pw_param)
         return pw_obj
 
-    def get_pw_material_hz(self, idx, coords, underneath=None, cmplx=False):
+    def get_pw_material_hz(
+        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
+    ):
         if cmplx:
-            pw_obj = DielectricHzCmplx()
+            pw_obj = _aggregate if _aggregate is not None else DielectricHzCmplx()
             pw_param = DielectricMagneticParamCmplx()
         else:
-            pw_obj = DielectricHzReal()
+            pw_obj = _aggregate if _aggregate is not None else DielectricHzReal()
             pw_param = DielectricMagneticParamReal()
 
         if underneath is None:
@@ -568,12 +604,14 @@ class Upml(Pml):
         numerator = 2 * self.kappa(w, component) - self.sigma(w, component) * self.dt
         return numerator
 
-    def get_pw_material_ex(self, idx, coords, underneath=None, cmplx=False):
+    def get_pw_material_ex(
+        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
+    ):
         if cmplx:
-            pw_obj = UpmlExCmplx()
+            pw_obj = _aggregate if _aggregate is not None else UpmlExCmplx()
             pw_param = UpmlElectricParamCmplx()
         else:
-            pw_obj = UpmlExReal()
+            pw_obj = _aggregate if _aggregate is not None else UpmlExReal()
             pw_param = UpmlElectricParamReal()
 
         if underneath is None:
@@ -591,12 +629,14 @@ class Upml(Pml):
         pw_obj.attach(idx, pw_param)
         return pw_obj
 
-    def get_pw_material_ey(self, idx, coords, underneath=None, cmplx=False):
+    def get_pw_material_ey(
+        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
+    ):
         if cmplx:
-            pw_obj = UpmlEyCmplx()
+            pw_obj = _aggregate if _aggregate is not None else UpmlEyCmplx()
             pw_param = UpmlElectricParamCmplx()
         else:
-            pw_obj = UpmlEyReal()
+            pw_obj = _aggregate if _aggregate is not None else UpmlEyReal()
             pw_param = UpmlElectricParamReal()
 
         if underneath is None:
@@ -614,12 +654,14 @@ class Upml(Pml):
         pw_obj.attach(idx, pw_param)
         return pw_obj
 
-    def get_pw_material_ez(self, idx, coords, underneath=None, cmplx=False):
+    def get_pw_material_ez(
+        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
+    ):
         if cmplx:
-            pw_obj = UpmlEzCmplx()
+            pw_obj = _aggregate if _aggregate is not None else UpmlEzCmplx()
             pw_param = UpmlElectricParamCmplx()
         else:
-            pw_obj = UpmlEzReal()
+            pw_obj = _aggregate if _aggregate is not None else UpmlEzReal()
             pw_param = UpmlElectricParamReal()
 
         if underneath is None:
@@ -637,12 +679,14 @@ class Upml(Pml):
         pw_obj.attach(idx, pw_param)
         return pw_obj
 
-    def get_pw_material_hx(self, idx, coords, underneath=None, cmplx=False):
+    def get_pw_material_hx(
+        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
+    ):
         if cmplx:
-            pw_obj = UpmlHxCmplx()
+            pw_obj = _aggregate if _aggregate is not None else UpmlHxCmplx()
             pw_param = UpmlMagneticParamCmplx()
         else:
-            pw_obj = UpmlHxReal()
+            pw_obj = _aggregate if _aggregate is not None else UpmlHxReal()
             pw_param = UpmlMagneticParamReal()
 
         if underneath is None:
@@ -660,12 +704,14 @@ class Upml(Pml):
         pw_obj.attach(idx, pw_param)
         return pw_obj
 
-    def get_pw_material_hy(self, idx, coords, underneath=None, cmplx=False):
+    def get_pw_material_hy(
+        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
+    ):
         if cmplx:
-            pw_obj = UpmlHyCmplx()
+            pw_obj = _aggregate if _aggregate is not None else UpmlHyCmplx()
             pw_param = UpmlMagneticParamCmplx()
         else:
-            pw_obj = UpmlHyReal()
+            pw_obj = _aggregate if _aggregate is not None else UpmlHyReal()
             pw_param = UpmlMagneticParamReal()
 
         if underneath is None:
@@ -683,12 +729,14 @@ class Upml(Pml):
         pw_obj.attach(idx, pw_param)
         return pw_obj
 
-    def get_pw_material_hz(self, idx, coords, underneath=None, cmplx=False):
+    def get_pw_material_hz(
+        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
+    ):
         if cmplx:
-            pw_obj = UpmlHzCmplx()
+            pw_obj = _aggregate if _aggregate is not None else UpmlHzCmplx()
             pw_param = UpmlMagneticParamCmplx()
         else:
-            pw_obj = UpmlHzReal()
+            pw_obj = _aggregate if _aggregate is not None else UpmlHzReal()
             pw_param = UpmlMagneticParamReal()
 
         if underneath is None:
@@ -813,12 +861,14 @@ class Cpml(Pml):
         else:
             return 0
 
-    def get_pw_material_ex(self, idx, coords, underneath=None, cmplx=False):
+    def get_pw_material_ex(
+        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
+    ):
         if cmplx:
-            pw_obj = CpmlExCmplx()
+            pw_obj = _aggregate if _aggregate is not None else CpmlExCmplx()
             pw_param = CpmlElectricParamCmplx()
         else:
-            pw_obj = CpmlExReal()
+            pw_obj = _aggregate if _aggregate is not None else CpmlExReal()
             pw_param = CpmlElectricParamReal()
 
         if underneath is None:
@@ -836,12 +886,14 @@ class Cpml(Pml):
         pw_obj.attach(idx, pw_param)
         return pw_obj
 
-    def get_pw_material_ey(self, idx, coords, underneath=None, cmplx=False):
+    def get_pw_material_ey(
+        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
+    ):
         if cmplx:
-            pw_obj = CpmlEyCmplx()
+            pw_obj = _aggregate if _aggregate is not None else CpmlEyCmplx()
             pw_param = CpmlElectricParamCmplx()
         else:
-            pw_obj = CpmlEyReal()
+            pw_obj = _aggregate if _aggregate is not None else CpmlEyReal()
             pw_param = CpmlElectricParamReal()
 
         if underneath is None:
@@ -859,12 +911,14 @@ class Cpml(Pml):
         pw_obj.attach(idx, pw_param)
         return pw_obj
 
-    def get_pw_material_ez(self, idx, coords, underneath=None, cmplx=False):
+    def get_pw_material_ez(
+        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
+    ):
         if cmplx:
-            pw_obj = CpmlEzCmplx()
+            pw_obj = _aggregate if _aggregate is not None else CpmlEzCmplx()
             pw_param = CpmlElectricParamCmplx()
         else:
-            pw_obj = CpmlEzReal()
+            pw_obj = _aggregate if _aggregate is not None else CpmlEzReal()
             pw_param = CpmlElectricParamReal()
 
         if underneath is None:
@@ -881,12 +935,14 @@ class Cpml(Pml):
         pw_obj.attach(idx, pw_param)
         return pw_obj
 
-    def get_pw_material_hx(self, idx, coords, underneath=None, cmplx=False):
+    def get_pw_material_hx(
+        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
+    ):
         if cmplx:
-            pw_obj = CpmlHxCmplx()
+            pw_obj = _aggregate if _aggregate is not None else CpmlHxCmplx()
             pw_param = CpmlMagneticParamCmplx()
         else:
-            pw_obj = CpmlHxReal()
+            pw_obj = _aggregate if _aggregate is not None else CpmlHxReal()
             pw_param = CpmlMagneticParamReal()
 
         if underneath is None:
@@ -903,12 +959,14 @@ class Cpml(Pml):
         pw_obj.attach(idx, pw_param)
         return pw_obj
 
-    def get_pw_material_hy(self, idx, coords, underneath=None, cmplx=False):
+    def get_pw_material_hy(
+        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
+    ):
         if cmplx:
-            pw_obj = CpmlHyCmplx()
+            pw_obj = _aggregate if _aggregate is not None else CpmlHyCmplx()
             pw_param = CpmlMagneticParamCmplx()
         else:
-            pw_obj = CpmlHyReal()
+            pw_obj = _aggregate if _aggregate is not None else CpmlHyReal()
             pw_param = CpmlMagneticParamReal()
 
         if underneath is None:
@@ -925,12 +983,14 @@ class Cpml(Pml):
         pw_obj.attach(idx, pw_param)
         return pw_obj
 
-    def get_pw_material_hz(self, idx, coords, underneath=None, cmplx=False):
+    def get_pw_material_hz(
+        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
+    ):
         if cmplx:
-            pw_obj = CpmlHzCmplx()
+            pw_obj = _aggregate if _aggregate is not None else CpmlHzCmplx()
             pw_param = CpmlMagneticParamCmplx()
         else:
-            pw_obj = CpmlHzReal()
+            pw_obj = _aggregate if _aggregate is not None else CpmlHzReal()
             pw_param = CpmlMagneticParamReal()
 
         if underneath is None:
@@ -1149,12 +1209,14 @@ class DcpAde(Dielectric):
         for i in self.cps:
             i.display_info(indent + 4)
 
-    def get_pw_material_ex(self, idx, coords, underneath=None, cmplx=False):
+    def get_pw_material_ex(
+        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
+    ):
         if cmplx:
-            pw_obj = DcpAdeExCmplx()
+            pw_obj = _aggregate if _aggregate is not None else DcpAdeExCmplx()
             pw_param = DcpAdeElectricParamCmplx()
         else:
-            pw_obj = DcpAdeExReal()
+            pw_obj = _aggregate if _aggregate is not None else DcpAdeExReal()
             pw_param = DcpAdeElectricParamReal()
 
         if underneath is None:
@@ -1167,12 +1229,14 @@ class DcpAde(Dielectric):
         pw_obj.attach(idx, pw_param)
         return pw_obj
 
-    def get_pw_material_ey(self, idx, coords, underneath=None, cmplx=False):
+    def get_pw_material_ey(
+        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
+    ):
         if cmplx:
-            pw_obj = DcpAdeEyCmplx()
+            pw_obj = _aggregate if _aggregate is not None else DcpAdeEyCmplx()
             pw_param = DcpAdeElectricParamCmplx()
         else:
-            pw_obj = DcpAdeEyReal()
+            pw_obj = _aggregate if _aggregate is not None else DcpAdeEyReal()
             pw_param = DcpAdeElectricParamReal()
 
         if underneath is None:
@@ -1185,12 +1249,14 @@ class DcpAde(Dielectric):
         pw_obj.attach(idx, pw_param)
         return pw_obj
 
-    def get_pw_material_ez(self, idx, coords, underneath=None, cmplx=False):
+    def get_pw_material_ez(
+        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
+    ):
         if cmplx:
-            pw_obj = DcpAdeEzCmplx()
+            pw_obj = _aggregate if _aggregate is not None else DcpAdeEzCmplx()
             pw_param = DcpAdeElectricParamCmplx()
         else:
-            pw_obj = DcpAdeEzReal()
+            pw_obj = _aggregate if _aggregate is not None else DcpAdeEzReal()
             pw_param = DcpAdeElectricParamReal()
 
         if underneath is None:
@@ -1203,12 +1269,14 @@ class DcpAde(Dielectric):
         pw_obj.attach(idx, pw_param)
         return pw_obj
 
-    def get_pw_material_hx(self, idx, coords, underneath=None, cmplx=False):
+    def get_pw_material_hx(
+        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
+    ):
         if cmplx:
-            pw_obj = DcpAdeHxCmplx()
+            pw_obj = _aggregate if _aggregate is not None else DcpAdeHxCmplx()
             pw_param = DcpAdeMagneticParamCmplx()
         else:
-            pw_obj = DcpAdeHxReal()
+            pw_obj = _aggregate if _aggregate is not None else DcpAdeHxReal()
             pw_param = DcpAdeMagneticParamReal()
 
         if underneath is None:
@@ -1219,12 +1287,14 @@ class DcpAde(Dielectric):
         pw_obj.attach(idx, pw_param)
         return pw_obj
 
-    def get_pw_material_hy(self, idx, coords, underneath=None, cmplx=False):
+    def get_pw_material_hy(
+        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
+    ):
         if cmplx:
-            pw_obj = DcpAdeHyCmplx()
+            pw_obj = _aggregate if _aggregate is not None else DcpAdeHyCmplx()
             pw_param = DcpAdeMagneticParamCmplx()
         else:
-            pw_obj = DcpAdeHyReal()
+            pw_obj = _aggregate if _aggregate is not None else DcpAdeHyReal()
             pw_param = DcpAdeMagneticParamReal()
 
         if underneath is None:
@@ -1235,12 +1305,14 @@ class DcpAde(Dielectric):
         pw_obj.attach(idx, pw_param)
         return pw_obj
 
-    def get_pw_material_hz(self, idx, coords, underneath=None, cmplx=False):
+    def get_pw_material_hz(
+        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
+    ):
         if cmplx:
-            pw_obj = DcpAdeHzCmplx()
+            pw_obj = _aggregate if _aggregate is not None else DcpAdeHzCmplx()
             pw_param = DcpAdeMagneticParamCmplx()
         else:
-            pw_obj = DcpAdeHzReal()
+            pw_obj = _aggregate if _aggregate is not None else DcpAdeHzReal()
             pw_param = DcpAdeMagneticParamReal()
 
         if underneath is None:
@@ -1419,12 +1491,14 @@ class DcpPlrc(Dielectric):
         for i in self.cps:
             i.display_info(indent + 4)
 
-    def get_pw_material_ex(self, idx, coords, underneath=None, cmplx=False):
+    def get_pw_material_ex(
+        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
+    ):
         if cmplx:
-            pw_obj = DcpPlrcExCmplx()
+            pw_obj = _aggregate if _aggregate is not None else DcpPlrcExCmplx()
             pw_param = DcpPlrcElectricParamCmplx()
         else:
-            pw_obj = DcpPlrcExReal()
+            pw_obj = _aggregate if _aggregate is not None else DcpPlrcExReal()
             pw_param = DcpPlrcElectricParamReal()
 
         if underneath is None:
@@ -1436,12 +1510,14 @@ class DcpPlrc(Dielectric):
         pw_obj.attach(idx, pw_param)
         return pw_obj
 
-    def get_pw_material_ey(self, idx, coords, underneath=None, cmplx=False):
+    def get_pw_material_ey(
+        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
+    ):
         if cmplx:
-            pw_obj = DcpPlrcEyCmplx()
+            pw_obj = _aggregate if _aggregate is not None else DcpPlrcEyCmplx()
             pw_param = DcpPlrcElectricParamCmplx()
         else:
-            pw_obj = DcpPlrcEyReal()
+            pw_obj = _aggregate if _aggregate is not None else DcpPlrcEyReal()
             pw_param = DcpPlrcElectricParamReal()
 
         if underneath is None:
@@ -1453,12 +1529,14 @@ class DcpPlrc(Dielectric):
         pw_obj.attach(idx, pw_param)
         return pw_obj
 
-    def get_pw_material_ez(self, idx, coords, underneath=None, cmplx=False):
+    def get_pw_material_ez(
+        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
+    ):
         if cmplx:
-            pw_obj = DcpPlrcEzCmplx()
+            pw_obj = _aggregate if _aggregate is not None else DcpPlrcEzCmplx()
             pw_param = DcpPlrcElectricParamCmplx()
         else:
-            pw_obj = DcpPlrcEzReal()
+            pw_obj = _aggregate if _aggregate is not None else DcpPlrcEzReal()
             pw_param = DcpPlrcElectricParamReal()
 
         if underneath is None:
@@ -1470,12 +1548,14 @@ class DcpPlrc(Dielectric):
         pw_obj.attach(idx, pw_param)
         return pw_obj
 
-    def get_pw_material_hx(self, idx, coords, underneath=None, cmplx=False):
+    def get_pw_material_hx(
+        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
+    ):
         if cmplx:
-            pw_obj = DcpPlrcHxCmplx()
+            pw_obj = _aggregate if _aggregate is not None else DcpPlrcHxCmplx()
             pw_param = DcpPlrcMagneticParamCmplx()
         else:
-            pw_obj = DcpPlrcHxReal()
+            pw_obj = _aggregate if _aggregate is not None else DcpPlrcHxReal()
             pw_param = DcpPlrcMagneticParamReal()
 
         if underneath is None:
@@ -1486,12 +1566,14 @@ class DcpPlrc(Dielectric):
         pw_obj.attach(idx, pw_param)
         return pw_obj
 
-    def get_pw_material_hy(self, idx, coords, underneath=None, cmplx=False):
+    def get_pw_material_hy(
+        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
+    ):
         if cmplx:
-            pw_obj = DcpPlrcHyCmplx()
+            pw_obj = _aggregate if _aggregate is not None else DcpPlrcHyCmplx()
             pw_param = DcpPlrcMagneticParamCmplx()
         else:
-            pw_obj = DcpPlrcHyReal()
+            pw_obj = _aggregate if _aggregate is not None else DcpPlrcHyReal()
             pw_param = DcpPlrcMagneticParamReal()
 
         if underneath is None:
@@ -1502,12 +1584,14 @@ class DcpPlrc(Dielectric):
         pw_obj.attach(idx, pw_param)
         return pw_obj
 
-    def get_pw_material_hz(self, idx, coords, underneath=None, cmplx=False):
+    def get_pw_material_hz(
+        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
+    ):
         if cmplx:
-            pw_obj = DcpPlrcHzCmplx()
+            pw_obj = _aggregate if _aggregate is not None else DcpPlrcHzCmplx()
             pw_param = DcpPlrcMagneticParamCmplx()
         else:
-            pw_obj = DcpPlrcHzReal()
+            pw_obj = _aggregate if _aggregate is not None else DcpPlrcHzReal()
             pw_param = DcpPlrcMagneticParamReal()
 
         if underneath is None:
@@ -1626,12 +1710,14 @@ class Drude(Dielectric):
         for p in self.dps:
             p.display_info(indent + 4)
 
-    def get_pw_material_ex(self, idx, coords, underneath=None, cmplx=False):
+    def get_pw_material_ex(
+        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
+    ):
         if cmplx:
-            pw_obj = DrudeExCmplx()
+            pw_obj = _aggregate if _aggregate is not None else DrudeExCmplx()
             pw_param = DrudeElectricParamCmplx()
         else:
-            pw_obj = DrudeExReal()
+            pw_obj = _aggregate if _aggregate is not None else DrudeExReal()
             pw_param = DrudeElectricParamReal()
 
         if underneath is None:
@@ -1644,12 +1730,14 @@ class Drude(Dielectric):
         pw_obj.attach(idx, pw_param)
         return pw_obj
 
-    def get_pw_material_ey(self, idx, coords, underneath=None, cmplx=False):
+    def get_pw_material_ey(
+        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
+    ):
         if cmplx:
-            pw_obj = DrudeEyCmplx()
+            pw_obj = _aggregate if _aggregate is not None else DrudeEyCmplx()
             pw_param = DrudeElectricParamCmplx()
         else:
-            pw_obj = DrudeEyReal()
+            pw_obj = _aggregate if _aggregate is not None else DrudeEyReal()
             pw_param = DrudeElectricParamReal()
 
         if underneath is None:
@@ -1662,12 +1750,14 @@ class Drude(Dielectric):
         pw_obj.attach(idx, pw_param)
         return pw_obj
 
-    def get_pw_material_ez(self, idx, coords, underneath=None, cmplx=False):
+    def get_pw_material_ez(
+        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
+    ):
         if cmplx:
-            pw_obj = DrudeEzCmplx()
+            pw_obj = _aggregate if _aggregate is not None else DrudeEzCmplx()
             pw_param = DrudeElectricParamCmplx()
         else:
-            pw_obj = DrudeEzReal()
+            pw_obj = _aggregate if _aggregate is not None else DrudeEzReal()
             pw_param = DrudeElectricParamReal()
 
         if underneath is None:
@@ -1680,12 +1770,14 @@ class Drude(Dielectric):
         pw_obj.attach(idx, pw_param)
         return pw_obj
 
-    def get_pw_material_hx(self, idx, coords, underneath=None, cmplx=False):
+    def get_pw_material_hx(
+        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
+    ):
         if cmplx:
-            pw_obj = DrudeHxCmplx()
+            pw_obj = _aggregate if _aggregate is not None else DrudeHxCmplx()
             pw_param = DrudeMagneticParamCmplx()
         else:
-            pw_obj = DrudeHxReal()
+            pw_obj = _aggregate if _aggregate is not None else DrudeHxReal()
             pw_param = DrudeMagneticParamReal()
 
         if underneath is None:
@@ -1696,12 +1788,14 @@ class Drude(Dielectric):
         pw_obj.attach(idx, pw_param)
         return pw_obj
 
-    def get_pw_material_hy(self, idx, coords, underneath=None, cmplx=False):
+    def get_pw_material_hy(
+        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
+    ):
         if cmplx:
-            pw_obj = DrudeHyCmplx()
+            pw_obj = _aggregate if _aggregate is not None else DrudeHyCmplx()
             pw_param = DrudeMagneticParamCmplx()
         else:
-            pw_obj = DrudeHyReal()
+            pw_obj = _aggregate if _aggregate is not None else DrudeHyReal()
             pw_param = DrudeMagneticParamReal()
 
         if underneath is None:
@@ -1712,12 +1806,14 @@ class Drude(Dielectric):
         pw_obj.attach(idx, pw_param)
         return pw_obj
 
-    def get_pw_material_hz(self, idx, coords, underneath=None, cmplx=False):
+    def get_pw_material_hz(
+        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
+    ):
         if cmplx:
-            pw_obj = DrudeHzCmplx()
+            pw_obj = _aggregate if _aggregate is not None else DrudeHzCmplx()
             pw_param = DrudeMagneticParamCmplx()
         else:
-            pw_obj = DrudeHzReal()
+            pw_obj = _aggregate if _aggregate is not None else DrudeHzReal()
             pw_param = DrudeMagneticParamReal()
 
         if underneath is None:
@@ -1806,12 +1902,14 @@ class Lorentz(Dielectric):
         for p in self.lps:
             p.display_info(indent + 4)
 
-    def get_pw_material_ex(self, idx, coords, underneath=None, cmplx=False):
+    def get_pw_material_ex(
+        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
+    ):
         if cmplx:
-            pw_obj = LorentzExCmplx()
+            pw_obj = _aggregate if _aggregate is not None else LorentzExCmplx()
             pw_param = LorentzElectricParamCmplx()
         else:
-            pw_obj = LorentzExReal()
+            pw_obj = _aggregate if _aggregate is not None else LorentzExReal()
             pw_param = LorentzElectricParamReal()
 
         if underneath is None:
@@ -1823,12 +1921,14 @@ class Lorentz(Dielectric):
         pw_obj.attach(idx, pw_param)
         return pw_obj
 
-    def get_pw_material_ey(self, idx, coords, underneath=None, cmplx=False):
+    def get_pw_material_ey(
+        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
+    ):
         if cmplx:
-            pw_obj = LorentzEyCmplx()
+            pw_obj = _aggregate if _aggregate is not None else LorentzEyCmplx()
             pw_param = LorentzElectricParamCmplx()
         else:
-            pw_obj = LorentzEyReal()
+            pw_obj = _aggregate if _aggregate is not None else LorentzEyReal()
             pw_param = LorentzElectricParamReal()
 
         if underneath is None:
@@ -1840,12 +1940,14 @@ class Lorentz(Dielectric):
         pw_obj.attach(idx, pw_param)
         return pw_obj
 
-    def get_pw_material_ez(self, idx, coords, underneath=None, cmplx=False):
+    def get_pw_material_ez(
+        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
+    ):
         if cmplx:
-            pw_obj = LorentzEzCmplx()
+            pw_obj = _aggregate if _aggregate is not None else LorentzEzCmplx()
             pw_param = LorentzElectricParamCmplx()
         else:
-            pw_obj = LorentzEzReal()
+            pw_obj = _aggregate if _aggregate is not None else LorentzEzReal()
             pw_param = LorentzElectricParamReal()
 
         if underneath is None:
@@ -1857,12 +1959,14 @@ class Lorentz(Dielectric):
         pw_obj.attach(idx, pw_param)
         return pw_obj
 
-    def get_pw_material_hx(self, idx, coords, underneath=None, cmplx=False):
+    def get_pw_material_hx(
+        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
+    ):
         if cmplx:
-            pw_obj = LorentzHxCmplx()
+            pw_obj = _aggregate if _aggregate is not None else LorentzHxCmplx()
             pw_param = LorentzMagneticParamCmplx()
         else:
-            pw_obj = LorentzHxReal()
+            pw_obj = _aggregate if _aggregate is not None else LorentzHxReal()
             pw_param = LorentzMagneticParamReal()
 
         if underneath is None:
@@ -1873,12 +1977,14 @@ class Lorentz(Dielectric):
         pw_obj.attach(idx, pw_param)
         return pw_obj
 
-    def get_pw_material_hy(self, idx, coords, underneath=None, cmplx=False):
+    def get_pw_material_hy(
+        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
+    ):
         if cmplx:
-            pw_obj = LorentzHyCmplx()
+            pw_obj = _aggregate if _aggregate is not None else LorentzHyCmplx()
             pw_param = LorentzMagneticParamCmplx()
         else:
-            pw_obj = LorentzHyReal()
+            pw_obj = _aggregate if _aggregate is not None else LorentzHyReal()
             pw_param = LorentzMagneticParamReal()
 
         if underneath is None:
@@ -1889,12 +1995,14 @@ class Lorentz(Dielectric):
         pw_obj.attach(idx, pw_param)
         return pw_obj
 
-    def get_pw_material_hz(self, idx, coords, underneath=None, cmplx=False):
+    def get_pw_material_hz(
+        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
+    ):
         if cmplx:
-            pw_obj = LorentzHzCmplx()
+            pw_obj = _aggregate if _aggregate is not None else LorentzHzCmplx()
             pw_param = LorentzMagneticParamCmplx()
         else:
-            pw_obj = LorentzHzReal()
+            pw_obj = _aggregate if _aggregate is not None else LorentzHzReal()
             pw_param = LorentzMagneticParamReal()
 
         if underneath is None:
@@ -2026,11 +2134,13 @@ class Dm2(Dielectric):
         print("normzlied reduced Planck constant:", self.hbar)
         print("relative tolerance:", self.rtol)
 
-    def get_pw_material_ex(self, idx, coords, underneath=None, cmplx=False):
+    def get_pw_material_ex(
+        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
+    ):
         if cmplx:
             raise ValueError("Dm2 class supports real fields only")
         else:
-            pw_obj = Dm2ExReal()
+            pw_obj = _aggregate if _aggregate is not None else Dm2ExReal()
             pw_param = Dm2ElectricParamReal()
 
         if underneath is None:
@@ -2049,11 +2159,13 @@ class Dm2(Dielectric):
         pw_obj.attach(idx, pw_param)
         return pw_obj
 
-    def get_pw_material_ey(self, idx, coords, underneath=None, cmplx=False):
+    def get_pw_material_ey(
+        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
+    ):
         if cmplx:
             raise ValueError("Dm2 class supports real fields only")
         else:
-            pw_obj = Dm2EyReal()
+            pw_obj = _aggregate if _aggregate is not None else Dm2EyReal()
             pw_param = Dm2ElectricParamReal()
 
         if underneath is None:
@@ -2072,11 +2184,13 @@ class Dm2(Dielectric):
         pw_obj.attach(idx, pw_param)
         return pw_obj
 
-    def get_pw_material_ez(self, idx, coords, underneath=None, cmplx=False):
+    def get_pw_material_ez(
+        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
+    ):
         if cmplx:
             raise ValueError("Dm2 class supports real fields only")
         else:
-            pw_obj = Dm2EzReal()
+            pw_obj = _aggregate if _aggregate is not None else Dm2EzReal()
             pw_param = Dm2ElectricParamReal()
 
         if underneath is None:
@@ -2095,11 +2209,13 @@ class Dm2(Dielectric):
         pw_obj.attach(idx, pw_param)
         return pw_obj
 
-    def get_pw_material_hx(self, idx, coords, underneath=None, cmplx=False):
+    def get_pw_material_hx(
+        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
+    ):
         if cmplx:
             raise ValueError("Dm2 class supports real fields only")
         else:
-            pw_obj = Dm2HxReal()
+            pw_obj = _aggregate if _aggregate is not None else Dm2HxReal()
             pw_param = Dm2MagneticParamReal()
 
         if underneath is None:
@@ -2110,11 +2226,13 @@ class Dm2(Dielectric):
         pw_obj.attach(idx, pw_param)
         return pw_obj
 
-    def get_pw_material_hy(self, idx, coords, underneath=None, cmplx=False):
+    def get_pw_material_hy(
+        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
+    ):
         if cmplx:
             raise ValueError("Dm2 class supports real fields only")
         else:
-            pw_obj = Dm2HyReal()
+            pw_obj = _aggregate if _aggregate is not None else Dm2HyReal()
             pw_param = Dm2MagneticParamReal()
 
         if underneath is None:
@@ -2125,11 +2243,13 @@ class Dm2(Dielectric):
         pw_obj.attach(idx, pw_param)
         return pw_obj
 
-    def get_pw_material_hz(self, idx, coords, underneath=None, cmplx=False):
+    def get_pw_material_hz(
+        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
+    ):
         if cmplx:
             raise ValueError("Dm2 class supports real fields only")
         else:
-            pw_obj = Dm2HzReal()
+            pw_obj = _aggregate if _aggregate is not None else Dm2HzReal()
             pw_param = Dm2MagneticParamReal()
 
         if underneath is None:
@@ -2139,3 +2259,18 @@ class Dm2(Dielectric):
 
         pw_obj.attach(idx, pw_param)
         return pw_obj
+
+
+_BUILTIN_MATERIAL_TYPES = (
+    Dummy,
+    Const,
+    Dielectric,
+    Upml,
+    Cpml,
+    DcpAde,
+    DcpPlrc,
+    DcpRc,
+    Drude,
+    Lorentz,
+    Dm2,
+)

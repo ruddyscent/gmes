@@ -5,6 +5,7 @@
 #include <array>
 #include <iterator>
 #include <functional>
+#include <set>
 #include <span>
 #include <stdexcept>
 #include <utility>
@@ -19,6 +20,7 @@ namespace gmes
 
   struct PwMaterialParam
   {
+    virtual ~PwMaterialParam() = default;
   }; // struct PwMaterialParam
 
   template <typename T>
@@ -63,6 +65,39 @@ namespace gmes
     attach(const int* const idx, int idx_size,
 	   const PwMaterialParam* const parameter) = 0;
 
+    PwMaterial<T>*
+    attach_many(const int* const indices, int index_rows, int index_cols,
+		const std::vector<PwMaterialParam*>& parameters)
+    {
+      if (index_cols != 3)
+	throw std::invalid_argument("bulk field indices must have shape (n, 3)");
+      if (index_rows != static_cast<int>(parameters.size()))
+	throw std::invalid_argument("bulk indices and parameters must have equal lengths");
+
+      std::set<Index3> unique_indices(idx_list.begin(), idx_list.end());
+      for (int i = 0; i < index_rows; ++i) {
+	const Index3 index = make_index(indices + 3 * i, index_cols);
+	if (std::ranges::any_of(index, [](int value) { return value < 0; }))
+	  throw std::out_of_range("field indices must be non-negative");
+	if (!unique_indices.insert(index).second)
+	  throw std::invalid_argument("bulk field indices must not contain duplicates");
+	validate_parameter(parameters[i]);
+      }
+
+      reserve(idx_list.size() + parameters.size());
+      for (int i = 0; i < index_rows; ++i)
+	attach(indices + 3 * i, index_cols, parameters[i]);
+
+      return this;
+    }
+
+    void
+    reserve(std::size_t capacity)
+    {
+      idx_list.reserve(capacity);
+      reserve_parameters(capacity);
+    }
+
     virtual void
     update_all(T* const inplace_field,
 	       int inplace_dim1, int inplace_dim2, int inplace_dim3,
@@ -99,6 +134,19 @@ namespace gmes
     }
 
   protected:
+    virtual bool
+    accepts_parameter(const PwMaterialParam* parameter) const noexcept = 0;
+
+    virtual void
+    reserve_parameters(std::size_t capacity) = 0;
+
+    void
+    validate_parameter(const PwMaterialParam* parameter) const
+    {
+      if (!accepts_parameter(parameter))
+	throw std::invalid_argument("parameter type does not match pointwise material");
+    }
+
     int
     position(const Index3& idx) const
     {

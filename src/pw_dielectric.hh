@@ -51,6 +51,7 @@ namespace gmes
     {
       const Index3 index = make_index(idx, idx_size);
 
+      this->validate_parameter(pm_param_ptr);
       const auto& dielectric_param = *static_cast<const DielectricElectricParam<T>*>(pm_param_ptr);
 
       idx_list.push_back(index);
@@ -74,6 +75,18 @@ namespace gmes
     }
 
   protected:
+    bool
+    accepts_parameter(const PwMaterialParam* parameter) const noexcept override
+    {
+      return dynamic_cast<const DielectricElectricParam<T>*>(parameter) != nullptr;
+    }
+
+    void
+    reserve_parameters(std::size_t capacity) override
+    {
+      param_list.reserve(capacity);
+    }
+
     using MaterialElectric<T>::position;
     using MaterialElectric<T>::idx_list;
     std::vector<DielectricElectricParam<T> > param_list;
@@ -230,7 +243,10 @@ namespace gmes
     {
       const Index3 index = make_index(idx, idx_size);
 
-      const auto& dielectric_param = *static_cast<const DielectricMagneticParam<T>*>(pm_param_ptr);
+      this->validate_parameter(pm_param_ptr);
+      const auto& magnetic_param = *static_cast<const MagneticParam<T>*>(pm_param_ptr);
+      DielectricMagneticParam<T> dielectric_param;
+      dielectric_param.mu_inf = magnetic_param.mu_inf;
 
       idx_list.push_back(index);
       param_list.push_back(dielectric_param);
@@ -248,6 +264,18 @@ namespace gmes
     }
 
   protected:
+    bool
+    accepts_parameter(const PwMaterialParam* parameter) const noexcept override
+    {
+      return dynamic_cast<const MagneticParam<T>*>(parameter) != nullptr;
+    }
+
+    void
+    reserve_parameters(std::size_t capacity) override
+    {
+      param_list.reserve(capacity);
+    }
+
     using MaterialMagnetic<T>::position;
     using MaterialMagnetic<T>::idx_list;
     std::vector<DielectricMagneticParam<T> > param_list;

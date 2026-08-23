@@ -8,4 +8,6 @@ recursive-include docs *.md
 exclude gmes/constant.py
 exclude gmes/pw_material.py
 exclude src/constant.py
+exclude src/material.c
+exclude src/material.cpp
 exclude src/pw_material.py

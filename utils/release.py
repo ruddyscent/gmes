@@ -22,13 +22,13 @@ REQUIRED_SDIST_PATHS = {
     "VERSION",
     "build-constraints.txt",
     "gmes/__init__.py",
+    "gmes/material.py",
     "pyproject.toml",
     "setup.py",
     "src/constant.cc",
     "src/constant.hh",
     "src/constant.i",
     "src/cpp23_support.hh",
-    "src/material.pyx",
     "src/numpy.i",
     "src/pw_material.i",
     "src/pygeom.pyx",
@@ -36,12 +36,17 @@ REQUIRED_SDIST_PATHS = {
 REQUIRED_WHEEL_MODULES = {
     "gmes/__init__.py",
     "gmes/constant.py",
+    "gmes/material.py",
     "gmes/pw_material.py",
+}
+FORBIDDEN_SDIST_PATHS = {
+    "src/material.c",
+    "src/material.cpp",
+    "src/material.pyx",
 }
 NATIVE_MODULE_PREFIXES = (
     "gmes/_constant.",
     "gmes/_pw_material.",
-    "gmes/material.",
     "gmes/pygeom.",
 )
 FORBIDDEN_DIRECTORY_NAMES = {".git", "__pycache__", "build", "dist"}
@@ -134,6 +139,12 @@ def verify_sdist(archive, version):
     missing = REQUIRED_SDIST_PATHS - paths
     if missing:
         raise RuntimeError(f"sdist is missing required paths: {sorted(missing)}")
+    legacy_material_sources = FORBIDDEN_SDIST_PATHS & paths
+    if legacy_material_sources:
+        raise RuntimeError(
+            "sdist contains retired material extension sources: "
+            f"{sorted(legacy_material_sources)}"
+        )
     if not any(name.startswith("tests/test_") for name in paths):
         raise RuntimeError("sdist does not contain the unit tests")
     if not any(name.startswith("examples/") and name.endswith(".py") for name in paths):
@@ -175,7 +186,7 @@ def _verify_core_metadata(metadata, version, archive_kind):
 
 
 def verify_wheel(archive, version):
-    """Check wheel tags, native modules, proxies, metadata, and cleanliness."""
+    """Check wheel tags, modules, metadata, and cleanliness."""
     archive = Path(archive)
     platform = _wheel_platform(archive.name, version)
     if platform not in EXPECTED_WHEEL_PLATFORMS:
@@ -190,7 +201,7 @@ def verify_wheel(archive, version):
 
         missing = REQUIRED_WHEEL_MODULES - paths
         if missing:
-            raise RuntimeError(f"wheel is missing proxy modules: {sorted(missing)}")
+            raise RuntimeError(f"wheel is missing Python modules: {sorted(missing)}")
         for prefix in NATIVE_MODULE_PREFIXES:
             if not any(
                 name.startswith(prefix) and name.endswith(".so") for name in paths

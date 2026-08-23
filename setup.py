@@ -148,14 +148,9 @@ pygeom = Extension(
     name="gmes.pygeom", sources=["src/pygeom.pyx"], include_dirs=[numpy_include]
 )
 
-# material module
-material = Extension(
-    name="gmes.material", sources=["src/material.pyx"], include_dirs=[numpy_include]
-)
-
 setup(
     ext_modules=cythonize(
-        [pw_material, constant, pygeom, material],
+        [pw_material, constant, pygeom],
         compiler_directives={"language_level": 3},
     ),
     cmdclass={"bdist_wheel": BdistWheel, "build_ext": BuildExt},

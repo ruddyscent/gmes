@@ -10,6 +10,11 @@ Notable changes to GMES are documented in this file.
   build-time fallback, runtime introspection, and a tunable cell threshold.
 - Repeatable field-update benchmarks for dielectric and dispersive workloads.
 
+### Changed
+
+- Replace the untyped Cython material configuration layer with an
+  import-compatible Python module while keeping native field-update kernels.
+
 ### Fixed
 
 - macOS auto-detection now skips `libomp` runtimes whose minimum deployment

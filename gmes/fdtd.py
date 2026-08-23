@@ -17,7 +17,7 @@ from .file_io import Probe
 from .geometry import DefaultMedium, GeomBoxTree, in_range
 
 # from file_io import write_hdf5, snapshot
-from .material import Dummy, _BUILTIN_MATERIAL_TYPES
+from .material import _BUILTIN_MATERIAL_TYPES, Dummy
 from .pygeom import GeomBox
 
 

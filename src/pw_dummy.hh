@@ -74,6 +74,12 @@ namespace gmes
 
   protected:
     bool
+    uses_input_stencil() const noexcept override
+    {
+      return false;
+    }
+
+    bool
     accepts_parameter(const PwMaterialParam* parameter) const noexcept override
     {
       return dynamic_cast<const DummyElectricParam<T>*>(parameter) != nullptr;
@@ -166,6 +172,12 @@ namespace gmes
     }
 
   protected:
+    bool
+    uses_input_stencil() const noexcept override
+    {
+      return false;
+    }
+
     bool
     accepts_parameter(const PwMaterialParam* parameter) const noexcept override
     {

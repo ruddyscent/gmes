@@ -75,14 +75,15 @@ namespace gmes
       throw std::invalid_argument("atomic state sizes must match");
 
     const T e_diff = e_new - e_ref;
-    std::vector<std::array<T, 3> > u_diff(u_ref.size());
-
+    T difference_squared = e_diff * e_diff;
     for (std::size_t  i = 0; i < u_ref.size(); ++i) {
-      for (std::size_t j = 0; j < u_ref[i].size(); ++j)
-        u_diff[i][j] = u_new[i][j] - u_ref[i][j];
+      for (std::size_t j = 0; j < u_ref[i].size(); ++j) {
+	const T difference = u_new[i][j] - u_ref[i][j];
+	difference_squared += difference * difference;
+      }
     }
 
-    const double difference_norm = l2_norm(e_diff, u_diff);
+    const double difference_norm = std::sqrt(difference_squared);
     const double reference_norm = l2_norm(e_ref, u_ref);
 
     if (reference_norm == 0)
@@ -106,6 +107,8 @@ namespace gmes
     double rtol;
 
     std::vector<std::array<T, 3> > u;
+    std::vector<double> a_scratch, b_scratch;
+    std::vector<std::array<T, 3> > u_new_scratch, u_previous_scratch;
   }; // template Dm2ElectricParam
 
 
@@ -235,6 +238,7 @@ namespace gmes
 
       idx_list.push_back(index);
       param_list.push_back(dm2_param);
+      prepare_scratch(param_list.back());
 
       return this;
     };
@@ -254,6 +258,16 @@ namespace gmes
     }
 
   protected:
+    static void
+    prepare_scratch(Dm2ElectricParam<T>& parameter)
+    {
+      const auto size = parameter.u.size();
+      parameter.a_scratch.resize(size);
+      parameter.b_scratch.resize(size);
+      parameter.u_new_scratch.resize(size);
+      parameter.u_previous_scratch.resize(size);
+    }
+
     bool
     accepts_parameter(const PwMaterialParam* parameter) const noexcept override
     {
@@ -278,9 +292,8 @@ namespace gmes
       const auto& gamma = dm2_param.gamma;
       const auto& t2 = dm2_param.t2;
 
-      for (std::size_t i = 0; i < n_atom.size(); ++i) {
-        a_out.push_back(n_atom[i] * gamma / t2 * exp(-t / t2));
-      }
+      for (std::size_t i = 0; i < n_atom.size(); ++i)
+	a_out[i] = n_atom[i] * gamma / t2 * exp(-t / t2);
     }
 
     void
@@ -292,9 +305,8 @@ namespace gmes
       const auto& omega = dm2_param.omega;
       const auto& t2 = dm2_param.t2;
 
-      for (std::size_t i = 0; i < n_atom.size(); ++i) {
-        b_out.push_back(n_atom[i] * gamma * omega[i] * exp(-t / t2));
-      }
+      for (std::size_t i = 0; i < n_atom.size(); ++i)
+	b_out[i] = n_atom[i] * gamma * omega[i] * exp(-t / t2);
     }
 
     void
@@ -355,7 +367,8 @@ namespace gmes
 	       const T* const hy, int hy_x_size, int hy_y_size, int hy_z_size,
 	       double dy, double dz, double dt, double n)
     {
-      for_each_equal(idx_list, param_list, [&](const auto& idx, auto& param) {
+      this->finalize_update_plan(0, ex_x_size, ex_y_size, ex_z_size, hz_x_size, hz_y_size, hz_z_size, hy_x_size, hy_y_size, hy_z_size);
+      this->for_each_planned(param_list, [&](const auto& idx, auto& param) {
     	update(ex, ex_x_size, ex_y_size, ex_z_size,
 	       hz, hz_x_size, hz_y_size, hz_z_size,
 	       hy, hy_x_size, hy_y_size, hy_z_size,
@@ -369,17 +382,17 @@ namespace gmes
 	   const T* const hz, int hz_x_size, int hz_y_size, int hz_z_size,
 	   const T* const hy, int hy_x_size, int hy_y_size, int hy_z_size,
 	   double dy, double dz, double dt, double n,
-	   const Index3& idx,
+	   const UpdateOffsets& offsets,
 	   Dm2ElectricParam<T>& dm2_param)
     {
-      const int i = idx[0], j = idx[1], k = idx[2];
       const std::vector<double>& omega = dm2_param.omega;
       const double rtol = dm2_param.rtol;
       std::vector<std::array<T, 3> >& u = dm2_param.u;
 
       const double t = (n + 0.5) * dt;
 
-      std::vector<double> a, b;
+      auto& a = dm2_param.a_scratch;
+      auto& b = dm2_param.b_scratch;
       double c_plus, c_minus, d;
 
       this->a(t, dm2_param, a);
@@ -388,17 +401,19 @@ namespace gmes
       this->c_minus(t, dm2_param, c_minus);
       this->d(t, dm2_param, d);
 
-      T e_new = field_at(ex, ex_x_size, ex_y_size, ex_z_size, ex_y_size == 1, i,j,k);
-      std::vector<std::array<T, 3> > u_new = u;
+      T e_new = ex[offsets.target];
+      auto& u_new = dm2_param.u_new_scratch;
+      std::copy(u.begin(), u.end(), u_new.begin());
 
-      const T e_old = field_at(ex, ex_x_size, ex_y_size, ex_z_size, ex_y_size == 1, i,j,k);
-      const T hy_dz = (field_at(hy, hy_x_size, hy_y_size, hy_z_size, hy_z_size == 1, i+1,j,k+1) - field_at(hy, hy_x_size, hy_y_size, hy_z_size, hy_z_size == 1, i+1,j,k)) / dz;
+      const T e_old = ex[offsets.target];
+      const T hy_dz = (hy[offsets.in2_first] - hy[offsets.in2_second]) / dz;
 
       double error;
       std::size_t iteration = 0;
       do {
-        T e_tmp = e_new;
-        std::vector<std::array<T, 3> > u_tmp = u_new;
+        const T e_previous = e_new;
+        auto& u_previous = dm2_param.u_previous_scratch;
+        std::copy(u_new.begin(), u_new.end(), u_previous.begin());
 
 	e_new = e_old - dt * hy_dz;
         for (std::size_t i = 0; i < u.size(); ++i) {
@@ -417,14 +432,14 @@ namespace gmes
             - .25 * dt * c_minus * (u_new[i][1] + u[i][1]) * (e_new + e_old);
         }
 
-        error = rel_error(e_new, u_new, e_tmp, u_tmp);
+        error = rel_error(e_new, u_new, e_previous, u_previous);
         if (std::isnan(error))
           throw std::runtime_error("Dm2 corrector produced an invalid error");
         if (++iteration >= dm2_max_iterations && error > rtol)
           throw std::runtime_error("Dm2 corrector failed to converge");
       } while (error > rtol);
 
-      field_at(ex, ex_x_size, ex_y_size, ex_z_size, ex_y_size == 1, i,j,k) = e_new;
+      ex[offsets.target] = e_new;
       std::copy(u_new.begin(), u_new.end(), u.begin());
     }
 
@@ -444,7 +459,8 @@ namespace gmes
 	       const T* const hz, int hz_x_size, int hz_y_size, int hz_z_size,
 	       double dz, double dx, double dt, double n)
     {
-      for_each_equal(idx_list, param_list, [&](const auto& idx, auto& param) {
+      this->finalize_update_plan(1, ey_x_size, ey_y_size, ey_z_size, hx_x_size, hx_y_size, hx_z_size, hz_x_size, hz_y_size, hz_z_size);
+      this->for_each_planned(param_list, [&](const auto& idx, auto& param) {
 	update(ey, ey_x_size, ey_y_size, ey_z_size,
 	       hx, hx_x_size, hx_y_size, hx_z_size,
 	       hz, hz_x_size, hz_y_size, hz_z_size,
@@ -458,17 +474,17 @@ namespace gmes
 	   const T* const hx, int hx_x_size, int hx_y_size, int hx_z_size,
 	   const T* const hz, int hz_x_size, int hz_y_size, int hz_z_size,
 	   double dz, double dx, double dt, double n,
-	   const Index3& idx,
+	   const UpdateOffsets& offsets,
 	   Dm2ElectricParam<T>& dm2_param)
     {
-      const int i = idx[0], j = idx[1], k = idx[2];
       const std::vector<double>& omega = dm2_param.omega;
       const double rtol = dm2_param.rtol;
       std::vector<std::array<T, 3> >& u = dm2_param.u;
 
       const double t = (n + 0.5) * dt;
 
-      std::vector<double> a, b;
+      auto& a = dm2_param.a_scratch;
+      auto& b = dm2_param.b_scratch;
       double c_plus, c_minus, d;
 
       this->a(t, dm2_param, a);
@@ -477,17 +493,19 @@ namespace gmes
       this->c_minus(t, dm2_param, c_minus);
       this->d(t, dm2_param, d);
 
-      T e_new = field_at(ey, ey_x_size, ey_y_size, ey_z_size, ey_z_size == 1, i,j,k);
-      std::vector<std::array<T, 3> > u_new = u;
+      T e_new = ey[offsets.target];
+      auto& u_new = dm2_param.u_new_scratch;
+      std::copy(u.begin(), u.end(), u_new.begin());
 
-      const T e_old = field_at(ey, ey_x_size, ey_y_size, ey_z_size, ey_z_size == 1, i,j,k);
-      const T hz_dx = (field_at(hz, hz_x_size, hz_y_size, hz_z_size, hz_x_size == 1, i+1,j+1,k) - field_at(hz, hz_x_size, hz_y_size, hz_z_size, hz_x_size == 1, i,j+1,k)) / dx;
+      const T e_old = ey[offsets.target];
+      const T hz_dx = (hz[offsets.in2_first] - hz[offsets.in2_second]) / dx;
 
       double error;
       std::size_t iteration = 0;
       do {
-        T e_tmp = e_new;
-        std::vector<std::array<T, 3> > u_tmp = u_new;
+        const T e_previous = e_new;
+        auto& u_previous = dm2_param.u_previous_scratch;
+        std::copy(u_new.begin(), u_new.end(), u_previous.begin());
 
 	e_new = e_old - dt * hz_dx;
         for (std::size_t i = 0; i < u.size(); ++i) {
@@ -506,14 +524,14 @@ namespace gmes
             - .25 * dt * c_minus * (u_new[i][1] + u[i][1]) * (e_new + e_old);
         }
 
-        error = rel_error(e_new, u_new, e_tmp, u_tmp);
+        error = rel_error(e_new, u_new, e_previous, u_previous);
         if (std::isnan(error))
           throw std::runtime_error("Dm2 corrector produced an invalid error");
         if (++iteration >= dm2_max_iterations && error > rtol)
           throw std::runtime_error("Dm2 corrector failed to converge");
       } while (error > rtol);
 
-      field_at(ey, ey_x_size, ey_y_size, ey_z_size, ey_z_size == 1, i,j,k) = e_new;
+      ey[offsets.target] = e_new;
       std::copy(u_new.begin(), u_new.end(), u.begin());
     }
 
@@ -533,7 +551,8 @@ namespace gmes
 	       const T* const hx, int hx_x_size, int hx_y_size, int hx_z_size,
 	       double dx, double dy, double dt, double n)
     {
-      for_each_equal(idx_list, param_list, [&](const auto& idx, auto& param) {
+      this->finalize_update_plan(2, ez_x_size, ez_y_size, ez_z_size, hy_x_size, hy_y_size, hy_z_size, hx_x_size, hx_y_size, hx_z_size);
+      this->for_each_planned(param_list, [&](const auto& idx, auto& param) {
     	update(ez, ez_x_size, ez_y_size, ez_z_size,
 	       hy, hy_x_size, hy_y_size, hy_z_size,
 	       hx, hx_x_size, hx_y_size, hx_z_size,
@@ -547,17 +566,17 @@ namespace gmes
 	   const T* const hy, int hy_x_size, int hy_y_size, int hy_z_size,
 	   const T* const hx, int hx_x_size, int hx_y_size, int hx_z_size,
 	   double dx, double dy, double dt, double n,
-	   const Index3& idx,
+	   const UpdateOffsets& offsets,
 	   Dm2ElectricParam<T>& dm2_param)
     {
-      const int i = idx[0], j = idx[1], k = idx[2];
       const std::vector<double>& omega = dm2_param.omega;
       const double rtol = dm2_param.rtol;
       std::vector<std::array<T, 3> >& u = dm2_param.u;
 
       const double t = (n + 0.5) * dt;
 
-      std::vector<double> a, b;
+      auto& a = dm2_param.a_scratch;
+      auto& b = dm2_param.b_scratch;
       double c_plus, c_minus, d;
 
       this->a(t, dm2_param, a);
@@ -566,17 +585,19 @@ namespace gmes
       this->c_minus(t, dm2_param, c_minus);
       this->d(t, dm2_param, d);
 
-      T e_new = field_at(ez, ez_x_size, ez_y_size, ez_z_size, ez_x_size == 1, i,j,k);
-      std::vector<std::array<T, 3> > u_new = u;
+      T e_new = ez[offsets.target];
+      auto& u_new = dm2_param.u_new_scratch;
+      std::copy(u.begin(), u.end(), u_new.begin());
 
-      const T e_old = field_at(ez, ez_x_size, ez_y_size, ez_z_size, ez_x_size == 1, i,j,k);
-      const T hx_dy = (field_at(hx, hx_x_size, hx_y_size, hx_z_size, hx_y_size == 1, i,j+1,k+1) - field_at(hx, hx_x_size, hx_y_size, hx_z_size, hx_y_size == 1, i,j,k+1)) / dy;
+      const T e_old = ez[offsets.target];
+      const T hx_dy = (hx[offsets.in2_first] - hx[offsets.in2_second]) / dy;
 
       double error;
       std::size_t iteration = 0;
       do {
-        T e_tmp = e_new;
-        std::vector<std::array<T, 3> > u_tmp = u_new;
+        const T e_previous = e_new;
+        auto& u_previous = dm2_param.u_previous_scratch;
+        std::copy(u_new.begin(), u_new.end(), u_previous.begin());
 
 	e_new = e_old - dt * hx_dy;
         for (std::size_t i = 0; i < u.size(); ++i) {
@@ -595,14 +616,14 @@ namespace gmes
             - .25 * dt * c_minus * (u_new[i][1] + u[i][1]) * (e_new + e_old);
         }
 
-        error = rel_error(e_new, u_new, e_tmp, u_tmp);
+        error = rel_error(e_new, u_new, e_previous, u_previous);
         if (std::isnan(error))
           throw std::runtime_error("Dm2 corrector produced an invalid error");
         if (++iteration >= dm2_max_iterations && error > rtol)
           throw std::runtime_error("Dm2 corrector failed to converge");
       } while (error > rtol);
 
-      field_at(ez, ez_x_size, ez_y_size, ez_z_size, ez_x_size == 1, i,j,k) = e_new;
+      ez[offsets.target] = e_new;
       std::copy(u_new.begin(), u_new.end(), u.begin());
     }
 
@@ -640,7 +661,8 @@ namespace gmes
 	       const T* const ez, int ez_x_size, int ez_y_size, int ez_z_size,
 	       double dz, double dx, double dt, double n)
     {
-      for_each_equal(idx_list, param_list, [&](const auto& idx, auto& param) {
+      this->finalize_update_plan(4, hy_x_size, hy_y_size, hy_z_size, ex_x_size, ex_y_size, ex_z_size, ez_x_size, ez_y_size, ez_z_size);
+      this->for_each_planned(param_list, [&](const auto& idx, auto& param) {
       	update(hy, hy_x_size, hy_y_size, hy_z_size,
 	       ex, ex_x_size, ex_y_size, ex_z_size,
 	       ez, ez_x_size, ez_y_size, ez_z_size,
@@ -660,14 +682,13 @@ namespace gmes
 	   const T* const ex, int ex_x_size, int ex_y_size, int ex_z_size,
 	   const T* const ez, int ez_x_size, int ez_y_size, int ez_z_size,
 	   double dz, double dx, double dt, double n,
-	   const Index3& idx,
+	   const UpdateOffsets& offsets,
 	   const DielectricMagneticParam<T>& dielectric_param) const
     {
-      const int i = idx[0], j = idx[1], k = idx[2];
       const double mu_inf = dielectric_param.mu_inf;
 
-      field_at(hy, hy_x_size, hy_y_size, hy_z_size, hy_z_size == 1, i,j,k) += dt / mu_inf * ((field_at(ez, ez_x_size, ez_y_size, ez_z_size, ez_x_size == 1, i,j,k-1) - field_at(ez, ez_x_size, ez_y_size, ez_z_size, ez_x_size == 1, i-1,j,k-1)) / dx -
-                                  (field_at(ex, ex_x_size, ex_y_size, ex_z_size, ex_y_size == 1, i-1,j,k) - field_at(ex, ex_x_size, ex_y_size, ex_z_size, ex_y_size == 1, i-1,j,k-1)) / dz);
+      hy[offsets.target] += dt / mu_inf * ((ez[offsets.in2_first] - ez[offsets.in2_second]) / dx -
+                                  (ex[offsets.in1_first] - ex[offsets.in1_second]) / dz);
     }
 
     static const std::string tag; // "Dm2Magnetic"

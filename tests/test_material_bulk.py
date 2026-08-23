@@ -10,8 +10,11 @@ from gmes import (
     Cartesian,
     Continuous,
     Cpml,
+    DcpAde,
+    DcpPlrc,
     DefaultMedium,
     Dielectric,
+    Dm2,
     Drude,
     DrudePole,
     Ez,
@@ -19,6 +22,9 @@ from gmes import (
     Shell,
     Sphere,
     TMzFDTD,
+    Lorentz,
+    LorentzPole,
+    Upml,
 )
 from gmes.pw_material import (
     ConstElectricParamReal,
@@ -157,6 +163,139 @@ class BulkAttachmentTest(unittest.TestCase):
         with self.assertRaisesRegex(IndexError, "out of bounds"):
             material.update_all(*fields, 1, 1, 1, 0)
         self.assertFalse(fields[0].any())
+
+
+class UpdatePlanTest(unittest.TestCase):
+    @staticmethod
+    def dielectric_parameter(eps_inf):
+        parameter = DielectricElectricParamReal()
+        parameter.eps_inf = eps_inf
+        return parameter
+
+    def test_unordered_indices_use_sparse_runs_without_reordering_metadata(self):
+        indices = np.array(
+            ((2, 0, 0), (1, 0, 0), (0, 0, 1)),
+            dtype=np.intc,
+        )
+        material = DielectricExReal()
+        material.attach_many(
+            indices,
+            [self.dielectric_parameter(value) for value in (4.0, 3.0, 2.0)],
+        )
+
+        material.finalize(0, 4, 2, 3, 4, 2, 3, 4, 2, 3)
+
+        self.assertTrue(material.is_finalized())
+        self.assertTrue(material.plan_is_parallel_safe())
+        self.assertEqual(material.plan_size(), 3)
+        self.assertEqual(material.plan_run_count(), 3)
+        self.assertGreater(material.plan_bytes(), 0)
+        self.assertEqual(material.get_eps_inf((2, 0, 0)), 4.0)
+        self.assertEqual(material.get_eps_inf((0, 0, 1)), 2.0)
+        self.assertEqual(material.get_eps_inf((1, 0, 0)), 3.0)
+
+        ex = np.zeros((4, 2, 3))
+        hz = np.zeros((4, 2, 3))
+        hy = np.zeros((4, 2, 3))
+        for i, _, k in indices:
+            hz[i + 1, 1, k] = 1
+        material.update_all(ex, hz, hy, 1, 1, 1, 0)
+
+        expected = np.zeros_like(ex)
+        expected[2, 0, 0] = 0.25
+        expected[0, 0, 1] = 0.5
+        expected[1, 0, 0] = 1 / 3
+        np.testing.assert_array_equal(ex, expected)
+
+    def test_duplicate_public_attachments_preserve_serial_update_order(self):
+        material = DielectricExReal()
+        index = np.array((0, 0, 0), dtype=np.intc)
+        material.attach(index, self.dielectric_parameter(1.0))
+        material.attach(index, self.dielectric_parameter(2.0))
+
+        ex = np.zeros((2, 2, 2))
+        hz = np.zeros((2, 2, 2))
+        hy = np.zeros((2, 2, 2))
+        hz[1, 1, 0] = 1
+        material.update_all(ex, hz, hy, 1, 1, 1, 0)
+
+        self.assertTrue(material.is_finalized())
+        self.assertFalse(material.plan_is_parallel_safe())
+        self.assertEqual(ex[0, 0, 0], 1.5)
+
+    def test_contiguous_cells_are_compressed_into_one_run(self):
+        material = DielectricExReal()
+        material.attach_many(
+            np.array(((0, 0, 0), (0, 0, 1), (0, 0, 2)), dtype=np.intc),
+            [self.dielectric_parameter(2.0) for _ in range(3)],
+        )
+
+        material.finalize(0, 2, 2, 4, 2, 2, 4, 2, 2, 4)
+
+        self.assertEqual(material.plan_size(), 3)
+        self.assertEqual(material.plan_run_count(), 1)
+        self.assertLess(material.plan_bytes(), material.plan_size() * 40)
+
+    def test_collapsed_targets_disable_parallel_alias_assumptions(self):
+        material = ConstExReal()
+        parameter = ConstElectricParamReal()
+        parameter.eps_inf = 1
+        parameter.value = 2
+        material.attach(np.array((0, 0, 0), dtype=np.intc), parameter)
+        material.attach(np.array((1, 0, 0), dtype=np.intc), parameter)
+
+        material.finalize(0, 2, 1, 2, 1, 2, 2, 2, 2, 1)
+
+        self.assertFalse(material.plan_is_parallel_safe())
+
+    def test_finalization_validates_complete_stencil_atomically(self):
+        material = DielectricExReal()
+        material.attach(
+            np.array((1, 0, 0), dtype=np.intc),
+            self.dielectric_parameter(1.0),
+        )
+
+        with self.assertRaisesRegex(IndexError, "stencil index is out of bounds"):
+            material.finalize(0, 2, 2, 2, 2, 2, 2, 2, 2, 2)
+
+        self.assertFalse(material.is_finalized())
+        self.assertEqual(material.plan_size(), 0)
+
+    def test_fdtd_finalizes_every_material_family(self):
+        materials = (
+            Dielectric(),
+            Drude(dps=(DrudePole(omega=1.0, gamma=0.1),)),
+            Lorentz(lps=(LorentzPole(amp=0.2, omega=1.0, gamma=0.1),)),
+            DcpAde(),
+            DcpPlrc(),
+            Dm2(),
+        )
+        for medium in materials:
+            with self.subTest(material=type(medium).__name__):
+                simulation = TMzFDTD(
+                    Cartesian(size=(1, 1, 0), resolution=2),
+                    [DefaultMedium(material=medium), Shell(material=Cpml())],
+                    verbose=False,
+                )
+                simulation.init()
+                for updaters in simulation.pw_material.values():
+                    for updater in updaters.values():
+                        self.assertTrue(updater.is_finalized())
+                        self.assertEqual(updater.plan_size(), updater.idx_size())
+
+        simulation = TMzFDTD(
+            Cartesian(size=(1, 1, 0), resolution=2),
+            [DefaultMedium(material=Dielectric()), Shell(material=Upml())],
+            verbose=False,
+        )
+        simulation.init()
+        self.assertTrue(
+            any(
+                type(updater).__name__.startswith("Upml") and updater.is_finalized()
+                for updaters in simulation.pw_material.values()
+                for updater in updaters.values()
+            )
+        )
 
 
 class MaterialMappingFastPathTest(unittest.TestCase):

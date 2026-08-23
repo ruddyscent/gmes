@@ -3,10 +3,10 @@
 `field_updates.py` measures simulation construction, `FDTD.init()`, and
 complete FDTD time steps as separate metrics without visualization or
 simulation output. It covers a small-grid control case, larger two- and
-three-dimensional dielectric grids, a two-dimensional Drude dispersive
-medium, a heterogeneous dielectric geometry, and a Bloch-periodic complex
-field. Each result also records field shapes and the native material-update
-loop sizes.
+three-dimensional dielectric grids, UPML, Drude, Lorentz, DCP ADE, and DM2
+media, a heterogeneous dielectric geometry, and a Bloch-periodic complex
+field. Each result also records field shapes, native material-update loop
+sizes, finalized-plan run and byte counts, and process peak resident memory.
 
 Run each configuration in a separate process so the OpenMP runtime reads the
 thread count and GMES reads the threshold before the first native update:
@@ -30,10 +30,12 @@ Compare `median_seconds_per_construction`,
 performance. Each median is computed from the samples in its corresponding
 `seconds_per_*` list. Compare `checksum` for numerical equivalence, and use
 `field_shapes` and `material_update_sizes` to confirm that runs have matching
-workloads. The top-level `warmup_steps`, `steps_per_repeat`, and `repeats`
-values record the command's workload settings. Results depend on the
-processor, compiler, OpenMP runtime, and system load, so generated JSON output
-should not be committed.
+workloads. `native_update_plan_bytes` reports the native offset/run storage,
+while `peak_rss_bytes` reports the process high-water resident set. The
+top-level `warmup_steps`, `steps_per_repeat`, and `repeats` values record the
+command's workload settings. Results depend on the processor, compiler,
+OpenMP runtime, and system load, so generated JSON output should not be
+committed.
 
 The default `GMES_OPENMP_THRESHOLD=8192` keeps small loops serial. Setting it
 to `0` forces every eligible loop through OpenMP; a value larger than the

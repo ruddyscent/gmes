@@ -35,6 +35,14 @@ class FieldUpdateBenchmarkTest(unittest.TestCase):
         self.assertIn("Ez", result["field_shapes"])
         self.assertEqual(result["field_shapes"]["Ez"]["shape"], [41, 41, 1])
         self.assertTrue(result["material_update_sizes"])
+        self.assertGreater(result["native_update_plan_bytes"], 0)
+        self.assertGreater(result["peak_rss_bytes"], 0)
+        self.assertTrue(
+            all(
+                item["plan_bytes"] > 0 and item["plan_runs"] > 0
+                for item in result["material_update_sizes"]
+            )
+        )
 
     def test_additional_initialization_workloads(self):
         heterogeneous = self.benchmark.build_simulation("heterogeneous", self.gmes)
@@ -53,6 +61,24 @@ class FieldUpdateBenchmarkTest(unittest.TestCase):
             self.benchmark.field_shapes(complex_field)["Ez"]["dtype"],
             "complex128",
         )
+
+    def test_state_heavy_workloads_cover_all_native_families(self):
+        expected_materials = {
+            "pml": "UpmlEzReal",
+            "dispersive": "DrudeEzReal",
+            "lorentz": "LorentzEzReal",
+            "dcp": "DcpAdeEzReal",
+            "dm2": "Dm2EzReal",
+        }
+        for case, material_name in expected_materials.items():
+            with self.subTest(case=case):
+                simulation = self.benchmark.build_simulation(case, self.gmes)
+                simulation.init()
+                materials = {
+                    item["material"]
+                    for item in self.benchmark.material_update_sizes(simulation)
+                }
+                self.assertIn(material_name, materials)
 
 
 if __name__ == "__main__":

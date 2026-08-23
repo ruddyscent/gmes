@@ -75,6 +75,13 @@ namespace gmes
 	       int in2_dim1, int in2_dim2, int in2_dim3,
 	       double d1, double d2, double dt, double n)
     {
+      if (this->is_finalized()) {
+        this->for_each_planned(param_list, [&](const auto& offsets, auto& param) {
+          inplace_field[offsets.target] = param.value;
+        });
+        return;
+      }
+
       for_each_equal(idx_list, param_list, [&](const auto& idx, auto& param) {
     	update(inplace_field, inplace_dim1, inplace_dim2, inplace_dim3,
     	       in_field1, in1_dim1, in1_dim2, in1_dim3,
@@ -98,6 +105,12 @@ namespace gmes
     }
 
   protected:
+    bool
+    uses_input_stencil() const noexcept override
+    {
+      return false;
+    }
+
     bool
     accepts_parameter(const PwMaterialParam* parameter) const noexcept override
     {
@@ -190,6 +203,13 @@ namespace gmes
 	       int in2_dim1, int in2_dim2, int in2_dim3,
 	       double d1, double d2, double dt, double n)
     {
+      if (this->is_finalized()) {
+        this->for_each_planned(param_list, [&](const auto& offsets, auto& param) {
+          inplace_field[offsets.target] = param.value;
+        });
+        return;
+      }
+
       for_each_equal(idx_list, param_list, [&](const auto& idx, auto& param) {
     	update(inplace_field, inplace_dim1, inplace_dim2, inplace_dim3,
     	       in_field1, in1_dim1, in1_dim2, in1_dim3,
@@ -213,6 +233,12 @@ namespace gmes
     }
 
   protected:
+    bool
+    uses_input_stencil() const noexcept override
+    {
+      return false;
+    }
+
     bool
     accepts_parameter(const PwMaterialParam* parameter) const noexcept override
     {

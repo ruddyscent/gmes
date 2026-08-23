@@ -73,6 +73,25 @@ namespace gmes
 #endif
   }
 
+  inline std::size_t
+  field_offset(int x_size, int y_size, int z_size,
+               bool collapsed,
+               int i, int j, int k)
+  {
+    if (collapsed)
+      return 0;
+
+    if (i < 0 || i >= x_size ||
+        j < 0 || j >= y_size ||
+        k < 0 || k >= z_size)
+      throw std::out_of_range("update stencil index is out of bounds");
+
+    return
+      (static_cast<std::size_t>(i) * static_cast<std::size_t>(y_size) +
+       static_cast<std::size_t>(j)) * static_cast<std::size_t>(z_size) +
+      static_cast<std::size_t>(k);
+  }
+
 #if !defined(__cpp_lib_ranges_zip) || __cpp_lib_ranges_zip < 202110L
   template <std::ranges::range First, std::ranges::range Second>
   class EqualZipView
@@ -179,14 +198,15 @@ namespace gmes
     requires std::ranges::sized_range<First> &&
              std::ranges::sized_range<Second>
   inline void
-  for_each_equal(First& first, Second& second, Function&& function)
+  for_each_equal(First& first, Second& second, Function&& function,
+                 bool allow_parallel = true)
   {
     const auto count = std::ranges::size(first);
     if (count != std::ranges::size(second))
       throw std::logic_error("material indices and parameters are out of sync");
 
 #if defined(_OPENMP)
-    if (count >= openmp_threshold()) {
+    if (allow_parallel && count >= openmp_threshold()) {
       parallel_for_equal(first, second, function, count);
       return;
     }

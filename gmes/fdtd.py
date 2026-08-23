@@ -553,6 +553,7 @@ class FDTD(object):
             if self.verbose:
                 print("Mapping materials for", comp.__name__, "field")
             init_mat_func[comp]()
+            self._finalize_material_component(comp)
 
             if self.verbose:
                 self._print_pw_obj(self.pw_material[comp])
@@ -561,9 +562,28 @@ class FDTD(object):
             if self.verbose:
                 print("Mapping materials for", comp.__name__, "field")
             init_mat_func[comp]()
+            self._finalize_material_component(comp)
 
             if self.verbose:
                 self._print_pw_obj(self.pw_material[comp])
+
+    def _finalize_material_component(self, component):
+        plan_fields = {
+            Ex: (Ex, Hz, Hy),
+            Ey: (Ey, Hx, Hz),
+            Ez: (Ez, Hy, Hx),
+            Hx: (Hx, Ez, Ey),
+            Hy: (Hy, Ex, Ez),
+            Hz: (Hz, Ey, Ex),
+        }
+        component_id = {Ex: 0, Ey: 1, Ez: 2, Hx: 3, Hy: 4, Hz: 5}[component]
+        shapes = tuple(
+            dimension
+            for field_component in plan_fields[component]
+            for dimension in self.field[field_component].shape
+        )
+        for updater in self.pw_material[component].values():
+            updater.finalize(component_id, *shapes)
 
     def init_source_ex(self):
         self.pw_source[Ex] = {}

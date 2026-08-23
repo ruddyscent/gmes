@@ -382,7 +382,11 @@ double _dm2_relative_error(
       std::array<double, 3> u_tmp;
       u_tmp.fill(static_cast<T>(0));
       $self->u.push_back(u_tmp);
+      $self->u_new_scratch.push_back(u_tmp);
+      $self->u_previous_scratch.push_back(u_tmp);
     }
+    $self->a_scratch.resize(omega_size);
+    $self->b_scratch.resize(omega_size);
   }
 };
 

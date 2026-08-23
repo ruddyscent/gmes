@@ -18,12 +18,12 @@ from gmes import (
     Drude,
     DrudePole,
     Ez,
+    Lorentz,
+    LorentzPole,
     PointSource,
     Shell,
     Sphere,
     TMzFDTD,
-    Lorentz,
-    LorentzPole,
     Upml,
 )
 from gmes.pw_material import (

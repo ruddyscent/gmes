@@ -54,6 +54,7 @@ namespace gmes
     {
       const Index3 index = make_index(idx, idx_size);
 
+      this->validate_parameter(pm_param_ptr);
       const auto& drude_param = *static_cast<const DrudeElectricParam<T>*>(pm_param_ptr);
 
       idx_list.push_back(index);
@@ -101,6 +102,18 @@ namespace gmes
     }
 
   protected:
+    bool
+    accepts_parameter(const PwMaterialParam* parameter) const noexcept override
+    {
+      return dynamic_cast<const DrudeElectricParam<T>*>(parameter) != nullptr;
+    }
+
+    void
+    reserve_parameters(std::size_t capacity) override
+    {
+      param_list.reserve(capacity);
+    }
+
     using MaterialElectric<T>::position;
     using MaterialElectric<T>::idx_list;
     std::vector<DrudeElectricParam<T> > param_list;

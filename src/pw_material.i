@@ -17,6 +17,7 @@
 %include <std_string.i>
 %include <std_complex.i>
 %include <std_except.i>
+%include <std_vector.i>
 %include <exception.i>
 %include "numpy.i"
 
@@ -40,6 +41,7 @@ import_array();
 %}
 
 %ignore gmes::PwMaterial::indices_in_bounds;
+%rename(_attach_many_native) gmes::PwMaterial::attach_many;
 
 // Declare numpy typemaps.
 %define %apply_numpy_typemaps(TYPE)
@@ -88,6 +90,8 @@ import_array();
 %apply_numpy_typemaps(std::complex<double>)
 
 %apply (int* IN_ARRAY1, int DIM1) {(const int* const idx, int idx_size)};
+%apply (int* IN_ARRAY2, int DIM1, int DIM2)
+      {(const int* const indices, int index_rows, int index_cols)};
 %apply (double* IN_ARRAY2, int DIM1, int DIM2) {(const double* const a, int a_size1, int a_size2)};
 %apply (double* IN_ARRAY2, int DIM1, int DIM2) {(const double* const b, int b_size1, int b_size2)};
 %apply (double* IN_ARRAY2, int DIM1, int DIM2) {(const double* const u_new_values, int u_new_rows, int u_new_cols)};
@@ -104,6 +108,7 @@ import_array();
 
 // Include the header file to be wrapped
 %include "pw_material.hh"
+%template(PwMaterialParamVector) std::vector<gmes::PwMaterialParam *>;
 %include "pw_dummy.hh"
 %include "pw_const.hh"
 %include "pw_dielectric.hh"
@@ -387,3 +392,69 @@ double _dm2_relative_error(
 %linear_wrap(std::complex<double>, Cmplx)
 
 %nonlinear_wrap(double, Real)
+
+%pythoncode %{
+import numpy as _np
+
+
+def _pointwise_parameter_type(pointwise):
+    name = type(pointwise).__name__
+    if name.endswith("Real"):
+        scalar = "Real"
+    elif name.endswith("Cmplx"):
+        scalar = "Cmplx"
+    else:
+        raise TypeError("unsupported pointwise material type")
+
+    stem = name[: -len(scalar)]
+    component = stem[-2:]
+    if component not in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz"):
+        raise TypeError("unsupported pointwise material component")
+
+    field = "Electric" if component.startswith("E") else "Magnetic"
+    parameter_name = f"{stem[:-2]}{field}Param{scalar}"
+    try:
+        return globals()[parameter_name]
+    except KeyError as error:
+        raise TypeError("unsupported pointwise material parameter type") from error
+
+
+def _attach_many(self, indices, parameters):
+    """Attach an ordered batch of indices and matching parameter objects.
+
+    Indices must be a C-contiguous ``numpy.intc`` array with shape ``(n, 3)``.
+    Negative or duplicate indices are rejected before the updater is changed;
+    upper bounds are checked later against the actual field passed to
+    ``update_all``. Parameter objects must match the concrete updater type.
+    """
+    if not isinstance(indices, _np.ndarray):
+        raise TypeError("bulk indices must be a NumPy array")
+    if indices.dtype != _np.dtype(_np.intc):
+        raise TypeError("bulk indices must use the platform C int dtype")
+    if indices.ndim != 2 or indices.shape[1] != 3:
+        raise ValueError("bulk field indices must have shape (n, 3)")
+    if not indices.flags.c_contiguous:
+        raise ValueError("bulk indices must be C-contiguous")
+
+    try:
+        parameters = list(parameters)
+    except TypeError as error:
+        raise TypeError("bulk parameters must be iterable") from error
+
+    if len(parameters) != indices.shape[0]:
+        raise ValueError("bulk indices and parameters must have equal lengths")
+
+    parameter_type = _pointwise_parameter_type(self)
+    if any(not isinstance(parameter, parameter_type) for parameter in parameters):
+        raise TypeError(
+            f"bulk parameters for {type(self).__name__} must be "
+            f"{parameter_type.__name__} instances"
+        )
+
+    self._attach_many_native(indices, parameters)
+    return self
+
+
+PwMaterialReal.attach_many = _attach_many
+PwMaterialCmplx.attach_many = _attach_many
+%}

@@ -2274,3 +2274,27 @@ _BUILTIN_MATERIAL_TYPES = (
     Lorentz,
     Dm2,
 )
+
+_NATIVE_DESCRIPTOR_ATTRIBUTE = "_gmes_native_material_descriptor"
+for _material_type in _BUILTIN_MATERIAL_TYPES:
+    setattr(_material_type, _NATIVE_DESCRIPTOR_ATTRIBUTE, _material_type)
+
+
+def _native_material_descriptor(material, getter_name):
+    """Return the inherited native aggregate descriptor, when compatible."""
+    descriptor = getattr(material, _NATIVE_DESCRIPTOR_ATTRIBUTE, None)
+    if descriptor not in _BUILTIN_MATERIAL_TYPES or not isinstance(
+        material, descriptor
+    ):
+        return None
+
+    material_type = type(material)
+    getter_is_inherited = getattr(material_type, getter_name) is getattr(
+        descriptor, getter_name
+    )
+    descriptor_is_explicit = (
+        material_type.__dict__.get(_NATIVE_DESCRIPTOR_ATTRIBUTE) is descriptor
+    )
+    if not getter_is_inherited and not descriptor_is_explicit:
+        return None
+    return descriptor

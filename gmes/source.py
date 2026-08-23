@@ -12,7 +12,13 @@ from scipy.optimize import bisect
 
 from . import constant as const
 from .fdtd import TEMzFDTD
-from .geometry import Cartesian, DefaultMedium, Shell, in_range
+from .geometry import (
+    _BUILTIN_GEOMETRY_TYPES,
+    Cartesian,
+    DefaultMedium,
+    Shell,
+    in_range,
+)
 from .material import Cpml, Dielectric
 
 # Point and total-field/scattered-field source update types.
@@ -370,6 +376,8 @@ class PointSource(Src):
 class TotalFieldScatteredField(Src):
     """Set a total and scattered field zone to launch a plane wave."""
 
+    _MAPPING_TILE_SIZE = 65536
+
     def __init__(self, src_time, center, size, direction, polarization, amp=1):
         """Constructor
 
@@ -645,62 +653,102 @@ class TotalFieldScatteredField(Src):
         face - which side of the interface
 
         """
-        aux_ds = {
-            const.PlusX: space.dr[0],
-            const.MinusX: space.dr[0],
-            const.PlusY: space.dr[1],
-            const.MinusY: space.dr[1],
-            const.PlusZ: space.dr[2],
-            const.MinusZ: space.dr[2],
-        }
-
-        idx_to_spc = {
-            const.Ex: space.ex_index_to_space,
-            const.Ey: space.ey_index_to_space,
-            const.Ez: space.ez_index_to_space,
-            const.Hx: space.hx_index_to_space,
-            const.Hy: space.hy_index_to_space,
-            const.Hz: space.hz_index_to_space,
-        }
-
-        low_idx_array = np.array(low_idx)
-        high_idx_array = np.array(high_idx)
-
         pw_src = source()
-        for i, j, k in ndindex(tuple(high_idx_array - low_idx_array)):
-            idx = tuple((i, j, k) + low_idx_array)
-            if in_range(idx, field.shape, component):
-                pnt = idx_to_spc[component](*idx)
+        for idx, pnt, mat_obj, underneath in self._mapped_source_points(
+            space, component, field, low_idx, high_idx
+        ):
+            if underneath is None:
+                eps_inf = mat_obj.eps_inf
+                mu_inf = mat_obj.mu_inf
+            else:
+                eps_inf = underneath.eps_inf
+                mu_inf = underneath.mu_inf
 
-                mat_obj, underneath = self.geom_tree.material_of_point(pnt)
+            amp = cosine * self.amp * self.mode_function(*pnt)
 
-                if underneath is None:
-                    eps_inf = mat_obj.eps_inf
-                    mu_inf = mat_obj.mu_inf
-                else:
-                    eps_inf = underneath.eps_inf
-                    mu_inf = underneath.mu_inf
+            samp_pnt = (
+                0,
+                0,
+                self._metric_from_center_along_beam_axis(samp_i2s(*idx)),
+            )
 
-                amp = cosine * self.amp * self.mode_function(*pnt)
-
-                samp_pnt = (
-                    0,
-                    0,
-                    self._metric_from_center_along_beam_axis(samp_i2s(*idx)),
+            if isinstance(pw_src, (TransparentEx, TransparentEy, TransparentEz)):
+                pw_src_param = TransparentElectricParam(
+                    eps_inf, amp, self.aux_fdtd, samp_pnt, face
                 )
-
-                if isinstance(pw_src, (TransparentEx, TransparentEy, TransparentEz)):
-                    pw_src_param = TransparentElectricParam(
-                        eps_inf, amp, self.aux_fdtd, samp_pnt, face
-                    )
-                    pw_src.attach(idx, pw_src_param)
-                if isinstance(pw_src, (TransparentHx, TransparentHy, TransparentHz)):
-                    pw_src_param = TransparentMagneticParam(
-                        mu_inf, amp, self.aux_fdtd, samp_pnt, face
-                    )
-                    pw_src.attach(idx, pw_src_param)
+                pw_src.attach(idx, pw_src_param)
+            if isinstance(pw_src, (TransparentHx, TransparentHy, TransparentHz)):
+                pw_src_param = TransparentMagneticParam(
+                    mu_inf, amp, self.aux_fdtd, samp_pnt, face
+                )
+                pw_src.attach(idx, pw_src_param)
 
         return pw_src
+
+    def _mapped_source_points(self, space, component, field, low_idx, high_idx):
+        """Yield source indices, coordinates, and materials in C-order."""
+        geometry = self.geom_tree.root.geom_list
+        if not all(type(obj) in _BUILTIN_GEOMETRY_TYPES for obj in geometry):
+            low = np.array(low_idx, dtype=np.intp)
+            high = np.array(high_idx, dtype=np.intp)
+            index_to_space = getattr(
+                space, f"{component.__name__.lower()}_index_to_space"
+            )
+            for local_idx in ndindex(tuple(high - low)):
+                idx = tuple(np.array(local_idx, dtype=np.intp) + low)
+                if in_range(idx, field.shape, component):
+                    point = index_to_space(*idx)
+                    material, underneath = self.geom_tree.material_of_point(point)
+                    yield idx, point, material, underneath
+            return
+
+        electric_high_trim = {
+            const.Ex: (0, 1, 1),
+            const.Ey: (1, 0, 1),
+            const.Ez: (1, 1, 0),
+        }
+        magnetic_low = {
+            const.Hx: (0, 1, 1),
+            const.Hy: (1, 0, 1),
+            const.Hz: (1, 1, 0),
+        }
+        if component in electric_high_trim:
+            allowed_low = np.zeros(3, dtype=np.intp)
+            allowed_high = np.array(field.shape) - electric_high_trim[component]
+        else:
+            allowed_low = np.array(magnetic_low[component], dtype=np.intp)
+            allowed_high = np.array(field.shape, dtype=np.intp)
+
+        low = np.maximum(np.array(low_idx, dtype=np.intp), allowed_low)
+        high = np.minimum(np.array(high_idx, dtype=np.intp), allowed_high)
+        tile_shape = tuple(high - low)
+        if any(length <= 0 for length in tile_shape):
+            return
+
+        field_axes = space.component_coordinate_axes(component, field.shape)
+        axes = tuple(
+            np.ascontiguousarray(axis[start:stop])
+            for axis, start, stop in zip(field_axes, low, high, strict=True)
+        )
+        total = int(np.prod(tile_shape))
+        plane = tile_shape[1] * tile_shape[2]
+        for start in range(0, total, self._MAPPING_TILE_SIZE):
+            stop = min(start + self._MAPPING_TILE_SIZE, total)
+            materials, underlying = self.geom_tree.material_of_grid(*axes, start, stop)
+            for offset, (material, underneath) in enumerate(
+                zip(materials, underlying, strict=True)
+            ):
+                linear = start + offset
+                i, remainder = divmod(linear, plane)
+                j, k = divmod(remainder, tile_shape[2])
+                local_idx = i, j, k
+                idx = tuple(
+                    value + origin for value, origin in zip(local_idx, low, strict=True)
+                )
+                point = tuple(
+                    axis[value] for axis, value in zip(axes, local_idx, strict=True)
+                )
+                yield idx, point, material, underneath
 
     def get_pw_source_ex(self, ex_field, space, geom_tree):
         pw_src = TransparentEx()

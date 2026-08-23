@@ -6,6 +6,7 @@ import numpy as np
 import gmes.fdtd as fdtd_module
 import gmes.material as material_module
 from gmes import (
+    FDTD,
     Cartesian,
     Continuous,
     Cpml,
@@ -16,6 +17,7 @@ from gmes import (
     Ez,
     PointSource,
     Shell,
+    Sphere,
     TMzFDTD,
 )
 from gmes.pw_material import (
@@ -251,6 +253,85 @@ class MaterialMappingFastPathTest(unittest.TestCase):
 
         self.assertGreater(CustomDielectric.calls, 1)
         self.assertTrue(simulation.pw_material[Ez])
+
+    def test_inherited_builtin_material_descriptor_uses_fast_path(self):
+        class InheritedDielectric(Dielectric):
+            pass
+
+        constructor = material_module.DielectricEzReal
+        calls = 0
+
+        def counted_constructor():
+            nonlocal calls
+            calls += 1
+            return constructor()
+
+        with patch.object(material_module, "DielectricEzReal", counted_constructor):
+            simulation = TMzFDTD(
+                Cartesian(size=(2, 2, 0), resolution=3),
+                [DefaultMedium(material=InheritedDielectric())],
+                verbose=False,
+            )
+            simulation.init()
+
+        self.assertEqual(calls, 1)
+
+    def test_batched_geometry_mapping_matches_fallback_for_all_components(self):
+        def build(size, bloch):
+            geometry = [
+                DefaultMedium(material=Dielectric(1)),
+                Sphere(material=Dielectric(2), radius=0.45),
+                Sphere(material=Dielectric(3), radius=0.2),
+                Shell(material=Cpml()),
+            ]
+            kwargs = {} if bloch is None else {"bloch": bloch}
+            return FDTD(
+                Cartesian(size=size, resolution=3),
+                geometry,
+                verbose=False,
+                **kwargs,
+            )
+
+        for size in ((1, 1, 1), (2, 0, 0)):
+            for bloch in (None, (0.1, 0.2, 0)):
+                with self.subTest(size=size, bloch=bloch):
+                    fast = build(size, bloch)
+                    fast._MATERIAL_TILE_SIZE = 7
+                    fast.init()
+                    with patch.object(fdtd_module, "_BUILTIN_GEOMETRY_TYPES", ()):
+                        fallback = build(size, bloch)
+                        fallback.init()
+
+                    self.assert_material_maps_equal(fast, fallback)
+                    for _ in range(3):
+                        fast.step()
+                        fallback.step()
+                    for component in fast.field:
+                        np.testing.assert_array_equal(
+                            fast.field[component], fallback.field[component]
+                        )
+
+    def test_custom_geometry_subclass_uses_pointwise_fallback(self):
+        class CustomSphere(Sphere):
+            pass
+
+        simulation = FDTD(
+            Cartesian(size=(1, 1, 1), resolution=2),
+            [
+                DefaultMedium(material=Dielectric()),
+                CustomSphere(material=Dielectric(2), radius=0.25),
+            ],
+            verbose=False,
+        )
+
+        with patch.object(
+            simulation.space,
+            "component_coordinate_axes",
+            side_effect=AssertionError("batch path must not be used"),
+        ):
+            simulation.init()
+
+        self.assertTrue(simulation.pw_material)
 
 
 if __name__ == "__main__":

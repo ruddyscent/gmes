@@ -14,10 +14,19 @@ from .constant import *
 from .file_io import Probe
 
 # GMES modules
-from .geometry import DefaultMedium, GeomBoxTree, in_range
+from .geometry import (
+    _BUILTIN_GEOMETRY_TYPES,
+    DefaultMedium,
+    GeomBoxTree,
+    in_range,
+)
 
 # from file_io import write_hdf5, snapshot
-from .material import _BUILTIN_MATERIAL_TYPES, Dummy
+from .material import (
+    _BUILTIN_MATERIAL_TYPES,
+    Dummy,
+    _native_material_descriptor,
+)
 from .pygeom import GeomBox
 
 
@@ -70,6 +79,8 @@ class FDTD(object):
     chatter -- list of the syncronizaion methods
 
     """
+
+    _MATERIAL_TILE_SIZE = 65536
 
     def __init__(
         self,
@@ -357,15 +368,7 @@ class FDTD(object):
         at self.pw_material[Ex].
 
         """
-        self.pw_material[Ex] = {}
-        aggregates = {}
-        shape = self.ex.shape
-        for idx in ndindex(shape):
-            spc = self.space.ex_index_to_space(*idx)
-            mat_obj, underneath = self.geom_tree.material_of_point(spc)
-            if idx[1] == shape[1] - 1 or idx[2] == shape[2] - 1:
-                mat_obj = Dummy(mat_obj.eps_inf, mat_obj.mu_inf)
-            self._attach_material(Ex, mat_obj, idx, spc, underneath, aggregates)
+        self._init_material_component(Ex)
 
     def init_material_ey(self):
         """Set up the update mechanism for Ey field.
@@ -374,15 +377,7 @@ class FDTD(object):
         at self.pw_material[Ey].
 
         """
-        self.pw_material[Ey] = {}
-        aggregates = {}
-        shape = self.ey.shape
-        for idx in ndindex(shape):
-            spc = self.space.ey_index_to_space(*idx)
-            mat_obj, underneath = self.geom_tree.material_of_point(spc)
-            if idx[2] == shape[2] - 1 or idx[0] == shape[0] - 1:
-                mat_obj = Dummy(mat_obj.eps_inf, mat_obj.mu_inf)
-            self._attach_material(Ey, mat_obj, idx, spc, underneath, aggregates)
+        self._init_material_component(Ey)
 
     def init_material_ez(self):
         """Set up the update mechanism for Ez field.
@@ -391,15 +386,7 @@ class FDTD(object):
         at self.pw_material[Ez].
 
         """
-        self.pw_material[Ez] = {}
-        aggregates = {}
-        shape = self.ez.shape
-        for idx in ndindex(shape):
-            spc = self.space.ez_index_to_space(*idx)
-            mat_obj, underneath = self.geom_tree.material_of_point(spc)
-            if idx[0] == shape[0] - 1 or idx[1] == shape[1] - 1:
-                mat_obj = Dummy(mat_obj.eps_inf, mat_obj.mu_inf)
-            self._attach_material(Ez, mat_obj, idx, spc, underneath, aggregates)
+        self._init_material_component(Ez)
 
     def init_material_hx(self):
         """Set up the update mechanism for Hx field.
@@ -408,15 +395,7 @@ class FDTD(object):
         at self.pw_material[Hx].
 
         """
-        self.pw_material[Hx] = {}
-        aggregates = {}
-        shape = self.hx.shape
-        for idx in ndindex(shape):
-            spc = self.space.hx_index_to_space(*idx)
-            mat_obj, underneath = self.geom_tree.material_of_point(spc)
-            if idx[1] == 0 or idx[2] == 0:
-                mat_obj = Dummy(mat_obj.eps_inf, mat_obj.mu_inf)
-            self._attach_material(Hx, mat_obj, idx, spc, underneath, aggregates)
+        self._init_material_component(Hx)
 
     def init_material_hy(self):
         """Set up the update mechanism for Hy field.
@@ -425,15 +404,7 @@ class FDTD(object):
         at self.pw_material[Hy].
 
         """
-        self.pw_material[Hy] = {}
-        aggregates = {}
-        shape = self.hy.shape
-        for idx in ndindex(shape):
-            spc = self.space.hy_index_to_space(*idx)
-            mat_obj, underneath = self.geom_tree.material_of_point(spc)
-            if idx[2] == 0 or idx[0] == 0:
-                mat_obj = Dummy(mat_obj.eps_inf, mat_obj.mu_inf)
-            self._attach_material(Hy, mat_obj, idx, spc, underneath, aggregates)
+        self._init_material_component(Hy)
 
     def init_material_hz(self):
         """Set up the update mechanism for Hz field.
@@ -442,24 +413,106 @@ class FDTD(object):
         at self.pw_material[Hz].
 
         """
-        self.pw_material[Hz] = {}
+        self._init_material_component(Hz)
+
+    @staticmethod
+    def _is_dummy_material_index(component, idx, shape):
+        if component is Ex:
+            return idx[1] == shape[1] - 1 or idx[2] == shape[2] - 1
+        if component is Ey:
+            return idx[2] == shape[2] - 1 or idx[0] == shape[0] - 1
+        if component is Ez:
+            return idx[0] == shape[0] - 1 or idx[1] == shape[1] - 1
+        if component is Hx:
+            return idx[1] == 0 or idx[2] == 0
+        if component is Hy:
+            return idx[2] == 0 or idx[0] == 0
+        return idx[0] == 0 or idx[1] == 0
+
+    def _init_material_component(self, component):
+        field = self.field[component]
+        shape = field.shape
+        self.pw_material[component] = {}
         aggregates = {}
-        shape = self.hz.shape
+        dummy_cache = {}
+
+        if all(type(obj) in _BUILTIN_GEOMETRY_TYPES for obj in self.geom_list):
+            axes = self.space.component_coordinate_axes(component, shape)
+            total = int(np.prod(shape))
+            plane = shape[1] * shape[2]
+            for start in range(0, total, self._MATERIAL_TILE_SIZE):
+                stop = min(start + self._MATERIAL_TILE_SIZE, total)
+                materials, underlying = self.geom_tree.material_of_grid(
+                    *axes, start, stop
+                )
+                for offset, (mat_obj, underneath) in enumerate(
+                    zip(materials, underlying, strict=True)
+                ):
+                    linear = start + offset
+                    i, remainder = divmod(linear, plane)
+                    j, k = divmod(remainder, shape[2])
+                    idx = i, j, k
+                    spc = axes[0][i], axes[1][j], axes[2][k]
+                    self._attach_mapped_material(
+                        component,
+                        mat_obj,
+                        idx,
+                        spc,
+                        underneath,
+                        shape,
+                        aggregates,
+                        dummy_cache,
+                    )
+            return
+
+        index_to_space = getattr(
+            self.space, f"{component.__name__.lower()}_index_to_space"
+        )
         for idx in ndindex(shape):
-            spc = self.space.hz_index_to_space(*idx)
+            spc = index_to_space(*idx)
             mat_obj, underneath = self.geom_tree.material_of_point(spc)
-            if idx[0] == 0 or idx[1] == 0:
-                mat_obj = Dummy(mat_obj.eps_inf, mat_obj.mu_inf)
-            self._attach_material(Hz, mat_obj, idx, spc, underneath, aggregates)
+            self._attach_mapped_material(
+                component,
+                mat_obj,
+                idx,
+                spc,
+                underneath,
+                shape,
+                aggregates,
+                dummy_cache,
+            )
+
+    def _attach_mapped_material(
+        self,
+        component,
+        material,
+        idx,
+        coords,
+        underneath,
+        shape,
+        aggregates,
+        dummy_cache,
+    ):
+        if self._is_dummy_material_index(component, idx, shape):
+            key = material.eps_inf, material.mu_inf
+            dummy = dummy_cache.get(key)
+            if dummy is None:
+                dummy = Dummy(*key)
+                dummy_cache[key] = dummy
+            material = dummy
+        self._attach_material(component, material, idx, coords, underneath, aggregates)
 
     def _attach_material(
         self, component, material, idx, coords, underneath, aggregates
     ):
-        getter = getattr(material, f"get_pw_material_{component.__name__.lower()}")
-        material_type = type(material)
+        getter_name = f"get_pw_material_{component.__name__.lower()}"
+        getter = getattr(material, getter_name)
+        descriptor = _native_material_descriptor(material, getter_name)
+        if descriptor not in _BUILTIN_MATERIAL_TYPES:
+            descriptor = None
 
-        if material_type in _BUILTIN_MATERIAL_TYPES:
-            aggregate = aggregates.get(material_type)
+        if descriptor is not None:
+            aggregate = aggregates.get(descriptor)
             pw_obj = getter(
                 idx,
                 coords,
@@ -476,7 +529,7 @@ class FDTD(object):
                 self.pw_material[component][type(pw_obj)] = aggregate
             else:
                 aggregate.merge(pw_obj)
-            aggregates[material_type] = aggregate
+            aggregates[descriptor] = aggregate
             return
 
         pw_obj = getter(idx, coords, underneath, self.cmplx)

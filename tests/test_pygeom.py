@@ -6,11 +6,13 @@ from gmes import (
     Block,
     Cartesian,
     Cone,
+    Cpml,
     Cylinder,
     DefaultMedium,
     Dielectric,
     Ellipsoid,
     Shell,
+    Sphere,
 )
 from gmes.pygeom import GeomBoxTree
 
@@ -139,6 +141,83 @@ class SkewBasisTest(unittest.TestCase):
 
         self.assertTrue(ellipsoid.in_object(tuple(inside)))
         self.assertFalse(ellipsoid.in_object(tuple(outside)))
+
+
+class BatchGeometryLookupTest(unittest.TestCase):
+    def test_grid_lookup_matches_pointwise_for_all_builtin_geometries(self):
+        space = Cartesian(size=(20, 4, 4), resolution=2)
+        space.dt = 0.1
+        default_material = Dielectric(1)
+        materials = [Dielectric(value) for value in range(2, 7)]
+        shell_material = Cpml()
+        geometry = [
+            DefaultMedium(default_material),
+            Cone(
+                materials[0],
+                center=(-7, 0, 0),
+                axis=(0, 0, 1),
+                radius=0.4,
+                height=0.8,
+            ),
+            Cylinder(
+                materials[1],
+                center=(-5, 0, 0),
+                axis=(0, 0, 1),
+                radius=0.4,
+                height=0.8,
+            ),
+            Block(materials[2], center=(-3, 0, 0), size=(0.8, 0.8, 0.8)),
+            Ellipsoid(materials[3], center=(-1, 0, 0), size=(0.8, 0.8, 0.8)),
+            Sphere(materials[4], center=(1, 0, 0), radius=0.4),
+            Shell(
+                shell_material,
+                center=(3, 0, 0),
+                size=(1, 1, 1),
+                thickness=0.2,
+            ),
+        ]
+        for obj in geometry:
+            obj.init(space)
+        tree = GeomBoxTree(geometry)
+        axes = (
+            np.array((-7, -5, -3, -1, 1, 3.4), dtype=np.double),
+            np.array((0,), dtype=np.double),
+            np.array((0,), dtype=np.double),
+        )
+
+        batched_materials, batched_underlying = tree.material_of_grid(*axes)
+        pointwise = [
+            tree.material_of_point((x, y, z))
+            for x in axes[0]
+            for y in axes[1]
+            for z in axes[2]
+        ]
+
+        self.assertEqual(batched_materials, [material for material, _ in pointwise])
+        self.assertEqual(
+            batched_underlying, [underlying for _, underlying in pointwise]
+        )
+        self.assertEqual(batched_materials[:-1], materials)
+        self.assertIs(batched_materials[-1], shell_material)
+        self.assertIs(batched_underlying[-1], default_material)
+
+    def test_grid_lookup_preserves_last_overlap_wins_and_tile_bounds(self):
+        space = Cartesian(size=(4, 4, 4), resolution=2)
+        default = DefaultMedium(Dielectric(1))
+        outer = Sphere(Dielectric(2), radius=1)
+        inner = Sphere(Dielectric(3), radius=0.5)
+        for obj in (default, outer, inner):
+            obj.init(space)
+        tree = GeomBoxTree((default, outer, inner))
+        axes = tuple(np.array((-1, 0, 1), dtype=np.double) for _ in range(3))
+
+        materials, _ = tree.material_of_grid(*axes, 12, 15)
+
+        self.assertIs(materials[1], inner.material)
+        with self.assertRaisesRegex(IndexError, "grid tile is out of bounds"):
+            tree.material_of_grid(*axes, -1, 1)
+        with self.assertRaisesRegex(IndexError, "grid tile is out of bounds"):
+            tree.material_of_grid(*axes, 0, 28)
 
 
 if __name__ == "__main__":

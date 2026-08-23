@@ -453,6 +453,49 @@ cdef class GeomBoxTree(object):
 
         return geom_obj.material, underneath_material
 
+    cpdef tuple material_of_grid(
+        self,
+        np.ndarray[np.double_t, ndim=1] x_axis,
+        np.ndarray[np.double_t, ndim=1] y_axis,
+        np.ndarray[np.double_t, ndim=1] z_axis,
+        Py_ssize_t start=0,
+        object stop=None,
+    ):
+        """Return materials for a bounded C-order tile of a rectilinear grid."""
+        cdef Py_ssize_t nx = x_axis.shape[0]
+        cdef Py_ssize_t ny = y_axis.shape[0]
+        cdef Py_ssize_t nz = z_axis.shape[0]
+        cdef Py_ssize_t plane = ny * nz
+        cdef Py_ssize_t total = nx * plane
+        cdef Py_ssize_t end
+        cdef Py_ssize_t linear, i, j, k, remainder, offset
+        cdef tuple material_pair
+        cdef list materials
+        cdef list underneath
+
+        if stop is None:
+            end = total
+        else:
+            end = stop
+        if start < 0 or end < start or end > total:
+            raise IndexError("grid tile is out of bounds")
+
+        materials = [None] * (end - start)
+        underneath = [None] * (end - start)
+        for linear in range(start, end):
+            i = linear // plane
+            remainder = linear - i * plane
+            j = remainder // nz
+            k = remainder - j * nz
+            material_pair = self.material_of_point(
+                (x_axis[i], y_axis[j], z_axis[k])
+            )
+            offset = linear - start
+            materials[offset] = material_pair[0]
+            underneath[offset] = material_pair[1]
+
+        return materials, underneath
+
     def display_info(self, node=None, indent=0):
         if not node: node = self.root
 
@@ -642,20 +685,23 @@ cdef class Cone(GeometricObject):
         """Check whether the given point is in this Cone.
 
         """
-        cdef np.ndarray p, r
-        cdef double proj, radius
+        cdef double rx, ry, rz, proj, radius, perpendicular_squared
         cdef bint truth
 
-        p = np.array(point, np.double)
-        r = p - self.center
-        proj = np.dot(self.axis, r)
+        rx = point[0] - self.center[0]
+        ry = point[1] - self.center[1]
+        rz = point[2] - self.center[2]
+        proj = self.axis[0] * rx + self.axis[1] * ry + self.axis[2] * rz
         if abs(proj) <= .5 * self.height:
             if self.radius2 == self.radius == np.inf:
                 truth = True
             else:
                 radius = self.radius
                 radius += (proj / self.height + .5) * (self.radius2 - radius)
-                truth = norm(r - proj * self.axis) <= abs(radius)
+                perpendicular_squared = rx * rx + ry * ry + rz * rz - proj * proj
+                if perpendicular_squared < 0:
+                    perpendicular_squared = 0
+                truth = sqrt(perpendicular_squared) <= abs(radius)
         else:
             truth = False
 
@@ -795,13 +841,32 @@ cdef class Block(GeometricObject):
         """Check whether the given point is in this block.
 
         """
-        cdef np.ndarray p, r, proj
+        cdef double rx, ry, rz, proj0, proj1, proj2
         cdef bint truth
 
-        p = np.array(point, np.double)
-        r = p - self.center
-        proj = np.dot(self.projection_matrix, r)
-        truth = (np.abs(proj) <= .5 * self.size).all()
+        rx = point[0] - self.center[0]
+        ry = point[1] - self.center[1]
+        rz = point[2] - self.center[2]
+        proj0 = (
+            self.projection_matrix[0, 0] * rx
+            + self.projection_matrix[0, 1] * ry
+            + self.projection_matrix[0, 2] * rz
+        )
+        proj1 = (
+            self.projection_matrix[1, 0] * rx
+            + self.projection_matrix[1, 1] * ry
+            + self.projection_matrix[1, 2] * rz
+        )
+        proj2 = (
+            self.projection_matrix[2, 0] * rx
+            + self.projection_matrix[2, 1] * ry
+            + self.projection_matrix[2, 2] * rz
+        )
+        truth = (
+            abs(proj0) <= .5 * self.size[0]
+            and abs(proj1) <= .5 * self.size[1]
+            and abs(proj2) <= .5 * self.size[2]
+        )
 
         return truth
 
@@ -870,14 +935,28 @@ cdef class Ellipsoid(Block):
         """Check whether the given point is in this ellipsoid.
 
         """
-        cdef np.ndarray p, r, q, proj
+        cdef double rx, ry, rz, q0, q1, q2
         cdef bint truth
 
-        p = np.array(point, np.double)
-        r = p - self.center
-        proj = np.dot(self.projection_matrix, r)
-        q = proj * self.inverse_semi_axes
-        truth = sum(q * q) <= 1
+        rx = point[0] - self.center[0]
+        ry = point[1] - self.center[1]
+        rz = point[2] - self.center[2]
+        q0 = self.inverse_semi_axes[0] * (
+            self.projection_matrix[0, 0] * rx
+            + self.projection_matrix[0, 1] * ry
+            + self.projection_matrix[0, 2] * rz
+        )
+        q1 = self.inverse_semi_axes[1] * (
+            self.projection_matrix[1, 0] * rx
+            + self.projection_matrix[1, 1] * ry
+            + self.projection_matrix[1, 2] * rz
+        )
+        q2 = self.inverse_semi_axes[2] * (
+            self.projection_matrix[2, 0] * rx
+            + self.projection_matrix[2, 1] * ry
+            + self.projection_matrix[2, 2] * rz
+        )
+        truth = q0 * q0 + q1 * q1 + q2 * q2 <= 1
 
         return truth
 
@@ -951,12 +1030,13 @@ cdef class Sphere(GeometricObject):
         """Check whether the given point is in the sphere.
 
         """
-        cdef np.ndarray p, r
+        cdef double rx, ry, rz
         cdef bint truth
 
-        p = np.array(point, np.double)
-        r = p - self.center
-        truth = norm(r) <= self.radius;
+        rx = point[0] - self.center[0]
+        ry = point[1] - self.center[1]
+        rz = point[2] - self.center[2]
+        truth = rx * rx + ry * ry + rz * rz <= self.radius * self.radius
 
         return truth
 

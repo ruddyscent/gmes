@@ -1,16 +1,19 @@
 import unittest
 from math import pi, sin
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 
-from gmes.constant import PlusX, PlusY
-from gmes.geometry import Cartesian
+from gmes import DefaultMedium, Dielectric, Sphere
+from gmes.constant import Ex, PlusX, PlusY
+from gmes.geometry import Cartesian, in_range
 from gmes.pw_source import (
     TransparentElectricParam,
     TransparentEx,
     TransparentMagneticParam,
 )
+from gmes.pygeom import GeomBoxTree
 from gmes.source import (
     Bandpass,
     Continuous,
@@ -133,6 +136,63 @@ class SourceTimeTest(unittest.TestCase):
             parameter.r1,
         ):
             self.assertEqual(set(values), {PlusX, PlusY})
+
+    def test_tfsf_batches_builtin_geometry_mapping_with_field_clipping(self):
+        source = self.make_tfsf()
+        source._MAPPING_TILE_SIZE = 3
+        space = Cartesian(size=(2, 2, 2), resolution=2)
+        default = DefaultMedium(Dielectric(1))
+        sphere = Sphere(Dielectric(3), radius=0.6)
+        for obj in (default, sphere):
+            obj.init(space)
+        source.geom_tree = GeomBoxTree((default, sphere))
+        field = space.get_ex_storage((Ex,))
+
+        mapped = list(
+            source._mapped_source_points(
+                space,
+                Ex,
+                field,
+                (-2, -2, -2),
+                tuple(value + 2 for value in field.shape),
+            )
+        )
+        expected_indices = [
+            index
+            for index in np.ndindex(field.shape)
+            if in_range(index, field.shape, Ex)
+        ]
+
+        self.assertEqual([index for index, *_ in mapped], expected_indices)
+        for index, point, material, underneath in mapped:
+            self.assertEqual(point, space.ex_index_to_space(*index))
+            self.assertEqual(
+                (material, underneath), source.geom_tree.material_of_point(point)
+            )
+
+    def test_tfsf_custom_geometry_uses_pointwise_fallback(self):
+        class CustomSphere(Sphere):
+            pass
+
+        source = self.make_tfsf()
+        space = Cartesian(size=(2, 2, 2), resolution=2)
+        default = DefaultMedium(Dielectric(1))
+        sphere = CustomSphere(Dielectric(3), radius=0.6)
+        for obj in (default, sphere):
+            obj.init(space)
+        source.geom_tree = GeomBoxTree((default, sphere))
+        field = space.get_ex_storage((Ex,))
+
+        with patch.object(
+            space,
+            "component_coordinate_axes",
+            side_effect=AssertionError("batch path must not be used"),
+        ):
+            mapped = list(
+                source._mapped_source_points(space, Ex, field, (0, 0, 0), field.shape)
+            )
+
+        self.assertTrue(mapped)
 
 
 if __name__ == "__main__":

@@ -12,6 +12,16 @@ from numpy import array, dot, empty, inf, zeros
 from . import constant as const
 from .pygeom import *
 
+_BUILTIN_GEOMETRY_TYPES = (
+    DefaultMedium,
+    Cone,
+    Cylinder,
+    Block,
+    Ellipsoid,
+    Sphere,
+    Shell,
+)
+
 
 class AuxiCartComm(object):
     """Auxiliary MPI Cartesian communicator for the absence of MPI implementation.
@@ -278,6 +288,33 @@ class Cartesian(object):
             return zeros(shape, complex)
         else:
             return zeros(shape, np.double)
+
+    def component_coordinate_axes(self, component, shape):
+        """Return global coordinate axes for a local Yee-grid field."""
+        offsets = {
+            const.Ex: (0.5, 0.0, 0.0),
+            const.Ey: (0.0, 0.5, 0.0),
+            const.Ez: (0.0, 0.0, 0.5),
+            const.Hx: (0.0, -0.5, -0.5),
+            const.Hy: (-0.5, 0.0, -0.5),
+            const.Hz: (-0.5, -0.5, 0.0),
+        }
+        try:
+            component_offsets = offsets[component]
+        except KeyError as error:
+            raise ValueError("unknown Yee-grid component") from error
+
+        global_origin = self.general_field_size * self.my_cart_idx
+        return tuple(
+            (
+                np.arange(length, dtype=np.double)
+                + global_origin[axis]
+                + component_offsets[axis]
+            )
+            * self.dr[axis]
+            - self.half_size[axis]
+            for axis, length in enumerate(shape)
+        )
 
     def get_ex_storage(self, field_compnt, cmplx=False):
         """Return an initialized array for Ex field component."""

@@ -2,6 +2,7 @@ import unittest
 
 import numpy as np
 
+from gmes.constant import Ex, Ey, Ez, Hx, Hy, Hz
 from gmes.geometry import Cartesian
 
 
@@ -38,6 +39,29 @@ class CartesianGridTest(unittest.TestCase):
             point = index_to_space(2, 3, 1)
 
             self.assertEqual(space_to_index(*point), (2, 3, 1))
+
+    def test_component_coordinate_axes_match_mpi_local_point_conversions(self):
+        space = Cartesian(size=(4, 0, 2), resolution=(2, 3, 4))
+        space.general_field_size = np.array((5, 1, 3), dtype=np.intp)
+        space.my_cart_idx = (2, 4, 3)
+        shape = (3, 2, 4)
+
+        for component in (Ex, Ey, Ez, Hx, Hy, Hz):
+            with self.subTest(component=component.__name__):
+                axes = space.component_coordinate_axes(component, shape)
+                index_to_space = getattr(
+                    space, f"{component.__name__.lower()}_index_to_space"
+                )
+                for index in np.ndindex(shape):
+                    expected = index_to_space(*index)
+                    actual = tuple(axis[value] for axis, value in zip(axes, index))
+                    np.testing.assert_array_equal(actual, expected)
+
+    def test_component_coordinate_axes_reject_unknown_components(self):
+        space = Cartesian(size=(2, 2, 2), resolution=2)
+
+        with self.assertRaisesRegex(ValueError, "unknown Yee-grid component"):
+            space.component_coordinate_axes(object(), (1, 1, 1))
 
     def test_component_indices_floor_negative_nearest_grid_values(self):
         space = Cartesian(size=(2, 2, 2), resolution=2)

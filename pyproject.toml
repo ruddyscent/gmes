@@ -107,7 +107,6 @@ py-version = "3.14"
 extension-pkg-allow-list = [
     "gmes._constant",
     "gmes._pw_material",
-    "gmes.material",
     "gmes.pygeom",
 ]
 ignore-patterns = [

@@ -34,10 +34,10 @@ class MacosBuildTest(unittest.TestCase):
     def test_extension_target_uses_otool_metadata(self, run):
         run.return_value.stdout = "cmd LC_BUILD_VERSION\n  minos 11.0\n"
 
-        verify_extension_targets(["build/gmes/material.so"], "11.0")
+        verify_extension_targets(["build/gmes/pygeom.so"], "11.0")
 
         run.assert_called_once_with(
-            ["otool", "-l", "build/gmes/material.so"],
+            ["otool", "-l", "build/gmes/pygeom.so"],
             check=True,
             capture_output=True,
             text=True,
@@ -48,7 +48,7 @@ class MacosBuildTest(unittest.TestCase):
         run.return_value.stdout = "cmd LC_BUILD_VERSION\n  minos 26.0\n"
 
         with self.assertRaisesRegex(RuntimeError, "expected 11.0"):
-            verify_extension_targets(["build/gmes/material.so"], "11.0")
+            verify_extension_targets(["build/gmes/pygeom.so"], "11.0")
 
     @patch("utils.macos_build.subprocess.run")
     def test_dependency_target_accepts_older_minos(self, run):

@@ -1,26 +1,22 @@
 # -*- coding: utf-8 -*-
-# cython: language_level=3
-# cython: boundscheck=False
-# cython: wraparound=False
-
-from sys import stderr
 
 from cmath import exp as cexp
 from collections.abc import Sequence
 from copy import deepcopy
-from math import sqrt, sin, cos, tanh, exp, pi
-from numpy import array, inf, empty, zeros
-import numpy as np
+from math import cos, exp, pi, sin, sqrt, tanh
+from sys import stderr
 
-from .pygeom import Compound, Material
-from .pw_material import *
+import numpy as np
+from numpy import array, empty, inf, zeros
+
 from .constant import c0
+from .pw_material import *
+from .pygeom import Compound, Material
 
 
 class Dummy(Material):
-    """A dummy material type which dosen't update the field component.
+    """A dummy material type which dosen't update the field component."""
 
-    """
     def __init__(self, eps_inf=1, mu_inf=1):
         Material.__init__(self, eps_inf, mu_inf)
 
@@ -28,9 +24,7 @@ class Dummy(Material):
         pass
 
     def display_info(self, indent=0):
-        """Display the parameter values.
-
-        """
+        """Display the parameter values."""
         print(" " * indent, "dummy object")
         print(" " * indent, end=" ")
         print("frequency independent permittivity:", self.eps_inf, end=" ")
@@ -134,14 +128,13 @@ class Dummy(Material):
 
 
 class Const(Material):
-    """A material type which sets the field to the given value.
+    """A material type which sets the field to the given value."""
 
-    """
     def __init__(self, value=0, eps_inf=1, mu_inf=1):
         """Arguments:
-            value -- field value
-            eps_inf -- frequency independent permittivity
-            mu_inf -- frequency independent permeability
+        value -- field value
+        eps_inf -- frequency independent permittivity
+        mu_inf -- frequency independent permeability
 
         """
         Material.__init__(self, eps_inf, mu_inf)
@@ -153,20 +146,18 @@ class Const(Material):
 
     def __getstate__(self):
         d = Material.__getstate__(self)
-        d['value'] = self.value
+        d["value"] = self.value
         return d
 
     def __setstate__(self, d):
         Material.__setstate__(self, d)
-        self.value = d['value']
+        self.value = d["value"]
 
     def init(self, space, param=None):
         pass
 
     def display_info(self, indent=0):
-        """Display the parameter values.
-
-        """
+        """Display the parameter values."""
         print(" " * indent, "const object")
         print(" " * indent, end=" ")
         print("value:", self.value, end=" ")
@@ -277,13 +268,12 @@ class Const(Material):
 
 
 class Dielectric(Material):
-    """Representation of non-dispersive isotropic dielectric medium.
+    """Representation of non-dispersive isotropic dielectric medium."""
 
-    """
     def __init__(self, eps_inf=1, mu_inf=1):
         """Arguments:
-            eps_inf -- frequency independent permittivity
-            mu_inf -- frequency independent permeability
+        eps_inf -- frequency independent permittivity
+        mu_inf -- frequency independent permeability
 
         """
         Material.__init__(self, eps_inf, mu_inf)
@@ -292,9 +282,7 @@ class Dielectric(Material):
         pass
 
     def display_info(self, indent=0):
-        """Display the parameter values.
-
-        """
+        """Display the parameter values."""
         print(" " * indent, "dielectric")
         print(" " * indent, end=" ")
         print("frequency independent permittivity:", self.eps_inf, end=" ")
@@ -409,35 +397,36 @@ class Pml(Material, Compound):
         initialized -- initialization semaphore
 
     """
+
     def __init__(self, eps_inf, mu_inf):
         Material.__init__(self, eps_inf, mu_inf)
         self.initialized = False
 
     def __getstate__(self):
         d = Material.__getstate__(self)
-        d['initialized'] = self.initialized
+        d["initialized"] = self.initialized
 
         if self.initialized:
-            d['center'] = self.center
-            d['half_size'] = self.half_size
-            d['d'] = self.d
-            d['dt'] = self.dt
-            d['dw'] = self.dw
-            d['sigma_max'] = self.sigma_max
+            d["center"] = self.center
+            d["half_size"] = self.half_size
+            d["d"] = self.d
+            d["dt"] = self.dt
+            d["dw"] = self.dw
+            d["sigma_max"] = self.sigma_max
 
         return d
 
     def __setstate__(self, d):
         Material.__setstate__(self, d)
-        self.initialized = d['initialized']
+        self.initialized = d["initialized"]
 
         if self.initialized:
-            self.center = np.array(d['center'], copy=True)
-            self.half_size = np.array(d['half_size'], copy=True)
-            self.d = d['d']
-            self.dt = d['dt']
-            self.dw = d['dw'].copy()
-            self.sigma_max = np.array(d['sigma_max'], copy=True)
+            self.center = np.array(d["center"], copy=True)
+            self.half_size = np.array(d["half_size"], copy=True)
+            self.d = d["d"]
+            self.dt = d["dt"]
+            self.dw = d["dw"].copy()
+            self.sigma_max = np.array(d["sigma_max"], copy=True)
 
     def init(self, space, param):
         """
@@ -464,40 +453,34 @@ class Pml(Material, Compound):
         self.initialized = True
 
     def get_sigma_opt(self):
-        """Calculate the optimal value of conductivity.
-
-        """
+        """Calculate the optimal value of conductivity."""
         eta = sqrt(self.mu_inf / self.eps_inf)
         return 0.8 * (self.m + 1) / (eta * self.dw)
 
     def sigma(self, w, component):
-        """Polynomial grading of conductivity.
-
-        """
+        """Polynomial grading of conductivity."""
         w -= self.center[component]
         half_size = self.half_size[component]
 
         if w <= self.d - half_size:
             depth = min(max((half_size + w) / self.d, 0), 1)
-            return self.sigma_max[component] * (1 - depth)**self.m
+            return self.sigma_max[component] * (1 - depth) ** self.m
         elif half_size - self.d <= w:
             depth = min(max((half_size - w) / self.d, 0), 1)
-            return self.sigma_max[component] * (1 - depth)**self.m
+            return self.sigma_max[component] * (1 - depth) ** self.m
         else:
             return 0
 
     def kappa(self, w, component):
-        """Polynomial grading of kappa.
-
-        """
+        """Polynomial grading of kappa."""
         w -= self.center[component]
         half_size = self.half_size[component]
         if w <= self.d - half_size:
             depth = min(max((half_size + w) / self.d, 0), 1)
-            return 1 + (self.kappa_max - 1) * (1 - depth)**self.m
+            return 1 + (self.kappa_max - 1) * (1 - depth) ** self.m
         elif half_size - self.d <= w:
             depth = min(max((half_size - w) / self.d, 0), 1)
-            return 1 + (self.kappa_max - 1) * (1 - depth)**self.m
+            return 1 + (self.kappa_max - 1) * (1 - depth) ** self.m
         else:
             return 1
 
@@ -519,7 +502,10 @@ class Upml(Pml):
         sigma_max_ratio -- the ratio between sigma_max and sigma_opt. default 0.745
 
     """
-    def __init__(self, eps_inf=1, mu_inf=1, m=3.6, kappa_max=4.6, sigma_max_ratio=.745):
+
+    def __init__(
+        self, eps_inf=1, mu_inf=1, m=3.6, kappa_max=4.6, sigma_max_ratio=0.745
+    ):
         Pml.__init__(self, eps_inf, mu_inf)
 
         self.m = float(m)
@@ -528,16 +514,16 @@ class Upml(Pml):
 
     def __getstate__(self):
         d = Pml.__getstate__(self)
-        d['m'] = self.m
-        d['kappa_max'] = self.kappa_max
-        d['sigma_max_ratio'] = self.sigma_max_ratio
+        d["m"] = self.m
+        d["kappa_max"] = self.kappa_max
+        d["sigma_max_ratio"] = self.sigma_max_ratio
         return d
 
     def __setstate__(self, d):
         Pml.__setstate__(self, d)
-        self.m = d['m']
-        self.kappa_max = d['kappa_max']
-        self.sigma_max_ratio = d['sigma_max_ratio']
+        self.m = d["m"]
+        self.kappa_max = d["kappa_max"]
+        self.sigma_max_ratio = d["sigma_max_ratio"]
 
     def display_info(self, indent=0):
         """Display the parameter values.
@@ -545,49 +531,41 @@ class Upml(Pml):
         Override PML.display_info.
 
         """
-        print(' ' * indent, 'UPML')
-        print(' ' * indent, end=" ")
-        print('frequency independent permittivity:', self.eps_inf, end=" ")
-        print('frequency independent permeability:', self.mu_inf)
+        print(" " * indent, "UPML")
+        print(" " * indent, end=" ")
+        print("frequency independent permittivity:", self.eps_inf, end=" ")
+        print("frequency independent permeability:", self.mu_inf)
 
-        print(' ' * indent, end=" ")
-        print('sigma_max:', self.sigma_max, end=" ")
-        print('m:', self.m, end=" ")
-        print('kappa_max:', self.kappa_max)
+        print(" " * indent, end=" ")
+        print("sigma_max:", self.sigma_max, end=" ")
+        print("m:", self.m, end=" ")
+        print("kappa_max:", self.kappa_max)
 
     def c1(self, w, component):
-        numerator = 2 * self.kappa(w, component) \
-            - self.sigma(w, component) * self.dt
-        denominator = 2 * self.kappa(w, component) \
-            + self.sigma(w, component) * self.dt
+        numerator = 2 * self.kappa(w, component) - self.sigma(w, component) * self.dt
+        denominator = 2 * self.kappa(w, component) + self.sigma(w, component) * self.dt
         return numerator / denominator
 
     def c2(self, w, component):
         numerator = 2 * self.dt
-        denominator = 2 * self.kappa(w, component) \
-            + self.sigma(w, component) * self.dt
+        denominator = 2 * self.kappa(w, component) + self.sigma(w, component) * self.dt
         return numerator / denominator
 
     def c3(self, w, component):
-        numerator = 2 * self.kappa(w, component) \
-            - self.sigma(w, component) * self.dt
-        denominator = 2 * self.kappa(w, component) \
-            + self.sigma(w, component) * self.dt
+        numerator = 2 * self.kappa(w, component) - self.sigma(w, component) * self.dt
+        denominator = 2 * self.kappa(w, component) + self.sigma(w, component) * self.dt
         return numerator / denominator
 
     def c4(self, w, component):
-        denominator = 2 * self.kappa(w, component) \
-            + self.sigma(w, component) * self.dt
+        denominator = 2 * self.kappa(w, component) + self.sigma(w, component) * self.dt
         return 1 / denominator
 
     def c5(self, w, component):
-        numerator = 2 * self.kappa(w, component) \
-            + self.sigma(w, component) * self.dt
+        numerator = 2 * self.kappa(w, component) + self.sigma(w, component) * self.dt
         return numerator
 
     def c6(self, w, component):
-        numerator = 2 * self.kappa(w, component) \
-            - self.sigma(w, component) * self.dt
+        numerator = 2 * self.kappa(w, component) - self.sigma(w, component) * self.dt
         return numerator
 
     def get_pw_material_ex(self, idx, coords, underneath=None, cmplx=False):
@@ -748,7 +726,17 @@ class Cpml(Pml):
         sigma_max_ratio -- default 0.65
 
     """
-    def __init__(self, eps_inf=1, mu_inf=1, m=3.4, kappa_max=1, m_a=4.8, a_max=0.8, sigma_max_ratio=0.65):
+
+    def __init__(
+        self,
+        eps_inf=1,
+        mu_inf=1,
+        m=3.4,
+        kappa_max=1,
+        m_a=4.8,
+        a_max=0.8,
+        sigma_max_ratio=0.65,
+    ):
         Pml.__init__(self, eps_inf, mu_inf)
 
         self.m = float(m)
@@ -759,20 +747,20 @@ class Cpml(Pml):
 
     def __getstate__(self):
         d = Pml.__getstate__(self)
-        d['m'] = self.m
-        d['kappa_max'] = self.kappa_max
-        d['m_a'] = self.m_a
-        d['a_max'] = self.a_max
-        d['sigma_max_ratio'] = self.sigma_max_ratio
+        d["m"] = self.m
+        d["kappa_max"] = self.kappa_max
+        d["m_a"] = self.m_a
+        d["a_max"] = self.a_max
+        d["sigma_max_ratio"] = self.sigma_max_ratio
         return d
 
     def __setstate__(self, d):
         Pml.__setstate__(self, d)
-        self.m = d['m']
-        self.kappa_max = d['kappa_max']
-        self.m_a = d['m_a']
-        self.a_max = d['a_max']
-        self.sigma_max_ratio = d['sigma_max_ratio']
+        self.m = d["m"]
+        self.kappa_max = d["kappa_max"]
+        self.m_a = d["m_a"]
+        self.a_max = d["a_max"]
+        self.sigma_max_ratio = d["sigma_max_ratio"]
 
     def display_info(self, indent=0):
         """Display the parameter values.
@@ -780,17 +768,17 @@ class Cpml(Pml):
         Override PML.display_info.
 
         """
-        print(' ' * indent, 'CPML')
-        print(' ' * indent, end=" ")
-        print('frequency independent permittivity:', self.eps_inf, end=" ")
-        print('frequency independent permeability:', self.mu_inf)
+        print(" " * indent, "CPML")
+        print(" " * indent, end=" ")
+        print("frequency independent permittivity:", self.eps_inf, end=" ")
+        print("frequency independent permeability:", self.mu_inf)
 
-        print(' ' * indent, end=" ")
-        print('sigma_max:', self.sigma_max, end=" ")
-        print('m:', self.m, end=" ")
-        print('kappa_max:', self.kappa_max, end=" ")
-        print('m_a:', self.m_a, end=" ")
-        print('a_max:', self.a_max)
+        print(" " * indent, end=" ")
+        print("sigma_max:", self.sigma_max, end=" ")
+        print("m:", self.m, end=" ")
+        print("kappa_max:", self.kappa_max, end=" ")
+        print("m_a:", self.m_a, end=" ")
+        print("a_max:", self.a_max)
 
     def a(self, w, component):
         w -= self.center[component]
@@ -806,7 +794,13 @@ class Cpml(Pml):
             return 0
 
     def b(self, w, component):
-        exponent = -(self.sigma(w, component) / self.kappa(w, component) + self.a(w, component)) * self.dt
+        exponent = (
+            -(
+                self.sigma(w, component) / self.kappa(w, component)
+                + self.a(w, component)
+            )
+            * self.dt
+        )
         return exp(exponent)
 
     def c(self, w, component):
@@ -966,9 +960,7 @@ class DrudePole(object):
         self.gamma = float(gamma)
 
     def display_info(self, indent=0):
-        """Display the parameter values.
-
-        """
+        """Display the parameter values."""
         print(" " * indent, "Drude pole")
         print(" " * indent, end=" ")
         print("plasma frequency:", self.omega, end=" ")
@@ -989,9 +981,7 @@ class LorentzPole(object):
         self.gamma = float(gamma)
 
     def display_info(self, indent=0):
-        """Display the parameter values.
-
-        """
+        """Display the parameter values."""
         print(" " * indent, "Lorentz pole")
         print(" " * indent, end=" ")
         print("amplitude:", self.amp, end=" ")
@@ -1015,9 +1005,7 @@ class CriticalPoint(object):
         self.gamma = float(gamma)
 
     def display_info(self, indent=0):
-        """Display the parameter values.
-
-        """
+        """Display the parameter values."""
         print(" " * indent, "critical point")
         print(" " * indent, end=" ")
         print("amplitude:", self.amp, end=" ")
@@ -1037,77 +1025,117 @@ class DcpAde(Dielectric):
 
         """
         Dielectric.__init__(self, eps_inf, mu_inf)
-        self.sigma = float(sigma) # instant conductivity
-        self.dps = tuple(dps) # tuple of Drude poles
-        self.cps = tuple(cps) # tuple of critical points
+        self.sigma = float(sigma)  # instant conductivity
+        self.dps = tuple(dps)  # tuple of Drude poles
+        self.cps = tuple(cps)  # tuple of critical points
         self.initialized = False
 
     def __getstate__(self):
         d = Dielectric.__getstate__(self)
-        d['sigma'] = self.sigma
-        d['dps'] = self.dps
-        d['cps'] = self.cps
-        d['initialized'] = self.initialized
+        d["sigma"] = self.sigma
+        d["dps"] = self.dps
+        d["cps"] = self.cps
+        d["initialized"] = self.initialized
 
         if self.initialized:
-            d['dt'] = self.dt
-            d['a'] = self.a
-            d['b'] = self.b
-            d['c'] = self.c
+            d["dt"] = self.dt
+            d["a"] = self.a
+            d["b"] = self.b
+            d["c"] = self.c
 
         return d
 
     def __setstate__(self, d):
         Dielectric.__setstate__(self, d)
 
-        self.sigma = d['sigma']
-        self.dps = deepcopy(d['dps'])
-        self.cps = deepcopy(d['cps'])
-        self.initialized = d['initialized']
+        self.sigma = d["sigma"]
+        self.dps = deepcopy(d["dps"])
+        self.cps = deepcopy(d["cps"])
+        self.initialized = d["initialized"]
 
         if self.initialized:
-            self.dt = d['dt']
-            self.a = d['a'].copy()
-            self.b = d['b'].copy()
-            self.c = d['c'].copy()
+            self.dt = d["dt"]
+            self.a = d["a"].copy()
+            self.b = d["b"].copy()
+            self.c = d["c"].copy()
 
     def init(self, space, param=None):
         self.dt = space.dt
 
         # parameters for the ADE of the Drude model
-        self.a = empty((len(self.dps),3), np.double)
+        self.a = empty((len(self.dps), 3), np.double)
         for i in range(len(self.dps)):
             pole = self.dps[i]
             denom = float(self.dt * pole.gamma + 2)
-            self.a[i,0] = (self.dt * pole.gamma - 2) / denom
-            self.a[i,1] = 4 / denom
-            self.a[i,2] = 0.5 * (self.dt * pole.omega)**2 / denom
+            self.a[i, 0] = (self.dt * pole.gamma - 2) / denom
+            self.a[i, 1] = 4 / denom
+            self.a[i, 2] = 0.5 * (self.dt * pole.omega) ** 2 / denom
 
         # parameters for the ADE of critical points model
-        self.b = empty((len(self.cps),5), np.double)
+        self.b = empty((len(self.cps), 5), np.double)
         for i in range(len(self.cps)):
             pnt = self.cps[i]
-            denom = (self.dt * pnt.gamma + 2)**2 + (self.dt * pnt.omega)**2
-            self.b[i,0] = -((self.dt * pnt.gamma - 2)**2 + (self.dt * pnt.omega)**2) / denom
-            self.b[i,1] = 2 * (4 - self.dt**2 * (pnt.gamma**2 + pnt.omega**2)) / denom
-            self.b[i,2] = 2 * self.dt * pnt.amp * pnt.omega * (self.dt * cos(pnt.phi) * pnt.omega + sin(pnt.phi) * (2 - self.dt * pnt.gamma)) / denom
-            self.b[i,3] = 4 * self.dt**2 * pnt.amp * pnt.omega * (cos(pnt.phi) * pnt.omega - sin(pnt.phi) * pnt.gamma) / denom
-            self.b[i,4] = 2 * self.dt * pnt.amp * pnt.omega * (self.dt * cos(pnt.phi) * pnt.omega - sin(pnt.phi) * (2 + self.dt * pnt.gamma)) / denom
+            denom = (self.dt * pnt.gamma + 2) ** 2 + (self.dt * pnt.omega) ** 2
+            self.b[i, 0] = (
+                -((self.dt * pnt.gamma - 2) ** 2 + (self.dt * pnt.omega) ** 2) / denom
+            )
+            self.b[i, 1] = 2 * (4 - self.dt**2 * (pnt.gamma**2 + pnt.omega**2)) / denom
+            self.b[i, 2] = (
+                2
+                * self.dt
+                * pnt.amp
+                * pnt.omega
+                * (
+                    self.dt * cos(pnt.phi) * pnt.omega
+                    + sin(pnt.phi) * (2 - self.dt * pnt.gamma)
+                )
+                / denom
+            )
+            self.b[i, 3] = (
+                4
+                * self.dt**2
+                * pnt.amp
+                * pnt.omega
+                * (cos(pnt.phi) * pnt.omega - sin(pnt.phi) * pnt.gamma)
+                / denom
+            )
+            self.b[i, 4] = (
+                2
+                * self.dt
+                * pnt.amp
+                * pnt.omega
+                * (
+                    self.dt * cos(pnt.phi) * pnt.omega
+                    - sin(pnt.phi) * (2 + self.dt * pnt.gamma)
+                )
+                / denom
+            )
 
         # parameters for the electric field update equations.
         self.c = empty(4, np.double)
-        denom = 0.5 * self.dt * self.sigma + sum(self.a[:,2]) + sum(self.b[:,4]) + self.eps_inf
+        denom = (
+            0.5 * self.dt * self.sigma
+            + sum(self.a[:, 2])
+            + sum(self.b[:, 4])
+            + self.eps_inf
+        )
         self.c[0] = self.dt / denom
         self.c[1] = 1 / denom
-        self.c[2] = -(sum(self.a[:,2]) + sum(self.b[:,2])) / denom
-        self.c[3] = -(0.5 * self.dt * self.sigma + 2 * sum(self.a[:,2]) + sum(self.b[:,3]) - self.eps_inf) / denom
+        self.c[2] = -(sum(self.a[:, 2]) + sum(self.b[:, 2])) / denom
+        self.c[3] = (
+            -(
+                0.5 * self.dt * self.sigma
+                + 2 * sum(self.a[:, 2])
+                + sum(self.b[:, 3])
+                - self.eps_inf
+            )
+            / denom
+        )
 
         self.initialized = True
 
     def display_info(self, indent=0):
-        """Display the parameter values.
-
-        """
+        """Display the parameter values."""
         print(" " * indent, "Drude-critical points dispersive media")
         print(" " * indent, end=" ")
         print("frequency independent permittivity:", self.eps_inf, end=" ")
@@ -1116,10 +1144,10 @@ class DcpAde(Dielectric):
 
         print(" " * indent, "Drude pole(s):")
         for i in self.dps:
-            i.display_info(indent+4)
+            i.display_info(indent + 4)
         print(" " * indent, "critical point(s):")
         for i in self.cps:
-            i.display_info(indent+4)
+            i.display_info(indent + 4)
 
     def get_pw_material_ex(self, idx, coords, underneath=None, cmplx=False):
         if cmplx:
@@ -1236,6 +1264,7 @@ class DcpPlrc(Dielectric):
       2005.
 
     """
+
     def __init__(self, eps_inf=1, mu_inf=1, sigma=0, dps=(), cps=()):
         """
         eps_inf: The (frequency-independent) relative permittivity. Default is 1.
@@ -1246,38 +1275,38 @@ class DcpPlrc(Dielectric):
 
         """
         Dielectric.__init__(self, eps_inf=eps_inf, mu_inf=mu_inf)
-        self.sigma = float(sigma) # instant conductivity
-        self.dps = tuple(dps) # tuple of Drude poles
-        self.cps = tuple(cps) # tuple of critical points
+        self.sigma = float(sigma)  # instant conductivity
+        self.dps = tuple(dps)  # tuple of Drude poles
+        self.cps = tuple(cps)  # tuple of critical points
         self.initialized = False
 
     def __getstate__(self):
         d = Dielectric.__getstate__(self)
-        d['sigma'] = self.sigma
-        d['dps'] = self.dps
-        d['cps'] = self.cps
-        d['initialized'] = self.initialized
+        d["sigma"] = self.sigma
+        d["dps"] = self.dps
+        d["cps"] = self.cps
+        d["initialized"] = self.initialized
 
         if self.initialized:
-            d['dt'] = self.dt
-            d['a'] = self.a
-            d['b'] = self.b
-            d['c'] = self.c
+            d["dt"] = self.dt
+            d["a"] = self.a
+            d["b"] = self.b
+            d["c"] = self.c
 
         return d
 
     def __setstate__(self, d):
         Dielectric.__setstate__(self, d)
-        self.sigma = d['sigma']
-        self.dps = deepcopy(d['dps'])
-        self.cps = deepcopy(d['cps'])
-        self.initialized = d['initialized']
+        self.sigma = d["sigma"]
+        self.dps = deepcopy(d["dps"])
+        self.cps = deepcopy(d["cps"])
+        self.initialized = d["initialized"]
 
         if self.initialized:
-            self.dt = d['dt']
-            self.a = d['a'].copy()
-            self.b = d['b'].copy()
-            self.c = d['c'].copy()
+            self.dt = d["dt"]
+            self.a = d["a"].copy()
+            self.b = d["b"].copy()
+            self.c = d["c"].copy()
 
     def init(self, space, param=None):
         self.dt = space.dt
@@ -1285,23 +1314,33 @@ class DcpPlrc(Dielectric):
         # parameters of the recursion relation for the Drude pole recursive accumulator.
         self.a = empty((len(self.dps), 3), np.double)
         for i, pole in enumerate(self.dps):
-            self.a[i,0] = self.delta_chi_dp_0(pole) - self.delta_xi_dp_0(pole)
-            self.a[i,1] = self.delta_xi_dp_0(pole)
-            self.a[i,2] = exp(-pole.gamma * self.dt)
+            self.a[i, 0] = self.delta_chi_dp_0(pole) - self.delta_xi_dp_0(pole)
+            self.a[i, 1] = self.delta_xi_dp_0(pole)
+            self.a[i, 2] = exp(-pole.gamma * self.dt)
 
         # parameters of the recursion relation for the critical point recursive accumulator.
         self.b = empty((len(self.cps), 3), complex)
         for i, pnt in enumerate(self.cps):
-            self.b[i,0] = self.delta_chi_cp_0(pnt) - self.delta_xi_cp_0(pnt)
-            self.b[i,1] = self.delta_xi_cp_0(pnt)
-            self.b[i,2] = cexp(-self.dt * (pnt.gamma + 1j * pnt.omega))
+            self.b[i, 0] = self.delta_chi_cp_0(pnt) - self.delta_xi_cp_0(pnt)
+            self.b[i, 1] = self.delta_xi_cp_0(pnt)
+            self.b[i, 2] = cexp(-self.dt * (pnt.gamma + 1j * pnt.omega))
 
         # parameters for the electric field update equations.
-        chi_0 = (sum([self.chi_dp_0(pole) for pole in self.dps] +
-                     [self.chi_cp_0(point) for point in self.cps]) + 0j).real
+        chi_0 = (
+            sum(
+                [self.chi_dp_0(pole) for pole in self.dps]
+                + [self.chi_cp_0(point) for point in self.cps]
+            )
+            + 0j
+        ).real
 
-        xi_0 = (sum([self.xi_dp_0(pole) for pole in self.dps] +
-                    [self.xi_cp_0(point) for point in self.cps]) + 0j).real
+        xi_0 = (
+            sum(
+                [self.xi_dp_0(pole) for pole in self.dps]
+                + [self.xi_cp_0(point) for point in self.cps]
+            )
+            + 0j
+        ).real
 
         self.c = empty(3, np.double)
         conductivity = 0.5 * self.dt * self.sigma
@@ -1316,20 +1355,22 @@ class DcpPlrc(Dielectric):
         omega = dp.omega
         gamma = dp.gamma
         gdt = dp.gamma * self.dt
-        return (omega / gamma)**2 * (exp(-gdt) + gdt - 1)
+        return (omega / gamma) ** 2 * (exp(-gdt) + gdt - 1)
 
     def xi_dp_0(self, dp):
         chi_dp_0 = self.chi_dp_0(dp)
         omega = dp.omega
         gamma = dp.gamma
         gdt = dp.gamma * self.dt
-        return chi_dp_0 * (1 / (1 - exp(gdt)) + 1 / gdt) + (omega / gamma)**2 * (gdt / 2 / tanh(gdt / 2) - 1)
+        return chi_dp_0 * (1 / (1 - exp(gdt)) + 1 / gdt) + (omega / gamma) ** 2 * (
+            gdt / 2 / tanh(gdt / 2) - 1
+        )
 
     def delta_chi_dp_0(self, dp):
         omega = dp.omega
         gamma = dp.gamma
         gdt = dp.gamma * self.dt
-        return -(omega / gamma * (1 - exp(-gdt)))**2
+        return -((omega / gamma * (1 - exp(-gdt))) ** 2)
 
     def delta_xi_dp_0(self, dp):
         gdt = dp.gamma * self.dt
@@ -1338,7 +1379,9 @@ class DcpPlrc(Dielectric):
 
     def chi_cp_0(self, cp):
         go = cp.gamma + 1j * cp.omega
-        return 2j * cp.amp * cp.omega * cexp(1j * cp.phi) * (1 - cexp(-self.dt * go)) / go
+        return (
+            2j * cp.amp * cp.omega * cexp(1j * cp.phi) * (1 - cexp(-self.dt * go)) / go
+        )
 
     def xi_cp_0(self, cp):
         dtgo = self.dt * (cp.gamma + 1j * cp.omega)
@@ -1347,7 +1390,14 @@ class DcpPlrc(Dielectric):
 
     def delta_chi_cp_0(self, cp):
         go = cp.gamma + 1j * cp.omega
-        return 2j * cp.amp * cp.omega * cexp(1j * cp.phi) * (1 - cexp(-self.dt * go))**2 / go
+        return (
+            2j
+            * cp.amp
+            * cp.omega
+            * cexp(1j * cp.phi)
+            * (1 - cexp(-self.dt * go)) ** 2
+            / go
+        )
 
     def delta_xi_cp_0(self, cp):
         dtgo = self.dt * (cp.gamma + 1j * cp.omega)
@@ -1355,9 +1405,7 @@ class DcpPlrc(Dielectric):
         return delta_chi_cp_0 * (1 / (1 - cexp(dtgo)) + 1 / dtgo)
 
     def display_info(self, indent=0):
-        """Display the parameter values.
-
-        """
+        """Display the parameter values."""
         print(" " * indent, "Drude-critical points dispersive media")
         print(" " * indent, end=" ")
         print("frequency independent permittivity:", self.eps_inf, end=" ")
@@ -1366,10 +1414,10 @@ class DcpPlrc(Dielectric):
 
         print(" " * indent, "Drude pole(s):")
         for i in self.dps:
-            i.display_info(indent+4)
+            i.display_info(indent + 4)
         print(" " * indent, "critical point(s):")
         for i in self.cps:
-            i.display_info(indent+4)
+            i.display_info(indent + 4)
 
     def get_pw_material_ex(self, idx, coords, underneath=None, cmplx=False):
         if cmplx:
@@ -1484,6 +1532,7 @@ class DcpRc(DcpPlrc):
       Jul. 2007, pp. 745-748.
 
     """
+
     def xi_dp_0(self, dp):
         return 0
 
@@ -1505,6 +1554,7 @@ class Drude(Dielectric):
     Electron. Lett., vol. 42, no. 9, pp. 503-504, 2006.
 
     """
+
     def __init__(self, eps_inf=1, mu_inf=1, sigma=0, dps=()):
         """
         Arguments:
@@ -1521,27 +1571,27 @@ class Drude(Dielectric):
 
     def __getstate__(self):
         d = Dielectric.__getstate__(self)
-        d['sigma'] = self.sigma
-        d['dps'] = self.dps
-        d['initialized'] = self.initialized
+        d["sigma"] = self.sigma
+        d["dps"] = self.dps
+        d["initialized"] = self.initialized
 
         if self.initialized:
-            d['dt'] = self.dt
-            d['a'] = self.a
-            d['c'] = self.c
+            d["dt"] = self.dt
+            d["a"] = self.a
+            d["c"] = self.c
 
         return d
 
     def __setstate__(self, d):
         Dielectric.__setstate__(self, d)
-        self.sigma = d['sigma']
-        self.dps = deepcopy(d['dps'])
-        self.initialized = d['initialized']
+        self.sigma = d["sigma"]
+        self.dps = deepcopy(d["dps"])
+        self.initialized = d["initialized"]
 
         if self.initialized:
-            self.dt = d['dt']
-            self.a = d['a'].copy()
-            self.c = d['c'].copy()
+            self.dt = d["dt"]
+            self.a = d["a"].copy()
+            self.c = d["c"].copy()
 
     def init(self, space, param=None):
         self.dt = space.dt
@@ -1550,14 +1600,14 @@ class Drude(Dielectric):
         self.a = empty((len(self.dps), 3), np.double)
         for i in range(len(self.dps)):
             pole = self.dps[i]
-            denom = self.dt * pole.gamma + 2.
-            self.a[i,0] = (self.dt * pole.gamma - 2) / denom
-            self.a[i,1] = 4 / denom
-            self.a[i,2] = 2 * (self.dt * pole.omega)**2 / denom
+            denom = self.dt * pole.gamma + 2.0
+            self.a[i, 0] = (self.dt * pole.gamma - 2) / denom
+            self.a[i, 1] = 4 / denom
+            self.a[i, 2] = 2 * (self.dt * pole.omega) ** 2 / denom
 
         # parameters for the electric field update equations.
         self.c = empty(3, np.double)
-        denom = 2. * self.eps_inf + self.dt * self.sigma
+        denom = 2.0 * self.eps_inf + self.dt * self.sigma
         self.c[0] = 2 * self.dt / denom
         self.c[1] = -2 / denom
         self.c[2] = (2 * self.eps_inf - self.dt * self.sigma) / denom
@@ -1565,18 +1615,16 @@ class Drude(Dielectric):
         self.initialized = True
 
     def display_info(self, indent=0):
-        """Display the parameter values.
-
-        """
+        """Display the parameter values."""
         print(" " * indent, "Drude dispersion media")
         print(" " * indent, end=" ")
         print("frequency independent permittivity:", self.eps_inf, end=" ")
         print("frequency independent permeability:", self.mu_inf, end=" ")
         print("conductivity:", self.sigma)
 
-        print(" "* indent, "Drude pole(s):")
+        print(" " * indent, "Drude pole(s):")
         for p in self.dps:
-            p.display_info(indent+4)
+            p.display_info(indent + 4)
 
     def get_pw_material_ex(self, idx, coords, underneath=None, cmplx=False):
         if cmplx:
@@ -1686,6 +1734,7 @@ class Lorentz(Dielectric):
     The auxiliary differential equation implementation of the Lorentz model.
 
     """
+
     def __init__(self, eps_inf=1, mu_inf=1, sigma=0, lps=()):
         """
         Arguments:
@@ -1702,43 +1751,43 @@ class Lorentz(Dielectric):
 
     def __getstate__(self):
         d = Dielectric.__getstate__(self)
-        d['sigma'] = self.sigma
-        d['lps'] = self.lps
-        d['initialized'] = self.initialized
+        d["sigma"] = self.sigma
+        d["lps"] = self.lps
+        d["initialized"] = self.initialized
 
         if self.initialized:
-            d['dt'] = self.dt
-            d['a'] = self.a
-            d['c'] = self.c
+            d["dt"] = self.dt
+            d["a"] = self.a
+            d["c"] = self.c
 
         return d
 
     def __setstate__(self, d):
         Dielectric.__setstate__(self, d)
-        self.sigma = d['sigma']
-        self.lps = deepcopy(d['lps'])
-        self.initialized = d['initialized']
+        self.sigma = d["sigma"]
+        self.lps = deepcopy(d["lps"])
+        self.initialized = d["initialized"]
 
         if self.initialized:
-            self.dt = d['dt']
-            self.a = d['a'].copy()
-            self.c = d['c'].copy()
+            self.dt = d["dt"]
+            self.a = d["a"].copy()
+            self.c = d["c"].copy()
 
     def init(self, space, param=None):
         self.dt = space.dt
 
         # parameters for the ADE of the Drude model.
-        self.a = empty((len(self.lps),3), np.double)
+        self.a = empty((len(self.lps), 3), np.double)
         for i in range(len(self.lps)):
             pole = self.lps[i]
-            denom = self.dt * pole.gamma + 2.
-            self.a[i,0] = (self.dt * pole.gamma - 2) / denom
-            self.a[i,1] = (4 - 2 * (self.dt * pole.omega)**2) / denom
-            self.a[i,2] = 2 * pole.amp * (self.dt * pole.omega)**2 / denom
+            denom = self.dt * pole.gamma + 2.0
+            self.a[i, 0] = (self.dt * pole.gamma - 2) / denom
+            self.a[i, 1] = (4 - 2 * (self.dt * pole.omega) ** 2) / denom
+            self.a[i, 2] = 2 * pole.amp * (self.dt * pole.omega) ** 2 / denom
 
         # parameters for the electric field update equations.
         self.c = empty(3, np.double)
-        denom = 2. * self.eps_inf + self.dt * self.sigma
+        denom = 2.0 * self.eps_inf + self.dt * self.sigma
         self.c[0] = 2 * self.dt / denom
         self.c[1] = -2 / denom
         self.c[2] = (2 * self.eps_inf - self.dt * self.sigma) / denom
@@ -1746,18 +1795,16 @@ class Lorentz(Dielectric):
         self.initialized = True
 
     def display_info(self, indent=0):
-        """Display the parameter values.
-
-        """
+        """Display the parameter values."""
         print(" " * indent, "Lorentz dispersion media")
         print(" " * indent, end=" ")
         print("frequency independent permittivity:", self.eps_inf, end=" ")
         print("frequency independent permeability:", self.mu_inf, end=" ")
         print("conductivity:", self.sigma)
 
-        print(" "* indent, "Lorentz pole(s):")
+        print(" " * indent, "Lorentz pole(s):")
         for p in self.lps:
-            p.display_info(indent+4)
+            p.display_info(indent + 4)
 
     def get_pw_material_ex(self, idx, coords, underneath=None, cmplx=False):
         if cmplx:
@@ -1865,7 +1912,20 @@ class Dm2(Dielectric):
     a two-level medium.
 
     """
-    def __init__(self, eps_inf=1, mu_inf=1, omega=(1,), n_atom=(1,), rho30=-1, gamma=1, t1=1, t2=1, hbar=1, rtol=10e-5):
+
+    def __init__(
+        self,
+        eps_inf=1,
+        mu_inf=1,
+        omega=(1,),
+        n_atom=(1,),
+        rho30=-1,
+        gamma=1,
+        t1=1,
+        t2=1,
+        hbar=1,
+        rtol=10e-5,
+    ):
         """
         Arguments:
             eps_inf: float, optional
@@ -1892,7 +1952,7 @@ class Dm2(Dielectric):
 
         """
         Dielectric.__init__(self, eps_inf, mu_inf)
-        if isinstance(omega, (Sequence, np.ndarray)) :
+        if isinstance(omega, (Sequence, np.ndarray)):
             self.omega = tuple(map(float, omega))
         else:
             self.omega = (float(omega),)
@@ -1912,50 +1972,52 @@ class Dm2(Dielectric):
 
     def __getstate__(self):
         d = Dielectric.__getstate__(self)
-        d['omega'] = deepcopy(self.omega)
-        d['n_atom'] = deepcopy(self.n_atom)
-        d['rho30'] = self.rho30
-        d['gamma'] = self.gamma
-        d['t1'] = self.t1
-        d['t2'] = self.t2
-        d['hbar'] = self.hbar
-        d['rtol'] = self.rtol
-        d['initialized'] = self.initialized
+        d["omega"] = deepcopy(self.omega)
+        d["n_atom"] = deepcopy(self.n_atom)
+        d["rho30"] = self.rho30
+        d["gamma"] = self.gamma
+        d["t1"] = self.t1
+        d["t2"] = self.t2
+        d["hbar"] = self.hbar
+        d["rtol"] = self.rtol
+        d["initialized"] = self.initialized
 
         if self.initialized:
-            d['dt'] = self.dt
+            d["dt"] = self.dt
 
         return d
 
     def __setstate__(self, d):
         Dielectric.__setstate__(self, d)
 
-        self.omega = deepcopy(d['omega'])
-        self.n_atom = deepcopy(d['n_atom'])
-        self.rho30 = d['rho30']
-        self.gamma = d['gamma']
-        self.t1 = d['t1']
-        self.t2 = d['t2']
-        self.hbar = d['hbar']
-        self.rtol = d['rtol']
-        self.initialized = d['initialized']
+        self.omega = deepcopy(d["omega"])
+        self.n_atom = deepcopy(d["n_atom"])
+        self.rho30 = d["rho30"]
+        self.gamma = d["gamma"]
+        self.t1 = d["t1"]
+        self.t2 = d["t2"]
+        self.hbar = d["hbar"]
+        self.rtol = d["rtol"]
+        self.initialized = d["initialized"]
 
         if self.initialized:
-            self.dt = d['dt']
+            self.dt = d["dt"]
 
     def init(self, space, param=None):
         self.dt = space.dt
         self.initialized = True
 
     def display_info(self, indent=0):
-        """Display the parameter values.
-
-        """
+        """Display the parameter values."""
         print(" " * indent, "2-level media")
         print(" " * indent, end=" ")
         print("frequency independent permittivity:", self.eps_inf, end=" ")
         print("frequency independent permeability:", self.mu_inf, end=" ")
-        print("angular frequencies of atomic transition resonance energy:", self.omega, end=" ")
+        print(
+            "angular frequencies of atomic transition resonance energy:",
+            self.omega,
+            end=" ",
+        )
         print("densities of polarizable atoms:", self.n_atom, end=" ")
         print("initial populaiton difference:", self.rho30, end=" ")
         print("dipole coupling coefficient:", self.gamma, end=" ")
@@ -1966,7 +2028,7 @@ class Dm2(Dielectric):
 
     def get_pw_material_ex(self, idx, coords, underneath=None, cmplx=False):
         if cmplx:
-            raise ValueError('Dm2 class supports real fields only')
+            raise ValueError("Dm2 class supports real fields only")
         else:
             pw_obj = Dm2ExReal()
             pw_param = Dm2ElectricParamReal()
@@ -1989,7 +2051,7 @@ class Dm2(Dielectric):
 
     def get_pw_material_ey(self, idx, coords, underneath=None, cmplx=False):
         if cmplx:
-            raise ValueError('Dm2 class supports real fields only')
+            raise ValueError("Dm2 class supports real fields only")
         else:
             pw_obj = Dm2EyReal()
             pw_param = Dm2ElectricParamReal()
@@ -2012,7 +2074,7 @@ class Dm2(Dielectric):
 
     def get_pw_material_ez(self, idx, coords, underneath=None, cmplx=False):
         if cmplx:
-            raise ValueError('Dm2 class supports real fields only')
+            raise ValueError("Dm2 class supports real fields only")
         else:
             pw_obj = Dm2EzReal()
             pw_param = Dm2ElectricParamReal()
@@ -2035,7 +2097,7 @@ class Dm2(Dielectric):
 
     def get_pw_material_hx(self, idx, coords, underneath=None, cmplx=False):
         if cmplx:
-            raise ValueError('Dm2 class supports real fields only')
+            raise ValueError("Dm2 class supports real fields only")
         else:
             pw_obj = Dm2HxReal()
             pw_param = Dm2MagneticParamReal()
@@ -2050,7 +2112,7 @@ class Dm2(Dielectric):
 
     def get_pw_material_hy(self, idx, coords, underneath=None, cmplx=False):
         if cmplx:
-            raise ValueError('Dm2 class supports real fields only')
+            raise ValueError("Dm2 class supports real fields only")
         else:
             pw_obj = Dm2HyReal()
             pw_param = Dm2MagneticParamReal()
@@ -2065,7 +2127,7 @@ class Dm2(Dielectric):
 
     def get_pw_material_hz(self, idx, coords, underneath=None, cmplx=False):
         if cmplx:
-            raise ValueError('Dm2 class supports real fields only')
+            raise ValueError("Dm2 class supports real fields only")
         else:
             pw_obj = Dm2HzReal()
             pw_param = Dm2MagneticParamReal()

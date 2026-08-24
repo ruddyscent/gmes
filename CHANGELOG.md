@@ -14,6 +14,8 @@ Notable changes to GMES are documented in this file.
 
 - Replace the untyped Cython material configuration layer with an
   import-compatible Python module while keeping native field-update kernels.
+- Replace the remaining Cython geometry extension with an import-compatible
+  Python module and bounded NumPy region-ID lowering.
 
 ### Fixed
 

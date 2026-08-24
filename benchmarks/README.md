@@ -1,5 +1,20 @@
 # Performance benchmarks
 
+`geometry_mapping.py` isolates bounded geometry-to-region lowering for all
+built-in primitives, default-only 2-D and 3-D grids, heterogeneous and
+overlapping scenes, collapsed dimensions, complex-mode coordinates, and an
+independently reported custom pointwise fallback. It hashes complete material
+and underlying-region maps so reference and candidate runs also verify mapping
+parity. Run the Cython reference and candidate in separate checkouts with the
+same options:
+
+```sh
+uv run --no-sync python benchmarks/geometry_mapping.py --repeats 7
+```
+
+Compare every case median, the built-in geometric mean, map hashes, and peak
+RSS. Generated JSON results are machine-specific and should not be committed.
+
 `field_updates.py` measures simulation construction, `FDTD.init()`, and
 complete FDTD time steps as separate metrics without visualization or
 simulation output. It covers a small-grid control case, larger two- and

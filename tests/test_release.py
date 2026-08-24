@@ -9,6 +9,7 @@ from pathlib import Path
 from utils.release import (
     EXPECTED_WHEEL_PLATFORMS,
     FORBIDDEN_SDIST_PATHS,
+    FORBIDDEN_WHEEL_MODULE_PREFIXES,
     NATIVE_MODULE_PREFIXES,
     REQUIRED_SDIST_PATHS,
     REQUIRED_WHEEL_MODULES,
@@ -58,6 +59,17 @@ class ReleaseConfigurationTest(unittest.TestCase):
             {"src/material.c", "src/material.cpp", "src/material.pyx"},
         )
         self.assertNotIn("gmes/material.", NATIVE_MODULE_PREFIXES)
+        self.assertIn("gmes/material.", FORBIDDEN_WHEEL_MODULE_PREFIXES)
+
+    def test_geometry_is_packaged_as_python_instead_of_a_native_extension(self):
+        self.assertIn("gmes/pygeom.py", REQUIRED_SDIST_PATHS)
+        self.assertIn("gmes/pygeom.py", REQUIRED_WHEEL_MODULES)
+        self.assertGreaterEqual(
+            FORBIDDEN_SDIST_PATHS,
+            {"src/pygeom.c", "src/pygeom.cpp", "src/pygeom.pyx"},
+        )
+        self.assertNotIn("gmes/pygeom.", NATIVE_MODULE_PREFIXES)
+        self.assertIn("gmes/pygeom.", FORBIDDEN_WHEEL_MODULE_PREFIXES)
 
     def test_cibuildwheel_matches_the_documented_platforms(self):
         cibuildwheel = self.configuration["tool"]["cibuildwheel"]

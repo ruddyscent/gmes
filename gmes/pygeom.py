@@ -1,48 +1,53 @@
 # -*- coding: utf-8 -*-
-# cython: language_level=3
-# cython: boundscheck=False
-# cython: wraparound=False
-
 from copy import deepcopy
+from dataclasses import dataclass
 from math import sqrt
+
 import numpy as np
 
-cimport numpy as np
-np.import_array()
-cimport cython
+
+def norm(p):
+    return sqrt(p[0] ** 2 + p[1] ** 2 + p[2] ** 2)
 
 
-cdef double norm(object p):
-    return sqrt(p[0]**2 + p[1]**2 + p[2]**2)
-
-
-cdef class Material(object):
-    """A base class for material types.
-
-    """
-    cdef public double eps_inf, mu_inf
+class Material(object):
+    """A base class for material types."""
 
     def __init__(self, eps_inf=1, mu_inf=1):
         self.eps_inf = float(eps_inf)
         self.mu_inf = float(mu_inf)
 
+    @property
+    def eps_inf(self):
+        return self._eps_inf
+
+    @eps_inf.setter
+    def eps_inf(self, value):
+        self._eps_inf = float(value)
+
+    @property
+    def mu_inf(self):
+        return self._mu_inf
+
+    @mu_inf.setter
+    def mu_inf(self, value):
+        self._mu_inf = float(value)
+
     def __getstate__(self):
         d = {}
-        d['eps_inf'] = self.eps_inf
-        d['mu_inf'] = self.mu_inf
+        d["eps_inf"] = self.eps_inf
+        d["mu_inf"] = self.mu_inf
         return d
 
     def __reduce__(self):
         return self.__class__, (), self.__getstate__()
 
     def __setstate__(self, d):
-        self.eps_inf = d['eps_inf']
-        self.mu_inf = d['mu_inf']
+        self.eps_inf = d["eps_inf"]
+        self.mu_inf = d["mu_inf"]
 
     def display_info(self, indent=0):
-        """Display the parameter values.
-
-        """
+        """Display the parameter values."""
         raise NotImplementedError
 
     def get_pw_material_ex(self, idx, coords, underneath=None, cmplx=False):
@@ -115,6 +120,7 @@ cdef class Material(object):
             underneath -- underneath material object of the target point.
 
         """
+
     def init(self, space, param=None):
         raise NotImplementedError
 
@@ -140,15 +146,14 @@ class Compound(object):
 #                                                                  #
 ####################################################################
 
-cdef tuple find_object(tuple point, tuple geom_list):
+
+def find_object(point, geom_list):
     """Find the last object including point in geom_list.
 
     find_object returns (object, array index). If no object includes
     the given point it returns (geom_list[0], 0).
 
     """
-    cdef int i
-
     i = len(geom_list) - 1
     while i > 0 and geom_list[i].in_object(point) is False:
         i -= 1
@@ -156,7 +161,7 @@ cdef tuple find_object(tuple point, tuple geom_list):
     return geom_list[i], i
 
 
-cdef class GeomBox(object):
+class GeomBox(object):
     """A bounding box of a geometric object.
 
     Attributes:
@@ -164,79 +169,84 @@ cdef class GeomBox(object):
     high -- the coordinates of the highest vertex
 
     """
-    cdef public np.ndarray low, high
 
-    def __init__(self, low=(0,0,0), high=(0,0,0)):
-        self.low  = np.array(low, np.double)
+    def __init__(self, low=(0, 0, 0), high=(0, 0, 0)):
+        self.low = np.array(low, np.double)
         self.high = np.array(high, np.double)
 
     def __getstate__(self):
         d = {}
-        d['low'] = self.low
-        d['high'] = self.high
+        d["low"] = self.low
+        d["high"] = self.high
         return d
 
     def __reduce__(self):
         return self.__class__, (), self.__getstate__()
 
     def __setstate__(self, d):
-        self.low.setfield(d['low'], np.double)
-        self.high.setfield(d['high'], np.double)
+        self.low.setfield(d["low"], np.double)
+        self.high.setfield(d["high"], np.double)
 
     def union(self, box):
-        """Enlarge the box to include the given box.
-
-        """
+        """Enlarge the box to include the given box."""
         self.low.setfield([min(a, b) for a, b in zip(self.low, box.low)], np.double)
         self.high.setfield([max(a, b) for a, b in zip(self.high, box.high)], np.double)
 
     def intersection(self, box):
-        """Reduce the box to intersect volume with the given box.
-
-        """
+        """Reduce the box to intersect volume with the given box."""
         self.low.setfield([max(a, b) for a, b in zip(self.low, box.low)], np.double)
         self.high.setfield([min(a, b) for a, b in zip(self.high, box.high)], np.double)
 
     def add_point(self, point):
-        """Enlarge the box to include the given point.
-
-        """
+        """Enlarge the box to include the given point."""
         self.low.setfield([min(a, b) for a, b in zip(self.low, point)], np.double)
         self.high.setfield([max(a, b) for a, b in zip(self.high, point)], np.double)
 
-    cdef inline bint between(self, double x, double low, double high):
-        """Return truth of low <= x <= high.
+    def between(self, x, low, high):
+        """Return truth of low <= x <= high."""
+        return bool(low <= x <= high)
 
-        """
-        return low <= x <= high
+    def in_box(self, point):
+        """Check whether the given point is in this box."""
+        truth = (
+            self.between(point[0], self.low[0], self.high[0])
+            and self.between(point[1], self.low[1], self.high[1])
+            and self.between(point[2], self.low[2], self.high[2])
+        )
 
-    cpdef bint in_box(self, tuple point):
-        """Check whether the given point is in this box.
+        return bool(truth)
 
-        """
-        cdef bint truth
-
-        truth = (self.between(point[0], self.low[0], self.high[0]) and
-                 self.between(point[1], self.low[1], self.high[1]) and
-                 self.between(point[2], self.low[2], self.high[2]))
-
-        return truth
+    def _contains_points(self, x, y, z):
+        return (
+            (self.low[0] <= x)
+            & (x <= self.high[0])
+            & (self.low[1] <= y)
+            & (y <= self.high[1])
+            & (self.low[2] <= z)
+            & (z <= self.high[2])
+        )
 
     def overlap(self, box):
-        """Check whether the given box intersect with the box.
+        """Check whether the given box intersect with the box."""
+        truth = (
+            (
+                self.between(box.low[0], self.low[0], self.high[0])
+                or self.between(box.high[0], self.low[0], self.high[0])
+                or self.between(self.low[0], box.low[0], box.high[0])
+            )
+            and (
+                self.between(box.low[1], self.low[1], self.high[1])
+                or self.between(box.high[1], self.low[1], self.high[1])
+                or self.between(self.low[1], box.low[1], box.high[1])
+            )
+            and (
+                self.between(box.low[2], self.low[2], self.high[2])
+                or self.between(box.high[2], self.low[2], self.high[2])
+                or self.between(self.low[2], box.low[2], box.high[2])
+            )
+        )
 
-        """
-        truth = ((self.between(box.low[0], self.low[0], self.high[0]) or
-                  self.between(box.high[0], self.low[0], self.high[0]) or
-                  self.between(self.low[0], box.low[0], box.high[0])) and
-                 (self.between(box.low[1], self.low[1], self.high[1]) or
-                  self.between(box.high[1], self.low[1], self.high[1]) or
-                  self.between(self.low[1], box.low[1], box.high[1])) and
-                 (self.between(box.low[2], self.low[2], self.high[2]) or
-                  self.between(box.high[2], self.low[2], self.high[2]) or
-                  self.between(self.low[2], box.low[2], box.high[2])))
-
-        return truth
+        return bool(truth)
 
     def divide(self, axis, x):
         high1 = list(self.high)
@@ -255,7 +265,7 @@ cdef class GeomBox(object):
         return "low: " + self.low.__str__() + " high: " + self.high.__str__()
 
 
-cdef class GeomBoxNode(object):
+class GeomBoxNode(object):
     """Node class which makes up a binary search tree.
 
     Attributes:
@@ -266,12 +276,8 @@ cdef class GeomBoxNode(object):
     depth -- depth from the root of this binary search tree
 
     """
-    cdef public GeomBox box
-    cdef public GeomBoxNode t1, t2
-    cdef public tuple geom_list
-    cdef public int depth
 
-    def __init__(self, GeomBox box, object geom_list, int depth):
+    def __init__(self, box, geom_list, depth):
         self.box = box
         self.t1, self.t2 = None, None
         self.geom_list = tuple(geom_list)
@@ -279,25 +285,79 @@ cdef class GeomBoxNode(object):
 
     def __getstate__(self):
         d = {}
-        d['box'] = self.box
-        d['t1'] = self.t1
-        d['t2'] = self.t2
-        d['geom_list'] = self.geom_list
-        d['depth'] = self.depth
+        d["box"] = self.box
+        d["t1"] = self.t1
+        d["t2"] = self.t2
+        d["geom_list"] = self.geom_list
+        d["depth"] = self.depth
         return d
 
     def __reduce__(self):
         return self.__class__, (None, (), 0), self.__getstate__()
 
     def __setstate__(self, d):
-        self.box = deepcopy(d['box'])
-        self.t1 = deepcopy(d['t1'])
-        self.t2 = deepcopy(d['t2'])
-        self.geom_list = deepcopy(d['geom_list'])
-        self.depth = d['depth']
+        self.box = deepcopy(d["box"])
+        self.t1 = deepcopy(d["t1"])
+        self.t2 = deepcopy(d["t2"])
+        self.geom_list = deepcopy(d["geom_list"])
+        self.depth = d["depth"]
 
 
-cdef class GeomBoxTree(object):
+@dataclass(frozen=True)
+class GeometryMap:
+    """A bounded, backend-neutral material map for one rectilinear tile."""
+
+    material_ids: np.ndarray
+    underlying_ids: np.ndarray
+    geometries: tuple
+    shape: tuple
+    start: int
+    stop: int
+    component: object = None
+
+    def __post_init__(self):
+        if (
+            not isinstance(self.geometries, tuple)
+            or not self.geometries
+            or len(self.shape) != 3
+            or any(not isinstance(length, int) or length < 0 for length in self.shape)
+        ):
+            raise ValueError("geometry table and three-dimensional shape are required")
+        total = int(np.prod(self.shape))
+        if (
+            not isinstance(self.start, int)
+            or not isinstance(self.stop, int)
+            or self.start < 0
+            or self.stop < self.start
+            or self.stop > total
+        ):
+            raise ValueError("geometry-map tile is out of bounds")
+        size = self.stop - self.start
+        for name in ("material_ids", "underlying_ids"):
+            values = getattr(self, name)
+            if (
+                not isinstance(values, np.ndarray)
+                or values.dtype != np.int32
+                or values.ndim != 1
+                or not values.flags.c_contiguous
+                or len(values) != size
+            ):
+                raise ValueError(f"{name} must be a contiguous int32 tile array")
+        if size and (
+            self.material_ids.min() < 0
+            or self.material_ids.max() >= len(self.geometries)
+            or self.underlying_ids.min() < -1
+            or self.underlying_ids.max() >= len(self.geometries)
+        ):
+            raise ValueError("geometry-map region ID is outside the geometry table")
+
+    @property
+    def materials(self):
+        """Return the stable region-ID-to-material table."""
+        return tuple(geometry.material for geometry in self.geometries)
+
+
+class GeomBoxTree(object):
     """A tree for the fast inclusion test of geometric objects within them.
 
     The tree recursively partitions the unit cell, allowing us to perform
@@ -307,7 +367,6 @@ cdef class GeomBoxTree(object):
     root -- root node of the binary search tree
 
     """
-    cdef public GeomBoxNode root
 
     def __init__(self, geom_list):
         box = GeomBox((-np.inf, -np.inf, -np.inf), (np.inf, np.inf, np.inf))
@@ -316,14 +375,14 @@ cdef class GeomBoxTree(object):
 
     def __getstate__(self):
         d = {}
-        d['root'] = self.root
+        d["root"] = self.root
         return d
 
     def __reduce__(self):
         return self.__class__, ((),), self.__getstate__()
 
     def __setstate__(self, d):
-        self.root = deepcopy(d['root'])
+        self.root = deepcopy(d["root"])
 
     def find_best_partition(self, node, divide_axis):
         """
@@ -371,9 +430,7 @@ cdef class GeomBoxTree(object):
         return best_partition, n1, n2
 
     def divide_geom_box_tree(self, node):
-        """Divide box in two, along the axis that maximally partitions the boxes.
-
-        """
+        """Divide box in two, along the axis that maximally partitions the boxes."""
         # Try partitioning along each dimension, counting the
         # number of objects in the partitioned boxes and finding
         # the best partition.
@@ -382,7 +439,9 @@ cdef class GeomBoxTree(object):
         for i in range(3):
             partition, n1, n2 = self.find_best_partition(node, i)
             division.append((partition, n1, n2))
-            if max(division[i][1], division[i][2]) < max(division[best][1], division[best][2]):
+            if max(division[i][1], division[i][2]) < max(
+                division[best][1], division[best][2]
+            ):
                 best = i
 
         # Don't do anything if division makes the worst case worse or if
@@ -400,7 +459,9 @@ cdef class GeomBoxTree(object):
             if box2.overlap(i.box):
                 b2GeomList.append(i)
 
-        return GeomBoxNode(box1, b1GeomList, node.depth + 1), GeomBoxNode(box2, b2GeomList, node.depth + 1)
+        return GeomBoxNode(box1, b1GeomList, node.depth + 1), GeomBoxNode(
+            box2, b2GeomList, node.depth + 1
+        )
 
     def branch_out(self, node):
         node.t1, node.t2 = self.divide_geom_box_tree(node)
@@ -409,7 +470,7 @@ cdef class GeomBoxTree(object):
             self.branch_out(node.t1)
             self.branch_out(node.t2)
 
-    cdef GeomBoxNode tree_search(self, GeomBoxNode node, tuple point):
+    def tree_search(self, node, point):
         if node.box.in_box(point) == False:
             return None
         else:
@@ -422,11 +483,7 @@ cdef class GeomBoxTree(object):
                 if node.t2.box.in_box(point):
                     return self.tree_search(node.t2, point)
 
-    cpdef tuple object_of_point(self, tuple point):
-        cdef GeomBoxNode leaf
-        cdef GeometricObject geom_obj
-        cdef int idx
-
+    def object_of_point(self, point):
         leaf = self.tree_search(self.root, point)
         geom_obj, idx = find_object(point, leaf.geom_list)
 
@@ -440,10 +497,7 @@ cdef class GeomBoxTree(object):
 
         return geom_obj, underneath_obj
 
-    cpdef tuple material_of_point(self, tuple point):
-        cdef GeometricObject geom_obj, underneath_obj
-        cdef Material underneath_material
-
+    def material_of_point(self, point):
         geom_obj, underneath_obj = self.object_of_point(point)
 
         if underneath_obj:
@@ -453,25 +507,49 @@ cdef class GeomBoxTree(object):
 
         return geom_obj.material, underneath_material
 
-    cpdef tuple material_of_grid(
+    def material_of_grid(
         self,
-        np.ndarray[np.double_t, ndim=1] x_axis,
-        np.ndarray[np.double_t, ndim=1] y_axis,
-        np.ndarray[np.double_t, ndim=1] z_axis,
-        Py_ssize_t start=0,
-        object stop=None,
+        x_axis,
+        y_axis,
+        z_axis,
+        start=0,
+        stop=None,
     ):
         """Return materials for a bounded C-order tile of a rectilinear grid."""
-        cdef Py_ssize_t nx = x_axis.shape[0]
-        cdef Py_ssize_t ny = y_axis.shape[0]
-        cdef Py_ssize_t nz = z_axis.shape[0]
-        cdef Py_ssize_t plane = ny * nz
-        cdef Py_ssize_t total = nx * plane
-        cdef Py_ssize_t end
-        cdef Py_ssize_t linear, i, j, k, remainder, offset
-        cdef tuple material_pair
-        cdef list materials
-        cdef list underneath
+        geometry_map = self.lower_grid(x_axis, y_axis, z_axis, start, stop)
+        geometries = geometry_map.geometries
+        materials = [geometries[index].material for index in geometry_map.material_ids]
+        underlying = [
+            None if index < 0 else geometries[index].material
+            for index in geometry_map.underlying_ids
+        ]
+        return materials, underlying
+
+    def lower_grid(
+        self,
+        x_axis,
+        y_axis,
+        z_axis,
+        start=0,
+        stop=None,
+        *,
+        component=None,
+    ):
+        """Lower a bounded C-order tile to integer geometry identifiers."""
+        axes = x_axis, y_axis, z_axis
+        for axis in axes:
+            if (
+                not isinstance(axis, np.ndarray)
+                or axis.dtype != np.double
+                or axis.ndim != 1
+            ):
+                raise TypeError("grid axes must be one-dimensional float64 arrays")
+
+        nx = x_axis.shape[0]
+        ny = y_axis.shape[0]
+        nz = z_axis.shape[0]
+        plane = ny * nz
+        total = nx * plane
 
         if stop is None:
             end = total
@@ -480,24 +558,95 @@ cdef class GeomBoxTree(object):
         if start < 0 or end < start or end > total:
             raise IndexError("grid tile is out of bounds")
 
-        materials = [None] * (end - start)
-        underneath = [None] * (end - start)
-        for linear in range(start, end):
-            i = linear // plane
-            remainder = linear - i * plane
-            j = remainder // nz
-            k = remainder - j * nz
-            material_pair = self.material_of_point(
-                (x_axis[i], y_axis[j], z_axis[k])
-            )
-            offset = linear - start
-            materials[offset] = material_pair[0]
-            underneath[offset] = material_pair[1]
+        geometries = self.root.geom_list
+        if not geometries:
+            raise ValueError("geometry list must contain a default medium")
 
-        return materials, underneath
+        linear = np.arange(start, end, dtype=np.intp)
+        i, remainder = np.divmod(linear, plane)
+        j, k = np.divmod(remainder, nz)
+        x = x_axis[i]
+        y = y_axis[j]
+        z = z_axis[k]
+        material_ids = np.full(end - start, -1, dtype=np.int32)
+        underlying_ids = np.full(end - start, -1, dtype=np.int32)
+        geometry_ids = {
+            id(geometry): index for index, geometry in enumerate(geometries)
+        }
+        all_positions = np.arange(end - start, dtype=np.intp)
+        for leaf, leaf_positions in self._leaf_tiles(self.root, x, y, z, all_positions):
+            leaf_geometries = leaf.geom_list
+            material_ids[leaf_positions] = geometry_ids[id(leaf_geometries[0])]
+            for geometry in leaf_geometries[1:]:
+                if self._uses_vectorized_predicate(geometry):
+                    matches = geometry._contains_points(
+                        x[leaf_positions], y[leaf_positions], z[leaf_positions]
+                    )
+                else:
+                    matches = np.fromiter(
+                        (
+                            geometry.in_object((x[pos], y[pos], z[pos]))
+                            for pos in leaf_positions
+                        ),
+                        dtype=np.bool_,
+                        count=len(leaf_positions),
+                    )
+                matched_positions = leaf_positions[matches]
+                if not matched_positions.size:
+                    continue
+
+                if isinstance(geometry.material, Compound):
+                    underlying_ids[matched_positions] = material_ids[matched_positions]
+                else:
+                    underlying_ids[matched_positions] = -1
+                material_ids[matched_positions] = geometry_ids[id(geometry)]
+
+        return GeometryMap(
+            material_ids,
+            underlying_ids,
+            geometries,
+            (nx, ny, nz),
+            start,
+            end,
+            component,
+        )
+
+    @staticmethod
+    def _uses_vectorized_predicate(geometry):
+        geometry_type = type(geometry)
+        return geometry_type in _BUILTIN_VECTOR_GEOMETRY_TYPES or (
+            getattr(geometry_type, "_gmes_vectorized_geometry", False) is True
+        )
+
+    def supports_bulk_lowering(self):
+        """Return whether every geometry opted into bounded array predicates."""
+        return all(
+            self._uses_vectorized_predicate(geometry)
+            for geometry in self.root.geom_list
+        )
+
+    def _leaf_tiles(self, node, x, y, z, positions):
+        if not positions.size:
+            return
+        if node.t1 is None or node.t2 is None:
+            yield node, positions
+            return
+
+        in_first = node.t1.box._contains_points(
+            x[positions], y[positions], z[positions]
+        )
+        first_positions = positions[in_first]
+        yield from self._leaf_tiles(node.t1, x, y, z, first_positions)
+
+        remaining = positions[~in_first]
+        in_second = node.t2.box._contains_points(
+            x[remaining], y[remaining], z[remaining]
+        )
+        yield from self._leaf_tiles(node.t2, x, y, z, remaining[in_second])
 
     def display_info(self, node=None, indent=0):
-        if not node: node = self.root
+        if not node:
+            node = self.root
 
         print(" " * indent, "depth:", node.depth, node.box)
 
@@ -506,8 +655,10 @@ cdef class GeomBoxTree(object):
                 print(" " * (indent + 5), "bounding box:", i.box)
                 i.display_info(indent + 5)
 
-        if node.t1: self.display_info(node.t1, indent + 5)
-        if node.t2: self.display_info(node.t2, indent + 5)
+        if node.t1:
+            self.display_info(node.t1, indent + 5)
+        if node.t2:
+            self.display_info(node.t2, indent + 5)
 
 
 ####################################################################
@@ -516,7 +667,8 @@ cdef class GeomBoxTree(object):
 #                                                                  #
 ####################################################################
 
-cdef class GeometricObject(object):
+
+class GeometricObject(object):
     """Base class for geometric object types.
 
     This class and its descendants are used to specify the solid
@@ -534,8 +686,11 @@ cdef class GeometricObject(object):
     box -- bounding box enclosing this geometric object
 
     """
-    cdef public Material material
-    cdef public GeomBox box
+
+    # Custom classes may explicitly set this to True when their parameters
+    # preserve or override `_contains_points()` with equivalent array semantics.
+    # The opt-in is inherited by parameter-only subclasses.
+    _gmes_vectorized_geometry = False
 
     def __init__(self, material):
         """
@@ -545,19 +700,30 @@ cdef class GeometricObject(object):
 
         """
         self.material = material
+        self.box = None
+
+    @property
+    def material(self):
+        return self._material
+
+    @material.setter
+    def material(self, value):
+        if value is not None and not isinstance(value, Material):
+            raise TypeError("material must be a Material instance")
+        self._material = value
 
     def __getstate__(self):
         d = {}
-        d['material'] = self.material
-        d['box'] = self.box
+        d["material"] = self.material
+        d["box"] = self.box
         return d
 
     def __reduce__(self):
         return self.__class__, (None,), self.__getstate__()
 
     def __setstate__(self, d):
-        self.material = deepcopy(d['material'])
-        self.box = deepcopy(d['box'])
+        self.material = deepcopy(d["material"])
+        self.box = deepcopy(d["box"])
 
     def init(self, space):
         self.material.init(space)
@@ -571,7 +737,7 @@ cdef class GeometricObject(object):
         """
         raise NotImplementedError
 
-    cpdef bint in_object(self, tuple point):
+    def in_object(self, point):
         """Return whether or not the point is inside.
 
         Return whether or not the point (in the lattice basis) is
@@ -582,30 +748,37 @@ cdef class GeometricObject(object):
         """
         raise NotImplementedError
 
-    def display_info(self, indent=0):
-        """Display some information about this geometric object.
+    def _contains_points(self, x, y, z):
+        return np.fromiter(
+            (self.in_object(point) for point in zip(x, y, z, strict=True)),
+            dtype=np.bool_,
+            count=len(x),
+        )
 
-        """
-        print(' ' * indent, 'geometric object')
-        print(' ' * indent, 'center:', self.center)
+    def display_info(self, indent=0):
+        """Display some information about this geometric object."""
+        print(" " * indent, "geometric object")
+        print(" " * indent, "center:", self.center)
         if self.material:
             self.material.display_info(indent + 5)
 
 
-cdef class DefaultMedium(GeometricObject):
-    """A geometric object expanding the whole space.
+class DefaultMedium(GeometricObject):
+    """A geometric object expanding the whole space."""
 
-    """
     def __init__(self, material):
         GeometricObject.__init__(self, material)
 
-    cpdef bint in_object(self, tuple point):
+    def in_object(self, point):
         """
         Override GeometricObject.in_object.
 
         """
 
         return self.box.in_box(point)
+
+    def _contains_points(self, x, y, z):
+        return self.box._contains_points(x, y, z)
 
     def geom_box(self):
         """
@@ -619,12 +792,12 @@ cdef class DefaultMedium(GeometricObject):
         Override GeometricObject.display_info.
 
         """
-        print(' ' * indent, 'default medium')
+        print(" " * indent, "default medium")
         if self.material:
             self.material.display_info(indent + 5)
 
 
-cdef class Cone(GeometricObject):
+class Cone(GeometricObject):
     """Form a cone or possibly a truncated cone.
 
     Attributes:
@@ -634,10 +807,16 @@ cdef class Cone(GeometricObject):
     box -- bounding box
 
     """
-    cdef public double radius, radius2, height
-    cdef public np.ndarray center, axis
 
-    def __init__(self, material, object center=(0,0,0), double radius2=0, object axis=(1,0,0), double radius=1, double height=1):
+    def __init__(
+        self,
+        material,
+        center=(0, 0, 0),
+        radius2=0,
+        axis=(1, 0, 0),
+        radius=1,
+        height=1,
+    ):
         """
 
         Keyword arguments:
@@ -652,13 +831,13 @@ cdef class Cone(GeometricObject):
             msg = "radius must be non-negative."
             raise ValueError(msg)
         else:
-            self.radius = float(radius) # low side radius
+            self.radius = float(radius)  # low side radius
 
         if radius2 < 0:
             msg = "radius2 must be non-negative."
             raise ValueError(msg)
         else:
-            self.radius2 = float(radius2) # high side radius
+            self.radius2 = float(radius2)  # high side radius
 
         self.center = np.array(center, np.double)
         self.axis = np.array(axis, np.double) / norm(axis)
@@ -666,38 +845,33 @@ cdef class Cone(GeometricObject):
 
     def __getstate__(self):
         d = GeometricObject.__getstate__(self)
-        d['radius'] = self.radius
-        d['radius2'] = self.radius2
-        d['height'] = self.height
-        d['center'] = self.center
-        d['axis'] = self.axis
+        d["radius"] = self.radius
+        d["radius2"] = self.radius2
+        d["height"] = self.height
+        d["center"] = self.center
+        d["axis"] = self.axis
         return d
 
     def __setstate__(self, d):
         GeometricObject.__setstate__(self, d)
-        self.radius = d['radius']
-        self.radius2 = d['radius2']
-        self.height = d['height']
-        self.center.setfield(d['center'], np.double)
-        self.axis.setfield(d['axis'], np.double)
+        self.radius = d["radius"]
+        self.radius2 = d["radius2"]
+        self.height = d["height"]
+        self.center.setfield(d["center"], np.double)
+        self.axis.setfield(d["axis"], np.double)
 
-    cpdef bint in_object(self, tuple point):
-        """Check whether the given point is in this Cone.
-
-        """
-        cdef double rx, ry, rz, proj, radius, perpendicular_squared
-        cdef bint truth
-
+    def in_object(self, point):
+        """Check whether the given point is in this Cone."""
         rx = point[0] - self.center[0]
         ry = point[1] - self.center[1]
         rz = point[2] - self.center[2]
         proj = self.axis[0] * rx + self.axis[1] * ry + self.axis[2] * rz
-        if abs(proj) <= .5 * self.height:
+        if abs(proj) <= 0.5 * self.height:
             if self.radius2 == self.radius == np.inf:
                 truth = True
             else:
                 radius = self.radius
-                radius += (proj / self.height + .5) * (self.radius2 - radius)
+                radius += (proj / self.height + 0.5) * (self.radius2 - radius)
                 perpendicular_squared = rx * rx + ry * ry + rz * rz - proj * proj
                 if perpendicular_squared < 0:
                     perpendicular_squared = 0
@@ -705,20 +879,37 @@ cdef class Cone(GeometricObject):
         else:
             truth = False
 
-        return truth
+        return bool(truth)
+
+    def _contains_points(self, x, y, z):
+        rx = x - self.center[0]
+        ry = y - self.center[1]
+        rz = z - self.center[2]
+        projection = self.axis[0] * rx + self.axis[1] * ry + self.axis[2] * rz
+        axial = np.abs(projection) <= 0.5 * self.height
+        if self.radius2 == self.radius == np.inf:
+            return axial
+
+        radius = self.radius + (projection / self.height + 0.5) * (
+            self.radius2 - self.radius
+        )
+        perpendicular_squared = np.maximum(
+            0, rx * rx + ry * ry + rz * rz - projection * projection
+        )
+        return axial & (np.sqrt(perpendicular_squared) <= np.abs(radius))
 
     def display_info(self, indent=0):
         """
         Override GeometricObject.display_info.
 
         """
-        print(' ' * indent, 'cone')
-        print(' ' * indent, end=" ")
-        print('center:', self.center, end=" ")
-        print('radius:', self.radius, end=" ")
-        print('height:' , self.height, end=" ")
-        print('axis:', self.axis, end=" ")
-        print('radius2:', self.radius2)
+        print(" " * indent, "cone")
+        print(" " * indent, end=" ")
+        print("center:", self.center, end=" ")
+        print("radius:", self.radius, end=" ")
+        print("height:", self.height, end=" ")
+        print("axis:", self.axis, end=" ")
+        print("radius2:", self.radius2)
         if self.material:
             self.material.display_info(indent + 5)
 
@@ -727,7 +918,7 @@ cdef class Cone(GeometricObject):
         Override GeometricObject.geom_box.
 
         """
-        h = .5 * self.height
+        h = 0.5 * self.height
 
         # Project a radius perpendicular to the axis onto each Cartesian
         # direction. Clamp roundoff before taking the square root.
@@ -753,11 +944,9 @@ cdef class Cone(GeometricObject):
 
 
 class Cylinder(Cone):
-    """Form a cylinder.
+    """Form a cylinder."""
 
-    """
-    def __init__(self, material, center=(0, 0, 0), axis=(0, 0, 1),
-                 radius=1, height=1):
+    def __init__(self, material, center=(0, 0, 0), axis=(0, 0, 1), radius=1, height=1):
         """
         Keyword arguments:
             material -- The material that the object is made of.
@@ -773,28 +962,29 @@ class Cylinder(Cone):
         Cone.__init__(self, material, center, radius, axis, radius, height)
 
     def display_info(self, indent=0):
-        """Display information of this cylinder.
-
-        """
-        print(' ' * indent, 'cylinder')
-        print(' ' * indent, end=" ")
-        print('center:', self.center, end=" ")
-        print('radius:', self.radius, end=" ")
-        print('height:', self.height, end=" ")
-        print('axis:', self.axis)
+        """Display information of this cylinder."""
+        print(" " * indent, "cylinder")
+        print(" " * indent, end=" ")
+        print("center:", self.center, end=" ")
+        print("radius:", self.radius, end=" ")
+        print("height:", self.height, end=" ")
+        print("axis:", self.axis)
         if self.material:
             self.material.display_info(indent + 5)
 
 
-cdef class Block(GeometricObject):
-    """Form a parallelpiped(i.e., a brick, possibly with non-orthogonal axes.)
+class Block(GeometricObject):
+    """Form a parallelpiped(i.e., a brick, possibly with non-orthogonal axes.)"""
 
-    """
-    cdef public np.ndarray center, e1, e2, e3, size, projection_matrix
-
-    def __init__(self, material, center=(0, 0, 0),
-                 e1=(1, 0, 0), e2=(0, 1, 0), e3=(0, 0, 1),
-                 size=(1, 1, 1)):
+    def __init__(
+        self,
+        material,
+        center=(0, 0, 0),
+        e1=(1, 0, 0),
+        e2=(0, 1, 0),
+        e3=(0, 0, 1),
+        size=(1, 1, 1),
+    ):
         """
         Keyword arguments:
             center -- center location. Default is (0, 0, 0).
@@ -819,31 +1009,26 @@ cdef class Block(GeometricObject):
 
     def __getstate__(self):
         d = GeometricObject.__getstate__(self)
-        d['center'] = self.center
-        d['e1'] = self.e1
-        d['e2'] = self.e2
-        d['e3'] = self.e3
-        d['size'] = self.size
-        d['pm'] = self.projection_matrix
+        d["center"] = self.center
+        d["e1"] = self.e1
+        d["e2"] = self.e2
+        d["e3"] = self.e3
+        d["size"] = self.size
+        d["pm"] = self.projection_matrix
         return d
 
     def __setstate__(self, d):
         GeometricObject.__setstate__(self, d)
-        self.center.setfield(d['center'], np.double)
-        self.e1.setfield(d['e1'], np.double)
-        self.e2.setfield(d['e2'], np.double)
-        self.e3.setfield(d['e3'], np.double)
-        self.size.setfield(d['size'], np.double)
+        self.center.setfield(d["center"], np.double)
+        self.e1.setfield(d["e1"], np.double)
+        self.e2.setfield(d["e2"], np.double)
+        self.e3.setfield(d["e3"], np.double)
+        self.size.setfield(d["size"], np.double)
         basis = np.column_stack((self.e1, self.e2, self.e3))
         self.projection_matrix.setfield(np.linalg.inv(basis), np.double)
 
-    cpdef bint in_object(self, tuple point):
-        """Check whether the given point is in this block.
-
-        """
-        cdef double rx, ry, rz, proj0, proj1, proj2
-        cdef bint truth
-
+    def in_object(self, point):
+        """Check whether the given point is in this block."""
         rx = point[0] - self.center[0]
         ry = point[1] - self.center[1]
         rz = point[2] - self.center[2]
@@ -863,17 +1048,34 @@ cdef class Block(GeometricObject):
             + self.projection_matrix[2, 2] * rz
         )
         truth = (
-            abs(proj0) <= .5 * self.size[0]
-            and abs(proj1) <= .5 * self.size[1]
-            and abs(proj2) <= .5 * self.size[2]
+            abs(proj0) <= 0.5 * self.size[0]
+            and abs(proj1) <= 0.5 * self.size[1]
+            and abs(proj2) <= 0.5 * self.size[2]
         )
 
-        return truth
+        return bool(truth)
+
+    def _project_points(self, x, y, z):
+        rx = x - self.center[0]
+        ry = y - self.center[1]
+        rz = z - self.center[2]
+        return tuple(
+            self.projection_matrix[row, 0] * rx
+            + self.projection_matrix[row, 1] * ry
+            + self.projection_matrix[row, 2] * rz
+            for row in range(3)
+        )
+
+    def _contains_points(self, x, y, z):
+        projection = self._project_points(x, y, z)
+        return (
+            (np.abs(projection[0]) <= 0.5 * self.size[0])
+            & (np.abs(projection[1]) <= 0.5 * self.size[1])
+            & (np.abs(projection[2]) <= 0.5 * self.size[2])
+        )
 
     def geom_box(self):
-        """Return a GeomBox for this block.
-
-        """
+        """Return a GeomBox for this block."""
         tmpBox = GeomBox(low=self.center, high=self.center)
         # enlarge the box to be big enough to contain all 8 corners
         # of the block.
@@ -895,49 +1097,43 @@ cdef class Block(GeometricObject):
         return tmpBox
 
     def display_info(self, indent=0):
-        """Display information of this block.
-
-        """
-        print(' ' * indent, 'block')
-        print(' ' * indent, end=" ")
-        print('center:', self.center, end=" ")
-        print('size:', self.size, end=" ")
-        print('axes:', self.e1, self.e2, self.e3)
+        """Display information of this block."""
+        print(" " * indent, "block")
+        print(" " * indent, end=" ")
+        print("center:", self.center, end=" ")
+        print("size:", self.size, end=" ")
+        print("axes:", self.e1, self.e2, self.e3)
         if self.material:
             self.material.display_info(indent + 5)
 
 
-cdef class Ellipsoid(Block):
-    """Form an ellipsoid.
+class Ellipsoid(Block):
+    """Form an ellipsoid."""
 
-    """
-    cdef public np.ndarray inverse_semi_axes
-
-    def __init__(self, material, center=(0, 0, 0),
-                 e1=(1, 0, 0), e2=(0, 1, 0), e3=(0, 0, 1),
-                 size=(1, 1, 1)):
-        """
-
-        """
+    def __init__(
+        self,
+        material,
+        center=(0, 0, 0),
+        e1=(1, 0, 0),
+        e2=(0, 1, 0),
+        e3=(0, 0, 1),
+        size=(1, 1, 1),
+    ):
+        """ """
         Block.__init__(self, material, center, e1, e2, e3, size)
         self.inverse_semi_axes = 2 / np.array(size, np.double)
 
     def __getstate__(self):
         d = Block.__getstate__(self)
-        d['isa'] = self.inverse_semi_axes
+        d["isa"] = self.inverse_semi_axes
         return d
 
     def __setstate__(self, d):
         Block.__setstate__(self, d)
-        self.inverse_semi_axes = d['isa']
+        self.inverse_semi_axes = d["isa"]
 
-    cpdef bint in_object(self, tuple point):
-        """Check whether the given point is in this ellipsoid.
-
-        """
-        cdef double rx, ry, rz, q0, q1, q2
-        cdef bint truth
-
+    def in_object(self, point):
+        """Check whether the given point is in this ellipsoid."""
         rx = point[0] - self.center[0]
         ry = point[1] - self.center[1]
         rz = point[2] - self.center[2]
@@ -958,30 +1154,33 @@ cdef class Ellipsoid(Block):
         )
         truth = q0 * q0 + q1 * q1 + q2 * q2 <= 1
 
-        return truth
+        return bool(truth)
+
+    def _contains_points(self, x, y, z):
+        projection = self._project_points(x, y, z)
+        q0 = self.inverse_semi_axes[0] * projection[0]
+        q1 = self.inverse_semi_axes[1] * projection[1]
+        q2 = self.inverse_semi_axes[2] * projection[2]
+        return q0 * q0 + q1 * q1 + q2 * q2 <= 1
 
     def display_info(self, indent=0):
-        """Display information of this ellipsoid.
-
-        """
-        print(' ' * indent, 'ellipsoid')
-        print(' ' * indent, end=" ")
-        print('center:', self.center, end=" ")
-        print('size:', self.size, end=" ")
-        print('axis:', self.e1, self.e2, self.e3)
+        """Display information of this ellipsoid."""
+        print(" " * indent, "ellipsoid")
+        print(" " * indent, end=" ")
+        print("center:", self.center, end=" ")
+        print("size:", self.size, end=" ")
+        print("axis:", self.e1, self.e2, self.e3)
         if self.material:
             self.material.display_info(indent + 5)
 
 
-cdef class Sphere(GeometricObject):
+class Sphere(GeometricObject):
     """Form a sphere.
 
     Attributes:
     radius -- Radius of the sphere.
 
     """
-    cdef public double radius
-    cdef public np.ndarray center
 
     def __init__(self, material, center=(0, 0, 0), radius=1):
         """
@@ -1003,22 +1202,19 @@ cdef class Sphere(GeometricObject):
 
         self.center = np.array(center, np.double)
 
-
     def __getstate__(self):
         d = GeometricObject.__getstate__(self)
-        d['radius'] = self.radius
-        d['center'] = self.center
+        d["radius"] = self.radius
+        d["center"] = self.center
         return d
 
     def __setstate__(self, d):
         GeometricObject.__setstate__(self, d)
-        self.radius = d['radius']
-        self.center.setfield(d['center'], np.double)
+        self.radius = d["radius"]
+        self.center.setfield(d["center"], np.double)
 
     def geom_box(self):
-        """Return GeomBox for the sphere.
-
-        """
+        """Return GeomBox for the sphere."""
         box = GeomBox(low=self.center, high=self.center)
 
         box.low -= self.radius
@@ -1026,47 +1222,47 @@ cdef class Sphere(GeometricObject):
 
         return box
 
-    cpdef bint in_object(self, tuple point):
-        """Check whether the given point is in the sphere.
-
-        """
-        cdef double rx, ry, rz
-        cdef bint truth
-
+    def in_object(self, point):
+        """Check whether the given point is in the sphere."""
         rx = point[0] - self.center[0]
         ry = point[1] - self.center[1]
         rz = point[2] - self.center[2]
         truth = rx * rx + ry * ry + rz * rz <= self.radius * self.radius
 
-        return truth
+        return bool(truth)
+
+    def _contains_points(self, x, y, z):
+        rx = x - self.center[0]
+        ry = y - self.center[1]
+        rz = z - self.center[2]
+        return rx * rx + ry * ry + rz * rz <= self.radius * self.radius
 
     def display_info(self, indent=0):
-        """Display information of the sphere.
-
-        """
-        print(' ' * indent, 'sphere')
-        print(' ' * indent, end=" ")
-        print('center:', self.center, end=" ")
-        print('radius:', self.radius)
+        """Display information of the sphere."""
+        print(" " * indent, "sphere")
+        print(" " * indent, end=" ")
+        print("center:", self.center, end=" ")
+        print("radius:", self.radius)
         if self.material:
             self.material.display_info(indent + 5)
 
 
-cdef class Shell(GeometricObject):
-    """Form a boundary.
+class Shell(GeometricObject):
+    """Form a boundary."""
 
-    """
-    cdef public double d
-    cdef public np.ndarray center, half_size
-    cdef public list box_list
-    cdef public bint minus_x, plus_x, minus_y, plus_y, minus_z, plus_z
-    cdef public bint boundary
-
-    def __init__(self, material, center=(0,0,0), size=None,
-                 thickness=1,
-                 plus_x=True, minus_x=True,
-                 plus_y=True, minus_y=True,
-                 plus_z=True, minus_z=True):
+    def __init__(
+        self,
+        material,
+        center=(0, 0, 0),
+        size=None,
+        thickness=1,
+        plus_x=True,
+        minus_x=True,
+        plus_y=True,
+        minus_y=True,
+        plus_z=True,
+        minus_z=True,
+    ):
         """
         Keyword arguments:
             material -- The filling material
@@ -1104,39 +1300,39 @@ cdef class Shell(GeometricObject):
             self.half_size = np.zeros((3,), np.double)
             self.boundary = True
         else:
-            self.half_size = np.array([0.5 * value for value in size],
-                                      np.double)
+            self.half_size = np.array([0.5 * value for value in size], np.double)
             self.boundary = False
 
         # do someting for the PML derived class?
+
     def __getstate__(self):
         d = GeometricObject.__getstate__(self)
-        d['center'] = self.center
-        d['half_size'] = self.half_size
-        d['d'] = self.d
-        d['box_list'] = self.box_list
-        d['minus_x'] = self.minus_x
-        d['plus_x'] = self.plus_x
-        d['minus_y'] = self.minus_y
-        d['plus_y'] = self.plus_y
-        d['minus_z'] = self.minus_z
-        d['plus_z'] = self.plus_z
-        d['boundary'] = self.boundary
+        d["center"] = self.center
+        d["half_size"] = self.half_size
+        d["d"] = self.d
+        d["box_list"] = self.box_list
+        d["minus_x"] = self.minus_x
+        d["plus_x"] = self.plus_x
+        d["minus_y"] = self.minus_y
+        d["plus_y"] = self.plus_y
+        d["minus_z"] = self.minus_z
+        d["plus_z"] = self.plus_z
+        d["boundary"] = self.boundary
         return d
 
     def __setstate__(self, d):
         GeometricObject.__setstate__(self, d)
-        self.center.setfield(d['center'], np.double)
-        self.half_size.setfield(d['half_size'], np.double)
-        self.d = d['d']
-        self.box_list = deepcopy(d['box_list'])
-        self.minus_x = d['minus_x']
-        self.plus_x = d['plus_x']
-        self.minus_y = d['minus_y']
-        self.plus_y = d['plus_y']
-        self.minus_z = d['minus_z']
-        self.plus_z = d['plus_z']
-        self.boundary = d['boundary']
+        self.center.setfield(d["center"], np.double)
+        self.half_size.setfield(d["half_size"], np.double)
+        self.d = d["d"]
+        self.box_list = deepcopy(d["box_list"])
+        self.minus_x = d["minus_x"]
+        self.plus_x = d["plus_x"]
+        self.minus_y = d["minus_y"]
+        self.plus_y = d["plus_y"]
+        self.minus_z = d["minus_z"]
+        self.plus_z = d["plus_z"]
+        self.boundary = d["boundary"]
 
     def init(self, space):
         if self.boundary:
@@ -1159,70 +1355,95 @@ cdef class Shell(GeometricObject):
             self.minus_z = False
 
         if self.plus_x:
-            low = (self.center[0] + self.half_size[0] - self.d,
-                   self.center[1] - self.half_size[1],
-                   self.center[2] - self.half_size[2])
+            low = (
+                self.center[0] + self.half_size[0] - self.d,
+                self.center[1] - self.half_size[1],
+                self.center[2] - self.half_size[2],
+            )
             high = self.center + self.half_size
             self.box_list.append(GeomBox(low, high))
 
         if self.minus_x:
             low = self.center - self.half_size
-            high = (self.center[0] - self.half_size[0] + self.d,
-                    self.center[1] + self.half_size[1],
-                    self.center[2] + self.half_size[2])
+            high = (
+                self.center[0] - self.half_size[0] + self.d,
+                self.center[1] + self.half_size[1],
+                self.center[2] + self.half_size[2],
+            )
             self.box_list.append(GeomBox(low, high))
 
         if self.plus_y:
-            low = (self.center[0] - self.half_size[0],
-                   self.center[1] + self.half_size[1] - self.d,
-                   self.center[2] - self.half_size[2])
+            low = (
+                self.center[0] - self.half_size[0],
+                self.center[1] + self.half_size[1] - self.d,
+                self.center[2] - self.half_size[2],
+            )
             high = self.center + self.half_size
             self.box_list.append(GeomBox(low, high))
 
         if self.minus_y:
             low = self.center - self.half_size
-            high = (self.center[0] + self.half_size[0],
-                    self.center[1] - self.half_size[1] + self.d,
-                    self.center[2] + self.half_size[2])
+            high = (
+                self.center[0] + self.half_size[0],
+                self.center[1] - self.half_size[1] + self.d,
+                self.center[2] + self.half_size[2],
+            )
             self.box_list.append(GeomBox(low, high))
 
         if self.plus_z:
-            low = (self.center[0] - self.half_size[0],
-                   self.center[1] - self.half_size[1],
-                   self.center[2] + self.half_size[2] - self.d)
+            low = (
+                self.center[0] - self.half_size[0],
+                self.center[1] - self.half_size[1],
+                self.center[2] + self.half_size[2] - self.d,
+            )
             high = self.center + self.half_size
             self.box_list.append(GeomBox(low, high))
 
         if self.minus_z:
             low = self.center - self.half_size
-            high = (self.center[0] + self.half_size[0],
-                    self.center[1] + self.half_size[1],
-                    self.center[2] - self.half_size[2] + self.d)
+            high = (
+                self.center[0] + self.half_size[0],
+                self.center[1] + self.half_size[1],
+                self.center[2] - self.half_size[2] + self.d,
+            )
             self.box_list.append(GeomBox(low, high))
 
-        self.material.init(space,
-                           (self.center, self.half_size, self.d))
+        self.material.init(space, (self.center, self.half_size, self.d))
         self.box = self.geom_box()
 
-    cpdef bint in_object(self, tuple point):
-        cdef GeomBox box
-
+    def in_object(self, point):
         for box in self.box_list:
             if box.in_box(point):
                 return True
         return False
 
+    def _contains_points(self, x, y, z):
+        matches = np.zeros(len(x), dtype=np.bool_)
+        for box in self.box_list:
+            matches |= box._contains_points(x, y, z)
+        return matches
+
     def geom_box(self):
-        return GeomBox(self.center - self.half_size,
-                       self.center + self.half_size)
+        return GeomBox(self.center - self.half_size, self.center + self.half_size)
 
     def display_info(self, indent=0):
-        print(' ' * indent, 'shell')
-        print(' ' * indent, 'center:', self.center)
-        print(' ' * indent, 'size:', 2 * self.half_size)
-        print(' ' * indent, end=" ")
-        print('+x:', self.plus_x, '-x:', self.minus_x, end=" ")
-        print('+y:', self.plus_y, '-y:', self.minus_y, end=" ")
-        print('+z:', self.plus_z, '-z:', self.minus_z)
+        print(" " * indent, "shell")
+        print(" " * indent, "center:", self.center)
+        print(" " * indent, "size:", 2 * self.half_size)
+        print(" " * indent, end=" ")
+        print("+x:", self.plus_x, "-x:", self.minus_x, end=" ")
+        print("+y:", self.plus_y, "-y:", self.minus_y, end=" ")
+        print("+z:", self.plus_z, "-z:", self.minus_z)
         if self.material:
             self.material.display_info(indent + 5)
+
+
+_BUILTIN_VECTOR_GEOMETRY_TYPES = (
+    DefaultMedium,
+    Cone,
+    Cylinder,
+    Block,
+    Ellipsoid,
+    Sphere,
+    Shell,
+)

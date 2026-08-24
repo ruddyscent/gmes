@@ -23,6 +23,7 @@ REQUIRED_SDIST_PATHS = {
     "build-constraints.txt",
     "gmes/__init__.py",
     "gmes/material.py",
+    "gmes/pygeom.py",
     "pyproject.toml",
     "setup.py",
     "src/constant.cc",
@@ -31,22 +32,28 @@ REQUIRED_SDIST_PATHS = {
     "src/cpp23_support.hh",
     "src/numpy.i",
     "src/pw_material.i",
-    "src/pygeom.pyx",
 }
 REQUIRED_WHEEL_MODULES = {
     "gmes/__init__.py",
     "gmes/constant.py",
     "gmes/material.py",
+    "gmes/pygeom.py",
     "gmes/pw_material.py",
 }
 FORBIDDEN_SDIST_PATHS = {
     "src/material.c",
     "src/material.cpp",
     "src/material.pyx",
+    "src/pygeom.c",
+    "src/pygeom.cpp",
+    "src/pygeom.pyx",
 }
 NATIVE_MODULE_PREFIXES = (
     "gmes/_constant.",
     "gmes/_pw_material.",
+)
+FORBIDDEN_WHEEL_MODULE_PREFIXES = (
+    "gmes/material.",
     "gmes/pygeom.",
 )
 FORBIDDEN_DIRECTORY_NAMES = {".git", "__pycache__", "build", "dist"}
@@ -139,11 +146,11 @@ def verify_sdist(archive, version):
     missing = REQUIRED_SDIST_PATHS - paths
     if missing:
         raise RuntimeError(f"sdist is missing required paths: {sorted(missing)}")
-    legacy_material_sources = FORBIDDEN_SDIST_PATHS & paths
-    if legacy_material_sources:
+    retired_extension_sources = FORBIDDEN_SDIST_PATHS & paths
+    if retired_extension_sources:
         raise RuntimeError(
-            "sdist contains retired material extension sources: "
-            f"{sorted(legacy_material_sources)}"
+            "sdist contains retired Python extension sources: "
+            f"{sorted(retired_extension_sources)}"
         )
     if not any(name.startswith("tests/test_") for name in paths):
         raise RuntimeError("sdist does not contain the unit tests")
@@ -207,6 +214,18 @@ def verify_wheel(archive, version):
                 name.startswith(prefix) and name.endswith(".so") for name in paths
             ):
                 raise RuntimeError(f"wheel is missing native module {prefix!r}")
+        retired_extensions = sorted(
+            name
+            for name in paths
+            if name.endswith(".so")
+            and any(
+                name.startswith(prefix) for prefix in FORBIDDEN_WHEEL_MODULE_PREFIXES
+            )
+        )
+        if retired_extensions:
+            raise RuntimeError(
+                f"wheel contains retired Python extensions: {retired_extensions}"
+            )
 
         metadata_names = [
             name for name in paths if name.endswith(".dist-info/METADATA")

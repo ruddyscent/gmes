@@ -1,4 +1,3 @@
 setuptools==84.0.0
 wheel==0.48.0
-Cython==3.2.9
 numpy==2.5.2

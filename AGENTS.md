@@ -4,14 +4,14 @@ This file provides guidance for contributors and coding agents working in this r
 
 ## Project overview
 
-GMES (GIST Maxwell's Equations Solver) is a Python package for electromagnetic simulation using the explicit finite-difference time-domain (FDTD) method. The Python API is implemented in `gmes/`, while performance-sensitive extensions live in `src/` and are built with C++, SWIG, and Cython. Example simulations are in `examples/`, and component-level tests are in `tests/`.
+GMES (GIST Maxwell's Equations Solver) is a Python package for electromagnetic simulation using the explicit finite-difference time-domain (FDTD) method. The Python API is implemented in `gmes/`, while performance-sensitive extensions live in `src/` and are built with C++ and SWIG. Example simulations are in `examples/`, and component-level tests are in `tests/`.
 
 ## Compatibility
 
 - Target Python 3.14 or newer and a C++23 toolchain. Use `std::mdspan` when the standard library provides it; preserve the internal contiguous-indexing fallback when it does not.
 - Python 2 compatibility is not required.
 - Preserve numerical behavior unless a change is explicitly documented and covered by regression tests.
-- Use the PEP 517 build declared in `pyproject.toml`; keep SWIG and Cython sources compatible with their current stable releases.
+- Use the PEP 517 build declared in `pyproject.toml`; keep SWIG sources compatible with their current stable release.
 - Be mindful that some examples require substantial memory and execution time; do not use them as routine smoke tests.
 
 ## Building and testing

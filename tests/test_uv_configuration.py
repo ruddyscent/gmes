@@ -34,8 +34,9 @@ class UvCacheKeyTest(unittest.TestCase):
         file_keys = {entry["file"] for entry in self.cache_keys if "file" in entry}
         self.assertGreaterEqual(
             file_keys,
-            {"src/*.cc", "src/*.hh", "src/*.i", "src/*.pyx"},
+            {"src/*.cc", "src/*.hh", "src/*.i"},
         )
+        self.assertNotIn("src/*.pyx", file_keys)
         self.assertFalse(any(key.startswith("gmes/") for key in file_keys))
 
     def test_tracks_macos_deployment_target(self):
@@ -57,7 +58,6 @@ class UvCacheKeyTest(unittest.TestCase):
             {
                 "setuptools==84.0.0",
                 "wheel==0.48.0",
-                "Cython==3.2.9",
                 "numpy==2.5.2",
             },
         )

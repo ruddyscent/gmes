@@ -8,18 +8,13 @@ from datetime import datetime, timedelta
 from math import sqrt
 
 import numpy as np
-from numpy import arange, array, inf, ndindex
+from numpy import arange, array, inf
 
 from .constant import *
 from .file_io import Probe
 
 # GMES modules
-from .geometry import (
-    _BUILTIN_GEOMETRY_TYPES,
-    DefaultMedium,
-    GeomBoxTree,
-    in_range,
-)
+from .geometry import DefaultMedium, GeomBoxTree, in_range
 
 # from file_io import write_hdf5, snapshot
 from .material import (
@@ -436,51 +431,41 @@ class FDTD(object):
         aggregates = {}
         dummy_cache = {}
 
-        if all(type(obj) in _BUILTIN_GEOMETRY_TYPES for obj in self.geom_list):
-            axes = self.space.component_coordinate_axes(component, shape)
-            total = int(np.prod(shape))
-            plane = shape[1] * shape[2]
-            for start in range(0, total, self._MATERIAL_TILE_SIZE):
-                stop = min(start + self._MATERIAL_TILE_SIZE, total)
-                materials, underlying = self.geom_tree.material_of_grid(
-                    *axes, start, stop
-                )
-                for offset, (mat_obj, underneath) in enumerate(
-                    zip(materials, underlying, strict=True)
-                ):
-                    linear = start + offset
-                    i, remainder = divmod(linear, plane)
-                    j, k = divmod(remainder, shape[2])
-                    idx = i, j, k
-                    spc = axes[0][i], axes[1][j], axes[2][k]
-                    self._attach_mapped_material(
-                        component,
-                        mat_obj,
-                        idx,
-                        spc,
-                        underneath,
-                        shape,
-                        aggregates,
-                        dummy_cache,
-                    )
-            return
-
-        index_to_space = getattr(
-            self.space, f"{component.__name__.lower()}_index_to_space"
-        )
-        for idx in ndindex(shape):
-            spc = index_to_space(*idx)
-            mat_obj, underneath = self.geom_tree.material_of_point(spc)
-            self._attach_mapped_material(
-                component,
-                mat_obj,
-                idx,
-                spc,
-                underneath,
-                shape,
-                aggregates,
-                dummy_cache,
+        axes = self.space.component_coordinate_axes(component, shape)
+        total = int(np.prod(shape))
+        plane = shape[1] * shape[2]
+        for start in range(0, total, self._MATERIAL_TILE_SIZE):
+            stop = min(start + self._MATERIAL_TILE_SIZE, total)
+            geometry_map = self.geom_tree.lower_grid(
+                *axes, start, stop, component=component
             )
+            geometries = geometry_map.geometries
+            for offset, (material_id, underlying_id) in enumerate(
+                zip(
+                    geometry_map.material_ids,
+                    geometry_map.underlying_ids,
+                    strict=True,
+                )
+            ):
+                mat_obj = geometries[material_id].material
+                underneath = (
+                    None if underlying_id < 0 else geometries[underlying_id].material
+                )
+                linear = start + offset
+                i, remainder = divmod(linear, plane)
+                j, k = divmod(remainder, shape[2])
+                idx = i, j, k
+                spc = axes[0][i], axes[1][j], axes[2][k]
+                self._attach_mapped_material(
+                    component,
+                    mat_obj,
+                    idx,
+                    spc,
+                    underneath,
+                    shape,
+                    aggregates,
+                    dummy_cache,
+                )
 
     def _attach_mapped_material(
         self,

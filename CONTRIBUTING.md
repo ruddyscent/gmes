@@ -34,8 +34,8 @@ Developers migrating from `python -m pip install -e ".[dev,hdf5]"` should use
 the uv setup above. `dev` is a PEP 735 dependency group, not an installable
 extra; runtime extras such as `hdf5` are still selected with `--extra`.
 
-uv's editable-project cache tracks the C++, SWIG, and Cython inputs under
-`src/`. Changing a `*.cc`, `*.hh`, `*.i`, or `*.pyx` file makes the next
+uv's editable-project cache tracks the C++ and SWIG inputs under `src/`.
+Changing a `*.cc`, `*.hh`, or `*.i` file makes the next
 `uv sync` rebuild the native extensions. Pure Python files remain directly
 editable and do not trigger a native rebuild. If a build input outside the
 configured cache keys changes, force a rebuild with:
@@ -57,8 +57,8 @@ uv run --no-sync python -m unittest discover -v
 uv build
 ```
 
-The native build constraints in `pyproject.toml` pin setuptools, wheel,
-Cython, and NumPy for isolated builds. Build-time NumPy must remain identical
+The native build constraints in `pyproject.toml` pin setuptools, wheel, and
+NumPy for isolated builds. Build-time NumPy must remain identical
 to the NumPy version in `uv.lock`; update both together, then verify an
 editable sync and a distribution build. When changing the required uv release,
 update both `[tool.uv].required-version` and the `setup-uv` workflow input in
@@ -93,13 +93,16 @@ GMES_ENABLE_OPENMP=0 uv run --no-sync python -m unittest discover -v
 
 Numerical behavior changes must include a deterministic regression test. Avoid using the large examples as routine tests because some need more than 1 GB of memory and run for a long time.
 
-Generated SWIG proxies, Cython C/C++ output, compiled extensions, distributions, and simulation results must not be committed.
+Generated SWIG proxies, compiled extensions, distributions, and simulation results must not be committed.
 
 Use `benchmarks/field_updates.py` to evaluate field-update performance. Run
 each thread count or threshold in a separate process and compare both timing
 and checksum output. Keep visualization, generated JSON, and simulation output
 out of the repository. The reference measurements and threshold rationale are
 recorded in [`docs/openmp-benchmark.md`](docs/openmp-benchmark.md).
+
+Use `benchmarks/geometry_mapping.py` to compare complete geometry region maps,
+mapping time, and peak RSS against the Cython reference implementation.
 
 Production distributions are created only by the tag-triggered release
 workflow. Follow [`docs/releasing.md`](docs/releasing.md) when preparing a
@@ -110,7 +113,7 @@ already present in `dist/`.
 
 - Keep public API changes explicit and document their migration impact.
 - Preserve numerical behavior unless the change is intentional and covered by tests.
-- Keep C++, SWIG, and Cython sources compatible with the current stable toolchain.
+- Keep C++ and SWIG sources compatible with the current stable toolchain.
 - Update the README or examples whenever a user-facing workflow changes.
 
 ## Commit messages

@@ -172,7 +172,11 @@ class SourceTimeTest(unittest.TestCase):
 
     def test_tfsf_custom_geometry_uses_pointwise_fallback(self):
         class CustomSphere(Sphere):
-            pass
+            calls = 0
+
+            def in_object(self, point):
+                type(self).calls += 1
+                return super().in_object(point)
 
         source = self.make_tfsf()
         space = Cartesian(size=(2, 2, 2), resolution=2)
@@ -183,15 +187,11 @@ class SourceTimeTest(unittest.TestCase):
         source.geom_tree = GeomBoxTree((default, sphere))
         field = space.get_ex_storage((Ex,))
 
-        with patch.object(
-            space,
-            "component_coordinate_axes",
-            side_effect=AssertionError("batch path must not be used"),
-        ):
-            mapped = list(
-                source._mapped_source_points(space, Ex, field, (0, 0, 0), field.shape)
-            )
+        mapped = list(
+            source._mapped_source_points(space, Ex, field, (0, 0, 0), field.shape)
+        )
 
+        self.assertGreater(CustomSphere.calls, 0)
         self.assertTrue(mapped)
 
 

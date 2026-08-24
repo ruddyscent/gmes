@@ -22,7 +22,6 @@ if sys.platform == "darwin":
 
 # Third-party modules - we depend on numpy for everything
 import numpy
-from Cython.Build import cythonize
 from setuptools import Extension, setup
 from setuptools.command.bdist_wheel import bdist_wheel
 from setuptools.command.build_ext import build_ext
@@ -143,15 +142,7 @@ constant = Extension(
     extra_compile_args=["-std=c++23"],
 )
 
-# pygeom module
-pygeom = Extension(
-    name="gmes.pygeom", sources=["src/pygeom.pyx"], include_dirs=[numpy_include]
-)
-
 setup(
-    ext_modules=cythonize(
-        [pw_material, constant, pygeom],
-        compiler_directives={"language_level": 3},
-    ),
+    ext_modules=[pw_material, constant],
     cmdclass={"bdist_wheel": BdistWheel, "build_ext": BuildExt},
 )

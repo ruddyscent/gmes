@@ -6,19 +6,13 @@ from copy import deepcopy
 from math import cos, exp, pi, sin, sqrt
 
 import numpy as np
-from numpy import cross, dot, inf, ndindex
+from numpy import cross, dot, inf
 from numpy.linalg import norm
 from scipy.optimize import bisect
 
 from . import constant as const
 from .fdtd import TEMzFDTD
-from .geometry import (
-    _BUILTIN_GEOMETRY_TYPES,
-    Cartesian,
-    DefaultMedium,
-    Shell,
-    in_range,
-)
+from .geometry import Cartesian, DefaultMedium, Shell, in_range
 from .material import Cpml, Dielectric
 
 # Point and total-field/scattered-field source update types.
@@ -687,21 +681,6 @@ class TotalFieldScatteredField(Src):
 
     def _mapped_source_points(self, space, component, field, low_idx, high_idx):
         """Yield source indices, coordinates, and materials in C-order."""
-        geometry = self.geom_tree.root.geom_list
-        if not all(type(obj) in _BUILTIN_GEOMETRY_TYPES for obj in geometry):
-            low = np.array(low_idx, dtype=np.intp)
-            high = np.array(high_idx, dtype=np.intp)
-            index_to_space = getattr(
-                space, f"{component.__name__.lower()}_index_to_space"
-            )
-            for local_idx in ndindex(tuple(high - low)):
-                idx = tuple(np.array(local_idx, dtype=np.intp) + low)
-                if in_range(idx, field.shape, component):
-                    point = index_to_space(*idx)
-                    material, underneath = self.geom_tree.material_of_point(point)
-                    yield idx, point, material, underneath
-            return
-
         electric_high_trim = {
             const.Ex: (0, 1, 1),
             const.Ey: (1, 0, 1),
@@ -734,10 +713,21 @@ class TotalFieldScatteredField(Src):
         plane = tile_shape[1] * tile_shape[2]
         for start in range(0, total, self._MAPPING_TILE_SIZE):
             stop = min(start + self._MAPPING_TILE_SIZE, total)
-            materials, underlying = self.geom_tree.material_of_grid(*axes, start, stop)
-            for offset, (material, underneath) in enumerate(
-                zip(materials, underlying, strict=True)
+            geometry_map = self.geom_tree.lower_grid(
+                *axes, start, stop, component=component
+            )
+            geometries = geometry_map.geometries
+            for offset, (material_id, underlying_id) in enumerate(
+                zip(
+                    geometry_map.material_ids,
+                    geometry_map.underlying_ids,
+                    strict=True,
+                )
             ):
+                material = geometries[material_id].material
+                underneath = (
+                    None if underlying_id < 0 else geometries[underlying_id].material
+                )
                 linear = start + offset
                 i, remainder = divmod(linear, plane)
                 j, k = divmod(remainder, tile_shape[2])

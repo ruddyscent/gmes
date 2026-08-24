@@ -2,7 +2,6 @@
 requires = [
     "setuptools>=77",
     "wheel",
-    "Cython>=3.1",
     "numpy>=2.3",
 ]
 build-backend = "setuptools.build_meta"
@@ -64,7 +63,6 @@ required-version = "==0.12.5"
 build-constraint-dependencies = [
     "setuptools==84.0.0",
     "wheel==0.48.0",
-    "Cython==3.2.9",
     "numpy==2.5.2",
 ]
 cache-keys = [
@@ -79,7 +77,6 @@ cache-keys = [
     {file = "src/*.cc"},
     {file = "src/*.hh"},
     {file = "src/*.i"},
-    {file = "src/*.pyx"},
     {env = "GMES_ENABLE_OPENMP"},
     {env = "GMES_OPENMP_PREFIX"},
     {env = "MACOSX_DEPLOYMENT_TARGET"},
@@ -107,7 +104,6 @@ py-version = "3.14"
 extension-pkg-allow-list = [
     "gmes._constant",
     "gmes._pw_material",
-    "gmes.pygeom",
 ]
 ignore-patterns = [
     "^constant\\.py$",

@@ -437,7 +437,11 @@ class MaterialMappingFastPathTest(unittest.TestCase):
                     fast = build(size, bloch)
                     fast._MATERIAL_TILE_SIZE = 7
                     fast.init()
-                    with patch.object(fdtd_module, "_BUILTIN_GEOMETRY_TYPES", ()):
+                    with patch.object(
+                        fdtd_module.GeomBoxTree,
+                        "_uses_vectorized_predicate",
+                        return_value=False,
+                    ):
                         fallback = build(size, bloch)
                         fallback.init()
 
@@ -452,7 +456,11 @@ class MaterialMappingFastPathTest(unittest.TestCase):
 
     def test_custom_geometry_subclass_uses_pointwise_fallback(self):
         class CustomSphere(Sphere):
-            pass
+            calls = 0
+
+            def in_object(self, point):
+                type(self).calls += 1
+                return super().in_object(point)
 
         simulation = FDTD(
             Cartesian(size=(1, 1, 1), resolution=2),
@@ -463,12 +471,28 @@ class MaterialMappingFastPathTest(unittest.TestCase):
             verbose=False,
         )
 
-        with patch.object(
-            simulation.space,
-            "component_coordinate_axes",
-            side_effect=AssertionError("batch path must not be used"),
-        ):
-            simulation.init()
+        simulation.init()
+
+        self.assertGreater(CustomSphere.calls, 0)
+        self.assertTrue(simulation.pw_material)
+
+    def test_opted_in_custom_geometry_subclass_uses_bulk_mapping(self):
+        class VectorizedSphere(Sphere):
+            _gmes_vectorized_geometry = True
+
+            def in_object(self, point):
+                raise AssertionError("pointwise fallback must not be used")
+
+        simulation = FDTD(
+            Cartesian(size=(1, 1, 1), resolution=2),
+            [
+                DefaultMedium(material=Dielectric()),
+                VectorizedSphere(material=Dielectric(2), radius=0.25),
+            ],
+            verbose=False,
+        )
+
+        simulation.init()
 
         self.assertTrue(simulation.pw_material)
 

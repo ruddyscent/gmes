@@ -36,7 +36,7 @@ class NativeOracleTest(unittest.TestCase):
             reference["commit"], "d87d25afd160d96b1fa0890cacecd90802448d57"
         )
         self.assertEqual(reference["tag"], "native-oracle-d87d25a")
-        self.assertEqual(reference["observer_tag"], "native-oracle-observer-v3")
+        self.assertEqual(reference["observer_tag"], "native-oracle-observer-v4")
         self.assertEqual(reference["field_scale"], 1e-3)
         self.assertEqual(reference["capture_steps"], [1, 2, 5, 20, 100])
         names = {case["name"] for case in self.manifest["correctness"]}
@@ -85,6 +85,7 @@ class NativeOracleTest(unittest.TestCase):
         mixed_3d = self.oracle.find_case(self.manifest, "mixed-3d")
         self.assertEqual(mixed_3d["size"], [96, 6, 4])
         self.assertEqual(mixed_3d["source"], "none")
+        self.assertEqual(self.oracle.find_case(self.manifest, "dm2-4")["size"][2], 0)
 
     def test_dcp_rc_remains_a_distinct_strategy(self):
         rc = self.oracle.material_from_name("dcp-rc", self.gmes)

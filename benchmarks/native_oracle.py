@@ -232,6 +232,8 @@ def _coverage_geometry(spec, gmes):
             "dm2-1",
         ],
     )
+    if float(spec["size"][2]) > 0:
+        families = [name for name in families if not name.startswith("dm2-")]
     geometry = [gmes.DefaultMedium(material_from_name("dielectric", gmes))]
     if spec.get("include_pml", True):
         geometry.append(

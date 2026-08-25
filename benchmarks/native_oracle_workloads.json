@@ -3,7 +3,8 @@
   "reference": {
     "commit": "d87d25afd160d96b1fa0890cacecd90802448d57",
     "tag": "native-oracle-d87d25a",
-    "observer_tag": "native-oracle-observer-v1",
+    "observer_tag": "native-oracle-observer-v2",
+    "field_scale": 0.001,
     "seed": 115,
     "capture_steps": [1, 2, 5, 20, 100],
     "precondition_steps": 2

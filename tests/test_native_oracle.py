@@ -36,7 +36,8 @@ class NativeOracleTest(unittest.TestCase):
             reference["commit"], "d87d25afd160d96b1fa0890cacecd90802448d57"
         )
         self.assertEqual(reference["tag"], "native-oracle-d87d25a")
-        self.assertEqual(reference["observer_tag"], "native-oracle-observer-v1")
+        self.assertEqual(reference["observer_tag"], "native-oracle-observer-v2")
+        self.assertEqual(reference["field_scale"], 1e-3)
         self.assertEqual(reference["capture_steps"], [1, 2, 5, 20, 100])
         names = {case["name"] for case in self.manifest["correctness"]}
         self.assertTrue(
@@ -196,9 +197,26 @@ class NativeOracleTest(unittest.TestCase):
     def test_benchmark_schema_characterizes_noise_and_memory_growth(self):
         spec = dict(self.oracle.find_case(self.manifest, "dielectric-2d"))
         spec.update(size=[2, 2, 0], resolution=2)
-        result = self.oracle.benchmark_case(
-            spec, self.manifest, repeats=2, warmup=0, steps=1
-        )
+        simulations = []
+        original_build = self.oracle.build_simulation
+
+        def tracked_build(*args, **kwargs):
+            simulation = original_build(*args, **kwargs)
+            original_step = simulation.step
+            simulation.oracle_step_count = 0
+
+            def tracked_step():
+                simulation.oracle_step_count += 1
+                return original_step()
+
+            simulation.step = tracked_step
+            simulations.append(simulation)
+            return simulation
+
+        with patch.object(self.oracle, "build_simulation", side_effect=tracked_build):
+            result = self.oracle.benchmark_case(
+                spec, self.manifest, repeats=2, warmup=1, steps=1
+            )
         measurements = result["measurements"]
         self.assertEqual(measurements["advance"]["repetitions"], 2)
         self.assertIn("relative_mad", measurements["advance"])
@@ -210,6 +228,10 @@ class NativeOracleTest(unittest.TestCase):
         self.assertGreater(result["memory"]["live_parameter_bytes"], 0)
         self.assertIn("git_commit", result["environment"])
         self.assertIn("cpu_count_physical", result["environment"])
+        self.assertEqual(
+            [simulation.oracle_step_count for simulation in simulations],
+            [0, 3, 2, 2],
+        )
 
     def test_isolated_runner_uses_controller_with_checkout_bound_import(self):
         manifest = json.loads(json.dumps(self.manifest))

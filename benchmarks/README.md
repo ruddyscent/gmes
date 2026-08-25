@@ -22,7 +22,7 @@ uv build
 
 That commit predates the read-only C++ state exporters required to inspect
 private dispersive/PML state.  The companion
-`native-oracle-observer-v1` tag contains only the #115 observer, workload,
+`native-oracle-observer-v2` tag contains only the #115 observer, workload,
 and runner changes on top of the frozen source.  Use it to produce reference
 archives; the archive metadata records both the frozen physics reference and
 the actual observer checkout commit.
@@ -33,7 +33,7 @@ variables, changes to an empty temporary directory, and rejects a `gmes`
 import that is not below the requested checkout.
 
 ```sh
-git worktree add --detach /tmp/gmes-native-observer native-oracle-observer-v1
+git worktree add --detach /tmp/gmes-native-observer native-oracle-observer-v2
 cd /tmp/gmes-native-observer
 uv sync --locked --extra hdf5
 
@@ -78,7 +78,9 @@ uv run --no-sync python benchmarks/native_oracle.py benchmark \
 Run each CPU gate once with one thread and once with the physical-core count
 reported in `environment.cpu_count_physical`.  Raw construction, geometry
 mapping, native plan initialization, one-step, and batched timings are kept
-separate.  The output also records median, p95, population standard deviation,
+separate. Each batched timing replicate starts from an independently rebuilt,
+identically seeded state so later samples do not measure a progressively older
+simulation. The output also records median, p95, population standard deviation,
 relative MAD, RSS samples/growth, exact field/update-run/index/parameter bytes
 (with mutable state reported as a parameter-storage subset), compiler and SWIG
 versions, build flags, CPU topology, GPU inventory/topology, and the

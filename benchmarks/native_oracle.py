@@ -146,14 +146,14 @@ def material_from_name(name, gmes):
             omega=(0.8,),
             n_atom=(0.01,),
             gamma=0.02,
-            rtol=1e-8,
+            rtol=1e-4,
         ),
         "dm2-4": lambda: gmes.Dm2(
             eps_inf=1.2,
             omega=(0.7, 0.8, 0.9, 1.0),
             n_atom=(0.01, 0.01, 0.01, 0.01),
             gamma=0.02,
-            rtol=1e-8,
+            rtol=1e-4,
         ),
     }
     try:
@@ -293,11 +293,15 @@ def _heterogeneous_geometry(spec, gmes):
 def _build_sources(spec, gmes):
     source_name = spec.get("source", "point")
     source_time = gmes.Continuous(freq=0.35)
+    amplitude = float(spec.get("source_amp", 1e-3))
     if source_name in {"point", "overlap-point"}:
         component = getattr(gmes, spec.get("source_component", "Ex"))
         sources = [
             gmes.PointSource(
-                src_time=source_time, center=(0, 0, 0), component=component
+                src_time=source_time,
+                center=(0, 0, 0),
+                component=component,
+                amp=amplitude,
             )
         ]
         if source_name == "overlap-point":
@@ -306,7 +310,7 @@ def _build_sources(spec, gmes):
                     src_time=gmes.Continuous(freq=0.55, phase=0.2),
                     center=(0, 0, 0),
                     component=component,
-                    amp=0.25,
+                    amp=0.25 * amplitude,
                 )
             )
         return sources
@@ -318,6 +322,7 @@ def _build_sources(spec, gmes):
         "size": interface_size,
         "direction": (1, 0, 0),
         "polarization": (0, 1, 0),
+        "amp": amplitude,
     }
     if source_name == "tfsf":
         return [gmes.TotalFieldScatteredField(**common)]
@@ -353,13 +358,13 @@ def build_simulation(spec, gmes):
     )
 
 
-def initialize_fields(simulation, seed):
+def initialize_fields(simulation, seed, scale=1e-3):
     """Fill every active field with fixed-seed nonzero values."""
     rng = np.random.default_rng(seed)
     for field in simulation.field.values():
-        values = rng.normal(size=field.shape)
+        values = scale * rng.normal(size=field.shape)
         if np.issubdtype(field.dtype, np.complexfloating):
-            values = values + 1j * rng.normal(size=field.shape)
+            values = values + 1j * scale * rng.normal(size=field.shape)
         field[...] = values
         if not np.all(field != 0):
             raise AssertionError("oracle seed unexpectedly produced a zero field value")
@@ -608,7 +613,7 @@ def capture_case(spec, manifest, output):
     simulation = build_simulation(spec, gmes)
     simulation.init()
     reference = manifest["reference"]
-    initialize_fields(simulation, reference["seed"])
+    initialize_fields(simulation, reference["seed"], reference["field_scale"])
     for _ in range(reference["precondition_steps"]):
         simulation.step()
 
@@ -885,7 +890,11 @@ def benchmark_case(spec, manifest, repeats, warmup, steps):
         start = perf_counter()
         _component_maps(simulation)
         geometry_mapping.append(perf_counter() - start)
-        initialize_fields(simulation, manifest["reference"]["seed"])
+        initialize_fields(
+            simulation,
+            manifest["reference"]["seed"],
+            manifest["reference"]["field_scale"],
+        )
     start = perf_counter()
     for _ in range(warmup):
         simulation.step()
@@ -898,6 +907,15 @@ def benchmark_case(spec, manifest, repeats, warmup, steps):
     samples = []
     rss_samples = [current_rss_bytes()]
     for _ in range(repeats):
+        simulation = build_simulation(spec, gmes)
+        simulation.init()
+        initialize_fields(
+            simulation,
+            manifest["reference"]["seed"],
+            manifest["reference"]["field_scale"],
+        )
+        for _ in range(warmup):
+            simulation.step()
         start = perf_counter()
         for _ in range(steps):
             simulation.step()

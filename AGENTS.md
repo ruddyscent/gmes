@@ -2,6 +2,28 @@
 
 This file provides guidance for contributors and coding agents working in this repository.
 
+## Working principles
+
+- Work autonomously by making reasonable assumptions whenever possible.
+- When the request, repository code, documentation, tests, configuration, or
+  history can answer a question, investigate those sources and proceed instead
+  of asking the user.
+- When a requirement is slightly ambiguous but reasonable interpretations
+  would not materially change the result, choose the most reasonable direction
+  and continue.
+- Perform safe, reversible local work within the requested scope without
+  additional confirmation, including reading and editing files and running
+  tests, linters, and builds.
+- Decide minor implementation choices independently and briefly report the
+  assumptions that materially influenced the result in the final response.
+- Ask questions only when missing information would materially change the
+  result, or when an action could be destructive, change external state beyond
+  the authorized scope, introduce a security risk, or incur cost. When a
+  question is necessary, consolidate all essential questions into one request.
+- Continue implementation and verification until the requested work is
+  complete, then report only the completed changes, verification results, and
+  any unresolved issues.
+
 ## Project overview
 
 GMES (GIST Maxwell's Equations Solver) is a Python package for electromagnetic simulation using the explicit finite-difference time-domain (FDTD) method. The Python API is implemented in `gmes/`, while performance-sensitive extensions live in `src/` and are built with C++ and SWIG. Example simulations are in `examples/`, and component-level tests are in `tests/`.

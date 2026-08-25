@@ -74,6 +74,12 @@ namespace gmes
       return this;
     }
 
+    std::size_t
+    oracle_parameter_bytes() const noexcept override
+    {
+      return param_list.capacity() * sizeof(DielectricElectricParam<T>);
+    }
+
   protected:
     bool
     accepts_parameter(const PwMaterialParam* parameter) const noexcept override
@@ -261,6 +267,12 @@ namespace gmes
       std::copy(dielectric_ptr->idx_list.begin(), dielectric_ptr->idx_list.end(), std::back_inserter(idx_list));
       std::copy(dielectric_ptr->param_list.begin(), dielectric_ptr->param_list.end(), std::back_inserter(param_list));
       return this;
+    }
+
+    std::size_t
+    oracle_parameter_bytes() const noexcept override
+    {
+      return param_list.capacity() * sizeof(DielectricMagneticParam<T>);
     }
 
   protected:

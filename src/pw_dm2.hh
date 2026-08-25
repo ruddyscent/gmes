@@ -257,6 +257,46 @@ namespace gmes
       return this;
     }
 
+    std::vector<std::complex<double>>
+    oracle_state() const override
+    {
+      std::vector<std::complex<double>> values;
+      for (const auto& parameter : param_list)
+        for (const auto& transition : parameter.u)
+          values.insert(values.end(), transition.begin(), transition.end());
+      return values;
+    }
+
+    std::size_t
+    oracle_state_bytes() const noexcept override
+    {
+      std::size_t bytes = 0;
+      for (const auto& parameter : param_list) {
+        bytes += parameter.u.capacity() * sizeof(std::array<T, 3>);
+        bytes += (parameter.a_scratch.capacity() + parameter.b_scratch.capacity()) * sizeof(double);
+        bytes += (parameter.u_new_scratch.capacity() +
+                  parameter.u_previous_scratch.capacity()) * sizeof(std::array<T, 3>);
+      }
+      return bytes;
+    }
+
+    std::size_t
+    oracle_parameter_bytes() const noexcept override
+    {
+      std::size_t bytes =
+        param_list.capacity() * sizeof(Dm2ElectricParam<T>);
+      for (const auto& parameter : param_list) {
+        bytes += (parameter.omega.capacity() + parameter.n_atom.capacity() +
+                  parameter.a_scratch.capacity() +
+                  parameter.b_scratch.capacity()) * sizeof(double);
+        bytes += (parameter.u.capacity() +
+                  parameter.u_new_scratch.capacity() +
+                  parameter.u_previous_scratch.capacity()) *
+                   sizeof(std::array<T, 3>);
+      }
+      return bytes;
+    }
+
   protected:
     static void
     prepare_scratch(Dm2ElectricParam<T>& parameter)

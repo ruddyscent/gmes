@@ -72,6 +72,28 @@ namespace gmes
       return this;
     }
 
+    std::vector<std::complex<double>>
+    oracle_state() const override
+    {
+      std::vector<std::complex<double>> values;
+      values.reserve(param_list.size());
+      for (const auto& parameter : param_list)
+        values.emplace_back(parameter.d);
+      return values;
+    }
+
+    std::size_t
+    oracle_state_bytes() const noexcept override
+    {
+      return param_list.size() * sizeof(T);
+    }
+
+    std::size_t
+    oracle_parameter_bytes() const noexcept override
+    {
+      return param_list.capacity() * sizeof(UpmlElectricParam<T>);
+    }
+
   protected:
     bool
     accepts_parameter(const PwMaterialParam* parameter) const noexcept override
@@ -288,6 +310,28 @@ namespace gmes
       std::copy(upml_ptr->idx_list.begin(), upml_ptr->idx_list.end(), std::back_inserter(idx_list));
       std::copy(upml_ptr->param_list.begin(), upml_ptr->param_list.end(), std::back_inserter(param_list));
       return this;
+    }
+
+    std::vector<std::complex<double>>
+    oracle_state() const override
+    {
+      std::vector<std::complex<double>> values;
+      values.reserve(param_list.size());
+      for (const auto& parameter : param_list)
+        values.emplace_back(parameter.b);
+      return values;
+    }
+
+    std::size_t
+    oracle_state_bytes() const noexcept override
+    {
+      return param_list.size() * sizeof(T);
+    }
+
+    std::size_t
+    oracle_parameter_bytes() const noexcept override
+    {
+      return param_list.capacity() * sizeof(UpmlMagneticParam<T>);
     }
 
   protected:

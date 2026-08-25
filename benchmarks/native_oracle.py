@@ -185,7 +185,19 @@ def _mixed_geometry(spec, gmes):
     for index, name in enumerate(names):
         center_x = -float(size[0]) / 2 + (index + 1.5) * width
         region_size = (width * 0.72, float(size[1]) * 0.65, z_size)
-        if name == "upml":
+        if name == "dm2-1" and float(size[2]) > 0:
+            geometry.append(
+                gmes.Sphere(
+                    material=material_from_name(name, gmes),
+                    center=(
+                        float(size[0]) / 2 - 0.5 / spec["resolution"],
+                        0,
+                        0,
+                    ),
+                    radius=0.2 / spec["resolution"],
+                )
+            )
+        elif name == "upml":
             geometry.append(
                 gmes.Shell(
                     material=material_from_name(name, gmes),
@@ -292,6 +304,8 @@ def _heterogeneous_geometry(spec, gmes):
 
 def _build_sources(spec, gmes):
     source_name = spec.get("source", "point")
+    if source_name == "none":
+        return []
     source_time = gmes.Continuous(freq=0.35)
     amplitude = float(spec.get("source_amp", 1e-3))
     if source_name in {"point", "overlap-point"}:
@@ -362,9 +376,18 @@ def initialize_fields(simulation, seed, scale=1e-3):
     """Fill every active field with fixed-seed nonzero values."""
     rng = np.random.default_rng(seed)
     for field in simulation.field.values():
-        values = scale * rng.normal(size=field.shape)
+        values = scale * (1 + 0.1 * rng.random())
+        for axis, length in enumerate(field.shape):
+            ramp_shape = [1] * field.ndim
+            ramp_shape[axis] = length
+            values = values + (
+                scale
+                * 1e-6
+                * (axis + 1)
+                * np.linspace(0, 1, length).reshape(ramp_shape)
+            )
         if np.issubdtype(field.dtype, np.complexfloating):
-            values = values + 1j * scale * rng.normal(size=field.shape)
+            values = values + 1j * scale * (1 + 0.1 * rng.random())
         field[...] = values
         if not np.all(field != 0):
             raise AssertionError("oracle seed unexpectedly produced a zero field value")

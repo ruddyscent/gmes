@@ -22,7 +22,7 @@ uv build
 
 That commit predates the read-only C++ state exporters required to inspect
 private dispersive/PML state.  The companion
-`native-oracle-observer-v2` tag contains only the #115 observer, workload,
+`native-oracle-observer-v3` tag contains only the #115 observer, workload,
 and runner changes on top of the frozen source.  Use it to produce reference
 archives; the archive metadata records both the frozen physics reference and
 the actual observer checkout commit.
@@ -33,7 +33,7 @@ variables, changes to an empty temporary directory, and rejects a `gmes`
 import that is not below the requested checkout.
 
 ```sh
-git worktree add --detach /tmp/gmes-native-observer native-oracle-observer-v2
+git worktree add --detach /tmp/gmes-native-observer native-oracle-observer-v3
 cd /tmp/gmes-native-observer
 uv sync --locked --extra hdf5
 
@@ -62,6 +62,15 @@ deterministic preconditioning steps.  The named 1, 2, 5, 20, and 100 captures
 are relative to that checkpoint.  A candidate backend loads `step/0`
 directly, so it does not need to run or import the native reference to create
 its starting state.
+
+The mixed-material cases are source-free because PointSource, TFSF, and
+Gaussian source behavior has dedicated cases. Native DM2 is stable for its
+homogeneous and Ziolkowski workloads but does not converge after waves from
+adjacent dispersive volumes reach a 3-D DM2 volume. The 3-D mixed case therefore
+keeps a normal, nonzero-state DM2 updater on one Ex Yee point and fixes a long
+x-domain that isolates it for the 100-step differential window. This preserves
+all material dispatcher and state-storage coverage without redefining the DM2
+corrector or weakening its tolerance.
 
 ## Measurements and gates
 

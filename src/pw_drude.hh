@@ -72,6 +72,38 @@ namespace gmes
       return this;
     }
 
+    std::vector<std::complex<double>>
+    oracle_state() const override
+    {
+      std::vector<std::complex<double>> values;
+      for (const auto& parameter : param_list) {
+        values.insert(values.end(), parameter.q_now.begin(), parameter.q_now.end());
+        values.insert(values.end(), parameter.q_new.begin(), parameter.q_new.end());
+      }
+      return values;
+    }
+
+    std::size_t
+    oracle_state_bytes() const noexcept override
+    {
+      std::size_t bytes = 0;
+      for (const auto& parameter : param_list)
+        bytes += (parameter.q_now.capacity() + parameter.q_new.capacity()) * sizeof(T);
+      return bytes;
+    }
+
+    std::size_t
+    oracle_parameter_bytes() const noexcept override
+    {
+      std::size_t bytes =
+        param_list.capacity() * sizeof(DrudeElectricParam<T>);
+      for (const auto& parameter : param_list)
+        bytes += parameter.a.capacity() * sizeof(std::array<double, 3>) +
+                 (parameter.q_now.capacity() + parameter.q_new.capacity()) *
+                   sizeof(T);
+      return bytes;
+    }
+
     T
     dps_sum(const T& init, const DrudeElectricParam<T>& drude_param) const
     {

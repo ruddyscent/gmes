@@ -60,6 +60,12 @@ namespace gmes
       return this;
     }
 
+    std::size_t
+    oracle_parameter_bytes() const noexcept override
+    {
+      return param_list.capacity() * sizeof(DummyElectricParam<T>);
+    }
+
     void
     update_all(T* const inplace_field,
 	       int inplace_dim1, int inplace_dim2, int inplace_dim3,
@@ -157,6 +163,12 @@ namespace gmes
       std::copy(dummy_ptr->idx_list.begin(), dummy_ptr->idx_list.end(), std::back_inserter(idx_list));
       std::copy(dummy_ptr->param_list.begin(), dummy_ptr->param_list.end(), std::back_inserter(param_list));
       return this;
+    }
+
+    std::size_t
+    oracle_parameter_bytes() const noexcept override
+    {
+      return param_list.capacity() * sizeof(DummyMagneticParam<T>);
     }
 
     void

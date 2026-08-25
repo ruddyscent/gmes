@@ -78,6 +78,38 @@ namespace gmes
       return this;
     }
 
+    std::vector<std::complex<double>>
+    oracle_state() const override
+    {
+      std::vector<std::complex<double>> values;
+      for (const auto& parameter : param_list) {
+        values.insert(values.end(), parameter.l_now.begin(), parameter.l_now.end());
+        values.insert(values.end(), parameter.l_new.begin(), parameter.l_new.end());
+      }
+      return values;
+    }
+
+    std::size_t
+    oracle_state_bytes() const noexcept override
+    {
+      std::size_t bytes = 0;
+      for (const auto& parameter : param_list)
+        bytes += (parameter.l_now.capacity() + parameter.l_new.capacity()) * sizeof(T);
+      return bytes;
+    }
+
+    std::size_t
+    oracle_parameter_bytes() const noexcept override
+    {
+      std::size_t bytes =
+        param_list.capacity() * sizeof(LorentzElectricParam<T>);
+      for (const auto& parameter : param_list)
+        bytes += parameter.a.capacity() * sizeof(std::array<double, 3>) +
+                 (parameter.l_now.capacity() + parameter.l_new.capacity()) *
+                   sizeof(T);
+      return bytes;
+    }
+
     T
     lps_sum(const T& init, const LorentzElectricParam<T>& lorentz_param) const
     {

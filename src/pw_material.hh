@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <array>
+#include <complex>
 #include <iterator>
 #include <functional>
 #include <set>
@@ -206,6 +207,40 @@ namespace gmes
     plan_bytes() const noexcept
     {
       return update_runs.capacity() * sizeof(UpdateRun);
+    }
+
+    std::size_t
+    oracle_index_bytes() const noexcept
+    {
+      return idx_list.capacity() * sizeof(Index3);
+    }
+
+    virtual std::size_t
+    oracle_parameter_bytes() const noexcept
+    {
+      return 0;
+    }
+
+    std::vector<int>
+    oracle_indices() const
+    {
+      std::vector<int> values;
+      values.reserve(3 * idx_list.size());
+      for (const auto& index : idx_list)
+        values.insert(values.end(), index.begin(), index.end());
+      return values;
+    }
+
+    virtual std::vector<std::complex<double>>
+    oracle_state() const
+    {
+      return {};
+    }
+
+    virtual std::size_t
+    oracle_state_bytes() const noexcept
+    {
+      return 0;
     }
 
     PwMaterial<T>*

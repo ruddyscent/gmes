@@ -103,6 +103,44 @@ namespace gmes
       return this;
     }
 
+    std::vector<std::complex<double>>
+    oracle_state() const override
+    {
+      std::vector<std::complex<double>> values;
+      for (const auto& parameter : param_list) {
+        values.emplace_back(parameter.e_old);
+        values.insert(values.end(), parameter.q_old.begin(), parameter.q_old.end());
+        values.insert(values.end(), parameter.q_now.begin(), parameter.q_now.end());
+        values.insert(values.end(), parameter.p_old.begin(), parameter.p_old.end());
+        values.insert(values.end(), parameter.p_now.begin(), parameter.p_now.end());
+      }
+      return values;
+    }
+
+    std::size_t
+    oracle_state_bytes() const noexcept override
+    {
+      std::size_t bytes = param_list.size() * sizeof(T);
+      for (const auto& parameter : param_list)
+        bytes += (parameter.q_old.capacity() + parameter.q_now.capacity() +
+                  parameter.p_old.capacity() + parameter.p_now.capacity()) * sizeof(T);
+      return bytes;
+    }
+
+    std::size_t
+    oracle_parameter_bytes() const noexcept override
+    {
+      std::size_t bytes =
+        param_list.capacity() * sizeof(DcpAdeElectricParam<T>);
+      for (const auto& parameter : param_list)
+        bytes += parameter.a.capacity() * sizeof(std::array<double, 3>) +
+                 parameter.b.capacity() * sizeof(std::array<double, 5>) +
+                 (parameter.q_old.capacity() + parameter.q_now.capacity() +
+                  parameter.p_old.capacity() + parameter.p_now.capacity()) *
+                   sizeof(T);
+      return bytes;
+    }
+
     T
     dps_sum(const T& init, const DcpAdeElectricParam<T>& dcp_param) const
     {
@@ -474,6 +512,47 @@ namespace gmes
       std::copy(dcp_ptr->idx_list.begin(), dcp_ptr->idx_list.end(), std::back_inserter(idx_list));
       std::copy(dcp_ptr->param_list.begin(), dcp_ptr->param_list.end(), std::back_inserter(param_list));
       return this;
+    }
+
+    std::vector<std::complex<double>>
+    oracle_state() const override
+    {
+      std::vector<std::complex<double>> values;
+      for (const auto& parameter : param_list) {
+        values.insert(values.end(), parameter.psi_dp_re.begin(), parameter.psi_dp_re.end());
+        values.insert(values.end(), parameter.psi_dp_im.begin(), parameter.psi_dp_im.end());
+        values.insert(values.end(), parameter.psi_cp_re.begin(), parameter.psi_cp_re.end());
+        values.insert(values.end(), parameter.psi_cp_im.begin(), parameter.psi_cp_im.end());
+      }
+      return values;
+    }
+
+    std::size_t
+    oracle_state_bytes() const noexcept override
+    {
+      std::size_t bytes = 0;
+      for (const auto& parameter : param_list)
+        bytes += (parameter.psi_dp_re.capacity() + parameter.psi_dp_im.capacity()) * sizeof(double) +
+                 (parameter.psi_cp_re.capacity() + parameter.psi_cp_im.capacity()) *
+                   sizeof(std::complex<double>);
+      return bytes;
+    }
+
+    std::size_t
+    oracle_parameter_bytes() const noexcept override
+    {
+      std::size_t bytes =
+        param_list.capacity() * sizeof(DcpPlrcElectricParam<T>);
+      for (const auto& parameter : param_list)
+        bytes += parameter.a.capacity() * sizeof(std::array<double, 3>) +
+                 parameter.b.capacity() *
+                   sizeof(std::array<std::complex<double>, 3>) +
+                 (parameter.psi_dp_re.capacity() +
+                  parameter.psi_dp_im.capacity()) * sizeof(double) +
+                 (parameter.psi_cp_re.capacity() +
+                  parameter.psi_cp_im.capacity()) *
+                   sizeof(std::complex<double>);
+      return bytes;
     }
 
     void

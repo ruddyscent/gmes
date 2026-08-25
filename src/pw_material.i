@@ -107,6 +107,8 @@ import_array();
 %apply (double* ARGOUT_ARRAY1, int DIM1) {(double* const w, int w_size)};
 
 // Include the header file to be wrapped
+%template(OracleIndexVector) std::vector<int>;
+%template(OracleStateVector) std::vector<std::complex<double>>;
 %include "pw_material.hh"
 %template(PwMaterialParamVector) std::vector<gmes::PwMaterialParam *>;
 %include "pw_dummy.hh"

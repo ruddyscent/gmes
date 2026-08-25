@@ -1,12 +1,110 @@
-# Performance benchmarks
+# Native migration oracle
+
+The machine-readable workload contract is
+`native_oracle_workloads.json`.  It fixes the post-#113 physics commit,
+correctness capture steps, model-specific tolerances, measured material
+coverage/fragmentation cases, and the CPU/single-GPU/two-GPU gate sizes before
+Torch tuning starts.
+
+## Reference lifecycle
+
+`native-oracle-d87d25a` points exactly to
+`d87d25afd160d96b1fa0890cacecd90802448d57`, the final post-#113 native
+solver.  It is the immutable physics source and can be built in isolation:
+
+```sh
+git worktree add --detach /tmp/gmes-native-source native-oracle-d87d25a
+cd /tmp/gmes-native-source
+uv sync --locked --extra hdf5
+uv run --no-sync python -m unittest discover -v
+uv build
+```
+
+That commit predates the read-only C++ state exporters required to inspect
+private dispersive/PML state.  The companion
+`native-oracle-observer-v1` tag contains only the #115 observer, workload,
+and runner changes on top of the frozen source.  Use it to produce reference
+archives; the archive metadata records both the frozen physics reference and
+the actual observer checkout commit.
+
+Keep controller, reference, and candidate environments separate.  The
+controller starts Python with `-I`, removes import-related environment
+variables, changes to an empty temporary directory, and rejects a `gmes`
+import that is not below the requested checkout.
+
+```sh
+git worktree add --detach /tmp/gmes-native-observer native-oracle-observer-v1
+cd /tmp/gmes-native-observer
+uv sync --locked --extra hdf5
+
+cd /path/to/controller-checkout
+uv run --no-sync python benchmarks/run_isolated_oracle.py \
+  --checkout /tmp/gmes-native-observer \
+  --python /tmp/gmes-native-observer/.venv/bin/python \
+  --manifest "$PWD/benchmarks/native_oracle_workloads.json" \
+  --case mixed-3d \
+  --output /tmp/gmes-oracle/reference-mixed-3d.npz
+```
+
+Repeat the command with a separately built candidate checkout and output
+path.  Compare every field, map, time value, source/auxiliary state, and
+persistent material state with:
+
+```sh
+uv run --no-sync python benchmarks/native_oracle.py compare \
+  --reference /tmp/gmes-oracle/reference-mixed-3d.npz \
+  --candidate /tmp/gmes-oracle/candidate-mixed-3d.npz
+```
+
+Each archive includes a `step/0` canonical input checkpoint.  It contains
+the fixed-seed nonzero fields and the complete state after the manifest's
+deterministic preconditioning steps.  The named 1, 2, 5, 20, and 100 captures
+are relative to that checkpoint.  A candidate backend loads `step/0`
+directly, so it does not need to run or import the native reference to create
+its starting state.
+
+## Measurements and gates
+
+Set thread counts before importing the native module or Torch.  Use an
+otherwise idle host, fixed clock/power settings where available, and the same
+workload, dtype, thread count, and replicate count for both sides.
+
+```sh
+uv run --no-sync python benchmarks/native_oracle.py benchmark \
+  --case cpu-crossover-2d --threads 1 --warmup 5 --steps 100 --repeats 15 \
+  > /tmp/gmes-oracle/native-cpu-crossover-2d-t1.json
+```
+
+Run each CPU gate once with one thread and once with the physical-core count
+reported in `environment.cpu_count_physical`.  Raw construction, geometry
+mapping, native plan initialization, one-step, and batched timings are kept
+separate.  The output also records median, p95, population standard deviation,
+relative MAD, RSS samples/growth, exact field/update-run/index/parameter bytes
+(with mutable state reported as a parameter-storage subset), compiler and SWIG
+versions, build flags, CPU topology, GPU inventory/topology, and the
+locked-environment hash.
+
+The single- and two-GPU sizes in the manifest are frozen now but are executed
+by the Torch runner introduced by later issues.  That runner must preserve
+this schema while adding transfer, eager warm-up, cold/cached compile, CUDA
+allocated/reserved peaks, profiler/graph-break, device-copy, allocator, and
+kernel-launch data.  Synchronize CUDA only at measurement boundaries.  Use
+one process per GPU for the two-GPU cases and record link topology.
+
+The long-running `physical_checks` cases archive field energy, boundary
+energy (reflection/transmission observables), maximum amplitude, finiteness,
+component spectra, complete fields, and DM2 state at fixed steps.  Large NPZ,
+JSON, and profiler outputs belong in CI/run artifacts or `/tmp`; do not add
+them to the repository, source distribution, or wheel.
+
+## Existing native microbenchmarks
 
 `geometry_mapping.py` isolates bounded geometry-to-region lowering for all
 built-in primitives, default-only 2-D and 3-D grids, heterogeneous and
 overlapping scenes, collapsed dimensions, complex-mode coordinates, and an
 independently reported custom pointwise fallback. It hashes complete material
 and underlying-region maps so reference and candidate runs also verify mapping
-parity. Run the Cython reference and candidate in separate checkouts with the
-same options:
+parity:
 
 ```sh
 uv run --no-sync python benchmarks/geometry_mapping.py --repeats 7
@@ -16,50 +114,27 @@ Compare every case median, the built-in geometric mean, map hashes, and peak
 RSS. Generated JSON results are machine-specific and should not be committed.
 
 `field_updates.py` measures simulation construction, `FDTD.init()`, and
-complete FDTD time steps as separate metrics without visualization or
-simulation output. It covers a small-grid control case, larger two- and
-three-dimensional dielectric grids, UPML, Drude, Lorentz, DCP ADE, and DM2
-media, a heterogeneous dielectric geometry, and a Bloch-periodic complex
-field. Each result also records field shapes, native material-update loop
-sizes, finalized-plan run and byte counts, and process peak resident memory.
-
-Run each configuration in a separate process so the OpenMP runtime reads the
-thread count and GMES reads the threshold before the first native update:
+complete FDTD time steps separately. It retains the #99 small, 2-D, 3-D,
+dispersive, Lorentz, DCP, DM2, PML, heterogeneous, and Bloch/complex cases.
+Run each configuration in a separate process so OpenMP and GMES read their
+runtime settings before the first native update:
 
 ```sh
 uv run --no-sync python benchmarks/field_updates.py --threads 1
 uv run --no-sync python benchmarks/field_updates.py --threads 4
 uv run --no-sync python benchmarks/field_updates.py --threads 4 --threshold 0
-uv run --no-sync python benchmarks/field_updates.py --threads 4 --threshold 1000000000
+uv run --no-sync python benchmarks/field_updates.py \
+  --threads 4 --threshold 1000000000
 ```
 
-The benchmark imports GMES after applying the requested runtime settings and
-before any timer starts. For every case and repeat, it constructs a fresh
-simulation and then times `FDTD.init()` independently. The initialization
-metric includes field allocation plus material and source mapping. After the
-last initialization sample, the existing warmup and repeated step measurement
-runs on that simulation.
+Compare the raw and median construction, initialization, and step samples,
+field checksum/shapes, material update sizes, native update-plan bytes, and
+peak RSS. The default `GMES_OPENMP_THRESHOLD=8192` keeps small loops serial.
+A threshold of zero forces eligible loops through OpenMP; a value larger than
+the grids provides an OpenMP-linked serial reference. Rebuild after changing
+`GMES_ENABLE_OPENMP`, but not for threshold or `OMP_NUM_THREADS` changes.
+For MPI runs, set the OpenMP thread count explicitly and avoid assigning more
+total workers than physical cores.
 
-Compare `median_seconds_per_construction`,
-`median_seconds_per_initialization`, and `median_seconds_per_step` for
-performance. Each median is computed from the samples in its corresponding
-`seconds_per_*` list. Compare `checksum` for numerical equivalence, and use
-`field_shapes` and `material_update_sizes` to confirm that runs have matching
-workloads. `native_update_plan_bytes` reports the native offset/run storage,
-while `peak_rss_bytes` reports the process high-water resident set. The
-top-level `warmup_steps`, `steps_per_repeat`, and `repeats` values record the
-command's workload settings. Results depend on the processor, compiler,
-OpenMP runtime, and system load, so generated JSON output should not be
-committed.
-
-The default `GMES_OPENMP_THRESHOLD=8192` keeps small loops serial. Setting it
-to `0` forces every eligible loop through OpenMP; a value larger than the
-benchmark grids provides an OpenMP-linked serial reference. The package must
-be rebuilt after changing `GMES_ENABLE_OPENMP`, but the threshold and
-`OMP_NUM_THREADS` are runtime settings.
-
-When benchmarking an MPI run, choose the OpenMP thread count explicitly and
-avoid assigning more total workers than physical cores.
-
-See [`../docs/openmp-benchmark.md`](../docs/openmp-benchmark.md) for the
-reference measurements and the reasoning behind the default threshold.
+See [the OpenMP benchmark notes](../docs/openmp-benchmark.md) for the reference
+measurements and threshold rationale.

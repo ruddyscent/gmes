@@ -1,0 +1,95 @@
+{
+  "schema_version": 1,
+  "reference": {
+    "commit": "d87d25afd160d96b1fa0890cacecd90802448d57",
+    "tag": "native-oracle-d87d25a",
+    "observer_tag": "native-oracle-observer-v1",
+    "seed": 115,
+    "capture_steps": [1, 2, 5, 20, 100],
+    "precondition_steps": 2
+  },
+  "correctness": [
+    {"name": "dielectric-1d", "recipe": "homogeneous", "size": [8, 0, 0], "resolution": 4, "material": "dielectric", "complex": false},
+    {"name": "dielectric-2d", "recipe": "homogeneous", "size": [8, 6, 0], "resolution": 4, "material": "dielectric", "complex": false},
+    {"name": "dielectric-3d", "recipe": "homogeneous", "size": [6, 5, 4], "resolution": 3, "material": "dielectric", "complex": false},
+    {"name": "singleton-3d", "recipe": "homogeneous", "size": [0, 0, 0], "resolution": 3, "material": "dielectric", "complex": false},
+    {"name": "bloch-2d", "recipe": "homogeneous", "size": [8, 6, 0], "resolution": 4, "material": "dielectric", "complex": true},
+    {"name": "bloch-3d", "recipe": "homogeneous", "size": [6, 5, 4], "resolution": 3, "material": "drude-4", "complex": true},
+    {"name": "dummy", "recipe": "homogeneous", "size": [5, 5, 4], "resolution": 3, "material": "dummy", "complex": false},
+    {"name": "const", "recipe": "homogeneous", "size": [5, 5, 4], "resolution": 3, "material": "const", "complex": false},
+    {"name": "upml", "recipe": "homogeneous", "size": [5, 5, 4], "resolution": 3, "material": "upml", "complex": false},
+    {"name": "cpml", "recipe": "homogeneous", "size": [5, 5, 4], "resolution": 3, "material": "cpml", "complex": false},
+    {"name": "upml-bloch", "recipe": "homogeneous", "size": [5, 5, 4], "resolution": 3, "material": "upml", "complex": true},
+    {"name": "cpml-bloch", "recipe": "homogeneous", "size": [5, 5, 4], "resolution": 3, "material": "cpml", "complex": true},
+    {"name": "drude-1", "recipe": "homogeneous", "size": [5, 5, 4], "resolution": 3, "material": "drude-1", "complex": false},
+    {"name": "drude-4", "recipe": "homogeneous", "size": [5, 5, 4], "resolution": 3, "material": "drude-4", "complex": false},
+    {"name": "lorentz-1", "recipe": "homogeneous", "size": [5, 5, 4], "resolution": 3, "material": "lorentz-1", "complex": false},
+    {"name": "lorentz-4", "recipe": "homogeneous", "size": [5, 5, 4], "resolution": 3, "material": "lorentz-4", "complex": false},
+    {"name": "lorentz-bloch", "recipe": "homogeneous", "size": [5, 5, 4], "resolution": 3, "material": "lorentz-1", "complex": true},
+    {"name": "dcp-ade", "recipe": "homogeneous", "size": [5, 5, 4], "resolution": 3, "material": "dcp-ade", "complex": false},
+    {"name": "dcp-plrc", "recipe": "homogeneous", "size": [5, 5, 4], "resolution": 3, "material": "dcp-plrc", "complex": false},
+    {"name": "dcp-rc", "recipe": "homogeneous", "size": [5, 5, 4], "resolution": 3, "material": "dcp-rc", "complex": false},
+    {"name": "dcp-ade-bloch", "recipe": "homogeneous", "size": [5, 5, 4], "resolution": 3, "material": "dcp-ade", "complex": true},
+    {"name": "dcp-plrc-bloch", "recipe": "homogeneous", "size": [5, 5, 4], "resolution": 3, "material": "dcp-plrc", "complex": true},
+    {"name": "dcp-rc-bloch", "recipe": "homogeneous", "size": [5, 5, 4], "resolution": 3, "material": "dcp-rc", "complex": true},
+    {"name": "dm2-1", "recipe": "homogeneous", "size": [5, 5, 4], "resolution": 3, "material": "dm2-1", "complex": false},
+    {"name": "dm2-4", "recipe": "homogeneous", "size": [5, 5, 4], "resolution": 3, "material": "dm2-4", "complex": false},
+    {"name": "mixed-2d", "recipe": "mixed", "size": [12, 6, 0], "resolution": 4, "complex": false},
+    {"name": "mixed-3d", "recipe": "mixed", "size": [12, 6, 4], "resolution": 3, "complex": false},
+    {"name": "periodic-3d", "recipe": "homogeneous", "size": [6, 5, 4], "resolution": 3, "material": "dielectric", "complex": false},
+    {"name": "overlapping-sources", "recipe": "homogeneous", "size": [6, 5, 4], "resolution": 3, "material": "dielectric", "source": "overlap-point", "complex": false},
+    {"name": "tfsf-transparent", "recipe": "homogeneous", "size": [4, 4, 4], "resolution": 2, "material": "dielectric", "source": "tfsf", "complex": false},
+    {"name": "gaussian-auxiliary", "recipe": "homogeneous", "size": [4, 4, 4], "resolution": 2, "material": "dielectric", "source": "gaussian", "complex": false}
+  ],
+  "benchmarks": [
+    {"name": "heterogeneous-16-cylinder", "recipe": "heterogeneous", "size": [10, 10, 0], "resolution": 20, "region_count": 16, "complex": false},
+    {"name": "many-small-regions", "recipe": "heterogeneous", "size": [16, 16, 0], "resolution": 10, "region_count": 128, "complex": false},
+    {"name": "heavy-overlap", "recipe": "heterogeneous", "size": [16, 16, 0], "resolution": 10, "region_count": 16, "overlap": true, "complex": false},
+    {"name": "pml-thin", "recipe": "homogeneous", "size": [16, 16, 0], "resolution": 10, "material": "cpml", "pml_thickness": 0.5, "complex": false},
+    {"name": "pml-thick", "recipe": "homogeneous", "size": [16, 16, 0], "resolution": 10, "material": "cpml", "pml_thickness": 3.0, "complex": false},
+    {"name": "coverage-1-contiguous", "recipe": "coverage", "size": [32, 24, 0], "resolution": 4, "coverage_percent": 1, "layout": "contiguous", "complex": false},
+    {"name": "coverage-1-fragmented", "recipe": "coverage", "size": [32, 24, 0], "resolution": 4, "coverage_percent": 1, "layout": "fragmented", "complex": false},
+    {"name": "coverage-10-contiguous", "recipe": "coverage", "size": [32, 24, 0], "resolution": 4, "coverage_percent": 10, "layout": "contiguous", "complex": false},
+    {"name": "coverage-10-fragmented", "recipe": "coverage", "size": [32, 24, 0], "resolution": 4, "coverage_percent": 10, "layout": "fragmented", "complex": false},
+    {"name": "coverage-50-contiguous", "recipe": "coverage", "size": [32, 24, 0], "resolution": 4, "coverage_percent": 50, "layout": "contiguous", "complex": false},
+    {"name": "coverage-50-fragmented", "recipe": "coverage", "size": [32, 24, 0], "resolution": 4, "coverage_percent": 50, "layout": "fragmented", "complex": false},
+    {"name": "coverage-90-contiguous", "recipe": "coverage", "size": [32, 24, 0], "resolution": 4, "coverage_percent": 90, "layout": "contiguous", "complex": false},
+    {"name": "coverage-90-fragmented", "recipe": "coverage", "size": [32, 24, 0], "resolution": 4, "coverage_percent": 90, "layout": "fragmented", "complex": false},
+    {"name": "cpu-crossover-2d", "recipe": "coverage", "size": [16, 16, 0], "resolution": 10, "coverage_percent": 10, "layout": "fragmented", "complex": false},
+    {"name": "cpu-crossover-3d", "recipe": "coverage", "size": [16, 16, 16], "resolution": 4, "coverage_percent": 10, "layout": "fragmented", "complex": false},
+    {"name": "cpu-large-2d", "recipe": "coverage", "size": [64, 64, 0], "resolution": 10, "coverage_percent": 50, "layout": "fragmented", "complex": false},
+    {"name": "cpu-large-3d", "recipe": "coverage", "size": [32, 32, 32], "resolution": 4, "coverage_percent": 50, "layout": "fragmented", "complex": false},
+    {"name": "single-gpu-2d", "recipe": "coverage", "size": [256, 256, 0], "resolution": 4, "coverage_percent": 50, "layout": "fragmented", "complex": false},
+    {"name": "single-gpu-3d", "recipe": "coverage", "size": [96, 96, 96], "resolution": 1, "coverage_percent": 50, "layout": "fragmented", "complex": false},
+    {"name": "two-gpu-2d", "recipe": "coverage", "size": [384, 256, 0], "resolution": 4, "coverage_percent": 50, "layout": "fragmented", "complex": false},
+    {"name": "two-gpu-3d", "recipe": "coverage", "size": [128, 96, 96], "resolution": 1, "coverage_percent": 50, "layout": "fragmented", "complex": false}
+  ],
+  "physical_checks": [
+    {"name": "reflection-transmission-dcp", "recipe": "homogeneous", "size": [40, 0, 0], "resolution": 10, "material": "dcp-plrc", "source_component": "Ey", "capture_steps": [100, 500], "complex": false},
+    {"name": "stability-energy-dielectric", "recipe": "homogeneous", "size": [24, 12, 0], "resolution": 6, "material": "dielectric", "capture_steps": [100, 500, 1000], "complex": false},
+    {"name": "ziolkowski-dm2", "recipe": "homogeneous", "size": [0, 0, 40], "resolution": 10, "material": "dm2-4", "source_component": "Ex", "capture_steps": [100, 500], "complex": false}
+  ],
+  "performance_gates": {
+    "cpu_crossover": {"cases": ["cpu-crossover-2d", "cpu-crossover-3d"], "sizes": [[16, 16, 0], [16, 16, 16]], "resolutions": [10, 4], "repeats": 15, "threads": [1, "physical"]},
+    "cpu_large": {"cases": ["cpu-large-2d", "cpu-large-3d"], "sizes": [[64, 64, 0], [32, 32, 32]], "resolutions": [10, 4], "repeats": 15, "threads": [1, "physical"], "max_individual_regression_percent": 5, "geomean_regression": "not-statistically-meaningful"},
+    "single_gpu": {"cases": ["single-gpu-2d", "single-gpu-3d"], "sizes": [[256, 256, 0], [96, 96, 96]], "resolutions": [4, 1], "repeats": 15, "devices": [0], "large_mixed_minimum_native_cpu_speedup": 2.0},
+    "two_gpu": {"cases": ["two-gpu-2d", "two-gpu-3d"], "sizes": [[384, 256, 0], [128, 96, 96]], "resolutions": [4, 1], "repeats": 15, "devices": [0, 1], "strong_scaling_minimum": 1.6, "weak_scaling_efficiency_minimum": 0.8},
+    "coverage_percent": [1, 10, 50, 90],
+    "layouts": ["contiguous", "fragmented"],
+    "workloads": ["homogeneous-dielectric", "bloch", "heterogeneous-16-cylinder", "many-small", "heavy-overlap", "pml-thin", "pml-thick", "drude-1", "drude-4", "lorentz-1", "lorentz-4", "dcp-ade", "dcp-plrc", "dcp-rc", "dm2-1", "dm2-4", "mixed", "point-source", "tfsf-transparent", "gaussian-beam", "periodic", "bloch"]
+  },
+  "tolerances": {
+    "native": {"float64": {"rtol": 0.0, "atol": 0.0}, "complex128": {"rtol": 0.0, "atol": 0.0}},
+    "torch": {
+      "dielectric": {"float64": {"rtol": 1e-13, "atol": 1e-14}, "complex128": {"rtol": 2e-13, "atol": 2e-14}},
+      "pml": {"float64": {"rtol": 2e-12, "atol": 2e-13}, "complex128": {"rtol": 4e-12, "atol": 4e-13}},
+      "drude": {"float64": {"rtol": 3e-12, "atol": 3e-13}, "complex128": {"rtol": 6e-12, "atol": 6e-13}},
+      "lorentz": {"float64": {"rtol": 3e-12, "atol": 3e-13}, "complex128": {"rtol": 6e-12, "atol": 6e-13}},
+      "dcp-ade": {"float64": {"rtol": 5e-12, "atol": 5e-13}},
+      "dcp-plrc": {"float64": {"rtol": 5e-12, "atol": 5e-13}},
+      "dcp-rc": {"float64": {"rtol": 5e-12, "atol": 5e-13}},
+      "dm2": {"float64": {"rtol": 2e-10, "atol": 2e-12}}
+      ,"mixed": {"float64": {"rtol": 2e-10, "atol": 2e-12}, "complex128": {"rtol": 4e-10, "atol": 4e-12}}
+    }
+  }
+}

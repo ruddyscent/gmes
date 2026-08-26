@@ -175,7 +175,7 @@ class TorchMaterialPlannerBenchmarkTest(unittest.TestCase):
                 counts["fragmented"] / counts["contiguous"], 1.0, delta=0.1
             )
 
-    def test_stateful_matrix_is_plan_only_and_width_normalized(self):
+    def test_stateful_matrix_executes_with_exact_width_normalization(self):
         result = self.benchmark.run_case(
             "state-widths",
             policy="auto",
@@ -190,7 +190,12 @@ class TorchMaterialPlannerBenchmarkTest(unittest.TestCase):
             profile=False,
             gmes=self.gmes,
         )
-        self.assertIn("plan-only", result["execution"])
+        self.assertGreater(result["cells_per_second"], 0)
+        self.assertGreater(result["dispersive_state_bytes"], 0)
+        self.assertEqual(result["state_width_policy"], "exact")
+        self.assertEqual(result["state_padding_elements"], 0)
+        self.assertGreater(result["state_padding_elements_avoided"], 0)
+        self.assertTrue(result["state_width_decisions"])
         electric_widths = {
             tuple(item["state_shape"])
             for item in result["signatures"]
@@ -201,6 +206,29 @@ class TorchMaterialPlannerBenchmarkTest(unittest.TestCase):
             item["model"] for item in result["signatures"] if item["component"] == "Hx"
         }
         self.assertEqual(magnetic_models, {"dielectric"})
+
+    def test_thousand_dispersive_regions_share_signatures_and_launches(self):
+        _, geometry, _, plans, _ = self.benchmark.build_host_plan(
+            "many-dispersive-regions",
+            policy="compact",
+            precision="float64",
+            device_type="cpu",
+            tile_size=64,
+            gmes=self.gmes,
+        )
+        self.assertEqual(len(geometry), 1001)
+        drude_buckets = [
+            bucket
+            for plan in plans
+            for bucket in plan.buckets
+            if bucket.signature.model == "drude"
+        ]
+        self.assertEqual(len(drude_buckets), 3)
+        self.assertTrue(
+            all(len(bucket.coefficient_table) == 1 for bucket in drude_buckets)
+        )
+        self.assertEqual(sum(plan.launch_count for plan in plans), 9)
+        self.assertEqual(sum(bucket.launch_count for bucket in drude_buckets), 3)
 
 
 class TorchDm2BenchmarkTest(unittest.TestCase):

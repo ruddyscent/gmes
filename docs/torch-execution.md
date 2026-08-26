@@ -8,11 +8,11 @@ oracle is needed by the migration.
 
 The executable slice supports serial periodic 1-D, 2-D, and 3-D Cartesian
 domains, simple nondispersive `Dielectric`, `Const`, and `Dummy` geometry,
-real-field `Dm2` Maxwell--Bloch media, UPML and CPML absorbing layers, eager or
-compiled phases, and Bloch-periodic fields for nondispersive and PML families.
-Sources, other dispersive materials, distributed domain decomposition,
-plotting, and solver-owned I/O remain outside this slice and fail during
-construction instead of silently falling back.
+real-field `Dm2` Maxwell--Bloch media, UPML and CPML absorbing layers, Drude,
+Lorentz, and every DCP strategy, and eager or compiled phases. Bloch-periodic
+fields support every family except DM2. Sources, distributed domain
+decomposition, plotting, and solver-owned I/O remain outside this slice and
+fail during construction instead of silently falling back.
 
 ## Mixed-material execution planning
 
@@ -52,7 +52,6 @@ geometry object count does not create per-region launches.
 `simulation.diagnostics()["pml"]` reports active component cells, mutable
 state bytes, and launches per step. Normal stepping uses gather/update/scatter
 over unique targets and performs no host conversion or native fallback.
-Other dispersive geometry remains plan-only until #119 consumes its state
 
 ## DM2 Maxwell--Bloch execution
 
@@ -86,6 +85,36 @@ simulation.load_host_dm2_state(
     step_count=simulation.state.step_count.cpu().item(),
 )
 ```
+PML cells may resolve a dispersive underlying region's base permittivity or
+permeability while non-PML cells retain their exact-width dispersive state.
+Target ownership keeps the two update families disjoint.
+
+## Dispersive state buckets
+
+Drude, Lorentz, DCP ADE, DCP PLRC, and DCP RC electric updates execute from
+the same component plans. Buckets are exact-width by
+`(model, component, real precision, pole count, critical-point count)`; the
+runtime does not merge widths or pad to a grid-wide maximum. Planner
+diagnostics report the actual scalar state width, while the benchmark reports
+`state_width_policy="exact"`, zero padded elements, device state bytes, and
+the elements that a same-family bounded-padding alternative would add. The
+decision record compares exact signature launches/state elements with a
+single-launch bounded max-width merge for later tuning.
+
+Each bucket finalizes recurrence coefficients once as contiguous
+structure-of-arrays tensors. The planner retains shared coefficient rows for
+memory and diagnostics; execution expands those rows once per active target to
+avoid a coefficient-indirection gather on every step. Mutable pole and
+critical-point state is allocated only for the bucket's active cells and stays
+registered in `TorchSimulationState`, so checkpoints include it and normal
+advancement performs no host transfer or per-cell allocation.
+
+Bloch fields and DCP complex accumulators use paired-real tensors. Complex
+multiplication is written explicitly over the final real/imaginary plane, so
+the recurrences do not depend on native complex Inductor support. Dispersive
+magnetic cells continue through the shared simple Dielectric path. Mixed PML
+geometry consumes lowered underlying-region IDs and can coexist with every
+dispersive family without a native fallback.
 
 ## Install a wheel variant
 

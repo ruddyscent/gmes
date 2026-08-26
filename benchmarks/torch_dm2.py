@@ -20,6 +20,8 @@ CASES = (
     "coverage-10-fragmented",
     "coverage-50-contiguous",
     "coverage-50-fragmented",
+    "all-material-2d",
+    "all-material-3d",
     "hard-nonconverging",
 )
 
@@ -77,8 +79,41 @@ def _coverage_geometry(gmes, coverage, layout):
     return geometry
 
 
+def _all_material_geometry(gmes, *, three_dimensional):
+    poles = (gmes.DrudePole(omega=0.7, gamma=0.03),)
+    lorentz_poles = (gmes.LorentzPole(amp=0.05, omega=0.9, gamma=0.04),)
+    points = (gmes.CriticalPoint(amp=0.04, phi=0.2, omega=0.9, gamma=0.03),)
+    materials = (
+        gmes.Drude(eps_inf=1.2, dps=poles),
+        gmes.Lorentz(eps_inf=1.25, lps=lorentz_poles),
+        gmes.DcpAde(eps_inf=1.3, dps=poles, cps=points),
+        gmes.DcpPlrc(eps_inf=1.35, dps=poles, cps=points),
+        gmes.DcpRc(eps_inf=1.4, dps=poles, cps=points),
+        _material(gmes, 4),
+    )
+    depth = 3.5 if three_dimensional else 1
+    geometry = _default_geometry(gmes)
+    geometry.extend(
+        gmes.Block(
+            material,
+            center=(-5 + 2 * index, 0, 0),
+            size=(1.8, 5.5, depth),
+        )
+        for index, material in enumerate(materials)
+    )
+    geometry.append(gmes.Shell(gmes.Cpml(), thickness=0.5))
+    return geometry
+
+
 def build_case(case, gmes):
     """Return a fixed 2-D DM2 workload."""
+    if case in {"all-material-2d", "all-material-3d"}:
+        three_dimensional = case.endswith("3d")
+        space = gmes.Cartesian(
+            (12, 6, 4 if three_dimensional else 0),
+            2 if three_dimensional else 4,
+        )
+        return space, _all_material_geometry(gmes, three_dimensional=three_dimensional)
     space = gmes.Cartesian((8, 8, 0), 6)
     if case.startswith("width-"):
         width = int(case.split("-")[1])
@@ -204,6 +239,13 @@ def run_case(args, gmes):
 
     state = _state_metrics(simulation)
     diagnostics = simulation.diagnostics()
+    material_models = sorted(
+        {
+            bucket.signature.model
+            for component in simulation.plan.components.values()
+            for bucket in component.buckets
+        }
+    )
     result = {
         "case": args.case,
         "device": str(simulation.device),
@@ -222,6 +264,12 @@ def run_case(args, gmes):
         "iteration_distributions": diagnostics.get("dm2", ()),
         "peak_rss_bytes": _peak_rss_bytes(),
         "fixed_storage": True,
+        "material_models": material_models,
+        "material_diagnostics": {
+            name: diagnostics[name]
+            for name in ("pml", "dispersive")
+            if name in diagnostics
+        },
         "hard_failure_observed": bool(
             hard and np.any(simulation.state._dm2_status.cpu().numpy())
         ),

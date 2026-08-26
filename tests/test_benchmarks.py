@@ -279,6 +279,40 @@ class TorchDm2BenchmarkTest(unittest.TestCase):
             metrics["bounded_padding_elements"],
         )
 
+    def test_all_material_cases_execute_in_2d_and_3d(self):
+        expected_models = {
+            "cpml",
+            "dcp-ade",
+            "dcp-plrc",
+            "dcp-rc",
+            "dielectric",
+            "dm2",
+            "drude",
+            "lorentz",
+        }
+        for case in ("all-material-2d", "all-material-3d"):
+            with self.subTest(case=case):
+                space, geometry = self.benchmark.build_case(case, self.gmes)
+                simulation = self.gmes.TorchSimulation(
+                    space=space,
+                    geometry=geometry,
+                    runtime=self.gmes.TorchRuntimeConfig(device="cpu", cpu_threads=1),
+                )
+                simulation.step()
+                models = {
+                    bucket.signature.model
+                    for component in simulation.plan.components.values()
+                    for bucket in component.buckets
+                }
+                self.assertTrue(expected_models.issubset(models))
+                diagnostics = simulation.diagnostics()
+                self.assertTrue(diagnostics["dm2"])
+                self.assertGreater(diagnostics["pml"]["active_cells"], 0)
+                self.assertEqual(
+                    set(diagnostics["dispersive"]["models"]),
+                    {"dcp-ade", "dcp-plrc", "dcp-rc", "drude", "lorentz"},
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

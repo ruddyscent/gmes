@@ -367,6 +367,8 @@ def _model_and_state(material, component):
     if isinstance(material, DcpPlrc):
         return "dcp-plrc", (len(material.dps), len(material.cps))
     if isinstance(material, Dm2):
+        if len(material.omega) != len(material.n_atom):
+            raise ValueError("Dm2 omega and n_atom must have equal lengths")
         return "dm2", (len(material.omega),)
     return f"custom:{type(material).__module__}.{type(material).__qualname__}", ()
 

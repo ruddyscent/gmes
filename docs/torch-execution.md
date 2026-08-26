@@ -6,12 +6,13 @@ the destination, not one selectable backend, so this API has no
 surface. The native classes remain temporarily available only while the frozen
 oracle is needed by the migration.
 
-The current slice supports serial periodic 1-D, 2-D, and 3-D Cartesian
-domains, nondispersive `Dielectric`, `Const`, and `Dummy` geometry, UPML
-and CPML absorbing layers, Drude, Lorentz, and every DCP strategy, eager or
-compiled electric and magnetic phases, and real or Bloch-periodic fields.
-Sources, DM2, distributed domain decomposition, plotting, and solver-owned I/O
-remain outside this slice and fail during construction instead of silently falling back.
+The executable slice supports serial periodic 1-D, 2-D, and 3-D Cartesian
+domains, simple nondispersive `Dielectric`, `Const`, and `Dummy` geometry,
+real-field `Dm2` Maxwell--Bloch media, UPML and CPML absorbing layers, Drude,
+Lorentz, and every DCP strategy, and eager or compiled phases. Bloch-periodic
+fields support every family except DM2. Sources, distributed domain
+decomposition, plotting, and solver-owned I/O remain outside this slice and
+fail during construction instead of silently falling back.
 
 ## Mixed-material execution planning
 
@@ -51,6 +52,39 @@ geometry object count does not create per-region launches.
 `simulation.diagnostics()["pml"]` reports active component cells, mutable
 state bytes, and launches per step. Normal stepping uses gather/update/scatter
 over unique targets and performs no host conversion or native fallback.
+
+## DM2 Maxwell--Bloch execution
+
+Electric DM2 cells are bucketed by component, real precision, and exact
+transition count. Each bucket expands immutable coefficients once into
+contiguous structure-of-arrays tensors and allocates transformed Bloch state
+only for its active targets. Mutable state and predictor--corrector scratch
+remain device-resident at fixed addresses; magnetic DM2 behavior shares the
+ordinary dielectric path.
+
+The corrector uses a device bool mask and a fixed schedule of ten compiled
+chunks with ten iterations each. Converged targets retain their field and
+state while unconverged targets continue, with the native 100-iteration limit,
+zero-reference relative error, NaN handling, and tolerance semantics
+preserved. There is no `.item()` or host decision inside this schedule. After
+all DM2 buckets finish, one compact status tensor crosses the diagnostic
+boundary; failures identify the component, transition width, and flattened
+targets without overwriting failed state. Successful runs expose per-bucket
+iteration distributions through `simulation.diagnostics()["dm2"]`.
+
+DM2 supports real fields only. Construction rejects a DM2 geometry combined
+with a Bloch vector instead of silently changing the field representation.
+Explicit state I/O is cell-major:
+
+```python
+state = simulation.dm2_state_snapshot()
+# Each record contains targets, transformed u/v/w, physical rho, and time.
+
+simulation.load_host_dm2_state(
+    [record["u"] for record in state],
+    step_count=simulation.state.step_count.cpu().item(),
+)
+```
 PML cells may resolve a dispersive underlying region's base permittivity or
 permeability while non-PML cells retain their exact-width dispersive state.
 Target ownership keeps the two update families disjoint.
@@ -80,7 +114,7 @@ multiplication is written explicitly over the final real/imaginary plane, so
 the recurrences do not depend on native complex Inductor support. Dispersive
 magnetic cells continue through the shared simple Dielectric path. Mixed PML
 geometry consumes lowered underlying-region IDs and can coexist with every
-dispersive family without a native fallback. DM2 remains follow-up work.
+dispersive family without a native fallback.
 
 ## Install a wheel variant
 
@@ -165,6 +199,8 @@ pml_state = simulation.state.pml_state_snapshot() # active PML cells only
 simulation.state.load_checkpoint(checkpoint)   # in-place; buffer addresses stay fixed
 ```
 
-Normal advancement does not call `.cpu()`, `.numpy()`, or `.item()`. Use
+Nondispersive advancement does not call `.cpu()`, `.numpy()`, or `.item()`.
+DM2 performs only the single post-electric status transfer described above;
+its predictor--corrector itself has no host synchronization. Use
 `buffer_addresses()` only as an explicit diagnostic when checking fixed
 storage for CUDA graph capture.

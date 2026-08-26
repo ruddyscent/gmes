@@ -21,6 +21,10 @@ def load_torch_material_planner():
     return _load_benchmark("torch_material_planner.py")
 
 
+def load_torch_dm2():
+    return _load_benchmark("torch_dm2.py")
+
+
 class FieldUpdateBenchmarkTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -225,6 +229,89 @@ class TorchMaterialPlannerBenchmarkTest(unittest.TestCase):
         )
         self.assertEqual(sum(plan.launch_count for plan in plans), 9)
         self.assertEqual(sum(bucket.launch_count for bucket in drude_buckets), 3)
+
+
+class TorchDm2BenchmarkTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        import gmes
+
+        cls.gmes = gmes
+        cls.benchmark = load_torch_dm2()
+
+    def test_reports_state_convergence_and_fixed_storage(self):
+        args = self.benchmark.parse_args(
+            [
+                "--case",
+                "width-1",
+                "--compile-policy",
+                "eager",
+                "--warmup",
+                "1",
+                "--steps",
+                "1",
+                "--repeats",
+                "1",
+            ]
+        )
+        result = self.benchmark.run_case(args, self.gmes)
+
+        self.assertTrue(result["fixed_storage"])
+        self.assertGreater(result["dm2_cells_per_second"], 0)
+        self.assertGreater(result["state"]["persistent_state_bytes"], 0)
+        self.assertGreater(result["state"]["scratch_bytes"], 0)
+        self.assertEqual(result["state"]["transition_widths"], [1])
+        self.assertTrue(result["iteration_distributions"])
+
+    def test_mixed_widths_report_exact_and_padding_tradeoff(self):
+        space, geometry = self.benchmark.build_case("mixed-widths", self.gmes)
+        simulation = self.gmes.TorchSimulation(
+            space=space,
+            geometry=geometry,
+            runtime=self.gmes.TorchRuntimeConfig(device="cpu", cpu_threads=1),
+        )
+        metrics = self.benchmark._state_metrics(simulation)
+
+        self.assertEqual(metrics["transition_widths"], [1, 2, 4, 8])
+        self.assertGreater(metrics["bounded_padding_overhead"], 1)
+        self.assertLess(
+            metrics["exact_transition_elements"],
+            metrics["bounded_padding_elements"],
+        )
+
+    def test_all_material_cases_execute_in_2d_and_3d(self):
+        expected_models = {
+            "cpml",
+            "dcp-ade",
+            "dcp-plrc",
+            "dcp-rc",
+            "dielectric",
+            "dm2",
+            "drude",
+            "lorentz",
+        }
+        for case in ("all-material-2d", "all-material-3d"):
+            with self.subTest(case=case):
+                space, geometry = self.benchmark.build_case(case, self.gmes)
+                simulation = self.gmes.TorchSimulation(
+                    space=space,
+                    geometry=geometry,
+                    runtime=self.gmes.TorchRuntimeConfig(device="cpu", cpu_threads=1),
+                )
+                simulation.step()
+                models = {
+                    bucket.signature.model
+                    for component in simulation.plan.components.values()
+                    for bucket in component.buckets
+                }
+                self.assertTrue(expected_models.issubset(models))
+                diagnostics = simulation.diagnostics()
+                self.assertTrue(diagnostics["dm2"])
+                self.assertGreater(diagnostics["pml"]["active_cells"], 0)
+                self.assertEqual(
+                    set(diagnostics["dispersive"]["models"]),
+                    {"dcp-ade", "dcp-plrc", "dcp-rc", "drude", "lorentz"},
+                )
 
 
 if __name__ == "__main__":

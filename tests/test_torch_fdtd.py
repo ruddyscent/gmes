@@ -187,7 +187,11 @@ class TorchStateTest(unittest.TestCase):
         self.assertEqual(list(simulation.state.parameters()), [])
         for name, value in simulation.state.named_buffers():
             self.assertEqual(value.device.type, "cpu", name)
-            if name == "step_count" or "targets" in name or "tile_origins" in name:
+            if name == "_dm2_status":
+                expected_dtype = torch.int8
+            elif name == "_dm2_iterations":
+                expected_dtype = torch.int32
+            elif name == "step_count" or "targets" in name or "tile_origins" in name:
                 expected_dtype = torch.int64
             elif any(
                 marker in name

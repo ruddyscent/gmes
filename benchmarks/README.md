@@ -135,10 +135,38 @@ Add `--device cuda:0 --precision float32 --profile` for the single-GPU matrix.
 CUDA is synchronized only at measurement boundaries. The profiler record
 includes operation counts and positive allocation events; generated JSON and
 trace artifacts belong in `/tmp` or CI artifacts, not the repository.
-PML and dispersive cases execute eagerly or with compiled bulk/PML phases.
-Results include exact-width state bytes, the bounded-padding alternative's
-element count, avoided padding, and signature-bounded launch counts; use
-`--native-reference` on CPU to record the native step ratio.
+PML, dispersive, and DM2 cases execute eagerly or with compiled bulk/PML
+phases. Results include exact-width state bytes, the bounded-padding
+alternative's element count, avoided padding, and signature-bounded launch
+counts; use `--native-reference` on CPU to record the native step ratio.
+
+## Torch DM2 matrix
+
+`torch_dm2.py` executes the DM2 state equations over exact transition widths
+1, 4, and 8; a mixed 1/2/4/8-width case; 10 and 50 percent contiguous and
+fragmented coverage; all-material 2-D and 3-D workloads combining Dielectric,
+CPML, Drude, Lorentz, every DCP strategy, and DM2; and a deliberately
+nonconverging workload. It reports
+cells/s, persistent and scratch bytes, fixed-address validation, actual
+iteration distributions, deterministic failure status, and the exact-width
+versus bounded-padding storage/arithmetic ratio.
+
+```sh
+uv run --no-sync python benchmarks/torch_dm2.py \
+  --case mixed-widths --compile-policy compile \
+  --warmup 2 --steps 10 --repeats 5
+
+uv run --no-sync python benchmarks/torch_dm2.py \
+  --case hard-nonconverging --device cuda:0 --precision float32
+
+uv run --no-sync python benchmarks/torch_dm2.py \
+  --case all-material-3d --compile-policy compile
+```
+
+Run all forced planner policies for differential checks and repeat the matrix
+on CPU with one/tuned threads and on CUDA in eager/compiled modes. CUDA is
+synchronized only at measurement boundaries; generated JSON belongs in
+`/tmp` or CI artifacts.
 
 ## Existing native microbenchmarks
 

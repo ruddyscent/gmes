@@ -14,7 +14,15 @@ import torch
 
 COMPONENTS = ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")
 EXECUTABLE_CASES = frozenset(
-    ("homogeneous", "heterogeneous-16", "many-regions", "collapsed-bloch")
+    (
+        "homogeneous",
+        "heterogeneous-16",
+        "many-regions",
+        "collapsed-bloch",
+        "pml-thin",
+        "pml-thick",
+        "pml-mixed",
+    )
 )
 CASES = (
     "homogeneous",
@@ -30,6 +38,9 @@ CASES = (
     "coverage-fragmented-90",
     "state-widths",
     "collapsed-bloch",
+    "pml-thin",
+    "pml-thick",
+    "pml-mixed",
 )
 
 
@@ -163,6 +174,23 @@ def build_case(case, gmes):
             _heterogeneous_geometry(gmes),
             (0.07, 0, 0),
         )
+    if case in {"pml-thin", "pml-thick", "pml-mixed"}:
+        geometry = _default_geometry(gmes)
+        if case == "pml-mixed":
+            geometry.append(
+                gmes.Block(
+                    material=gmes.Dielectric(eps_inf=3.2, mu_inf=1.15),
+                    center=(0, 0, 0),
+                    size=(6, 6, 1),
+                )
+            )
+        geometry.append(
+            gmes.Shell(
+                material=gmes.Cpml(),
+                thickness=0.5 if case != "pml-thick" else 3.0,
+            )
+        )
+        return gmes.Cartesian((16, 16, 0), 10), geometry, None
     raise ValueError(f"unknown planner benchmark case: {case}")
 
 
@@ -272,6 +300,12 @@ def _profile(simulation, steps):
     events = profile.key_averages()
     return {
         "event_count": sum(event.count for event in events),
+        "gather_count": sum(
+            event.count for event in events if "index_select" in event.key
+        ),
+        "scatter_count": sum(
+            event.count for event in events if "index_copy" in event.key
+        ),
         "positive_self_memory_events": sum(
             event.count for event in events if event.self_cpu_memory_usage > 0
         ),
@@ -423,6 +457,12 @@ def run_case(
             ),
         }
     )
+    pml = simulation.diagnostics()["pml"]
+    scalar_width = 2 if simulation.state.paired_real else 1
+    pml["gather_scatter_bytes_per_step"] = (
+        pml["active_cells"] * 6 * scalar_width * simulation.state.ex.element_size()
+    )
+    result["pml"] = pml
     if profile:
         result["profile"] = _profile(simulation, max(1, min(steps, 5)))
     return result

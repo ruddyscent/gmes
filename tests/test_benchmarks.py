@@ -126,6 +126,29 @@ class TorchMaterialPlannerBenchmarkTest(unittest.TestCase):
             {"dense"},
         )
 
+    def test_pml_benchmark_reports_execution_and_storage_metrics(self):
+        result = self.benchmark.run_case(
+            "pml-thin",
+            policy="auto",
+            device="cpu",
+            precision="float64",
+            compile_policy="eager",
+            threads=1,
+            warmup=0,
+            steps=1,
+            repeats=1,
+            tile_size=64,
+            profile=True,
+            gmes=self.gmes,
+        )
+        self.assertGreater(result["cells_per_second"], 0)
+        self.assertGreater(result["pml"]["active_cells"], 0)
+        self.assertGreater(result["pml"]["state_bytes"], 0)
+        self.assertGreater(result["pml"]["gather_scatter_bytes_per_step"], 0)
+        self.assertEqual(result["pml"]["launches_per_step"], 6)
+        self.assertGreater(result["profile"]["gather_count"], 0)
+        self.assertGreater(result["profile"]["scatter_count"], 0)
+
     def test_fragmented_coverage_matches_contiguous_target_counts(self):
         for coverage in (1, 10, 50, 90):
             counts = {}

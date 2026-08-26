@@ -344,7 +344,6 @@ def _update_dcp_convolution(plan, state, descriptor):
     point_state.copy_(point_work)
 
 
-@torch.inference_mode()
 def update_bucket(plan, state, descriptor):
     """Apply one exact-width bucket with unique indexed destinations."""
     field, targets = _prepare_curl(plan, state, descriptor)

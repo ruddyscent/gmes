@@ -6,14 +6,71 @@ the destination, not one selectable backend, so this API has no
 surface. The native classes remain temporarily available only while the frozen
 oracle is needed by the migration.
 
-The executable slice supports serial periodic 1-D, 2-D, and 3-D Cartesian
+The executable slice supports periodic 1-D, 2-D, and 3-D Cartesian
 domains, simple nondispersive `Dielectric`, `Const`, and `Dummy` geometry,
 real-field `Dm2` Maxwell--Bloch media, UPML and CPML absorbing layers, Drude,
 Lorentz, and every DCP strategy, and eager or compiled phases. Bloch-periodic
 fields support every family except DM2. Point/current, TFSF, Transparent, and
-Gaussian-beam sources are device-resident. Distributed domain decomposition,
-plotting, and solver-owned hot-path I/O remain outside this slice and fail
-during construction instead of silently falling back.
+Gaussian-beam sources are device-resident. Plotting and solver-owned hot-path
+I/O remain outside this slice and fail during construction instead of silently
+falling back. On Linux, one physical domain may be split across exactly two
+local CUDA ranks through `TorchDistributedSimulation` and NCCL.
+
+## Two-GPU spatial decomposition
+
+Start exactly one process per visible GPU. Each process resolves the four
+`torchrun` rank variables, binds exclusively to `cuda:LOCAL_RANK`, sets the
+current CUDA device, and initializes NCCL with that device before creating a
+simulation:
+
+```python
+import gmes
+
+launch = gmes.distributed_launch_from_environment()
+runtime = gmes.TorchRuntimeConfig(
+    device=f"cuda:{launch.local_rank}",
+    precision="float32",
+    compile_policy="compile",
+    cpu_threads=1,
+    launch=launch,
+)
+simulation = gmes.TorchDistributedSimulation(
+    space=gmes.Cartesian((128, 96, 96), 1),
+    geometry=[gmes.DefaultMedium(gmes.Dielectric(eps_inf=1.7))],
+    runtime=runtime,
+)
+simulation.capture_cuda_graphs()  # optional fixed-storage throughput setup
+simulation.advance(100)
+global_fields = simulation.global_field_snapshot()  # rank 0 only by default
+simulation.close()
+```
+
+The decomposition scores every possible Cartesian cut using local material
+and mutable-state cost, measured device weights, source crossings,
+communication surface, and whether halo planes require strided packing. Odd
+and non-divisible sizes use explicit global offsets. Yee ownership is unique:
+rank 0 owns the low-side electric interface and rank 1 owns the high-side
+magnetic interface. Point sources, TFSF faces, and probes are filtered by the
+same ownership maps. A bounded TFSF incident-field auxiliary solver is
+replicated on the same rank-local device because it is not the physical main
+domain and its global sample coordinates must remain identical.
+
+Each half step packs persistent CUDA send buffers, starts paired NCCL sends and
+receives with `batch_isend_irecv`, runs the independent dense update, waits at
+the first halo consumer, applies the interface correction, and then runs PML,
+dispersive, DM2, source, and probe updates. No halo uses CPU staging or Python
+object serialization. `capture_cuda_graphs()` captures only fixed rank-local
+compute regions; NCCL, boundary exchange, sources, diagnostics, and I/O stay
+outside the graphs.
+
+The default permits a topology-qualified NCCL transport when CUDA peer access
+is unavailable, as on a PCIe PHB path. Pass `require_peer_access=True` to make
+direct peer access mandatory. Construction validates two visible devices, one
+unique local rank per device, NCCL, matching precision, and identical
+decomposition metadata. `diagnostics()` records rank binding, device model and
+memory, CUDA/PyTorch/NCCL versions, peer access, local shape, and persistent
+halo bytes. A distributed checkpoint is rank-local and validates all ranks
+collectively before any state is restored.
 
 ## Mixed-material execution planning
 

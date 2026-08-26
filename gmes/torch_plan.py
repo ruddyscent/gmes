@@ -23,6 +23,9 @@ from .material import (
 COMPONENTS = ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")
 ELECTRIC_COMPONENTS = frozenset(("Ex", "Ey", "Ez"))
 COMPONENT_TYPES = {"Ex": Ex, "Ey": Ey, "Ez": Ez, "Hx": Hx, "Hy": Hy, "Hz": Hz}
+SINGLE_BUCKET_MODELS = frozenset(
+    ("upml", "cpml", "drude", "lorentz", "dcp-ade", "dcp-plrc", "dcp-rc")
+)
 EXECUTION_POLICIES = frozenset(("auto", "dense", "compact", "tiled"))
 
 
@@ -67,6 +70,9 @@ class MaterialBucketPlan:
     fragmentation: float
     target_count: int
     state_width: int
+    padded_state_width: int
+    padding_elements_avoided: int
+    width_decision: str
     coefficient_names: tuple
     targets: np.ndarray
     target_region_indices: np.ndarray
@@ -128,10 +134,10 @@ class MaterialBucketPlan:
         """Return the steady-state material launch estimate for this signature."""
         if self.target_count == 0 or self.signature.model == "dummy":
             return 0
-        if self.selected_policy == "tiled" and self.signature.model not in {
-            "upml",
-            "cpml",
-        }:
+        if (
+            self.selected_policy == "tiled"
+            and self.signature.model not in SINGLE_BUCKET_MODELS
+        ):
             return len(self.tile_origins)
         return 1
 
@@ -262,6 +268,10 @@ class ComponentPlan:
                     "targets": bucket.target_count,
                     "occupancy": bucket.occupancy,
                     "fragmentation": bucket.fragmentation,
+                    "state_width": bucket.state_width,
+                    "padded_state_width": bucket.padded_state_width,
+                    "padding_elements_avoided": bucket.padding_elements_avoided,
+                    "width_decision": bucket.width_decision,
                     "estimated_costs": dict(bucket.estimated_costs),
                     "estimated_bytes": bucket.estimated_bytes,
                     "coefficient_rows": len(bucket.coefficient_table),
@@ -384,28 +394,39 @@ def _coefficient_descriptor(material, component, underlying):
         if model == "cpml":
             names.extend(("m_a", "a_max"))
             values.extend((float(material.m_a), float(material.a_max)))
-    elif model in {"drude", "dcp-ade", "dcp-plrc", "dcp-rc"}:
-        names.append("sigma")
-        values.append(float(material.sigma))
-        for index, pole in enumerate(material.dps):
-            names.extend((f"dp{index}_omega", f"dp{index}_gamma"))
-            values.extend((pole.omega, pole.gamma))
-        for index, point in enumerate(getattr(material, "cps", ())):
-            names.extend(
-                (
-                    f"cp{index}_amp",
-                    f"cp{index}_phi",
-                    f"cp{index}_omega",
-                    f"cp{index}_gamma",
-                )
-            )
-            values.extend((point.amp, point.phi, point.omega, point.gamma))
-    elif model == "lorentz":
-        names.append("sigma")
-        values.append(float(material.sigma))
-        for index, pole in enumerate(material.lps):
-            names.extend((f"lp{index}_amp", f"lp{index}_omega", f"lp{index}_gamma"))
-            values.extend((pole.amp, pole.omega, pole.gamma))
+    elif model in {"drude", "lorentz"}:
+        for pole, row in enumerate(material.a):
+            for term, value in enumerate(row):
+                names.append(f"a{pole}_{term}")
+                values.append(float(value))
+        for term, value in enumerate(material.c):
+            names.append(f"c{term}")
+            values.append(float(value))
+    elif model == "dcp-ade":
+        for pole, row in enumerate(material.a):
+            for term, value in enumerate(row):
+                names.append(f"a{pole}_{term}")
+                values.append(float(value))
+        for point, row in enumerate(material.b):
+            for term, value in enumerate(row):
+                names.append(f"b{point}_{term}")
+                values.append(float(value))
+        for term, value in enumerate(material.c):
+            names.append(f"c{term}")
+            values.append(float(value))
+    elif model in {"dcp-plrc", "dcp-rc"}:
+        for pole, row in enumerate(material.a):
+            for term, value in enumerate(row):
+                names.append(f"a{pole}_{term}")
+                values.append(float(value))
+        for point, row in enumerate(material.b):
+            for term, value in enumerate(row):
+                value = complex(value)
+                names.extend((f"b{point}_{term}_real", f"b{point}_{term}_imag"))
+                values.extend((value.real, value.imag))
+        for term, value in enumerate(material.c):
+            names.append(f"c{term}")
+            values.append(float(value))
     elif model == "dm2":
         names.extend(("rho30", "gamma", "t1", "t2", "hbar", "rtol"))
         values.extend(
@@ -516,6 +537,18 @@ def _pml_stencil_indices(component, targets, target_shape, shapes):
     return np.column_stack(columns)
 
 
+def _state_width(signature):
+    if signature.model in {"drude", "lorentz"}:
+        return 2 * signature.state_shape[0]
+    if signature.model == "dcp-ade":
+        poles, points = signature.state_shape
+        return 1 + 2 * poles + 2 * points
+    if signature.model in {"dcp-plrc", "dcp-rc"}:
+        poles, points = signature.state_shape
+        return poles + 2 * points
+    return int(sum(signature.state_shape))
+
+
 def _select_policy(requested, *, device_type, count, active_count, runs, tiles, width):
     occupancy = count / active_count if active_count else 0.0
     fragmentation = runs / count if count else 0.0
@@ -608,6 +641,37 @@ class TorchExecutionPlanner:
         unique_signatures = tuple(
             sorted({signatures[index] for index in flat_material[active_targets]})
         )
+        signature_widths = {
+            signature: _state_width(signature) for signature in unique_signatures
+        }
+        padded_widths = {}
+        signature_counts = {}
+        width_groups = {}
+        for signature, width in signature_widths.items():
+            key = (signature.model, signature.component, signature.precision)
+            padded_widths[key] = max(padded_widths.get(key, 0), width)
+            width_groups.setdefault(key, []).append(signature)
+            region_ids = np.asarray(
+                [index for index, item in enumerate(signatures) if item == signature],
+                dtype=np.int32,
+            )
+            signature_counts[signature] = int(
+                np.count_nonzero(np.isin(flat_material[active_targets], region_ids))
+            )
+        width_decisions = {}
+        for key, group in width_groups.items():
+            exact_elements = sum(
+                signature_counts[item] * signature_widths[item] for item in group
+            )
+            padded_elements = (
+                sum(signature_counts[item] for item in group) * padded_widths[key]
+            )
+            width_decisions[key] = (
+                f"exact selected: {len(group)} signature launch(es), "
+                f"{exact_elements} state elements; bounded max-width merge: "
+                f"1 launch, {padded_elements} elements "
+                f"(+{padded_elements - exact_elements})"
+            )
         ownership = np.full(total, -1, dtype=np.int16)
         dense_inverse = np.zeros(total, dtype=np.float64)
         buckets = []
@@ -684,7 +748,11 @@ class TorchExecutionPlanner:
                 if not len(targets)
                 else 1 + int(np.count_nonzero(np.diff(selected_positions) != 1))
             )
-            state_width = int(sum(signature.state_shape))
+            state_width = signature_widths[signature]
+            padded_state_width = padded_widths[
+                (signature.model, signature.component, signature.precision)
+            ]
+            padding_elements_avoided = len(targets) * (padded_state_width - state_width)
             selected_policy, reason, costs, occupancy, fragmentation = _select_policy(
                 self.policy,
                 device_type=self.device_type,
@@ -744,6 +812,11 @@ class TorchExecutionPlanner:
                     fragmentation=fragmentation,
                     target_count=len(targets),
                     state_width=state_width,
+                    padded_state_width=padded_state_width,
+                    padding_elements_avoided=padding_elements_avoided,
+                    width_decision=width_decisions[
+                        (signature.model, signature.component, signature.precision)
+                    ],
                     coefficient_names=descriptor_names or (),
                     targets=_readonly(targets, np.int64),
                     target_region_indices=_readonly(target_region_indices, np.int32),

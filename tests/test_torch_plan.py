@@ -135,6 +135,10 @@ class ComponentPlanTest(unittest.TestCase):
             bucket for bucket in drude if bucket.signature.state_shape == (1,)
         )
         self.assertGreaterEqual(len(width_one.region_keys), 2)
+        self.assertEqual(width_one.state_width, 2)
+        self.assertEqual(width_one.padded_state_width, 8)
+        self.assertGreater(width_one.padding_elements_avoided, 0)
+        self.assertIn("bounded max-width merge", width_one.width_decision)
         self.assertTrue(
             all(bucket.selected_policy == "tiled" for bucket in electric.buckets)
         )

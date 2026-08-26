@@ -569,6 +569,16 @@ def run_case(
                 if device_type == "cuda"
                 else 0
             ),
+            "timing_scope": {
+                "included": ("advance", "device_synchronize"),
+                "excluded_host_boundaries": (
+                    "host_snapshot",
+                    "flush_probes",
+                    "probe_spectrum",
+                    "write_probe_text",
+                    "checkpoint",
+                ),
+            },
         }
     )
     pml = simulation.diagnostics()["pml"]

@@ -152,6 +152,13 @@ class TorchMaterialPlannerBenchmarkTest(unittest.TestCase):
         self.assertEqual(result["pml"]["launches_per_step"], 6)
         self.assertGreater(result["profile"]["gather_count"], 0)
         self.assertGreater(result["profile"]["scatter_count"], 0)
+        self.assertEqual(
+            result["timing_scope"]["included"], ("advance", "device_synchronize")
+        )
+        self.assertIn(
+            "flush_probes",
+            result["timing_scope"]["excluded_host_boundaries"],
+        )
 
     def test_fragmented_coverage_matches_contiguous_target_counts(self):
         for coverage in (1, 10, 50, 90):

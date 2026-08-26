@@ -10,9 +10,10 @@ The executable slice supports serial periodic 1-D, 2-D, and 3-D Cartesian
 domains, simple nondispersive `Dielectric`, `Const`, and `Dummy` geometry,
 real-field `Dm2` Maxwell--Bloch media, UPML and CPML absorbing layers, Drude,
 Lorentz, and every DCP strategy, and eager or compiled phases. Bloch-periodic
-fields support every family except DM2. Sources, distributed domain
-decomposition, plotting, and solver-owned I/O remain outside this slice and
-fail during construction instead of silently falling back.
+fields support every family except DM2. Point/current, TFSF, Transparent, and
+Gaussian-beam sources are device-resident. Distributed domain decomposition,
+plotting, and solver-owned hot-path I/O remain outside this slice and fail
+during construction instead of silently falling back.
 
 ## Mixed-material execution planning
 
@@ -66,11 +67,12 @@ The corrector uses a device bool mask and a fixed schedule of ten compiled
 chunks with ten iterations each. Converged targets retain their field and
 state while unconverged targets continue, with the native 100-iteration limit,
 zero-reference relative error, NaN handling, and tolerance semantics
-preserved. There is no `.item()` or host decision inside this schedule. After
-all DM2 buckets finish, one compact status tensor crosses the diagnostic
-boundary; failures identify the component, transition width, and flattened
-targets without overwriting failed state. Successful runs expose per-bucket
-iteration distributions through `simulation.diagnostics()["dm2"]`.
+preserved. There is no `.item()` or host decision inside this schedule. Device-side
+asynchronous assertions validate each bucket's status without transferring a
+status tensor during successful advancement; failures identify the component
+and transition-width bucket without overwriting failed state. The explicit
+`simulation.diagnostics()["dm2"]` boundary transfers iteration counts and
+reports their per-bucket distributions.
 
 DM2 supports real fields only. Construction rejects a DM2 geometry combined
 with a Bloch vector instead of silently changing the field representation.
@@ -115,6 +117,55 @@ the recurrences do not depend on native complex Inductor support. Dispersive
 magnetic cells continue through the shared simple Dielectric path. Mixed PML
 geometry consumes lowered underlying-region IDs and can coexist with every
 dispersive family without a native fallback.
+
+## Sources, probes, and checkpoints
+
+Pass legacy built-in sources through the explicit `sources` argument. Point
+and current targets are normalized once with the native last-source-wins
+overlap rule, then grouped by Yee component. Continuous, bandpass, and
+differentiated-Gaussian oscillators execute from tensor parameters at the
+native electric and magnetic half-step times. TFSF faces are consolidated by
+unique target; their auxiliary Torch solver uses the parent's device, real
+precision, timestep, and paired-real layout. Gaussian modes are lowered during
+construction and their envelope remains tensor-native.
+
+A third-party source must implement `lower_torch_source(context)` and return
+`TorchPointSourceRecord` values. The lowering hook runs once during
+construction. Arbitrary legacy callbacks and `PointSource(filename=...)`
+are rejected rather than entering or graph-breaking `advance()`.
+
+`TorchProbeSpec` creates a fixed-capacity device ring. When a producer
+outpaces explicit flushing, the ring overwrites its oldest values and reports
+the dropped count; it never grows. `flush_probes()`, `host_snapshot()`,
+`probe_spectrum()`, and `write_probe_text()` are explicit synchronization/output
+boundaries and are not called by the solver phases.
+
+Use the simulation-level versioned checkpoint API for restartable work:
+
+```python
+checkpoint = simulation.checkpoint()
+simulation.advance(100)
+simulation.load_checkpoint(checkpoint)
+simulation.save_checkpoint("restart.npz")  # tensor arrays plus JSON metadata
+simulation.load_checkpoint_file("restart.npz")
+
+samples = simulation.flush_probes()
+write_probe_text(samples, "/tmp/gmes-probes")
+```
+
+The in-memory and pickle-free NPZ schemas contain only metadata and tensors:
+fields, material state, source
+clock, auxiliary solver state, probe rings, and time state. Loading verifies
+the schema version, plan identity, device, dtype, and paired-real layout before
+copying into the fixed live buffers. Unsupported versions or a different
+execution plan fail without partial restoration. The lower-level
+`simulation.state.checkpoint()` remains useful for material-state debugging
+but intentionally does not include auxiliary solvers or probes.
+
+Periodic/Bloch halo scheduling remains outside compiled material kernels.
+Every active Yee component applies phase directly to paired-real tensors using
+persistent boundary scratch, including collapsed axes where source and
+destination slices alias.
 
 ## Install a wheel variant
 
@@ -191,16 +242,16 @@ parts in the requested real dtype. Complex conversion occurs only at an
 explicit host boundary:
 
 ```python
-device_copy = simulation.state.snapshot()      # cloned tensors, same device
-checkpoint = simulation.state.checkpoint()     # fields, clocks, and PML state
-host_fields = simulation.state.host_snapshot() # cloned NumPy arrays by default
+device_copy = simulation.state.snapshot()  # cloned tensors, same device
+checkpoint = simulation.checkpoint()        # versioned full execution state
+host_fields = simulation.host_snapshot()    # cloned NumPy arrays by default
 pml_state = simulation.state.pml_state_snapshot() # active PML cells only
 
-simulation.state.load_checkpoint(checkpoint)   # in-place; buffer addresses stay fixed
+simulation.load_checkpoint(checkpoint)  # in-place; buffer addresses stay fixed
 ```
 
 Nondispersive advancement does not call `.cpu()`, `.numpy()`, or `.item()`.
-DM2 performs only the single post-electric status transfer described above;
-its predictor--corrector itself has no host synchronization. Use
+DM2 status validation also stays on-device; only explicit diagnostics transfer
+its iteration counts. Use
 `buffer_addresses()` only as an explicit diagnostic when checking fixed
 storage for CUDA graph capture.

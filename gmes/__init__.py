@@ -126,10 +126,15 @@ _class = [
     "MaterialBucketPlan",
     "TorchConfigurationError",
     "TorchExecutionPlanner",
+    "TorchPointSourceRecord",
+    "TorchProbeSamples",
+    "TorchProbeSpec",
+    "TorchProbeSpectrum",
     "TorchRuntimeConfig",
     "TorchSimulation",
     "TorchSimulationPlan",
     "TorchSimulationState",
+    "TorchSourceLoweringContext",
 ]
 _constant = [
     "pi",
@@ -150,7 +155,13 @@ _constant = [
     "ATTO",
     "inf",
 ]
-_function = ["torch_runtime_diagnostics"]
+_function = [
+    "probe_spectrum",
+    "read_torch_checkpoint",
+    "torch_runtime_diagnostics",
+    "write_probe_text",
+    "write_torch_checkpoint",
+]
 __all__ = []
 __all__.extend(_module)
 __all__.extend(_class)

@@ -55,7 +55,7 @@ jobs:
       - name: Build native extensions
         if: matrix.language == 'c-cpp'
         run: |
-          uv sync --locked --extra hdf5 --extra plot --extra mpi
+          uv sync --locked --extra torch-cpu --extra hdf5 --extra plot --extra mpi
           uv build
 
       - uses: github/codeql-action/analyze@v4

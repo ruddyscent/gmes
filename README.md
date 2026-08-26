@@ -24,6 +24,7 @@ GMES (GIST Maxwell's Equations Solver) is a free electromagnetic simulator that 
 - SWIG 4
 - NumPy 2.3 or newer
 - SciPy 1.16 or newer
+- PyTorch 2.13 (CPU, CUDA 12.6, or CUDA 13.0 wheel)
 
 GMES 0.10.0 publishes binary wheels for the following combinations:
 
@@ -104,7 +105,7 @@ by the tests:
 
 ```sh
 uv python install 3.14
-uv sync --locked --extra hdf5
+uv sync --locked --extra torch-cpu --extra hdf5
 uv run --no-sync python -m unittest discover -v
 uv build
 ```
@@ -112,8 +113,9 @@ uv build
 This checkout requires uv 0.12.5; uv exits with an actionable version error
 when a different release is used.
 
-The `dev` dependency group is installed by default. Other supported runtime
-combinations include `--extra plot`, `--extra mpi`, and `--extra all`. The
+The `dev` dependency group is installed by default. Select exactly one of `torch-cpu`, `torch-cu126`, or `torch-cu130` for an explicit development runtime; see [`docs/torch-execution.md`](docs/torch-execution.md) for the breaking Torch-only API and wheel-selection contract.
+
+Other supported runtime combinations include `--extra plot`, `--extra mpi`, and `--extra all`. The
 build uses the PEP 517 configuration in `pyproject.toml`; invoking `setup.py`
 directly is not supported.
 

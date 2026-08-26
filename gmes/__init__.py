@@ -46,6 +46,7 @@ from .fdtd import *
 from .geometry import *
 from .material import *
 from .source import *
+from .torch_fdtd import *
 
 # List here only the objects we want to be publicly available
 _module = [
@@ -118,6 +119,12 @@ _class = [
     "Drude",
     "Lorentz",
     "Dm2",
+    "DistributedLaunch",
+    "TorchConfigurationError",
+    "TorchRuntimeConfig",
+    "TorchSimulation",
+    "TorchSimulationPlan",
+    "TorchSimulationState",
 ]
 _constant = [
     "pi",
@@ -138,7 +145,9 @@ _constant = [
     "ATTO",
     "inf",
 ]
+_function = ["torch_runtime_diagnostics"]
 __all__ = []
 __all__.extend(_module)
 __all__.extend(_class)
 __all__.extend(_constant)
+__all__.extend(_function)

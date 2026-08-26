@@ -82,7 +82,7 @@
   "tolerances": {
     "native": {"float64": {"rtol": 0.0, "atol": 0.0}, "complex128": {"rtol": 0.0, "atol": 0.0}},
     "torch": {
-      "dielectric": {"float64": {"rtol": 1e-13, "atol": 1e-14}, "complex128": {"rtol": 2e-13, "atol": 2e-14}},
+      "dielectric": {"float32": {"rtol": 3e-5, "atol": 3e-6}, "float64": {"rtol": 1e-13, "atol": 1e-14}, "complex64": {"rtol": 3e-5, "atol": 3e-6}, "complex128": {"rtol": 2e-13, "atol": 2e-14}},
       "pml": {"float64": {"rtol": 2e-12, "atol": 2e-13}, "complex128": {"rtol": 4e-12, "atol": 4e-13}},
       "drude": {"float64": {"rtol": 3e-12, "atol": 3e-13}, "complex128": {"rtol": 6e-12, "atol": 6e-13}},
       "lorentz": {"float64": {"rtol": 3e-12, "atol": 3e-13}, "complex128": {"rtol": 6e-12, "atol": 6e-13}},

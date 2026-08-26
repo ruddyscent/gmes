@@ -16,7 +16,7 @@ class DevelopmentDocumentationTest(unittest.TestCase):
 
     def test_primary_documents_share_setup_test_and_build_commands(self):
         canonical_workflow = """uv python install 3.14
-uv sync --locked --extra hdf5
+uv sync --locked --extra torch-cpu --extra hdf5
 uv run --no-sync python -m unittest discover -v
 uv build"""
         for name, contents in self.primary_documents.items():

@@ -44,10 +44,10 @@ jobs:
         run: brew install swig libomp
       - name: Install Linux test dependencies
         if: runner.os == 'Linux'
-        run: uv sync --locked --extra hdf5 --extra plot --extra mpi
+        run: uv sync --locked --extra torch-cpu --extra hdf5 --extra plot --extra mpi
       - name: Install macOS test dependencies
         if: runner.os == 'macOS'
-        run: uv sync --locked --extra hdf5 --extra plot
+        run: uv sync --locked --extra torch-cpu --extra hdf5 --extra plot
       - name: Verify default build OpenMP support on Linux
         if: runner.os == 'Linux'
         run: uv run --no-sync python -c "from gmes import pw_material; assert pw_material.openmp_enabled()"
@@ -66,10 +66,10 @@ jobs:
         run: OMP_NUM_THREADS=4 GMES_OPENMP_THRESHOLD=0 uv run --no-sync python -m unittest discover -v
       - name: Rebuild without OpenMP on Linux
         if: runner.os == 'Linux'
-        run: GMES_ENABLE_OPENMP=0 uv sync --locked --extra hdf5 --extra plot --extra mpi --reinstall-package gmes
+        run: GMES_ENABLE_OPENMP=0 uv sync --locked --extra torch-cpu --extra hdf5 --extra plot --extra mpi --reinstall-package gmes
       - name: Rebuild without OpenMP on macOS
         if: runner.os == 'macOS'
-        run: GMES_ENABLE_OPENMP=0 uv sync --locked --extra hdf5 --extra plot --reinstall-package gmes
+        run: GMES_ENABLE_OPENMP=0 uv sync --locked --extra torch-cpu --extra hdf5 --extra plot --reinstall-package gmes
       - name: Run tests with the serial build
         run: GMES_ENABLE_OPENMP=0 uv run --no-sync python -m unittest discover -v
       - name: Run MPI deployment smoke test

@@ -39,6 +39,11 @@ class NativeOracleTest(unittest.TestCase):
         self.assertEqual(reference["observer_tag"], "native-oracle-observer-v4")
         self.assertEqual(reference["field_scale"], 1e-3)
         self.assertEqual(reference["capture_steps"], [1, 2, 5, 20, 100])
+        dielectric_tolerances = self.manifest["tolerances"]["torch"]["dielectric"]
+        self.assertEqual(
+            set(dielectric_tolerances),
+            {"float32", "float64", "complex64", "complex128"},
+        )
         names = {case["name"] for case in self.manifest["correctness"]}
         self.assertTrue(
             {

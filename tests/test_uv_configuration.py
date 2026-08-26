@@ -10,7 +10,8 @@ class UvCacheKeyTest(unittest.TestCase):
         cls.project_root = project_root
         project_file = project_root / "pyproject.toml"
         with project_file.open("rb") as stream:
-            cls.uv_configuration = tomllib.load(stream)["tool"]["uv"]
+            cls.project_configuration = tomllib.load(stream)
+        cls.uv_configuration = cls.project_configuration["tool"]["uv"]
         cls.cache_keys = cls.uv_configuration["cache-keys"]
         with (project_root / "uv.lock").open("rb") as stream:
             cls.lockfile = tomllib.load(stream)
@@ -78,6 +79,48 @@ class UvCacheKeyTest(unittest.TestCase):
         )
         constraints = self.uv_configuration["build-constraint-dependencies"]
         self.assertIn(f"numpy=={numpy_package['version']}", constraints)
+
+    def test_locks_explicit_pytorch_213_accelerator_variants(self):
+        project = self.project_configuration["project"]
+        self.assertIn("torch>=2.13,<2.14", project["dependencies"])
+        extras = project["optional-dependencies"]
+        for extra in ("torch-cpu", "torch-cu126", "torch-cu130"):
+            self.assertEqual(extras[extra], ["torch>=2.13,<2.14"])
+
+        expected_indexes = {
+            "pytorch-cpu": "https://download.pytorch.org/whl/cpu",
+            "pytorch-cu126": "https://download.pytorch.org/whl/cu126",
+            "pytorch-cu130": "https://download.pytorch.org/whl/cu130",
+        }
+        indexes = {item["name"]: item for item in self.uv_configuration["index"]}
+        self.assertEqual(
+            {name: indexes[name]["url"] for name in expected_indexes},
+            expected_indexes,
+        )
+        self.assertTrue(all(indexes[name]["explicit"] for name in expected_indexes))
+        sources = self.uv_configuration["sources"]["torch"]
+        self.assertEqual(
+            {(source["extra"], source["index"]) for source in sources},
+            {
+                ("torch-cpu", "pytorch-cpu"),
+                ("torch-cu126", "pytorch-cu126"),
+                ("torch-cu130", "pytorch-cu130"),
+            },
+        )
+
+        torch_packages = {
+            (package["version"], package["source"]["registry"])
+            for package in self.lockfile["package"]
+            if package["name"] == "torch"
+        }
+        self.assertGreaterEqual(
+            torch_packages,
+            {
+                ("2.13.0+cpu", expected_indexes["pytorch-cpu"]),
+                ("2.13.0+cu126", expected_indexes["pytorch-cu126"]),
+                ("2.13.0+cu130", expected_indexes["pytorch-cu130"]),
+            },
+        )
 
 
 if __name__ == "__main__":

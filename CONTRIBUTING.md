@@ -18,7 +18,7 @@ repository root:
 
 ```sh
 uv python install 3.14
-uv sync --locked --extra hdf5
+uv sync --locked --extra torch-cpu --extra hdf5
 uv run --no-sync python -m unittest discover -v
 uv build
 ```

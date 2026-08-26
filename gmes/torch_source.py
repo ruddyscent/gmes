@@ -407,6 +407,17 @@ class TorchSourcePlan(nn.Module):
             auxiliary.step()
 
 
+def _is_owned_target(simulation, component, target):
+    shape = simulation.plan.shapes[component]
+    target = tuple(int(value) for value in target)
+    if len(target) != 3 or any(
+        value < 0 or value >= limit for value, limit in zip(target, shape)
+    ):
+        return False
+    linear = int(np.ravel_multi_index(target, shape))
+    return simulation.plan.components[component].ownership.reshape(-1)[linear] >= 0
+
+
 def lower_sources(
     sources,
     *,
@@ -506,6 +517,8 @@ def lower_sources(
             if isinstance(pointwise, (PointSourceElectric, PointSourceMagnetic)):
                 records = []
                 for target, parameter in pointwise._param.items():
+                    if not _is_owned_target(simulation, component, target):
+                        continue
                     _, current = _POINT_COMPONENTS[parameter.comp]
                     scale = None
                     if current:
@@ -540,6 +553,8 @@ def lower_sources(
             ):
                 by_auxiliary = {}
                 for target, parameter in pointwise._param.items():
+                    if not _is_owned_target(simulation, component, target):
+                        continue
                     by_auxiliary.setdefault(id(parameter.aux_fdtd), {})[
                         target
                     ] = parameter
@@ -563,11 +578,16 @@ def lower_sources(
                 raise TypeError(
                     f"unsupported pointwise source {type(pointwise).__name__!r}"
                 )
-        if extension_records[component]:
+        owned_extension_records = [
+            record
+            for record in extension_records[component]
+            if _is_owned_target(simulation, component, record.target)
+        ]
+        if owned_extension_records:
             batches.append(
                 TorchPointSourceBatch(
                     component,
-                    extension_records[component],
+                    owned_extension_records,
                     shape=simulation.plan.shapes[component],
                     paired_real=simulation.state.paired_real,
                     device=simulation.device,

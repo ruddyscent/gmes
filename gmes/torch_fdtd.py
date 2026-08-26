@@ -898,6 +898,8 @@ class TorchSimulation:
         sources=(),
         probes=(),
         _is_auxiliary=False,
+        _distributed_partition=None,
+        _auxiliary_factory=None,
     ):
         if not isinstance(runtime, TorchRuntimeConfig):
             raise TypeError("runtime must be a TorchRuntimeConfig")
@@ -913,13 +915,18 @@ class TorchSimulation:
                 f"processes oversubscribe {processors} available CPUs"
             )
         torch.set_num_threads(threads)
-        if runtime.launch.world_size != 1:
+        if runtime.launch.world_size == 1:
+            if int(space.numprocs) != 1:
+                raise TorchConfigurationError(
+                    "MPI-decomposed Cartesian spaces are unsupported by TorchSimulation"
+                )
+        elif (
+            runtime.launch.world_size != 2
+            or _distributed_partition is None
+            or int(space.numprocs) != 2
+        ):
             raise TorchConfigurationError(
-                "distributed execution is not implemented in this slice; use world_size=1"
-            )
-        if int(space.numprocs) != 1:
-            raise TorchConfigurationError(
-                "MPI-decomposed Cartesian spaces are unsupported by TorchSimulation"
+                "world_size=2 is available only through TorchDistributedSimulation"
             )
         device = _resolved_device(runtime)
 
@@ -1039,6 +1046,7 @@ class TorchSimulation:
             magnetic_function = _magnetic_phase
         self._electric = electric_function
         self._magnetic = magnetic_function
+        compile_options = None
         if runtime.compile_policy == "compile":
             compile_options = {"cpp_wrapper": True} if device.type == "cpu" else None
             self._electric = torch.compile(
@@ -1064,7 +1072,7 @@ class TorchSimulation:
                 model: torch.compile(
                     function,
                     fullgraph=True,
-                    dynamic=False,
+                    dynamic=True,
                     options=compile_options,
                 )
                 for model, function in pml_functions.items()
@@ -1134,16 +1142,30 @@ class TorchSimulation:
         else:
             self._dm2_iterations_host = state._dm2_iterations
 
+        self._dispersive = self._apply_dispersive
+        if self._dispersive_buckets and runtime.compile_policy == "compile":
+            self._dispersive = torch.compile(
+                self._apply_dispersive,
+                fullgraph=True,
+                dynamic=False,
+                options=compile_options,
+            )
+        self._distributed_partition = _distributed_partition
+        self._distributed_exchange = None
+        simulation_factory = (
+            type(self) if _auxiliary_factory is None else _auxiliary_factory
+        )
         self.sources = lower_sources(
             sources,
             simulation=self,
-            simulation_factory=type(self),
+            simulation_factory=simulation_factory,
             runtime=runtime,
             bloch=bloch,
         )
         self._is_auxiliary = bool(_is_auxiliary)
         self.probes = TorchProbeBuffer(probes, simulation=self)
         self.plan_identity = self._compute_plan_identity()
+        self._cuda_graphs = {}
 
     def _compute_plan_identity(self):
         digest = hashlib.sha256()
@@ -1268,82 +1290,33 @@ class TorchSimulation:
         destination[..., 1].copy_(source[..., 0]).mul_(sine)
         destination[..., 1].add_(source[..., 1], alpha=cosine)
 
-    def _sync_electric_boundaries(self):
-        state = self.state
-        self._rotate_or_copy(
-            state.ex[:, -1, :],
-            state.ex[:, 0, :],
-            self._boundary_angle("Ex", 1, 1),
-            getattr(state, "_boundary_ex_1", None),
-        )
-        self._rotate_or_copy(
-            state.ex[:, :, -1],
-            state.ex[:, :, 0],
-            self._boundary_angle("Ex", 2, 1),
-            getattr(state, "_boundary_ex_2", None),
-        )
-        self._rotate_or_copy(
-            state.ey[:, :, -1],
-            state.ey[:, :, 0],
-            self._boundary_angle("Ey", 2, 1),
-            getattr(state, "_boundary_ey_2", None),
-        )
-        self._rotate_or_copy(
-            state.ey[-1, :, :],
-            state.ey[0, :, :],
-            self._boundary_angle("Ey", 0, 1),
-            getattr(state, "_boundary_ey_0", None),
-        )
-        self._rotate_or_copy(
-            state.ez[-1, :, :],
-            state.ez[0, :, :],
-            self._boundary_angle("Ez", 0, 1),
-            getattr(state, "_boundary_ez_0", None),
-        )
-        self._rotate_or_copy(
-            state.ez[:, -1, :],
-            state.ez[:, 0, :],
-            self._boundary_angle("Ez", 1, 1),
-            getattr(state, "_boundary_ez_1", None),
+    def _sync_boundary_family(self, names, *, high_from_low, skip_axis=None):
+        for name in names:
+            component_axis = ("x", "y", "z").index(name[1].lower())
+            field = self.state.field(name)
+            for axis in range(3):
+                if axis == component_axis or axis == skip_axis:
+                    continue
+                destination = [slice(None)] * field.ndim
+                source = [slice(None)] * field.ndim
+                destination[axis] = -1 if high_from_low else 0
+                source[axis] = 0 if high_from_low else -1
+                direction = 1 if high_from_low else -1
+                self._rotate_or_copy(
+                    field[tuple(destination)],
+                    field[tuple(source)],
+                    self._boundary_angle(name, axis, direction),
+                    getattr(self.state, f"_boundary_{name.lower()}_{axis}", None),
+                )
+
+    def _sync_electric_boundaries(self, *, skip_axis=None):
+        self._sync_boundary_family(
+            ("Ex", "Ey", "Ez"), high_from_low=True, skip_axis=skip_axis
         )
 
-    def _sync_magnetic_boundaries(self):
-        state = self.state
-        self._rotate_or_copy(
-            state.hx[:, 0, :],
-            state.hx[:, -1, :],
-            self._boundary_angle("Hx", 1, -1),
-            getattr(state, "_boundary_hx_1", None),
-        )
-        self._rotate_or_copy(
-            state.hx[:, :, 0],
-            state.hx[:, :, -1],
-            self._boundary_angle("Hx", 2, -1),
-            getattr(state, "_boundary_hx_2", None),
-        )
-        self._rotate_or_copy(
-            state.hy[:, :, 0],
-            state.hy[:, :, -1],
-            self._boundary_angle("Hy", 2, -1),
-            getattr(state, "_boundary_hy_2", None),
-        )
-        self._rotate_or_copy(
-            state.hy[0, :, :],
-            state.hy[-1, :, :],
-            self._boundary_angle("Hy", 0, -1),
-            getattr(state, "_boundary_hy_0", None),
-        )
-        self._rotate_or_copy(
-            state.hz[0, :, :],
-            state.hz[-1, :, :],
-            self._boundary_angle("Hz", 0, -1),
-            getattr(state, "_boundary_hz_0", None),
-        )
-        self._rotate_or_copy(
-            state.hz[:, 0, :],
-            state.hz[:, -1, :],
-            self._boundary_angle("Hz", 1, -1),
-            getattr(state, "_boundary_hz_1", None),
+    def _sync_magnetic_boundaries(self, *, skip_axis=None):
+        self._sync_boundary_family(
+            ("Hx", "Hy", "Hz"), high_from_low=False, skip_axis=skip_axis
         )
 
     def _apply_constants(self, names):
@@ -1395,20 +1368,78 @@ class TorchSimulation:
         for descriptor in self._dispersive_buckets:
             update_bucket(self.plan, self.state, descriptor)
 
+    def _electric_post_update(self):
+        self._run_pml(self._electric_pml)
+        if self._dispersive_buckets:
+            self._dispersive()
+        self._update_dm2()
+        if self._has_electric_constants:
+            self._apply_constants(("Ex", "Ey", "Ez"))
+
+    def _magnetic_post_update(self):
+        self._run_pml(self._magnetic_pml)
+        if self._has_magnetic_constants:
+            self._apply_constants(("Hx", "Hy", "Hz"))
+
+    def _run_compute_region(self, name, function):
+        graph = self._cuda_graphs.get(name)
+        if graph is None:
+            function()
+        else:
+            graph.replay()
+
+    @torch.inference_mode()
+    def capture_cuda_graphs(self):
+        """Capture fixed-storage compute regions without NCCL or host I/O."""
+        if self.device.type != "cuda":
+            raise TorchConfigurationError("CUDA graph capture requires a CUDA runtime")
+        if self._cuda_graphs:
+            return self
+        checkpoint = self.checkpoint()
+        regions = [
+            ("electric", lambda: self._electric(*self._electric_args)),
+            ("magnetic", lambda: self._magnetic(*self._magnetic_args)),
+        ]
+        if (
+            self._has_pml
+            or self._dispersive_buckets
+            or self._has_dm2
+            or self._has_electric_constants
+        ):
+            regions.append(("electric_post", self._electric_post_update))
+        if self._has_pml or self._has_magnetic_constants:
+            regions.append(("magnetic_post", self._magnetic_post_update))
+        for _name, function in regions:
+            function()
+        torch.cuda.synchronize(self.device)
+        graphs = {}
+        for name, function in regions:
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                function()
+            graphs[name] = graph
+        self._cuda_graphs = graphs
+        self.load_checkpoint(checkpoint)
+        torch.cuda.synchronize(self.device)
+        return self
+
     @torch.inference_mode()
     def advance(self, steps):
-        """Advance a fixed state in place without implicit host conversion."""
+        """Advance fixed rank-local state without implicit host conversion."""
         if isinstance(steps, bool) or not isinstance(steps, int) or steps < 0:
             raise ValueError("steps must be a non-negative integer")
+        exchange = self._distributed_exchange
+        split_axis = None if exchange is None else exchange.axis
         for _ in range(steps):
-            self._sync_magnetic_boundaries()
-            self._electric(*self._electric_args)
-            self._run_pml(self._electric_pml)
-            if self._dispersive_buckets:
-                self._apply_dispersive()
-            self._update_dm2()
-            if self._has_electric_constants:
-                self._apply_constants(("Ex", "Ey", "Ez"))
+            self._sync_magnetic_boundaries(skip_axis=split_axis)
+            if exchange is not None:
+                exchange.begin("magnetic")
+            self._run_compute_region(
+                "electric", lambda: self._electric(*self._electric_args)
+            )
+            if exchange is not None:
+                exchange.finish("magnetic")
+            self._run_compute_region("electric_post", self._electric_post_update)
             if not self.sources.empty:
                 self.sources.apply(
                     self,
@@ -1423,11 +1454,15 @@ class TorchSimulation:
                     electric=True,
                     time=self.state.source_time + 0.5 * self.state.time_step,
                 )
-            self._sync_electric_boundaries()
-            self._magnetic(*self._magnetic_args)
-            self._run_pml(self._magnetic_pml)
-            if self._has_magnetic_constants:
-                self._apply_constants(("Hx", "Hy", "Hz"))
+            self._sync_electric_boundaries(skip_axis=split_axis)
+            if exchange is not None:
+                exchange.begin("electric")
+            self._run_compute_region(
+                "magnetic", lambda: self._magnetic(*self._magnetic_args)
+            )
+            if exchange is not None:
+                exchange.finish("electric")
+            self._run_compute_region("magnetic_post", self._magnetic_post_update)
             if not self.sources.empty:
                 self.sources.apply(
                     self,

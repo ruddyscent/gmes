@@ -168,6 +168,85 @@ on CPU with one/tuned threads and on CUDA in eager/compiled modes. CUDA is
 synchronized only at measurement boundaries; generated JSON belongs in
 `/tmp` or CI artifacts.
 
+## Two-GPU Torch scaling
+
+The fixed two-GPU runner compares one and two GPUs inside the same
+`torchrun` job, restores the same captured checkpoint for every replicate,
+and keeps construction, compute-graph capture, warm steady-state timing,
+memory, and profiler evidence separate. The strong mixed case uses the frozen
+`two-gpu-3d` size from `native_oracle_workloads.json`; the weak case doubles
+the 96x96x96 single-GPU volume along x. Homogeneous and deliberately
+imbalanced mixed cases validate the decomposition decision separately.
+
+Install the CUDA 12.6 lock variant and capture the physical inventory before
+the run. PyTorch device enumeration may differ from the physical
+`nvidia-smi -L` order, so the JSON device table and rank diagnostics are the
+authoritative binding record.
+
+```sh
+uv sync --locked --extra torch-cu126 --extra hdf5
+nvidia-smi -L
+nvidia-smi topo -m
+
+OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 \
+uv run --no-sync torchrun --standalone --nproc-per-node=2 \
+  --module benchmarks.torch_two_gpu \
+  --case strong-mixed --warmup 5 --steps 100 --repeats 15 \
+  --profile-steps 10 --enforce \
+  --output /tmp/gmes-two-gpu/strong-mixed.json \
+  --trace-directory /tmp/gmes-two-gpu/traces-strong
+
+OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 \
+uv run --no-sync torchrun --standalone --nproc-per-node=2 \
+  --module benchmarks.torch_two_gpu \
+  --case weak-mixed --warmup 5 --steps 100 --repeats 15 \
+  --profile-steps 10 --enforce \
+  --output /tmp/gmes-two-gpu/weak-mixed.json \
+  --trace-directory /tmp/gmes-two-gpu/traces-weak
+```
+
+Repeat with `--case strong-homogeneous` and
+`--case strong-imbalanced`. JSON output records every timing sample,
+one-versus-two throughput, the 1.6 strong or 0.8 weak gate, rank-local memory,
+halo bytes, fixed-address validation, exact decomposition, PyTorch/CUDA/NCCL
+versions, both GPU models, peer-access status, and `nvidia-smi topo -m`.
+Per-rank Chrome traces remain in the requested trace directory and separate
+pack/launch, boundary wait, unpack, NCCL device time, compute overlap, and
+exposed communication. Generated JSON and traces belong in `/tmp` or CI
+artifacts, not in the repository.
+
+The frozen native reference/candidate commands earlier in this document remain
+the correctness-oracle handoff. The two-GPU runner is the candidate performance
+handoff: it consumes the same mixed-coverage recipe and fixed GPU sizes without
+importing or launching the native solver in either CUDA rank.
+
+Run the complete deterministic field/material/source/restart matrix with:
+
+```sh
+OMP_NUM_THREADS=1 uv run --no-sync torchrun --standalone \
+  --nproc-per-node=2 --module benchmarks.torch_two_gpu_correctness \
+  --output /tmp/gmes-two-gpu/correctness.json
+
+OMP_NUM_THREADS=1 uv run --no-sync torchrun --standalone \
+  --nproc-per-node=2 --module benchmarks.torch_two_gpu_correctness \
+  --capture-graphs --output /tmp/gmes-two-gpu/correctness-graphs.json
+```
+
+The failure-contract runner expects the first three modes to report
+`"passed": true`; `rank-failure` intentionally returns nonzero so `torchrun`
+can terminate its peer rank:
+
+```sh
+uv run --no-sync torchrun --standalone --nproc-per-node=2 \
+  --module benchmarks.torch_two_gpu_failures strict-peer
+uv run --no-sync torchrun --standalone --nproc-per-node=2 \
+  --module benchmarks.torch_two_gpu_failures dtype-mismatch
+uv run --no-sync torchrun --standalone --nproc-per-node=2 \
+  --module benchmarks.torch_two_gpu_failures checkpoint-mismatch
+uv run --no-sync torchrun --standalone --nproc-per-node=2 \
+  --module benchmarks.torch_two_gpu_failures rank-failure
+```
+
 ## Existing native microbenchmarks
 
 `geometry_mapping.py` isolates bounded geometry-to-region lowering for all

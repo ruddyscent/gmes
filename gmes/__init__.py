@@ -46,6 +46,7 @@ from .fdtd import *
 from .geometry import *
 from .material import *
 from .source import *
+from .torch_distributed import *
 from .torch_fdtd import *
 
 # List here only the objects we want to be publicly available
@@ -125,6 +126,9 @@ _class = [
     "FlattenedStencilTerm",
     "MaterialBucketPlan",
     "TorchConfigurationError",
+    "TorchDistributedError",
+    "TorchDistributedSimulation",
+    "TorchHaloExchange",
     "TorchExecutionPlanner",
     "TorchPointSourceRecord",
     "TorchProbeSamples",
@@ -135,6 +139,7 @@ _class = [
     "TorchSimulationPlan",
     "TorchSimulationState",
     "TorchSourceLoweringContext",
+    "TwoGpuDecomposition",
 ]
 _constant = [
     "pi",
@@ -156,7 +161,10 @@ _constant = [
     "inf",
 ]
 _function = [
+    "choose_two_gpu_decomposition",
+    "distributed_launch_from_environment",
     "probe_spectrum",
+    "rank_local_space",
     "read_torch_checkpoint",
     "torch_runtime_diagnostics",
     "write_probe_text",

@@ -183,6 +183,7 @@ class Cartesian(object):
         # my_field_size may be different than general_field_size at the last
         # node in each dimension.
         self.my_field_size = self.get_my_field_size()
+        self.global_field_offset = self.general_field_size * self.my_cart_idx
 
     def bcast(self, obj=None, root=None):
         """Same with the Broadcast but, it handles for unknown root among
@@ -304,7 +305,7 @@ class Cartesian(object):
         except KeyError as error:
             raise ValueError("unknown Yee-grid component") from error
 
-        global_origin = self.general_field_size * self.my_cart_idx
+        global_origin = self.global_field_offset
         return tuple(
             (
                 np.arange(length, dtype=np.double)
@@ -405,7 +406,7 @@ class Cartesian(object):
 
         """
         idx = array((i, j, k), np.intp)
-        global_idx = idx + self.general_field_size * self.my_cart_idx
+        global_idx = idx + self.global_field_offset
 
         spc_0 = (global_idx[0] + 0.5) * self.dr[0] - self.half_size[0]
         spc_1 = global_idx[1] * self.dr[1] - self.half_size[1]
@@ -436,9 +437,7 @@ class Cartesian(object):
             if self.whole_field_size[i] == 1:
                 idx[i] = 0
             else:
-                idx[i] = global_idx[i] - (
-                    self.my_cart_idx[i] * self.general_field_size[i]
-                )
+                idx[i] = global_idx[i] - self.global_field_offset[i]
 
         return tuple(idx)
 
@@ -468,7 +467,7 @@ class Cartesian(object):
         """
         idx = array((i, j, k), np.intp)
 
-        global_idx = idx + self.general_field_size * self.my_cart_idx
+        global_idx = idx + self.global_field_offset
 
         coords_0 = global_idx[0] * self.dr[0] - self.half_size[0]
         coords_1 = (global_idx[1] + 0.5) * self.dr[1] - self.half_size[1]
@@ -499,9 +498,7 @@ class Cartesian(object):
             if self.whole_field_size[i] == 1:
                 idx[i] = 0
             else:
-                idx[i] = global_idx[i] - (
-                    self.my_cart_idx[i] * self.general_field_size[i]
-                )
+                idx[i] = global_idx[i] - self.global_field_offset[i]
 
         return tuple(idx)
 
@@ -531,7 +528,7 @@ class Cartesian(object):
         """
         idx = array((i, j, k), np.intp)
 
-        global_idx = idx + self.general_field_size * self.my_cart_idx
+        global_idx = idx + self.global_field_offset
 
         coords_0 = global_idx[0] * self.dr[0] - self.half_size[0]
         coords_1 = global_idx[1] * self.dr[1] - self.half_size[1]
@@ -562,9 +559,7 @@ class Cartesian(object):
             if self.whole_field_size[i] == 1:
                 idx[i] = 0
             else:
-                idx[i] = global_idx[i] - (
-                    self.my_cart_idx[i] * self.general_field_size[i]
-                )
+                idx[i] = global_idx[i] - self.global_field_offset[i]
 
         return tuple(idx)
 
@@ -594,7 +589,7 @@ class Cartesian(object):
         """
         idx = array((i, j, k), np.intp)
 
-        global_idx = idx + self.general_field_size * self.my_cart_idx
+        global_idx = idx + self.global_field_offset
 
         coords_0 = global_idx[0] * self.dr[0] - self.half_size[0]
         coords_1 = (global_idx[1] - 0.5) * self.dr[1] - self.half_size[1]
@@ -656,7 +651,7 @@ class Cartesian(object):
         """
         idx = array((i, j, k), np.intp)
 
-        global_idx = idx + self.general_field_size * self.my_cart_idx
+        global_idx = idx + self.global_field_offset
 
         coords_0 = (global_idx[0] - 0.5) * self.dr[0] - self.half_size[0]
         coords_1 = global_idx[1] * self.dr[1] - self.half_size[1]
@@ -718,7 +713,7 @@ class Cartesian(object):
         """
         idx = array((i, j, k), np.intp)
 
-        global_idx = idx + self.general_field_size * self.my_cart_idx
+        global_idx = idx + self.global_field_offset
 
         coords_0 = (global_idx[0] - 0.5) * self.dr[0] - self.half_size[0]
         coords_1 = (global_idx[1] - 0.5) * self.dr[1] - self.half_size[1]

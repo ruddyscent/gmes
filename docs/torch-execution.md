@@ -7,11 +7,42 @@ surface. The native classes remain temporarily available only while the frozen
 oracle is needed by the migration.
 
 The first slice supports serial periodic 1-D, 2-D, and 3-D Cartesian domains,
-simple nondispersive `Dielectric` geometry, eager or compiled electric and
-magnetic phases, and real or Bloch-periodic fields. Sources, PML, dispersive
-materials, distributed domain decomposition, plotting, and solver-owned I/O
-remain outside this slice and fail during construction instead of silently
-falling back.
+simple nondispersive `Dielectric`, `Const`, and `Dummy` geometry, eager or
+compiled electric and magnetic phases, and real or Bloch-periodic fields.
+Sources, PML, dispersive materials, distributed domain decomposition, plotting,
+and solver-owned I/O remain outside this slice and fail during construction
+instead of silently falling back.
+
+## Mixed-material execution planning
+
+Construction lowers every Yee component through an immutable
+`ComponentPlan`. Before any tensor is finalized, the planner validates bounds,
+complete active-cell coverage, unique destinations, and exact material and
+underlying-region IDs. Each component records flattened stencil metadata, a
+dense inverse-coefficient plane, compact target arrays, and a bounded
+tile-dense candidate as appropriate. Host arrays are built in bounded geometry
+tiles; each selected array is converted to one contiguous device tensor.
+
+Execution buckets use the normalized signature `(model, component, real
+precision, state shape)`. Geometry object identity and coefficient values are
+not part of that signature: equivalent regions share one launch bucket and
+refer to shared coefficient rows through stable region indirection. Drude,
+Lorentz, DCP, and DM2 magnetic cells normalize to the same simple magnetic
+signature because their magnetic behavior is physically identical.
+
+`TorchRuntimeConfig.execution_policy` accepts `"auto"`, `"dense"`,
+`"compact"`, or `"tiled"`. The default `auto` decision uses a fixed
+CPU/CUDA cost model over occupancy, active-target fragmentation, state width,
+tile coverage, memory, and launch cost; it never inserts material autotuning
+into a timestep. Forced policies exist for differential benchmarks and
+debugging, and do not silently replace an unsupported state equation.
+`simulation.diagnostics()["material_plan"]` explains every decision and its
+candidate costs.
+
+PML and dispersive material geometry can already be lowered into normalized
+SoA/tile descriptors with exact underlying-region mapping. Their state
+equations deliberately remain construction errors until #118 through #120
+consume these plans.
 
 ## Install a wheel variant
 
@@ -56,6 +87,7 @@ runtime = TorchRuntimeConfig(
     device="cuda:0",       # use "cpu" explicitly for CPU execution
     precision="float32",   # "float32" or "float64"
     compile_policy="compile",  # "eager" or fullgraph Torch compilation
+    execution_policy="auto",  # or force dense/compact/tiled for measurements
     cpu_threads=4,
 )
 simulation = TorchSimulation(

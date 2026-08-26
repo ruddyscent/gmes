@@ -15,13 +15,18 @@ except ImportError as error:  # pragma: no cover
         "GMES Torch execution requires PyTorch 2.13; run `uv sync --locked`."
     ) from error
 
-from .constant import Ex, Ey, Ez, Hx, Hy, Hz
 from .geometry import DefaultMedium, GeomBoxTree
 from .material import Dielectric
-
-_COMPONENTS = ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")
-_ELECTRIC = ("Ex", "Ey", "Ez")
-_COMPONENT_TYPES = {"Ex": Ex, "Ey": Ey, "Ez": Ez, "Hx": Hx, "Hy": Hy, "Hz": Hz}
+from .torch_plan import (
+    COMPONENTS,
+    ELECTRIC_COMPONENTS,
+    EXECUTION_POLICIES,
+    ComponentPlan,
+    ExecutionSignature,
+    FlattenedStencilTerm,
+    MaterialBucketPlan,
+    TorchExecutionPlanner,
+)
 
 
 class TorchConfigurationError(ValueError):
@@ -57,6 +62,8 @@ class TorchRuntimeConfig:
     cpu_threads: int | None = None
     launch: DistributedLaunch = field(default_factory=DistributedLaunch)
     autograd: bool = False
+    execution_policy: str = "auto"
+    planner_tile_size: int = 4096
 
     def validate_static(self):
         """Reject invalid requests before tensors or compiler state are created."""
@@ -74,6 +81,12 @@ class TorchRuntimeConfig:
             raise TorchConfigurationError(
                 "autograd is unsupported; GMES field buffers are inference-only"
             )
+        if self.execution_policy not in EXECUTION_POLICIES:
+            raise TorchConfigurationError(
+                "execution_policy must be 'auto', 'dense', 'compact', or 'tiled'"
+            )
+        if self.planner_tile_size < 1:
+            raise TorchConfigurationError("planner_tile_size must be positive")
         self.launch.validate()
 
     @property
@@ -121,6 +134,7 @@ def torch_runtime_diagnostics(config):
     result = {
         "torch": torch.__version__,
         "requested_device": config.device,
+        "execution_policy": config.execution_policy,
         "requested_precision": config.precision,
         "compile_policy": config.compile_policy,
         "cuda_build": torch.version.cuda,
@@ -150,85 +164,137 @@ def _field_shapes(space):
     )
 
 
-def _boundary_mask(name, shape, start, stop):
-    linear = np.arange(start, stop, dtype=np.intp)
-    plane = shape[1] * shape[2]
-    i, remainder = np.divmod(linear, plane)
-    j, k = np.divmod(remainder, shape[2])
-    if name == "Ex":
-        return (j == shape[1] - 1) | (k == shape[2] - 1)
-    if name == "Ey":
-        return (k == shape[2] - 1) | (i == shape[0] - 1)
-    if name == "Ez":
-        return (i == shape[0] - 1) | (j == shape[1] - 1)
-    if name == "Hx":
-        return (j == 0) | (k == 0)
-    if name == "Hy":
-        return (k == 0) | (i == 0)
-    return (i == 0) | (j == 0)
-
-
-def _lower_component(geom_tree, space, name, shape, material_tile_size=65536):
-    """Lower bounded GeometryMap tiles to dense dielectric coefficients and IDs."""
-    component = _COMPONENT_TYPES[name]
-    axes = space.component_coordinate_axes(component, shape)
-    total = int(np.prod(shape))
-    inverse = np.empty(total, dtype=np.float64)
-    material_ids = np.empty(total, dtype=np.int32)
-    coefficient = "eps_inf" if name in _ELECTRIC else "mu_inf"
-    for start in range(0, total, material_tile_size):
-        stop = min(start + material_tile_size, total)
-        lowered = geom_tree.lower_grid(*axes, start, stop, component=component)
-        tile = np.empty(stop - start, dtype=np.float64)
-        for material_id in np.unique(lowered.material_ids):
-            material = lowered.geometries[int(material_id)].material
-            if type(material) is not Dielectric:
-                raise NotImplementedError(
-                    "the Torch minimal slice supports only simple Dielectric materials; "
-                    f"{type(material).__name__} was mapped for {name}"
-                )
-            value = float(getattr(material, coefficient))
-            if not np.isfinite(value) or value <= 0:
-                raise TorchConfigurationError(
-                    f"{coefficient} must be finite and positive for {name}"
-                )
-            tile[lowered.material_ids == material_id] = 1.0 / value
-        tile[_boundary_mask(name, shape, start, stop)] = 0.0
-        inverse[start:stop] = tile
-        material_ids[start:stop] = lowered.material_ids
-    return inverse.reshape(shape), material_ids.reshape(shape)
-
-
 class TorchSimulationPlan(nn.Module):
-    """Fixed-shape non-trainable buffers lowered from GeometryMap tiles."""
+    """Finalized immutable tensors and metadata for mixed-material execution."""
 
-    def __init__(self, coefficients, material_ids, *, dr, dt, bloch, device, dtype):
+    def __init__(self, component_plans, *, dr, dt, bloch, device, dtype):
         super().__init__()
+        plans = {component.name: component for component in component_plans}
+        if set(plans) != set(COMPONENTS):
+            raise ValueError("the execution plan must contain all six Yee components")
+        self.components = MappingProxyType(plans)
         self.shapes = MappingProxyType(
-            {name: tuple(coefficients[name].shape) for name in _COMPONENTS}
+            {name: tuple(plans[name].shape) for name in COMPONENTS}
         )
         self.dr = tuple(float(value) for value in dr)
         self.dt = float(dt)
         self.bloch = None if bloch is None else tuple(float(value) for value in bloch)
-        for name in _COMPONENTS:
-            family = "inv_eps" if name in _ELECTRIC else "inv_mu"
-            coefficient = torch.as_tensor(
-                coefficients[name], dtype=dtype, device=device
+        for name in COMPONENTS:
+            component = plans[name]
+            family = "inv_eps" if name in ELECTRIC_COMPONENTS else "inv_mu"
+            coefficient = torch.tensor(
+                component.dense_inverse, dtype=dtype, device=device
             ).contiguous()
             if self.bloch is not None:
                 coefficient = coefficient.unsqueeze(-1)
-            ids = torch.as_tensor(
-                material_ids[name], dtype=torch.int32, device=device
-            ).contiguous()
             self.register_buffer(f"{family}_{name.lower()}", coefficient)
-            self.register_buffer(f"material_ids_{name.lower()}", ids)
-        self._sealed_names = frozenset(self._buffers) | {"shapes", "dr", "dt", "bloch"}
+            self.register_buffer(
+                f"material_ids_{name.lower()}",
+                torch.tensor(
+                    component.material_ids, dtype=torch.int32, device=device
+                ).contiguous(),
+            )
+            self.register_buffer(
+                f"underlying_ids_{name.lower()}",
+                torch.tensor(
+                    component.underlying_ids, dtype=torch.int32, device=device
+                ).contiguous(),
+            )
+            self.register_buffer(
+                f"ownership_{name.lower()}",
+                torch.tensor(
+                    component.ownership, dtype=torch.int16, device=device
+                ).contiguous(),
+            )
+            constant_values = component.constant_values
+            if self.bloch is None:
+                if np.any(constant_values[:, 1]):
+                    raise TorchConfigurationError(
+                        "a complex Const value requires paired-real Bloch fields"
+                    )
+                constant_values = constant_values[:, 0]
+            self.register_buffer(
+                f"constant_targets_{name.lower()}",
+                torch.tensor(
+                    component.constant_targets, dtype=torch.int64, device=device
+                ).contiguous(),
+            )
+            self.register_buffer(
+                f"constant_values_{name.lower()}",
+                torch.tensor(constant_values, dtype=dtype, device=device).contiguous(),
+            )
+            for index, bucket in enumerate(component.buckets):
+                prefix = f"bucket_{name.lower()}_{index}"
+                arrays = [
+                    ("region_keys", bucket.region_keys, torch.int32),
+                    (
+                        "region_coefficient_indices",
+                        bucket.region_coefficient_indices,
+                        torch.int32,
+                    ),
+                    ("coefficients", bucket.coefficient_table, dtype),
+                ]
+                if bucket.selected_policy == "compact":
+                    arrays.extend(
+                        (
+                            ("targets", bucket.targets, torch.int64),
+                            (
+                                "target_region_indices",
+                                bucket.target_region_indices,
+                                torch.int32,
+                            ),
+                        )
+                    )
+                elif bucket.selected_policy == "tiled":
+                    arrays.extend(
+                        (
+                            ("tile_origins", bucket.tile_origins, torch.int64),
+                            (
+                                "tile_region_indices",
+                                bucket.tile_region_indices,
+                                torch.int32,
+                            ),
+                        )
+                    )
+                for suffix, values, tensor_dtype in arrays:
+                    self.register_buffer(
+                        f"{prefix}_{suffix}",
+                        torch.tensor(
+                            values, dtype=tensor_dtype, device=device
+                        ).contiguous(),
+                    )
+        self._sealed_names = frozenset(self._buffers) | {
+            "components",
+            "shapes",
+            "dr",
+            "dt",
+            "bloch",
+        }
 
     def __setattr__(self, name, value):
         sealed = self.__dict__.get("_sealed_names", ())
         if name in sealed:
             raise AttributeError(f"Torch simulation plan buffer {name!r} is immutable")
         super().__setattr__(name, value)
+
+    @property
+    def unsupported_models(self):
+        """Return stateful/custom models planned for follow-up execution issues."""
+        supported = {"dielectric", "const", "dummy"}
+        return tuple(
+            sorted(
+                {
+                    bucket.signature.model
+                    for component in self.components.values()
+                    for bucket in component.buckets
+                    if bucket.signature.model not in supported
+                }
+            )
+        )
+
+    def decision_report(self):
+        """Return policy choices and their occupancy/cost evidence."""
+        return tuple(self.components[name].decision_record() for name in COMPONENTS)
 
 
 class TorchSimulationState(nn.Module):
@@ -241,7 +307,7 @@ class TorchSimulationState(nn.Module):
         plane = (2,) if paired_real else ()
         ex_shape = plan.shapes["Ex"]
         scratch_shape = (ex_shape[0], ex_shape[1] - 1, ex_shape[2] - 1) + plane
-        for name in _COMPONENTS:
+        for name in COMPONENTS:
             shape = plan.shapes[name] + plane
             self.register_buffer(
                 name.lower(), torch.zeros(shape, device=device, dtype=dtype)
@@ -263,14 +329,14 @@ class TorchSimulationState(nn.Module):
     def field(self, component):
         """Return one live device field by component type or canonical name."""
         name = component if isinstance(component, str) else component.__name__
-        if name not in _COMPONENTS:
+        if name not in COMPONENTS:
             raise KeyError(f"unknown field component {name!r}")
         return getattr(self, name.lower())
 
     def fields(self):
         """Return a read-only name-to-live-buffer view."""
         return MappingProxyType(
-            {name: getattr(self, name.lower()) for name in _COMPONENTS}
+            {name: getattr(self, name.lower()) for name in COMPONENTS}
         )
 
     @torch.inference_mode()
@@ -403,6 +469,120 @@ def _magnetic_phase(
     hz_target.addcmul_(inv_hz[1:, 1:, :], scratch, value=dt)
 
 
+def _electric_phase_2d_z(
+    ex,
+    ey,
+    ez,
+    hx,
+    hy,
+    hz,
+    inv_ex,
+    inv_ey,
+    inv_ez,
+    scratch_ex,
+    scratch_ey,
+    scratch_ez,
+    dt,
+    dx,
+    dy,
+    dz,
+):
+    del scratch_ex, scratch_ey, scratch_ez, dz
+    ex[:, :-1, :-1].add_(
+        inv_ex[:, :-1, :-1] * (hz[1:, 1:, :] - hz[1:, :-1, :]),
+        alpha=dt / dy,
+    )
+    ey[:-1, :, :-1].add_(
+        inv_ey[:-1, :, :-1] * (hz[1:, 1:, :] - hz[:-1, 1:, :]),
+        alpha=-dt / dx,
+    )
+    ez[:-1, :-1, :].add_(
+        inv_ez[:-1, :-1, :]
+        * (
+            (hy[1:, :, 1:] - hy[:-1, :, 1:]) / dx
+            - (hx[:, 1:, 1:] - hx[:, :-1, 1:]) / dy
+        ),
+        alpha=dt,
+    )
+
+
+def _magnetic_phase_2d_z(
+    ex,
+    ey,
+    ez,
+    hx,
+    hy,
+    hz,
+    inv_hx,
+    inv_hy,
+    inv_hz,
+    scratch_hx,
+    scratch_hy,
+    scratch_hz,
+    dt,
+    dx,
+    dy,
+    dz,
+):
+    del scratch_hx, scratch_hy, scratch_hz, dz
+    hx[:, 1:, 1:].add_(
+        inv_hx[:, 1:, 1:] * (ez[:-1, 1:, :] - ez[:-1, :-1, :]),
+        alpha=-dt / dy,
+    )
+    hy[1:, :, 1:].add_(
+        inv_hy[1:, :, 1:] * (ez[1:, :-1, :] - ez[:-1, :-1, :]),
+        alpha=dt / dx,
+    )
+    hz[1:, 1:, :].add_(
+        inv_hz[1:, 1:, :]
+        * (
+            (ex[:, 1:, :-1] - ex[:, :-1, :-1]) / dy
+            - (ey[1:, :, :-1] - ey[:-1, :, :-1]) / dx
+        ),
+        alpha=dt,
+    )
+
+
+def _electric_periodic_phase(*arguments):
+    ex, ey, ez, hx, hy, hz = arguments[:6]
+    hx[:, 0, :].copy_(hx[:, -1, :])
+    hx[:, :, 0].copy_(hx[:, :, -1])
+    hy[:, :, 0].copy_(hy[:, :, -1])
+    hy[0, :, :].copy_(hy[-1, :, :])
+    hz[0, :, :].copy_(hz[-1, :, :])
+    hz[:, 0, :].copy_(hz[:, -1, :])
+    _electric_phase(*arguments)
+
+
+def _magnetic_periodic_phase(*arguments):
+    ex, ey, ez = arguments[:3]
+    ex[:, -1, :].copy_(ex[:, 0, :])
+    ex[:, :, -1].copy_(ex[:, :, 0])
+    ey[:, :, -1].copy_(ey[:, :, 0])
+    ey[-1, :, :].copy_(ey[0, :, :])
+    ez[-1, :, :].copy_(ez[0, :, :])
+    ez[:, -1, :].copy_(ez[:, 0, :])
+    _magnetic_phase(*arguments)
+
+
+def _electric_periodic_phase_2d_z(*arguments):
+    ex, ey, ez, hx, hy, hz = arguments[:6]
+    hx[:, 0, :].copy_(hx[:, -1, :])
+    hy[0, :, :].copy_(hy[-1, :, :])
+    hz[0, :, :].copy_(hz[-1, :, :])
+    hz[:, 0, :].copy_(hz[:, -1, :])
+    _electric_phase_2d_z(*arguments)
+
+
+def _magnetic_periodic_phase_2d_z(*arguments):
+    ex, ey, ez = arguments[:3]
+    ex[:, -1, :].copy_(ex[:, 0, :])
+    ey[-1, :, :].copy_(ey[0, :, :])
+    ez[-1, :, :].copy_(ez[0, :, :])
+    ez[:, -1, :].copy_(ez[:, 0, :])
+    _magnetic_phase_2d_z(*arguments)
+
+
 class TorchSimulation:
     """Breaking Torch-only construction and execution API.
 
@@ -472,17 +652,34 @@ class TorchSimulation:
             geometric_object.init(space)
         geom_tree = GeomBoxTree(geometry)
         shapes = _field_shapes(space)
-        coefficients = {}
-        material_ids = {}
-        for name in _COMPONENTS:
-            coefficients[name], material_ids[name] = _lower_component(
-                geom_tree, space, name, shapes[name]
+        planner = TorchExecutionPlanner(
+            geom_tree=geom_tree,
+            space=space,
+            shapes=shapes,
+            precision=runtime.precision,
+            device_type=device.type,
+            policy=runtime.execution_policy,
+            execution_tile_size=runtime.planner_tile_size,
+        )
+        component_plans = planner.build()
+        unsupported_models = sorted(
+            {
+                bucket.signature.model
+                for component in component_plans
+                for bucket in component.buckets
+                if bucket.signature.model not in {"dielectric", "const", "dummy"}
+            }
+        )
+        if unsupported_models:
+            raise NotImplementedError(
+                "the mixed-material planner lowered these models, but their state "
+                "equations belong to follow-up issues #118-#120: "
+                + ", ".join(unsupported_models)
             )
 
         with torch.inference_mode():
             plan = TorchSimulationPlan(
-                coefficients,
-                material_ids,
+                component_plans,
                 dr=dr,
                 dt=time_step,
                 bloch=bloch,
@@ -505,15 +702,53 @@ class TorchSimulation:
         self.geom_tree = geom_tree
         self.plan = plan
         self.state = state
-        self._electric = _electric_phase
-        self._magnetic = _magnetic_phase
+        self._phase_includes_boundaries = bloch is None
+        self._has_electric_constants = any(
+            getattr(plan, f"constant_targets_{name.lower()}").numel()
+            for name in ("Ex", "Ey", "Ez")
+        )
+        self._has_magnetic_constants = any(
+            getattr(plan, f"constant_targets_{name.lower()}").numel()
+            for name in ("Hx", "Hy", "Hz")
+        )
+        z_collapsed = (
+            shapes["Ez"][2] == 1
+            and bloch is None
+            and runtime.compile_policy == "compile"
+        )
+        if z_collapsed:
+            electric_function = _electric_periodic_phase_2d_z
+            magnetic_function = _magnetic_periodic_phase_2d_z
+        else:
+            electric_function = (
+                _electric_periodic_phase
+                if self._phase_includes_boundaries
+                else _electric_phase
+            )
+            magnetic_function = (
+                _magnetic_periodic_phase
+                if self._phase_includes_boundaries
+                else _magnetic_phase
+            )
+        self._electric = electric_function
+        self._magnetic = magnetic_function
         if runtime.compile_policy == "compile":
+            compile_options = {"cpp_wrapper": True} if device.type == "cpu" else None
             self._electric = torch.compile(
-                _electric_phase, fullgraph=True, dynamic=False
+                electric_function,
+                fullgraph=True,
+                dynamic=False,
+                options=compile_options,
             )
             self._magnetic = torch.compile(
-                _magnetic_phase, fullgraph=True, dynamic=False
+                magnetic_function,
+                fullgraph=True,
+                dynamic=False,
+                options=compile_options,
             )
+        self._electric_args = self._electric_arguments()
+        self._magnetic_args = self._magnetic_arguments()
+        self._defer_collapsed_ghosts = z_collapsed
 
     def _electric_arguments(self):
         state = self.state
@@ -639,19 +874,43 @@ class TorchSimulation:
             self._boundary_angle("Hz", 1, -1),
         )
 
+    def _apply_constants(self, names):
+        for name in names:
+            targets = getattr(self.plan, f"constant_targets_{name.lower()}")
+            if targets.numel() == 0:
+                continue
+            values = getattr(self.plan, f"constant_values_{name.lower()}")
+            field = self.state.field(name)
+            if self.state.paired_real:
+                field.reshape(-1, 2).index_copy_(0, targets, values)
+            else:
+                field.reshape(-1).index_copy_(0, targets, values)
+
     @torch.inference_mode()
     def advance(self, steps):
         """Advance a fixed state in place without implicit host conversion."""
         if isinstance(steps, bool) or not isinstance(steps, int) or steps < 0:
             raise ValueError("steps must be a non-negative integer")
-        for _ in range(steps):
-            self.state.source_time.add_(self.state.time_step, alpha=0.5)
-            self._sync_magnetic_boundaries()
-            self._electric(*self._electric_arguments())
-            self.state.source_time.add_(self.state.time_step, alpha=0.5)
-            self._sync_electric_boundaries()
-            self._magnetic(*self._magnetic_arguments())
-            self.state.step_count.add_(1)
+        for step_index in range(steps):
+            if self._defer_collapsed_ghosts and step_index == steps - 1:
+                self.state.hx[:, :, 0].copy_(self.state.hx[:, :, -1])
+                self.state.hy[:, :, 0].copy_(self.state.hy[:, :, -1])
+            if not self._phase_includes_boundaries:
+                self._sync_magnetic_boundaries()
+            self._electric(*self._electric_args)
+            if self._has_electric_constants:
+                self._apply_constants(("Ex", "Ey", "Ez"))
+            if not self._phase_includes_boundaries:
+                self._sync_electric_boundaries()
+            self._magnetic(*self._magnetic_args)
+            if self._has_magnetic_constants:
+                self._apply_constants(("Hx", "Hy", "Hz"))
+        if steps:
+            if self._defer_collapsed_ghosts:
+                self.state.ex[:, :, -1].copy_(self.state.ex[:, :, 0])
+                self.state.ey[:, :, -1].copy_(self.state.ey[:, :, 0])
+            self.state.source_time.add_(self.state.time_step, alpha=steps)
+            self.state.step_count.add_(steps)
         return self
 
     def step(self):
@@ -661,7 +920,7 @@ class TorchSimulation:
     @torch.inference_mode()
     def load_host_fields(self, fields):
         """Explicitly copy NumPy or CPU Torch field values into live buffers."""
-        if set(fields) != set(_COMPONENTS):
+        if set(fields) != set(COMPONENTS):
             raise ValueError("host fields must contain Ex, Ey, Ez, Hx, Hy, and Hz")
         for name, values in fields.items():
             target = self.state.field(name)
@@ -687,6 +946,7 @@ class TorchSimulation:
         result = torch_runtime_diagnostics(self.runtime)
         result["resolved_device"] = str(self.device)
         result["cpu_threads"] = self.cpu_threads
+        result["material_plan"] = self.plan.decision_report()
         return result
 
     def buffer_addresses(self):
@@ -695,8 +955,13 @@ class TorchSimulation:
 
 
 __all__ = [
+    "ComponentPlan",
     "DistributedLaunch",
+    "ExecutionSignature",
+    "FlattenedStencilTerm",
+    "MaterialBucketPlan",
     "TorchConfigurationError",
+    "TorchExecutionPlanner",
     "TorchRuntimeConfig",
     "TorchSimulation",
     "TorchSimulationPlan",

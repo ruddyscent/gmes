@@ -109,6 +109,32 @@ component spectra, complete fields, and DM2 state at fixed steps.  Large NPZ,
 JSON, and profiler outputs belong in CI/run artifacts or `/tmp`; do not add
 them to the repository, source distribution, or wheel.
 
+## Torch material planner matrix
+
+`torch_material_planner.py` measures the immutable lowering contract and the
+currently executable simple-material path. Its fixed cases cover homogeneous
+and 16-cylinder dielectric grids, 1,000 equivalent geometry objects, 1/10/50/90
+percent contiguous and fragmented stateful coverage, exact state-width
+buckets, and collapsed paired-real Bloch fields. It reports plan creation and
+tensor-finalization time, cells/s, launches/step, bytes/cell, peak host/device
+memory, signature normalization, and the complete `auto` decision record.
+
+Run every forced candidate to verify complete-field equality and the 10 percent
+automatic-policy gate:
+
+```sh
+uv run --no-sync python benchmarks/torch_material_planner.py \
+  --case heterogeneous-16 --policy matrix --compile-policy compile \
+  --warmup 10 --steps 100 --repeats 15 --native-reference
+```
+
+Add `--device cuda:0 --precision float32 --profile` for the single-GPU matrix.
+CUDA is synchronized only at measurement boundaries. The profiler record
+includes operation counts and positive allocation events; generated JSON and
+trace artifacts belong in `/tmp` or CI artifacts, not the repository.
+Stateful coverage and width cases are plan-only until #118 through #120 supply
+their model equations.
+
 ## Existing native microbenchmarks
 
 `geometry_mapping.py` isolates bounded geometry-to-region lowering for all

@@ -3,14 +3,22 @@ import unittest
 from pathlib import Path
 
 
-def load_field_updates():
-    benchmark_path = (
-        Path(__file__).resolve().parents[1] / "benchmarks" / "field_updates.py"
+def _load_benchmark(name):
+    benchmark_path = Path(__file__).resolve().parents[1] / "benchmarks" / name
+    spec = importlib.util.spec_from_file_location(
+        name.removesuffix(".py"), benchmark_path
     )
-    spec = importlib.util.spec_from_file_location("field_updates", benchmark_path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def load_field_updates():
+    return _load_benchmark("field_updates.py")
+
+
+def load_torch_material_planner():
+    return _load_benchmark("torch_material_planner.py")
 
 
 class FieldUpdateBenchmarkTest(unittest.TestCase):
@@ -79,6 +87,93 @@ class FieldUpdateBenchmarkTest(unittest.TestCase):
                     for item in self.benchmark.material_update_sizes(simulation)
                 }
                 self.assertIn(material_name, materials)
+
+
+class TorchMaterialPlannerBenchmarkTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        import gmes
+
+        cls.gmes = gmes
+        cls.benchmark = load_torch_material_planner()
+
+    def test_reports_plan_execution_and_policy_metrics(self):
+        result = self.benchmark.run_case(
+            "homogeneous",
+            policy="auto",
+            device="cpu",
+            precision="float64",
+            compile_policy="eager",
+            threads=1,
+            warmup=0,
+            steps=1,
+            repeats=1,
+            tile_size=64,
+            profile=False,
+            gmes=self.gmes,
+        )
+        self.assertGreater(result["plan_creation_seconds"], 0)
+        self.assertGreater(result["estimated_plan_bytes"], 0)
+        self.assertGreater(result["bytes_per_active_component_cell"], 0)
+        self.assertEqual(result["material_launches_per_step"], 6)
+        self.assertGreater(result["cells_per_second"], 0)
+        self.assertEqual(
+            {
+                bucket["selected_policy"]
+                for component in result["decisions"]
+                for bucket in component["buckets"]
+            },
+            {"dense"},
+        )
+
+    def test_fragmented_coverage_matches_contiguous_target_counts(self):
+        for coverage in (1, 10, 50, 90):
+            counts = {}
+            for layout in ("contiguous", "fragmented"):
+                _, _, _, plans, _ = self.benchmark.build_host_plan(
+                    f"coverage-{layout}-{coverage}",
+                    policy="auto",
+                    precision="float64",
+                    device_type="cpu",
+                    tile_size=64,
+                    gmes=self.gmes,
+                )
+                counts[layout] = sum(
+                    bucket.target_count
+                    for plan in plans
+                    for bucket in plan.buckets
+                    if bucket.signature.model == "drude"
+                )
+            self.assertAlmostEqual(
+                counts["fragmented"] / counts["contiguous"], 1.0, delta=0.1
+            )
+
+    def test_stateful_matrix_is_plan_only_and_width_normalized(self):
+        result = self.benchmark.run_case(
+            "state-widths",
+            policy="auto",
+            device="cpu",
+            precision="float64",
+            compile_policy="eager",
+            threads=1,
+            warmup=0,
+            steps=1,
+            repeats=1,
+            tile_size=64,
+            profile=False,
+            gmes=self.gmes,
+        )
+        self.assertIn("plan-only", result["execution"])
+        electric_widths = {
+            tuple(item["state_shape"])
+            for item in result["signatures"]
+            if item["component"] == "Ex" and item["model"] == "drude"
+        }
+        self.assertEqual(electric_widths, {(1,), (2,), (4,), (8,)})
+        magnetic_models = {
+            item["model"] for item in result["signatures"] if item["component"] == "Hx"
+        }
+        self.assertEqual(magnetic_models, {"dielectric"})
 
 
 if __name__ == "__main__":

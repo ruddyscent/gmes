@@ -234,7 +234,18 @@ class TorchSimulationPlan(nn.Module):
                     ),
                     ("coefficients", bucket.coefficient_table, dtype),
                 ]
-                if bucket.selected_policy == "compact":
+                if bucket.signature.model in {"upml", "cpml"}:
+                    cell_coefficients = bucket.cell_coefficients
+                    if self.bloch is not None:
+                        cell_coefficients = cell_coefficients[..., np.newaxis]
+                    arrays.extend(
+                        (
+                            ("targets", bucket.targets, torch.int64),
+                            ("stencil_indices", bucket.stencil_indices, torch.int64),
+                            ("cell_coefficients", cell_coefficients, dtype),
+                        )
+                    )
+                elif bucket.selected_policy == "compact":
                     arrays.extend(
                         (
                             ("targets", bucket.targets, torch.int64),
@@ -280,7 +291,7 @@ class TorchSimulationPlan(nn.Module):
     @property
     def unsupported_models(self):
         """Return stateful/custom models planned for follow-up execution issues."""
-        supported = {"dielectric", "const", "dummy"}
+        supported = {"dielectric", "const", "dummy", "upml", "cpml"}
         return tuple(
             sorted(
                 {
@@ -324,6 +335,23 @@ class TorchSimulationState(nn.Module):
         self.register_buffer(
             "time_step", torch.tensor(plan.dt, device=device, dtype=dtype)
         )
+        for component_name, component in plan.components.items():
+            for index, bucket in enumerate(component.buckets):
+                if bucket.signature.model not in {"upml", "cpml"}:
+                    continue
+                prefix = f"pml_{component_name.lower()}_{index}"
+                state_shape = (bucket.target_count, bucket.state_width) + plane
+                self.register_buffer(
+                    f"{prefix}_state",
+                    torch.zeros(state_shape, device=device, dtype=dtype),
+                )
+                scratch_shape = (bucket.target_count,) + plane
+                for scratch_index in range(3):
+                    self.register_buffer(
+                        f"_{prefix}_scratch{scratch_index}",
+                        torch.zeros(scratch_shape, device=device, dtype=dtype),
+                        persistent=False,
+                    )
         self.requires_grad_(False)
 
     def field(self, component):
@@ -364,6 +392,19 @@ class TorchSimulationState(nn.Module):
     def snapshot(self):
         """Clone all live fields on their current device."""
         return {name: value.detach().clone() for name, value in self.fields().items()}
+
+    @torch.inference_mode()
+    def pml_state_snapshot(self, *, numpy=True, complex_state=True):
+        """Explicitly extract active-cell PML state for oracle comparison."""
+        result = {}
+        for name, value in self.named_buffers(recurse=False):
+            if not name.startswith("pml_") or not name.endswith("_state"):
+                continue
+            host = value.detach().to(device="cpu", copy=True)
+            if self.paired_real and complex_state:
+                host = torch.complex(host[..., 0], host[..., 1])
+            result[name] = host.numpy() if numpy else host
+        return result
 
     @torch.inference_mode()
     def host_snapshot(self, *, numpy=True, complex_fields=True):
@@ -583,12 +624,85 @@ def _magnetic_periodic_phase_2d_z(*arguments):
     _magnetic_phase_2d_z(*arguments)
 
 
+def _gather_difference(source, positive, negative, output, temporary, scale):
+    torch.index_select(source, 0, positive, out=output)
+    torch.index_select(source, 0, negative, out=temporary)
+    output.sub_(temporary).mul_(scale)
+
+
+def _upml_bucket_update(
+    field,
+    source1,
+    source2,
+    targets,
+    stencil,
+    coefficients,
+    state,
+    scratch0,
+    scratch1,
+    scratch2,
+    scale1,
+    scale2,
+    direction,
+):
+    _gather_difference(
+        source1, stencil[:, 0], stencil[:, 1], scratch0, scratch2, scale1
+    )
+    _gather_difference(
+        source2, stencil[:, 2], stencil[:, 3], scratch1, scratch2, scale2
+    )
+    scratch0.sub_(scratch1).mul_(direction)
+    memory = state[:, 0]
+    scratch1.copy_(memory)
+    memory.mul_(coefficients[:, 1]).addcmul_(coefficients[:, 2], scratch0)
+    torch.index_select(field, 0, targets, out=scratch2)
+    scratch0.copy_(memory).mul_(coefficients[:, 5])
+    scratch0.addcmul_(coefficients[:, 6], scratch1, value=-1.0)
+    scratch0.mul_(coefficients[:, 4]).mul_(coefficients[:, 0])
+    scratch2.mul_(coefficients[:, 3]).add_(scratch0)
+    field.index_copy_(0, targets, scratch2)
+
+
+def _cpml_bucket_update(
+    field,
+    source1,
+    source2,
+    targets,
+    stencil,
+    coefficients,
+    state,
+    scratch0,
+    scratch1,
+    scratch2,
+    scale1,
+    scale2,
+    direction,
+    dt,
+):
+    _gather_difference(
+        source1, stencil[:, 0], stencil[:, 1], scratch0, scratch2, scale1
+    )
+    _gather_difference(
+        source2, stencil[:, 2], stencil[:, 3], scratch1, scratch2, scale2
+    )
+    psi1 = state[:, 0]
+    psi2 = state[:, 1]
+    psi1.mul_(coefficients[:, 1]).addcmul_(coefficients[:, 2], scratch0)
+    psi2.mul_(coefficients[:, 4]).addcmul_(coefficients[:, 5], scratch1)
+    torch.index_select(field, 0, targets, out=scratch2)
+    scratch0.div_(coefficients[:, 3]).add_(psi1)
+    scratch1.div_(coefficients[:, 6]).add_(psi2)
+    scratch0.sub_(scratch1).mul_(coefficients[:, 0]).mul_(dt * direction)
+    scratch2.add_(scratch0)
+    field.index_copy_(0, targets, scratch2)
+
+
 class TorchSimulation:
     """Breaking Torch-only construction and execution API.
 
     Geometry construction and host conversion are deliberately separate from
     the compiled electric and magnetic phases. Sources and distributed domain
-    decomposition are not part of this minimal dielectric slice.
+    decomposition are not part of this single-device material slice.
     """
 
     def __init__(
@@ -667,13 +781,14 @@ class TorchSimulation:
                 bucket.signature.model
                 for component in component_plans
                 for bucket in component.buckets
-                if bucket.signature.model not in {"dielectric", "const", "dummy"}
+                if bucket.signature.model
+                not in {"dielectric", "const", "dummy", "upml", "cpml"}
             }
         )
         if unsupported_models:
             raise NotImplementedError(
                 "the mixed-material planner lowered these models, but their state "
-                "equations belong to follow-up issues #118-#120: "
+                "equations belong to follow-up issues #119-#120: "
                 + ", ".join(unsupported_models)
             )
 
@@ -711,10 +826,16 @@ class TorchSimulation:
             getattr(plan, f"constant_targets_{name.lower()}").numel()
             for name in ("Hx", "Hy", "Hz")
         )
+        self._has_pml = any(
+            bucket.signature.model in {"upml", "cpml"}
+            for component in component_plans
+            for bucket in component.buckets
+        )
         z_collapsed = (
             shapes["Ez"][2] == 1
             and bloch is None
             and runtime.compile_policy == "compile"
+            and not self._has_pml
         )
         if z_collapsed:
             electric_function = _electric_periodic_phase_2d_z
@@ -748,6 +869,22 @@ class TorchSimulation:
             )
         self._electric_args = self._electric_arguments()
         self._magnetic_args = self._magnetic_arguments()
+        pml_functions = {
+            "upml": _upml_bucket_update,
+            "cpml": _cpml_bucket_update,
+        }
+        if runtime.compile_policy == "compile":
+            pml_functions = {
+                model: torch.compile(
+                    function,
+                    fullgraph=True,
+                    dynamic=False,
+                    options=compile_options,
+                )
+                for model, function in pml_functions.items()
+            }
+        self._electric_pml = self._pml_executions(("Ex", "Ey", "Ez"), pml_functions)
+        self._magnetic_pml = self._pml_executions(("Hx", "Hy", "Hz"), pml_functions)
         self._defer_collapsed_ghosts = z_collapsed
 
     def _electric_arguments(self):
@@ -789,6 +926,53 @@ class TorchSimulation:
             plan.dt,
             *plan.dr,
         )
+
+    def _pml_executions(self, names, functions):
+        executions = []
+        paired_width = 2 if self.state.paired_real else None
+        for name in names:
+            component = self.plan.components[name]
+            for index, bucket in enumerate(component.buckets):
+                model = bucket.signature.model
+                if model not in functions:
+                    continue
+                prefix = f"bucket_{name.lower()}_{index}"
+                state_prefix = f"pml_{name.lower()}_{index}"
+                flatten = (
+                    (lambda value: value.reshape(-1, paired_width))
+                    if paired_width is not None
+                    else (lambda value: value.reshape(-1))
+                )
+                terms = component.stencil
+                direction = 1.0
+                if name not in ELECTRIC_COMPONENTS:
+                    terms = tuple(reversed(terms))
+                    direction = -1.0
+                term1, term2 = terms
+                arguments = [
+                    flatten(self.state.field(name)),
+                    flatten(self.state.field(term1.source)),
+                    flatten(self.state.field(term2.source)),
+                    getattr(self.plan, f"{prefix}_targets"),
+                    getattr(self.plan, f"{prefix}_stencil_indices"),
+                    getattr(self.plan, f"{prefix}_cell_coefficients"),
+                    getattr(self.state, f"{state_prefix}_state"),
+                    getattr(self.state, f"_{state_prefix}_scratch0"),
+                    getattr(self.state, f"_{state_prefix}_scratch1"),
+                    getattr(self.state, f"_{state_prefix}_scratch2"),
+                    1.0 / self.plan.dr[term1.scale_axis],
+                    1.0 / self.plan.dr[term2.scale_axis],
+                    direction,
+                ]
+                if model == "cpml":
+                    arguments.append(self.plan.dt)
+                executions.append((functions[model], tuple(arguments)))
+        return tuple(executions)
+
+    @staticmethod
+    def _run_pml(executions):
+        for function, arguments in executions:
+            function(*arguments)
 
     def _boundary_angle(self, name, axis, direction):
         if self.plan.bloch is None:
@@ -898,11 +1082,13 @@ class TorchSimulation:
             if not self._phase_includes_boundaries:
                 self._sync_magnetic_boundaries()
             self._electric(*self._electric_args)
+            self._run_pml(self._electric_pml)
             if self._has_electric_constants:
                 self._apply_constants(("Ex", "Ey", "Ez"))
             if not self._phase_includes_boundaries:
                 self._sync_electric_boundaries()
             self._magnetic(*self._magnetic_args)
+            self._run_pml(self._magnetic_pml)
             if self._has_magnetic_constants:
                 self._apply_constants(("Hx", "Hy", "Hz"))
         if steps:
@@ -947,6 +1133,20 @@ class TorchSimulation:
         result["resolved_device"] = str(self.device)
         result["cpu_threads"] = self.cpu_threads
         result["material_plan"] = self.plan.decision_report()
+        result["pml"] = {
+            "active_cells": sum(
+                bucket.target_count
+                for component in self.plan.components.values()
+                for bucket in component.buckets
+                if bucket.signature.model in {"upml", "cpml"}
+            ),
+            "state_bytes": sum(
+                value.numel() * value.element_size()
+                for name, value in self.state.named_buffers(recurse=False)
+                if name.startswith("pml_") and name.endswith("_state")
+            ),
+            "launches_per_step": len(self._electric_pml) + len(self._magnetic_pml),
+        }
         return result
 
     def buffer_addresses(self):

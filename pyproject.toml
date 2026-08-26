@@ -32,12 +32,16 @@ classifiers = [
 dependencies = [
     "numpy>=2.3",
     "scipy>=1.16",
+    "torch>=2.13,<2.14",
 ]
 
 [project.optional-dependencies]
 plot = ["matplotlib>=3.10"]
 mpi = ["mpi4py>=4"]
 hdf5 = ["tables>=3.10"]
+torch-cpu = ["torch>=2.13,<2.14"]
+torch-cu126 = ["torch>=2.13,<2.14"]
+torch-cu130 = ["torch>=2.13,<2.14"]
 all = [
     "matplotlib>=3.10",
     "mpi4py>=4",
@@ -60,6 +64,13 @@ Issues = "https://github.com/ruddyscent/gmes/issues"
 
 [tool.uv]
 required-version = "==0.12.5"
+conflicts = [
+    [
+        {extra = "torch-cpu"},
+        {extra = "torch-cu126"},
+        {extra = "torch-cu130"},
+    ],
+]
 build-constraint-dependencies = [
     "setuptools==84.0.0",
     "wheel==0.48.0",
@@ -81,6 +92,28 @@ cache-keys = [
     {env = "GMES_OPENMP_PREFIX"},
     {env = "MACOSX_DEPLOYMENT_TARGET"},
 ]
+
+[tool.uv.sources]
+torch = [
+    {index = "pytorch-cpu", extra = "torch-cpu"},
+    {index = "pytorch-cu126", extra = "torch-cu126"},
+    {index = "pytorch-cu130", extra = "torch-cu130"},
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
 
 [tool.setuptools]
 packages = ["gmes"]

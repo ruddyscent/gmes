@@ -187,11 +187,24 @@ class TorchStateTest(unittest.TestCase):
         self.assertEqual(list(simulation.state.parameters()), [])
         for name, value in simulation.state.named_buffers():
             self.assertEqual(value.device.type, "cpu", name)
-            expected_dtype = (
-                torch.int32
-                if "material_ids" in name
-                else (torch.int64 if name == "step_count" else torch.float32)
-            )
+            if name == "step_count" or "targets" in name or "tile_origins" in name:
+                expected_dtype = torch.int64
+            elif any(
+                marker in name
+                for marker in (
+                    "material_ids",
+                    "underlying_ids",
+                    "target_region_indices",
+                    "region_keys",
+                    "region_coefficient_indices",
+                    "tile_region_indices",
+                )
+            ):
+                expected_dtype = torch.int32
+            elif "ownership" in name:
+                expected_dtype = torch.int16
+            else:
+                expected_dtype = torch.float32
             self.assertEqual(value.dtype, expected_dtype, name)
             self.assertFalse(value.requires_grad, name)
         for field in simulation.state.fields().values():
@@ -249,9 +262,22 @@ class TorchStateTest(unittest.TestCase):
 
 
 class TorchOracleTest(unittest.TestCase):
-    def _compare(self, *, device, precision, compile_policy, bloch=None):
-        native, fields = _native_and_fields(bloch=bloch)
+    def _compare(
+        self,
+        *,
+        device,
+        precision,
+        compile_policy,
+        bloch=None,
+        size=(2, 2, 2),
+        resolution=2,
+    ):
+        native, fields = _native_and_fields(
+            size=size, resolution=resolution, bloch=bloch
+        )
         simulation = _simulation(
+            size=size,
+            resolution=resolution,
             device=device,
             precision=precision,
             compile_policy=compile_policy,
@@ -273,6 +299,15 @@ class TorchOracleTest(unittest.TestCase):
     def test_cpu_eager_float32_uses_separate_tolerance(self):
         self._compare(device="cpu", precision="float32", compile_policy="eager")
 
+    def test_cpu_fullgraph_collapsed_z_matches_native(self):
+        self._compare(
+            device="cpu",
+            precision="float64",
+            compile_policy="compile",
+            size=(4, 4, 0),
+            resolution=4,
+        )
+
     def test_cpu_fullgraph_paired_real_matches_complex_native(self):
         torch._dynamo.reset()
         simulation = self._compare(
@@ -289,6 +324,16 @@ class TorchOracleTest(unittest.TestCase):
             torch._dynamo.utils.counters["stats"]["unique_graphs"],
         )
         self.assertEqual(addresses, simulation.buffer_addresses())
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is unavailable")
+    def test_cuda_fullgraph_collapsed_z_matches_native(self):
+        self._compare(
+            device="cuda:0",
+            precision="float32",
+            compile_policy="compile",
+            size=(4, 4, 0),
+            resolution=4,
+        )
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA is unavailable")
     def test_cuda_eager_paired_real_matches_complex_native(self):

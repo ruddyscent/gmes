@@ -8,11 +8,11 @@ oracle is needed by the migration.
 
 The executable slice supports serial periodic 1-D, 2-D, and 3-D Cartesian
 domains, simple nondispersive `Dielectric`, `Const`, and `Dummy` geometry,
-real-field `Dm2` Maxwell--Bloch media, eager or compiled phases, and
-Bloch-periodic fields for the nondispersive families. Sources, PML, other
-dispersive materials, distributed domain decomposition, plotting, and
-solver-owned I/O remain outside this slice and fail during construction
-instead of silently falling back.
+real-field `Dm2` Maxwell--Bloch media, UPML and CPML absorbing layers, eager or
+compiled phases, and Bloch-periodic fields for nondispersive and PML families.
+Sources, other dispersive materials, distributed domain decomposition,
+plotting, and solver-owned I/O remain outside this slice and fail during
+construction instead of silently falling back.
 
 ## Mixed-material execution planning
 
@@ -40,10 +40,19 @@ debugging, and do not silently replace an unsupported state equation.
 `simulation.diagnostics()["material_plan"]` explains every decision and its
 candidate costs.
 
-PML and other dispersive material geometry can already be lowered into
-normalized SoA/tile descriptors with exact underlying-region mapping. Their
-state equations deliberately remain construction errors until #118 and #119
-consume these plans.
+UPML and CPML use active-cell-only contiguous tensor buckets. Coordinate-
+dependent coefficients and four flattened gather indices are finalized once;
+the mutable UPML `b/d` or CPML `psi1/psi2` state and three fixed scratch
+arrays stay on the requested device. The base permittivity/permeability comes
+from each shell cell's lowered underlying-region ID, including corners and
+overlap. Buckets are keyed by model, component, precision, and state width, so
+geometry object count does not create per-region launches.
+
+`simulation.state.pml_state_snapshot()` is an explicit oracle/debug adapter.
+`simulation.diagnostics()["pml"]` reports active component cells, mutable
+state bytes, and launches per step. Normal stepping uses gather/update/scatter
+over unique targets and performs no host conversion or native fallback.
+Other dispersive geometry remains plan-only until #119 consumes its state
 
 ## DM2 Maxwell--Bloch execution
 
@@ -154,8 +163,9 @@ explicit host boundary:
 
 ```python
 device_copy = simulation.state.snapshot()      # cloned tensors, same device
-checkpoint = simulation.state.checkpoint()     # cloned persistent state
+checkpoint = simulation.state.checkpoint()     # fields, clocks, and PML state
 host_fields = simulation.state.host_snapshot() # cloned NumPy arrays by default
+pml_state = simulation.state.pml_state_snapshot() # active PML cells only
 
 simulation.state.load_checkpoint(checkpoint)   # in-place; buffer addresses stay fixed
 ```

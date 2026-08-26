@@ -115,9 +115,11 @@ them to the repository, source distribution, or wheel.
 currently executable simple-material path. Its fixed cases cover homogeneous
 and 16-cylinder dielectric grids, 1,000 equivalent geometry objects, 1/10/50/90
 percent contiguous and fragmented stateful coverage, exact state-width
-buckets, and collapsed paired-real Bloch fields. It reports plan creation and
-tensor-finalization time, cells/s, launches/step, bytes/cell, peak host/device
-memory, signature normalization, and the complete `auto` decision record.
+buckets, collapsed paired-real Bloch fields, thin and thick CPML shells, and a
+mixed Dielectric+CPML workload. It reports plan creation and tensor-finalization
+time, cells/s, launches/step, bytes/cell, PML active cells/state bytes/
+gather-scatter bytes, peak host/device memory, signature normalization, and the
+complete `auto` decision record.
 
 Run every forced candidate to verify complete-field equality and the 10 percent
 automatic-policy gate:
@@ -132,8 +134,8 @@ Add `--device cuda:0 --precision float32 --profile` for the single-GPU matrix.
 CUDA is synchronized only at measurement boundaries. The profiler record
 includes operation counts and positive allocation events; generated JSON and
 trace artifacts belong in `/tmp` or CI artifacts, not the repository.
-PML and non-DM2 dispersive coverage and width cases remain plan-only until
-#118 and #119 supply their model equations. DM2 cases execute the model.
+PML and DM2 cases execute their model equations. Other dispersive coverage and
+width cases remain plan-only until #119 supplies their equations.
 
 ## Torch DM2 matrix
 

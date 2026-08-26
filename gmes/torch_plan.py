@@ -73,6 +73,9 @@ class MaterialBucketPlan:
     region_keys: np.ndarray
     region_coefficient_indices: np.ndarray
     coefficient_table: np.ndarray
+    cell_coefficient_names: tuple
+    cell_coefficients: np.ndarray
+    stencil_indices: np.ndarray
     tile_origins: np.ndarray
     tile_region_indices: np.ndarray
     estimated_bytes: int
@@ -92,6 +95,16 @@ class MaterialBucketPlan:
             self.coefficient_names
         ):
             raise ValueError("coefficient table width does not match its descriptor")
+        if (
+            self.cell_coefficients.ndim != 2
+            or self.cell_coefficients.shape[0] not in (0, self.target_count)
+            or self.cell_coefficients.shape[1] != len(self.cell_coefficient_names)
+        ):
+            raise ValueError(
+                "cell coefficients must be empty or completely described per target"
+            )
+        if self.stencil_indices.shape not in ((0, 4), (self.target_count, 4)):
+            raise ValueError("stencil indices must be empty or cover every target")
         if self.tile_region_indices.ndim != 2:
             raise ValueError("tile-dense region indices must be two-dimensional")
         if len(self.tile_origins) != len(self.tile_region_indices):
@@ -102,6 +115,8 @@ class MaterialBucketPlan:
             self.region_keys,
             self.region_coefficient_indices,
             self.coefficient_table,
+            self.cell_coefficients,
+            self.stencil_indices,
             self.tile_origins,
             self.tile_region_indices,
         ):
@@ -113,7 +128,10 @@ class MaterialBucketPlan:
         """Return the steady-state material launch estimate for this signature."""
         if self.target_count == 0 or self.signature.model == "dummy":
             return 0
-        if self.selected_policy == "tiled":
+        if self.selected_policy == "tiled" and self.signature.model not in {
+            "upml",
+            "cpml",
+        }:
             return len(self.tile_origins)
         return 1
 
@@ -247,6 +265,7 @@ class ComponentPlan:
                     "estimated_costs": dict(bucket.estimated_costs),
                     "estimated_bytes": bucket.estimated_bytes,
                     "coefficient_rows": len(bucket.coefficient_table),
+                    "cell_coefficient_width": len(bucket.cell_coefficient_names),
                 }
                 for bucket in self.buckets
             ],
@@ -279,9 +298,18 @@ _STENCIL_COORDINATES = {
     "Ex": (("Hz", (1, 1, 0), (1, 0, 0), 1, 1), ("Hy", (1, 0, 1), (1, 0, 0), 2, -1)),
     "Ey": (("Hx", (0, 1, 1), (0, 1, 0), 2, 1), ("Hz", (1, 1, 0), (0, 1, 0), 0, -1)),
     "Ez": (("Hy", (1, 0, 1), (0, 0, 1), 0, 1), ("Hx", (0, 1, 1), (0, 0, 1), 1, -1)),
-    "Hx": (("Ey", (0, 0, 0), (0, 0, -1), 2, 1), ("Ez", (0, 0, 0), (0, -1, 0), 1, -1)),
-    "Hy": (("Ez", (0, 0, 0), (-1, 0, 0), 0, 1), ("Ex", (0, 0, 0), (0, 0, -1), 2, -1)),
-    "Hz": (("Ex", (0, 0, 0), (0, -1, 0), 1, 1), ("Ey", (0, 0, 0), (-1, 0, 0), 0, -1)),
+    "Hx": (
+        ("Ey", (0, -1, 0), (0, -1, -1), 2, 1),
+        ("Ez", (0, 0, -1), (0, -1, -1), 1, -1),
+    ),
+    "Hy": (
+        ("Ez", (0, 0, -1), (-1, 0, -1), 0, 1),
+        ("Ex", (-1, 0, 0), (-1, 0, -1), 2, -1),
+    ),
+    "Hz": (
+        ("Ex", (-1, 0, 0), (-1, -1, 0), 1, 1),
+        ("Ey", (0, -1, 0), (-1, -1, 0), 0, -1),
+    ),
 }
 
 
@@ -311,7 +339,7 @@ def _model_and_state(material, component):
     if isinstance(material, Const):
         return "const", ()
     if isinstance(material, Upml):
-        return "upml", (2,)
+        return "upml", (1,)
     if isinstance(material, Cpml):
         return "cpml", (2,)
     if magnetic and isinstance(material, (Drude, Lorentz, DcpAde, DcpPlrc, DcpRc, Dm2)):
@@ -396,6 +424,98 @@ def _coefficient_descriptor(material, component, underlying):
             names.extend((f"transition{index}_omega", f"transition{index}_density"))
             values.extend((omega, density))
     return tuple(names), tuple(float(value) for value in values)
+
+
+_PML_CELL_COEFFICIENT_NAMES = {
+    "upml": ("inv_base", "c1", "c2", "c3", "c4", "c5", "c6"),
+    "cpml": ("inv_base", "b1", "c1", "kappa1", "b2", "c2", "kappa2"),
+}
+
+_PML_AXES = {
+    "Ex": (1, 2, 0),
+    "Ey": (2, 0, 1),
+    "Ez": (0, 1, 2),
+    "Hx": (1, 2, 0),
+    "Hy": (2, 0, 1),
+    "Hz": (0, 1, 2),
+}
+
+
+def _pml_profile(material, coordinates, axis):
+    """Vectorize the native PML grading functions over one coordinate axis."""
+    offset = coordinates[:, axis] - material.center[axis]
+    half_size = material.half_size[axis]
+    low = offset <= material.d - half_size
+    high = np.logical_and(~low, half_size - material.d <= offset)
+    depth = np.zeros(len(coordinates), dtype=np.float64)
+    depth[low] = np.clip((half_size + offset[low]) / material.d, 0.0, 1.0)
+    depth[high] = np.clip((half_size - offset[high]) / material.d, 0.0, 1.0)
+    graded = np.zeros(len(coordinates), dtype=np.float64)
+    boundary = np.logical_or(low, high)
+    graded[boundary] = (1.0 - depth[boundary]) ** material.m
+    sigma = material.sigma_max[axis] * graded
+    kappa = 1.0 + (material.kappa_max - 1.0) * graded
+    return sigma, kappa, depth, boundary
+
+
+def _pml_cell_coefficients(material, component, coordinates, inverse_base):
+    """Lower coordinate-dependent PML parameters without per-cell objects."""
+    first_axis, second_axis, field_axis = _PML_AXES[component]
+    profiles = {
+        axis: _pml_profile(material, coordinates, axis)
+        for axis in {first_axis, second_axis, field_axis}
+    }
+    base = np.full(len(coordinates), inverse_base, dtype=np.float64)
+    if isinstance(material, Upml):
+        sigma1, kappa1, _, _ = profiles[first_axis]
+        sigma2, kappa2, _, _ = profiles[second_axis]
+        sigmaf, kappaf, _, _ = profiles[field_axis]
+
+        def pair(sigma, kappa):
+            denominator = 2.0 * kappa + sigma * material.dt
+            return (
+                (2.0 * kappa - sigma * material.dt) / denominator,
+                2.0 * material.dt / denominator,
+                1.0 / denominator,
+            )
+
+        c1, c2, _ = pair(sigma1, kappa1)
+        c3, _, c4 = pair(sigma2, kappa2)
+        c5 = 2.0 * kappaf + sigmaf * material.dt
+        c6 = 2.0 * kappaf - sigmaf * material.dt
+        return np.column_stack((base, c1, c2, c3, c4, c5, c6))
+
+    rows = [base]
+    for axis in (first_axis, second_axis):
+        sigma, kappa, depth, boundary = profiles[axis]
+        a = np.zeros(len(coordinates), dtype=np.float64)
+        a[boundary] = material.a_max * depth[boundary] ** material.m_a
+        b = np.exp(-(sigma / kappa + a) * material.dt)
+        denominator = (sigma + kappa * a) * kappa
+        c = np.zeros(len(coordinates), dtype=np.float64)
+        nonzero = denominator != 0.0
+        c[nonzero] = sigma[nonzero] * (b[nonzero] - 1.0) / denominator[nonzero]
+        rows.extend((b, c, kappa))
+    return np.column_stack(rows)
+
+
+def _pml_stencil_indices(component, targets, target_shape, shapes):
+    coordinates = np.unravel_index(targets, target_shape)
+    columns = []
+    stencil = _STENCIL_COORDINATES[component]
+    if component not in ELECTRIC_COMPONENTS:
+        stencil = tuple(reversed(stencil))
+    for source, positive, negative, _axis, _sign in stencil:
+        for delta in (positive, negative):
+            source_coordinates = tuple(
+                coordinates[axis] + delta[axis] for axis in range(3)
+            )
+            columns.append(
+                np.ravel_multi_index(source_coordinates, shapes[source]).astype(
+                    np.int64, copy=False
+                )
+            )
+    return np.column_stack(columns)
 
 
 def _select_policy(requested, *, device_type, count, active_count, runs, tiles, width):
@@ -532,6 +652,31 @@ class TorchExecutionPlanner:
             coefficient_table, region_coefficient_indices = np.unique(
                 coefficient_rows, axis=0, return_inverse=True
             )
+            cell_coefficient_names = ()
+            cell_coefficients = np.empty((0, 0), dtype=np.float64)
+            stencil_indices = np.empty((0, 4), dtype=np.int64)
+            if signature.model in {"upml", "cpml"}:
+                cell_coefficient_names = _PML_CELL_COEFFICIENT_NAMES[signature.model]
+                linear_coordinates = np.unravel_index(targets, shape)
+                target_coordinates = np.column_stack(
+                    tuple(axes[axis][linear_coordinates[axis]] for axis in range(3))
+                )
+                cell_coefficients = np.empty((len(targets), 7), dtype=np.float64)
+                for region_index, (material_id, _underlying_id) in enumerate(keys):
+                    selected_region = target_region_indices == region_index
+                    material = geometries[int(material_id)].material
+                    descriptor_row = coefficient_table[
+                        region_coefficient_indices[region_index]
+                    ]
+                    cell_coefficients[selected_region] = _pml_cell_coefficients(
+                        material,
+                        name,
+                        target_coordinates[selected_region],
+                        descriptor_row[0],
+                    )
+                stencil_indices = _pml_stencil_indices(
+                    name, targets, shape, self.shapes
+                )
 
             tile_ids = np.unique(targets // self.execution_tile_size)
             tile_cells = len(tile_ids) * self.execution_tile_size
@@ -585,6 +730,8 @@ class TorchExecutionPlanner:
                     keys,
                     region_coefficient_indices,
                     coefficient_table,
+                    cell_coefficients,
+                    stencil_indices,
                     tile_origins,
                     tile_region_indices,
                 )
@@ -607,6 +754,9 @@ class TorchExecutionPlanner:
                         region_coefficient_indices, np.int32
                     ),
                     coefficient_table=_readonly(coefficient_table, np.float64),
+                    cell_coefficient_names=cell_coefficient_names,
+                    cell_coefficients=_readonly(cell_coefficients, np.float64),
+                    stencil_indices=_readonly(stencil_indices, np.int64),
                     tile_origins=_readonly(tile_origins, np.int64),
                     tile_region_indices=_readonly(tile_region_indices, np.int32),
                     estimated_bytes=estimated_bytes,

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Benchmark occupancy-aware Torch material planning and simple execution."""
+"""Benchmark occupancy-aware Torch material and dispersive execution."""
 
 import argparse
 import json
@@ -13,23 +13,14 @@ import numpy as np
 import torch
 
 COMPONENTS = ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")
-EXECUTABLE_CASES = frozenset(
-    (
-        "homogeneous",
-        "heterogeneous-16",
-        "many-regions",
-        "collapsed-bloch",
-        "pml-thin",
-        "pml-thick",
-        "pml-mixed",
-    )
-)
+DISPERSIVE_MODELS = frozenset(("drude", "lorentz", "dcp-ade", "dcp-plrc", "dcp-rc"))
 CASES = (
     "homogeneous",
     "heterogeneous-16",
     "many-regions",
     "coverage-contiguous-1",
     "coverage-contiguous-10",
+    "many-dispersive-regions",
     "coverage-contiguous-50",
     "coverage-contiguous-90",
     "coverage-fragmented-1",
@@ -41,7 +32,16 @@ CASES = (
     "pml-thin",
     "pml-thick",
     "pml-mixed",
+    "drude-1",
+    "drude-4",
+    "lorentz-1",
+    "lorentz-4",
+    "dcp-ade",
+    "dcp-plrc",
+    "dcp-rc",
+    "mixed-dispersive",
 )
+EXECUTABLE_CASES = frozenset(CASES)
 
 
 def _peak_rss_bytes():
@@ -69,14 +69,18 @@ def _heterogeneous_geometry(gmes):
     return geometry
 
 
-def _many_region_geometry(gmes, count=1000):
+def _many_region_geometry(gmes, count=1000, material=None):
     geometry = _default_geometry(gmes)
     columns = 40
     for index in range(count):
         x_index, y_index = divmod(index, columns)
         geometry.append(
             gmes.Block(
-                material=gmes.Dielectric(eps_inf=2.5, mu_inf=1.1),
+                material=(
+                    gmes.Dielectric(eps_inf=2.5, mu_inf=1.1)
+                    if material is None
+                    else material
+                ),
                 center=(-9.75 + 0.5 * y_index, -6.0 + 0.5 * x_index, 0),
                 size=(0.2, 0.2, 1.0),
             )
@@ -139,6 +143,59 @@ def _state_width_geometry(gmes):
     return geometry
 
 
+def _dispersive_material(case, gmes):
+    width = 4 if case.endswith("-4") else 1
+    poles = tuple(
+        gmes.DrudePole(omega=0.6 + 0.1 * index, gamma=0.03 + 0.01 * index)
+        for index in range(width)
+    )
+    lorentz_poles = tuple(
+        gmes.LorentzPole(
+            amp=0.05 + 0.01 * index,
+            omega=0.8 + 0.1 * index,
+            gamma=0.03 + 0.01 * index,
+        )
+        for index in range(width)
+    )
+    points = (
+        gmes.CriticalPoint(amp=0.04, phi=0.2, omega=0.9, gamma=0.03),
+        gmes.CriticalPoint(amp=0.02, phi=-0.1, omega=1.1, gamma=0.04),
+    )
+    factories = {
+        "drude-1": lambda: gmes.Drude(eps_inf=1.2, dps=poles),
+        "drude-4": lambda: gmes.Drude(eps_inf=1.2, dps=poles),
+        "lorentz-1": lambda: gmes.Lorentz(eps_inf=1.2, lps=lorentz_poles),
+        "lorentz-4": lambda: gmes.Lorentz(eps_inf=1.2, lps=lorentz_poles),
+        "dcp-ade": lambda: gmes.DcpAde(eps_inf=1.2, dps=poles, cps=points),
+        "dcp-plrc": lambda: gmes.DcpPlrc(eps_inf=1.2, dps=poles, cps=points),
+        "dcp-rc": lambda: gmes.DcpRc(eps_inf=1.2, dps=poles, cps=points),
+    }
+    return factories[case]()
+
+
+def _dispersive_geometry(case, gmes):
+    geometry = _default_geometry(gmes)
+    if case != "mixed-dispersive":
+        geometry.append(
+            gmes.Block(
+                _dispersive_material(case, gmes),
+                center=(0, 0, 0),
+                size=(9, 9, 1),
+            )
+        )
+        return geometry
+    families = ("drude-1", "lorentz-1", "dcp-ade", "dcp-plrc", "dcp-rc")
+    for index, family in enumerate(families):
+        geometry.append(
+            gmes.Block(
+                _dispersive_material(family, gmes),
+                center=(-4 + 2 * index, 0, 0),
+                size=(1.8, 9, 1),
+            )
+        )
+    return geometry
+
+
 def build_case(case, gmes):
     """Return space, geometry, and optional Bloch vector for one fixed workload."""
     if case == "homogeneous":
@@ -155,6 +212,16 @@ def build_case(case, gmes):
             _many_region_geometry(gmes),
             None,
         )
+    if case == "many-dispersive-regions":
+        material = gmes.Drude(
+            eps_inf=1.2,
+            dps=(gmes.DrudePole(omega=0.8, gamma=0.03),),
+        )
+        return (
+            gmes.Cartesian((20, 14, 0), 8),
+            _many_region_geometry(gmes, material=material),
+            None,
+        )
     if case.startswith("coverage-"):
         _, layout, coverage = case.split("-")
         return (
@@ -168,6 +235,21 @@ def build_case(case, gmes):
             _state_width_geometry(gmes),
             None,
         )
+    if case in {
+        "drude-1",
+        "drude-4",
+        "lorentz-1",
+        "lorentz-4",
+        "dcp-ade",
+        "dcp-plrc",
+        "dcp-rc",
+        "mixed-dispersive",
+    }:
+        return (
+            gmes.Cartesian((10, 10, 0), 12),
+            _dispersive_geometry(case, gmes),
+            None,
+        )
     if case == "collapsed-bloch":
         return (
             gmes.Cartesian((10, 0, 0), 32),
@@ -177,12 +259,14 @@ def build_case(case, gmes):
     if case in {"pml-thin", "pml-thick", "pml-mixed"}:
         geometry = _default_geometry(gmes)
         if case == "pml-mixed":
-            geometry.append(
+            families = ("drude-1", "lorentz-1", "dcp-ade", "dcp-plrc", "dcp-rc")
+            geometry.extend(
                 gmes.Block(
-                    material=gmes.Dielectric(eps_inf=3.2, mu_inf=1.15),
-                    center=(0, 0, 0),
-                    size=(6, 6, 1),
+                    material=_dispersive_material(family, gmes),
+                    center=(-6.4 + 3.2 * index, 0, 0),
+                    size=(3.0, 15.5, 1),
                 )
+                for index, family in enumerate(families)
             )
         geometry.append(
             gmes.Shell(
@@ -397,7 +481,7 @@ def run_case(
         **plan_summary(plans),
     }
     if case not in EXECUTABLE_CASES:
-        result["execution"] = "plan-only; state equations are implemented by #118-#120"
+        result["execution"] = "plan-only; this model has no Torch state equation"
         return result
 
     start = perf_counter()
@@ -432,6 +516,18 @@ def run_case(
         simulation.advance(steps)
         _synchronize(simulation.device)
         samples.append((perf_counter() - start) / steps)
+    dispersive_buckets = [
+        bucket
+        for plan in plans
+        for bucket in plan.buckets
+        if bucket.signature.model in DISPERSIVE_MODELS
+    ]
+    exact_state_elements = sum(
+        bucket.target_count * bucket.state_width for bucket in dispersive_buckets
+    )
+    bounded_padding_elements = sum(
+        bucket.target_count * bucket.padded_state_width for bucket in dispersive_buckets
+    )
     cells = int(np.prod(space.my_field_size))
     result.update(
         {
@@ -442,6 +538,24 @@ def run_case(
             "plan_tensor_bytes": sum(
                 value.numel() * value.element_size()
                 for _, value in simulation.plan.named_buffers()
+            ),
+            "dispersive_state_bytes": sum(
+                value.numel() * value.element_size()
+                for name, value in simulation.state.state_dict().items()
+                if name.startswith("bucket_")
+            ),
+            "state_width_policy": "exact",
+            "state_padding_elements": 0,
+            "exact_state_elements": exact_state_elements,
+            "bounded_padding_elements": bounded_padding_elements,
+            "state_padding_elements_avoided": (
+                bounded_padding_elements - exact_state_elements
+            ),
+            "dispersive_launches_per_step": sum(
+                bucket.launch_count for bucket in dispersive_buckets
+            ),
+            "state_width_decisions": sorted(
+                {bucket.width_decision for bucket in dispersive_buckets}
             ),
             "field_checksum": float(
                 sum(

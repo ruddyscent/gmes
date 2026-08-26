@@ -1,4 +1,4 @@
-"""Torch-native state and execution for the minimal dielectric FDTD slice."""
+"""Torch-native state and execution for the supported FDTD material slice."""
 
 import os
 from dataclasses import dataclass, field
@@ -17,6 +17,12 @@ except ImportError as error:  # pragma: no cover
 
 from .geometry import DefaultMedium, GeomBoxTree
 from .material import Dielectric
+from .torch_dispersive import (
+    DISPERSIVE_MODELS,
+    register_plan_buffers,
+    register_state_buffers,
+    update_bucket,
+)
 from .torch_plan import (
     COMPONENTS,
     ELECTRIC_COMPONENTS,
@@ -179,6 +185,7 @@ class TorchSimulationPlan(nn.Module):
         self.dr = tuple(float(value) for value in dr)
         self.dt = float(dt)
         self.bloch = None if bloch is None else tuple(float(value) for value in bloch)
+        dispersive_buckets = []
         for name in COMPONENTS:
             component = plans[name]
             family = "inv_eps" if name in ELECTRIC_COMPONENTS else "inv_mu"
@@ -274,12 +281,24 @@ class TorchSimulationPlan(nn.Module):
                             values, dtype=tensor_dtype, device=device
                         ).contiguous(),
                     )
+                descriptor = register_plan_buffers(
+                    self,
+                    bucket,
+                    component,
+                    prefix,
+                    dtype=dtype,
+                    device=device,
+                )
+                if descriptor is not None:
+                    dispersive_buckets.append(descriptor)
+        self.dispersive_buckets = tuple(dispersive_buckets)
         self._sealed_names = frozenset(self._buffers) | {
             "components",
             "shapes",
             "dr",
             "dt",
             "bloch",
+            "dispersive_buckets",
         }
 
     def __setattr__(self, name, value):
@@ -290,8 +309,8 @@ class TorchSimulationPlan(nn.Module):
 
     @property
     def unsupported_models(self):
-        """Return stateful/custom models planned for follow-up execution issues."""
-        supported = {"dielectric", "const", "dummy", "upml", "cpml"}
+        """Return planned models without a Torch execution implementation."""
+        supported = {"dielectric", "const", "dummy", "upml", "cpml"} | DISPERSIVE_MODELS
         return tuple(
             sorted(
                 {
@@ -328,6 +347,13 @@ class TorchSimulationState(nn.Module):
                 torch.zeros(scratch_shape, device=device, dtype=dtype),
                 persistent=False,
             )
+        register_state_buffers(
+            self,
+            plan.dispersive_buckets,
+            paired_real=paired_real,
+            dtype=dtype,
+            device=device,
+        )
         self.register_buffer(
             "step_count", torch.zeros((), device=device, dtype=torch.int64)
         )
@@ -701,8 +727,8 @@ class TorchSimulation:
     """Breaking Torch-only construction and execution API.
 
     Geometry construction and host conversion are deliberately separate from
-    the compiled electric and magnetic phases. Sources and distributed domain
-    decomposition are not part of this single-device material slice.
+    the electric, magnetic, PML, and dispersive phases. Sources and distributed
+    domain decomposition are not part of this single-device material slice.
     """
 
     def __init__(
@@ -747,7 +773,7 @@ class TorchSimulation:
             raise ValueError("geometry must contain a DefaultMedium")
         if type(default_medium.material) is not Dielectric:
             raise NotImplementedError(
-                "the Torch minimal slice requires a simple Dielectric DefaultMedium"
+                "TorchSimulation requires a simple Dielectric DefaultMedium"
             )
         eps_inf = float(default_medium.material.eps_inf)
         mu_inf = float(default_medium.material.mu_inf)
@@ -782,13 +808,15 @@ class TorchSimulation:
                 for component in component_plans
                 for bucket in component.buckets
                 if bucket.signature.model
-                not in {"dielectric", "const", "dummy", "upml", "cpml"}
+                not in (
+                    {"dielectric", "const", "dummy", "upml", "cpml"} | DISPERSIVE_MODELS
+                )
             }
         )
         if unsupported_models:
             raise NotImplementedError(
                 "the mixed-material planner lowered these models, but their state "
-                "equations belong to follow-up issues #119-#120: "
+                "equations belong to follow-up issue #120: "
                 + ", ".join(unsupported_models)
             )
 
@@ -809,6 +837,7 @@ class TorchSimulation:
             )
 
         self.runtime = runtime
+        self._dispersive_buckets = plan.dispersive_buckets
         self.cpu_threads = threads
         self.device = device
         self.dtype = runtime.dtype
@@ -1070,6 +1099,10 @@ class TorchSimulation:
             else:
                 field.reshape(-1).index_copy_(0, targets, values)
 
+    def _apply_dispersive(self):
+        for descriptor in self._dispersive_buckets:
+            update_bucket(self.plan, self.state, descriptor)
+
     @torch.inference_mode()
     def advance(self, steps):
         """Advance a fixed state in place without implicit host conversion."""
@@ -1083,6 +1116,8 @@ class TorchSimulation:
                 self._sync_magnetic_boundaries()
             self._electric(*self._electric_args)
             self._run_pml(self._electric_pml)
+            if self._dispersive_buckets:
+                self._apply_dispersive()
             if self._has_electric_constants:
                 self._apply_constants(("Ex", "Ey", "Ez"))
             if not self._phase_includes_boundaries:
@@ -1146,6 +1181,24 @@ class TorchSimulation:
                 if name.startswith("pml_") and name.endswith("_state")
             ),
             "launches_per_step": len(self._electric_pml) + len(self._magnetic_pml),
+        }
+        result["dispersive"] = {
+            "models": tuple(sorted({item.model for item in self._dispersive_buckets})),
+            "active_cells": sum(item.target_count for item in self._dispersive_buckets),
+            "state_bytes": sum(
+                value.numel() * value.element_size()
+                for name, value in self.state.state_dict().items()
+                if name.startswith("bucket_")
+            ),
+            "launches_per_step": len(self._dispersive_buckets),
+            "state_width_policy": "exact",
+            "padding_elements": 0,
+            "padding_elements_avoided": sum(
+                bucket.padding_elements_avoided
+                for component in self.plan.components.values()
+                for bucket in component.buckets
+                if bucket.signature.model in DISPERSIVE_MODELS
+            ),
         }
         return result
 

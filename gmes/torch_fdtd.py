@@ -17,6 +17,12 @@ except ImportError as error:  # pragma: no cover
 
 from .geometry import DefaultMedium, GeomBoxTree
 from .material import Dielectric
+from .torch_dm2 import (
+    DM2_ITERATIONS_PER_CHUNK,
+    DM2_MAX_ITERATIONS,
+    Dm2BucketMetadata,
+    TorchDm2BucketState,
+)
 from .torch_plan import (
     COMPONENTS,
     ELECTRIC_COMPONENTS,
@@ -179,6 +185,8 @@ class TorchSimulationPlan(nn.Module):
         self.dr = tuple(float(value) for value in dr)
         self.dt = float(dt)
         self.bloch = None if bloch is None else tuple(float(value) for value in bloch)
+        dm2_buckets = []
+        dm2_status_offset = 0
         for name in COMPONENTS:
             component = plans[name]
             family = "inv_eps" if name in ELECTRIC_COMPONENTS else "inv_mu"
@@ -234,7 +242,10 @@ class TorchSimulationPlan(nn.Module):
                     ),
                     ("coefficients", bucket.coefficient_table, dtype),
                 ]
-                if bucket.selected_policy == "compact":
+                if (
+                    bucket.selected_policy == "compact"
+                    or bucket.signature.model == "dm2"
+                ):
                     arrays.extend(
                         (
                             ("targets", bucket.targets, torch.int64),
@@ -245,7 +256,7 @@ class TorchSimulationPlan(nn.Module):
                             ),
                         )
                     )
-                elif bucket.selected_policy == "tiled":
+                if bucket.selected_policy == "tiled":
                     arrays.extend(
                         (
                             ("tile_origins", bucket.tile_origins, torch.int64),
@@ -263,12 +274,132 @@ class TorchSimulationPlan(nn.Module):
                             values, dtype=tensor_dtype, device=device
                         ).contiguous(),
                     )
+                if bucket.signature.model == "dm2":
+                    target_coefficients = bucket.region_coefficient_indices[
+                        bucket.target_region_indices
+                    ]
+                    target_rows = bucket.coefficient_table[target_coefficients]
+                    columns = {
+                        column_name: target_rows[:, column]
+                        for column, column_name in enumerate(bucket.coefficient_names)
+                    }
+                    transition_count = bucket.signature.state_shape[0]
+                    if transition_count:
+                        omega = np.column_stack(
+                            [
+                                columns[f"transition{transition}_omega"]
+                                for transition in range(transition_count)
+                            ]
+                        )
+                        n_atom = np.column_stack(
+                            [
+                                columns[f"transition{transition}_density"]
+                                for transition in range(transition_count)
+                            ]
+                        )
+                    else:
+                        omega = np.empty((bucket.target_count, 0), dtype=np.float64)
+                        n_atom = np.empty((bucket.target_count, 0), dtype=np.float64)
+                    for coefficient_name in (
+                        "rho30",
+                        "gamma",
+                        "t1",
+                        "t2",
+                        "hbar",
+                        "rtol",
+                    ):
+                        self.register_buffer(
+                            f"{prefix}_{coefficient_name}",
+                            torch.tensor(
+                                columns[coefficient_name],
+                                dtype=dtype,
+                                device=device,
+                            ).contiguous(),
+                        )
+                    self.register_buffer(
+                        f"{prefix}_omega",
+                        torch.tensor(omega, dtype=dtype, device=device).contiguous(),
+                    )
+                    self.register_buffer(
+                        f"{prefix}_n_atom",
+                        torch.tensor(n_atom, dtype=dtype, device=device).contiguous(),
+                    )
+                    term = component.stencil[1]
+                    coordinates = np.unravel_index(bucket.targets, component.shape)
+                    source_bases = sum(
+                        coordinate * stride
+                        for coordinate, stride in zip(coordinates, term.source_strides)
+                    )
+                    source_positive_indices = (
+                        source_bases + term.positive_offset
+                    ).astype(np.int64, copy=False)
+                    source_negative_indices = (
+                        source_bases + term.negative_offset
+                    ).astype(np.int64, copy=False)
+                    source_size = int(np.prod(term.source_shape))
+                    if (
+                        np.any(source_positive_indices < 0)
+                        or np.any(source_positive_indices >= source_size)
+                        or np.any(source_negative_indices < 0)
+                        or np.any(source_negative_indices >= source_size)
+                    ):
+                        raise ValueError("DM2 source stencil is outside its component")
+                    self.register_buffer(
+                        f"{prefix}_source_positive_indices",
+                        torch.tensor(
+                            source_positive_indices,
+                            dtype=torch.int64,
+                            device=device,
+                        ).contiguous(),
+                    )
+                    self.register_buffer(
+                        f"{prefix}_source_negative_indices",
+                        torch.tensor(
+                            source_negative_indices,
+                            dtype=torch.int64,
+                            device=device,
+                        ).contiguous(),
+                    )
+                    self.register_buffer(
+                        f"{prefix}_curl_scale",
+                        torch.full(
+                            (bucket.target_count,),
+                            (
+                                0.0
+                                if (
+                                    self.shapes["Ex"][0],
+                                    self.shapes["Ey"][1],
+                                    self.shapes["Ez"][2],
+                                )[term.scale_axis]
+                                == 1
+                                else term.sign * self.dt / self.dr[term.scale_axis]
+                            ),
+                            dtype=dtype,
+                            device=device,
+                        ),
+                    )
+                    dm2_buckets.append(
+                        Dm2BucketMetadata(
+                            component=name,
+                            bucket_index=index,
+                            transition_count=transition_count,
+                            target_count=bucket.target_count,
+                            prefix=prefix,
+                            source_component=term.source,
+                            status_offset=dm2_status_offset,
+                        )
+                    )
+                    dm2_status_offset += bucket.target_count
+        self.dm2_buckets = tuple(dm2_buckets)
+        self.dm2_target_count = dm2_status_offset
         self._sealed_names = frozenset(self._buffers) | {
             "components",
             "shapes",
             "dr",
             "dt",
             "bloch",
+            "dm2_buckets",
+            "dm2_target_count",
         }
 
     def __setattr__(self, name, value):
@@ -280,7 +411,7 @@ class TorchSimulationPlan(nn.Module):
     @property
     def unsupported_models(self):
         """Return stateful/custom models planned for follow-up execution issues."""
-        supported = {"dielectric", "const", "dummy"}
+        supported = {"dielectric", "const", "dm2", "dummy"}
         return tuple(
             sorted(
                 {
@@ -324,6 +455,30 @@ class TorchSimulationState(nn.Module):
         self.register_buffer(
             "time_step", torch.tensor(plan.dt, device=device, dtype=dtype)
         )
+        self.register_buffer(
+            "_dm2_status",
+            torch.zeros(plan.dm2_target_count, device=device, dtype=torch.int8),
+            persistent=False,
+        )
+        self.register_buffer(
+            "_dm2_iterations",
+            torch.zeros(plan.dm2_target_count, device=device, dtype=torch.int32),
+            persistent=False,
+        )
+        dm2_states = []
+        for metadata in plan.dm2_buckets:
+            start = metadata.status_offset
+            stop = start + metadata.target_count
+            dm2_states.append(
+                TorchDm2BucketState(
+                    metadata,
+                    status=self._dm2_status[start:stop],
+                    iterations=self._dm2_iterations[start:stop],
+                    device=device,
+                    dtype=dtype,
+                )
+            )
+        self.dm2_buckets = nn.ModuleList(dm2_states)
         self.requires_grad_(False)
 
     def field(self, component):
@@ -662,36 +817,42 @@ class TorchSimulation:
             execution_tile_size=runtime.planner_tile_size,
         )
         component_plans = planner.build()
+        has_dm2 = any(
+            bucket.signature.model == "dm2"
+            for component in component_plans
+            for bucket in component.buckets
+        )
+        if has_dm2 and bloch is not None:
+            raise TorchConfigurationError("Dm2 supports real fields only")
         unsupported_models = sorted(
             {
                 bucket.signature.model
                 for component in component_plans
                 for bucket in component.buckets
-                if bucket.signature.model not in {"dielectric", "const", "dummy"}
+                if bucket.signature.model not in {"dielectric", "const", "dm2", "dummy"}
             }
         )
         if unsupported_models:
             raise NotImplementedError(
                 "the mixed-material planner lowered these models, but their state "
-                "equations belong to follow-up issues #118-#120: "
+                "equations belong to follow-up issues #118 and #119: "
                 + ", ".join(unsupported_models)
             )
 
-        with torch.inference_mode():
-            plan = TorchSimulationPlan(
-                component_plans,
-                dr=dr,
-                dt=time_step,
-                bloch=bloch,
-                device=device,
-                dtype=runtime.dtype,
-            )
-            state = TorchSimulationState(
-                plan,
-                paired_real=bloch is not None,
-                device=device,
-                dtype=runtime.dtype,
-            )
+        plan = TorchSimulationPlan(
+            component_plans,
+            dr=dr,
+            dt=time_step,
+            bloch=bloch,
+            device=device,
+            dtype=runtime.dtype,
+        )
+        state = TorchSimulationState(
+            plan,
+            paired_real=bloch is not None,
+            device=device,
+            dtype=runtime.dtype,
+        )
 
         self.runtime = runtime
         self.cpu_threads = threads
@@ -702,6 +863,7 @@ class TorchSimulation:
         self.geom_tree = geom_tree
         self.plan = plan
         self.state = state
+        self._has_dm2 = has_dm2
         self._phase_includes_boundaries = bloch is None
         self._has_electric_constants = any(
             getattr(plan, f"constant_targets_{name.lower()}").numel()
@@ -749,6 +911,75 @@ class TorchSimulation:
         self._electric_args = self._electric_arguments()
         self._magnetic_args = self._magnetic_arguments()
         self._defer_collapsed_ghosts = z_collapsed
+        self._dm2_updates = []
+        for bucket_state in state.dm2_buckets:
+            metadata = bucket_state.metadata
+            prefix = metadata.prefix
+            prepare = bucket_state.prepare
+            iterate = bucket_state.iterate
+            finalize = bucket_state.finalize
+            repetitions = DM2_MAX_ITERATIONS // DM2_ITERATIONS_PER_CHUNK
+            if runtime.compile_policy == "compile":
+                prepare, iterate, finalize = (
+                    torch.compile(
+                        function,
+                        fullgraph=True,
+                        dynamic=False,
+                        options=compile_options,
+                    )
+                    for function in (prepare, iterate, finalize)
+                )
+            self._dm2_updates.append(
+                (
+                    prepare,
+                    (
+                        state.field(metadata.component),
+                        state.field(metadata.source_component),
+                        state.step_count,
+                        state.time_step,
+                        getattr(plan, f"{prefix}_targets"),
+                        getattr(plan, f"{prefix}_source_positive_indices"),
+                        getattr(plan, f"{prefix}_source_negative_indices"),
+                        getattr(plan, f"{prefix}_rho30"),
+                        getattr(plan, f"{prefix}_gamma"),
+                        getattr(plan, f"{prefix}_t1"),
+                        getattr(plan, f"{prefix}_t2"),
+                        getattr(plan, f"{prefix}_hbar"),
+                        getattr(plan, f"{prefix}_omega"),
+                        getattr(plan, f"{prefix}_n_atom"),
+                        getattr(plan, f"{prefix}_curl_scale"),
+                    ),
+                    iterate,
+                    (
+                        0.5 * plan.dt,
+                        0.25 * plan.dt,
+                        getattr(plan, f"{prefix}_rtol"),
+                        getattr(plan, f"{prefix}_omega"),
+                    ),
+                    finalize,
+                    (
+                        state.field(metadata.component),
+                        getattr(plan, f"{prefix}_targets"),
+                    ),
+                    repetitions,
+                )
+            )
+        if has_dm2 and device.type == "cuda":
+            self._dm2_status_host = torch.empty(
+                plan.dm2_target_count,
+                dtype=torch.int8,
+                device="cpu",
+                pin_memory=True,
+            )
+            self._dm2_iterations_host = torch.empty(
+                plan.dm2_target_count,
+                dtype=torch.int32,
+                device="cpu",
+                pin_memory=True,
+            )
+        else:
+            self._dm2_status_host = state._dm2_status
+            self._dm2_iterations_host = state._dm2_iterations
 
     def _electric_arguments(self):
         state = self.state
@@ -886,6 +1117,49 @@ class TorchSimulation:
             else:
                 field.reshape(-1).index_copy_(0, targets, values)
 
+    def _update_dm2(self):
+        for (
+            prepare,
+            prepare_args,
+            iterate,
+            iterate_args,
+            finalize,
+            finalize_args,
+            repetitions,
+        ) in self._dm2_updates:
+            prepare(*prepare_args)
+            for _ in range(repetitions):
+                iterate(*iterate_args)
+            finalize(*finalize_args)
+        if not self._has_dm2:
+            return
+        self._dm2_status_host.copy_(self.state._dm2_status)
+        status = self._dm2_status_host.numpy()
+        if not np.any(status):
+            return
+        invalid = []
+        nonconverged = []
+        for metadata in self.plan.dm2_buckets:
+            start = metadata.status_offset
+            stop = start + metadata.target_count
+            targets = getattr(self.plan, f"{metadata.prefix}_targets")
+            target_values = targets.detach().cpu().numpy()
+            bucket_status = status[start:stop]
+            for code, destination in ((1, invalid), (2, nonconverged)):
+                failed = target_values[bucket_status == code]
+                if len(failed):
+                    destination.append(
+                        f"{metadata.component}/width={metadata.transition_count}:"
+                        f"{failed.tolist()}"
+                    )
+        if invalid:
+            raise RuntimeError(
+                "Dm2 corrector produced an invalid error for " + ", ".join(invalid)
+            )
+        raise RuntimeError(
+            "Dm2 corrector failed to converge for " + ", ".join(nonconverged)
+        )
+
     @torch.inference_mode()
     def advance(self, steps):
         """Advance a fixed state in place without implicit host conversion."""
@@ -898,6 +1172,7 @@ class TorchSimulation:
             if not self._phase_includes_boundaries:
                 self._sync_magnetic_boundaries()
             self._electric(*self._electric_args)
+            self._update_dm2()
             if self._has_electric_constants:
                 self._apply_constants(("Ex", "Ey", "Ez"))
             if not self._phase_includes_boundaries:
@@ -905,12 +1180,16 @@ class TorchSimulation:
             self._magnetic(*self._magnetic_args)
             if self._has_magnetic_constants:
                 self._apply_constants(("Hx", "Hy", "Hz"))
+            if self._has_dm2:
+                self.state.source_time.add_(self.state.time_step)
+                self.state.step_count.add_(1)
         if steps:
             if self._defer_collapsed_ghosts:
                 self.state.ex[:, :, -1].copy_(self.state.ex[:, :, 0])
                 self.state.ey[:, :, -1].copy_(self.state.ey[:, :, 0])
-            self.state.source_time.add_(self.state.time_step, alpha=steps)
-            self.state.step_count.add_(steps)
+            if not self._has_dm2:
+                self.state.source_time.add_(self.state.time_step, alpha=steps)
+                self.state.step_count.add_(steps)
         return self
 
     def step(self):
@@ -941,12 +1220,97 @@ class TorchSimulation:
             target.copy_(source.to(device=self.device, dtype=self.dtype))
         return self
 
+    @torch.inference_mode()
+    def load_host_dm2_state(self, states, *, step_count=None):
+        """Copy cell-major (cell, transition, u/v/w) DM2 state arrays."""
+        if len(states) != len(self.state.dm2_buckets):
+            raise ValueError("DM2 state input must contain one array per bucket")
+        for bucket, values in zip(self.state.dm2_buckets, states):
+            source = torch.as_tensor(values)
+            expected = (
+                bucket.metadata.target_count,
+                bucket.metadata.transition_count,
+                3,
+            )
+            if tuple(source.shape) != expected:
+                raise ValueError(
+                    f"DM2 state for {bucket.metadata.component} has shape "
+                    f"{tuple(source.shape)}; expected {expected}"
+                )
+            bucket.u.copy_(
+                source.permute(2, 0, 1).to(device=self.device, dtype=self.dtype)
+            )
+        if step_count is not None:
+            if (
+                isinstance(step_count, bool)
+                or not isinstance(step_count, int)
+                or step_count < 0
+            ):
+                raise ValueError("DM2 state step_count must be a non-negative integer")
+            self.state.step_count.fill_(step_count)
+            self.state.source_time.copy_(self.state.time_step).mul_(step_count)
+        return self
+
+    @torch.inference_mode()
+    def dm2_state_snapshot(self):
+        """Return explicit host snapshots of transformed and physical DM2 state."""
+        time = float(self.state.source_time.detach().cpu().numpy())
+        snapshots = []
+        for metadata, bucket in zip(self.plan.dm2_buckets, self.state.dm2_buckets):
+            prefix = metadata.prefix
+            u = bucket.u.detach().cpu().permute(1, 2, 0).contiguous().numpy().copy()
+            t1 = getattr(self.plan, f"{prefix}_t1").detach().cpu().numpy()
+            t2 = getattr(self.plan, f"{prefix}_t2").detach().cpu().numpy()
+            rho30 = getattr(self.plan, f"{prefix}_rho30").detach().cpu().numpy()
+            rho = u.copy()
+            rho[:, :, :2] *= np.exp(-time / t2)[:, None, None]
+            rho[:, :, 2] *= np.exp(-time / t1)[:, None]
+            rho[:, :, 2] += rho30[:, None]
+            snapshots.append(
+                {
+                    "component": metadata.component,
+                    "transition_count": metadata.transition_count,
+                    "targets": (
+                        getattr(self.plan, f"{prefix}_targets")
+                        .detach()
+                        .cpu()
+                        .numpy()
+                        .copy()
+                    ),
+                    "u": u,
+                    "rho": rho,
+                    "time": time,
+                }
+            )
+        return tuple(snapshots)
+
+    @torch.inference_mode()
     def diagnostics(self):
         """Return the focused runtime diagnostic record for this simulation."""
         result = torch_runtime_diagnostics(self.runtime)
         result["resolved_device"] = str(self.device)
         result["cpu_threads"] = self.cpu_threads
         result["material_plan"] = self.plan.decision_report()
+        if self._has_dm2:
+            self._dm2_iterations_host.copy_(self.state._dm2_iterations)
+            iterations = self._dm2_iterations_host.numpy()
+            dm2 = []
+            for metadata in self.plan.dm2_buckets:
+                start = metadata.status_offset
+                stop = start + metadata.target_count
+                values, counts = np.unique(iterations[start:stop], return_counts=True)
+                dm2.append(
+                    {
+                        "component": metadata.component,
+                        "transition_count": metadata.transition_count,
+                        "targets": metadata.target_count,
+                        "iteration_distribution": {
+                            int(value): int(count)
+                            for value, count in zip(values, counts)
+                        },
+                    }
+                )
+            result["dm2"] = tuple(dm2)
         return result
 
     def buffer_addresses(self):

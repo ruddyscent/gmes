@@ -31,13 +31,27 @@ class NativeOracleTest(unittest.TestCase):
         cls.manifest = cls.oracle.load_manifest()
 
     def test_manifest_freezes_reference_matrix_and_gates(self):
+        self.assertEqual(self.manifest["schema_version"], 2)
         reference = self.manifest["reference"]
         self.assertEqual(
             reference["commit"], "d87d25afd160d96b1fa0890cacecd90802448d57"
         )
         self.assertEqual(reference["tag"], "native-oracle-d87d25a")
         self.assertEqual(reference["observer_tag"], "native-oracle-observer-v4")
+        self.assertEqual(
+            reference["observer_commit"],
+            "11ac12d4992ad85b19b414b837383b392904a131",
+        )
+        self.assertEqual(
+            reference["performance_summary_sha256"],
+            "a81b87e8cb2870d2fbbf1bbb7409c98d10780da30eb23cb5965fce39b9109fb6",
+        )
+        self.assertEqual(reference["field_initializer"], "native-affine-ramp-v1")
         self.assertEqual(reference["field_scale"], 1e-3)
+        self.assertEqual(reference["performance_warmup_steps"], 5)
+        self.assertEqual(reference["performance_steps_per_repeat"], 100)
+        self.assertEqual(reference["performance_repetitions"], 15)
+        self.assertEqual(reference["performance_profile_steps"], 5)
         self.assertEqual(reference["capture_steps"], [1, 2, 5, 20, 100])
         dielectric_tolerances = self.manifest["tolerances"]["torch"]["dielectric"]
         self.assertEqual(
@@ -75,6 +89,24 @@ class NativeOracleTest(unittest.TestCase):
         self.assertEqual(gates["two_gpu"]["devices"], [0, 1])
         self.assertGreaterEqual(gates["cpu_large"]["repeats"], 11)
         self.assertEqual(gates["cpu_large"]["cases"], ["cpu-large-2d", "cpu-large-3d"])
+        self.assertEqual(
+            gates["cpu_acceptance"]["cases"],
+            [
+                "cpu-crossover-2d",
+                "cpu-crossover-3d",
+                "cpu-large-2d",
+                "cpu-large-3d",
+                "bloch-2d",
+                "bloch-3d",
+            ],
+        )
+        self.assertEqual(
+            gates["cpu_acceptance"]["thread_modes"], ["one", "physical"]
+        )
+        self.assertEqual(
+            gates["cpu_acceptance"]["statistics"]["method"],
+            "independent-stratified-bootstrap-log-geomean-v1",
+        )
         benchmark_names = {case["name"] for case in self.manifest["benchmarks"]}
         self.assertTrue(
             {
@@ -147,6 +179,28 @@ class NativeOracleTest(unittest.TestCase):
                 if record["state_values"]
             )
         )
+
+    def test_field_initializer_is_backend_neutral_and_canonical(self):
+        shapes = {
+            name: (2 + index % 2, 3, 1)
+            for index, name in enumerate(reversed(self.oracle.COMPONENT_NAMES))
+        }
+        first = self.oracle.initial_field_values(shapes, 115, 1e-3)
+        second = self.oracle.initial_field_values(shapes, 115, 1e-3)
+        complex_values = self.oracle.initial_field_values(
+            shapes,
+            115,
+            1e-3,
+            complex_fields=True,
+        )
+        self.assertEqual(tuple(first), self.oracle.COMPONENT_NAMES)
+        for name in self.oracle.COMPONENT_NAMES:
+            np.testing.assert_array_equal(first[name], second[name])
+            self.assertEqual(first[name].shape, shapes[name])
+            self.assertEqual(first[name].dtype, np.float64)
+            self.assertEqual(complex_values[name].dtype, np.complex128)
+            self.assertTrue(np.all(first[name] != 0))
+            self.assertTrue(np.all(complex_values[name] != 0))
 
     def test_tfsf_snapshot_contains_auxiliary_fields_and_state(self):
         spec = self.oracle.find_case(self.manifest, "tfsf-transparent")
@@ -227,6 +281,20 @@ class NativeOracleTest(unittest.TestCase):
                 spec, self.manifest, repeats=2, warmup=1, steps=1
             )
         measurements = result["measurements"]
+        self.assertEqual(result["schema_version"], 2)
+        self.assertEqual(
+            result["benchmark_contract"],
+            {
+                "initializer": "native-affine-ramp-v1",
+                "seed": 115,
+                "field_scale": 1e-3,
+                "warmup_steps": 1,
+                "steps_per_repeat": 1,
+                "repetitions": 2,
+                "timer": "time.perf_counter",
+                "sample_start": "independently-rebuilt-post-warmup-state",
+            },
+        )
         self.assertEqual(measurements["advance"]["repetitions"], 2)
         self.assertIn("relative_mad", measurements["advance"])
         self.assertIn("geometry_mapping", measurements)
@@ -239,7 +307,7 @@ class NativeOracleTest(unittest.TestCase):
         self.assertIn("cpu_count_physical", result["environment"])
         self.assertEqual(
             [simulation.oracle_step_count for simulation in simulations],
-            [0, 3, 2, 2],
+            [0, 1, 2, 2, 2, 2],
         )
 
     def test_isolated_runner_uses_controller_with_checkout_bound_import(self):

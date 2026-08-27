@@ -593,24 +593,21 @@ def run_case(
 
 
 def run_policy_matrix(case, **kwargs):
-    """Measure auto and all forced candidates from the same workload contract."""
+    """Retain exploratory timings while executable policies remain identical."""
     results = {
         policy: run_case(case, policy=policy, **kwargs)
         for policy in ("auto", "dense", "compact", "tiled")
     }
-    if case in EXECUTABLE_CASES:
-        fastest = min(
-            results[policy]["median_seconds_per_step"]
-            for policy in ("dense", "compact", "tiled")
-        )
-        auto = results["auto"]["median_seconds_per_step"]
-        ratio = auto / fastest
-    else:
-        ratio = None
     return {
         "case": case,
-        "auto_to_fastest_forced_ratio": ratio,
-        "within_ten_percent": ratio is None or ratio <= 1.10,
+        "comparison_valid": False,
+        "invalid_reason": (
+            "execution_policy currently changes planner/storage metadata only; "
+            "runtime uses dense dielectric and compact indexed material updates"
+        ),
+        "auto_to_fastest_forced_ratio": None,
+        "within_ten_percent": None,
+        "passed": False,
         "results": results,
     }
 

@@ -176,10 +176,95 @@ class TorchRuntimeConfigTest(unittest.TestCase):
         )
 
         self.assertEqual(len(first.compile_cache_key), 64)
-        self.assertNotEqual(first.compile_cache_key, second.compile_cache_key)
+        self.assertEqual(first.compile_cache_key, second.compile_cache_key)
+        self.assertEqual(
+            first.diagnostics()["material_execution_representation"],
+            "dense-base+compact-indexed-materials-v1",
+        )
+        self.assertEqual(
+            first.diagnostics()["phase_specialization"], "z-collapsed-v1"
+        )
         self.assertEqual(
             first.diagnostics()["compile_cache_key"], first.compile_cache_key
         )
+        self.assertEqual(
+            first.diagnostics()["compile_solver_abi"], "torch-fdtd-regions-v3"
+        )
+
+        three_dimensional = {
+            "space": gmes.Cartesian((2, 2, 2), 1),
+            "geometry": _geometry(),
+        }
+        compiled_3d = TorchSimulation(
+            **three_dimensional,
+            runtime=TorchRuntimeConfig(
+                device="cpu", compile_policy="compile", cpu_threads=1
+            ),
+        )
+        eager_3d = TorchSimulation(
+            **three_dimensional,
+            runtime=TorchRuntimeConfig(
+                device="cpu", compile_policy="eager", cpu_threads=1
+            ),
+        )
+        self.assertNotEqual(compiled_3d.compile_cache_key, eager_3d.compile_cache_key)
+
+        bloch_a = TorchSimulation(
+            **common,
+            bloch=(0.07, 0.11, 0.0),
+            runtime=TorchRuntimeConfig(
+                device="cpu", compile_policy="compile", cpu_threads=1
+            ),
+        )
+        bloch_b = TorchSimulation(
+            **common,
+            bloch=(0.08, 0.11, 0.0),
+            runtime=TorchRuntimeConfig(
+                device="cpu", compile_policy="compile", cpu_threads=1
+            ),
+        )
+        self.assertNotEqual(first.compile_cache_key, bloch_a.compile_cache_key)
+        self.assertNotEqual(bloch_a.compile_cache_key, bloch_b.compile_cache_key)
+        self.assertEqual(
+            bloch_a.diagnostics()["phase_specialization"], "three-axis-v1"
+        )
+
+        pole = gmes.DrudePole(omega=0.6, gamma=0.03)
+        material = gmes.Drude(eps_inf=1.2, dps=(pole,))
+        material_runtime = TorchRuntimeConfig(
+            device="cpu", compile_policy="compile", cpu_threads=1
+        )
+        sparse = TorchSimulation(
+            space=common["space"],
+            geometry=[
+                *_geometry(),
+                gmes.Block(material, center=(0, 0, 0), size=(0.5, 0.5, 1)),
+            ],
+            runtime=material_runtime,
+        )
+        sparse_forced = TorchSimulation(
+            space=common["space"],
+            geometry=[
+                *_geometry(),
+                gmes.Block(material, center=(0, 0, 0), size=(0.5, 0.5, 1)),
+            ],
+            runtime=TorchRuntimeConfig(
+                device="cpu",
+                compile_policy="compile",
+                execution_policy="dense",
+                cpu_threads=1,
+            ),
+        )
+        broad = TorchSimulation(
+            space=common["space"],
+            geometry=[
+                *_geometry(),
+                gmes.Block(material, center=(0, 0, 0), size=(1.5, 1.5, 1)),
+            ],
+            runtime=material_runtime,
+        )
+        self.assertEqual(sparse.compile_cache_key, sparse_forced.compile_cache_key)
+        self.assertNotEqual(sparse.compile_cache_key, broad.compile_cache_key)
 
     def test_missing_cuda_has_actionable_error_and_no_fallback(self):
         config = TorchRuntimeConfig(device="cuda:0")

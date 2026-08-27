@@ -96,6 +96,17 @@ relative MAD, RSS samples/growth, exact field/update-run/index/parameter bytes
 versions, build flags, CPU topology, GPU inventory/topology, and the
 locked-environment hash.
 
+Schema 2 also records the initializer, seed and scale, warm-up count, timed
+steps, replicate count, timer, and sample-start semantics as an explicit
+`benchmark_contract`. Native/Torch hard-gate comparisons must reject a
+mismatched contract and must authenticate the frozen observer commit.
+The legacy v4 summary predates the embedded field; it is accepted only with
+its exact clean observer commit and the SHA-256 of the ANSI-sanitized JSON
+artifact published in #115. A same-commit rerun with different warm-up or
+sample semantics is rejected. Every replacement summary, including one with an
+embedded contract, requires a separately frozen observer commit and exact
+content digest in the manifest before it can participate in a hard gate.
+
 The single- and two-GPU sizes in the manifest are frozen now but are executed
 by the Torch runner introduced by later issues.  That runner must preserve
 this schema while adding transfer, eager warm-up, cold/cached compile, CUDA
@@ -105,13 +116,33 @@ one process per GPU for the two-GPU cases and record link topology.
 
 ## Torch compiler and runtime tuning
 
-`torch_tuning.py` consumes the frozen manifest and native summary while using
-`torch.utils.benchmark.Timer` for repeated measurements. It records construction,
-H2D, cold and cached compilation, one-step latency, batched throughput, compiler
-counters, raw samples, buffer addresses, memory growth, topology, and an optional
-Chrome profiler trace. The strict acceptance summary rejects graph breaks,
+`torch_tuning.py` consumes the frozen manifest and native summary. Authoritative
+native ratios use an explicit `time.perf_counter` plus device synchronization
+loop so Torch does not receive `Timer.timeit()`'s two hidden statement warmups.
+Every authoritative replicate restores the seeded pre-warm-up checkpoint and
+executes the real manifest warm-up before timing, matching the native repeat
+contract. Repeated `torch.utils.benchmark.Timer` samples are retained in a separate,
+exploratory record and never feed the native gate. The runner records
+construction, H2D, cold and cached compilation, one-step latency, batched
+throughput, compiler counters, raw samples, buffer addresses, memory growth,
+topology, and a Chrome profiler trace. The strict acceptance summary rejects graph breaks,
 recompilation after warm-up, host-device transfers, storage changes, or unbounded
-device-memory growth.
+device-memory growth. CPU hard-gate evidence covers crossover, large mixed, and
+paired-real Bloch cases in both 2-D and 3-D at one thread and at the physical-core
+thread count. Each isolated thread slice must contain all six cases; both slices
+are required before epic acceptance. Schema 3 binds each CPU slice to the exact manifest, runner inputs, solver
+inputs and ABI, clean candidate commit, and host identity. Aggregation requires
+`--native-summary`, reopens the exact SHA-pinned artifact, and recomputes every
+native comparison instead of trusting embedded booleans. Raw samples are also checked for positivity,
+replicate count, relative MAD, the 5% individual limit, and a deterministic
+one-sided bootstrap test of the log-geometric-mean ratio.
+
+The current dense/compact/tiled selector changes planner metadata and optional
+storage only; material execution still uses one dense dielectric base plus
+compact indexed material updates. Policy-matrix timings are therefore retained
+as exploratory raw data and fail closed instead of claiming the 10% automatic
+policy gate. That gate can be enabled only after the forced policies select
+distinct executable representations.
 
 ```sh
 uv run --no-sync python -m benchmarks.torch_tuning \
@@ -128,6 +159,24 @@ uv run --no-sync python -m benchmarks.torch_tuning \
 Use `--policy matrix` for the forced dense/compact/tiled comparison and
 `--enforce` in automation. Keep JSON and profiler traces in CI artifacts or
 `/tmp`; the files contain the complete environment metadata and can be large.
+Run the six-case `cpu-gates` command in separate processes for `--threads 1`
+and the affinity-aware physical-core count, then aggregate them. A single case
+or thread slice is diagnostic-only and cannot report epic CPU suite success:
+
+```sh
+uv run --no-sync python -m benchmarks.torch_tuning \
+  --case cpu-gates --device cpu --threads 1 --interop-threads 1 \
+  --native-summary native-summary.json --output /tmp/cpu-one.json
+
+uv run --no-sync python -m benchmarks.torch_tuning \
+  --case cpu-gates --device cpu --threads 4 --interop-threads 1 \
+  --native-summary native-summary.json --output /tmp/cpu-physical.json
+
+uv run --no-sync python -m benchmarks.torch_tuning \
+  --case cpu-gates --native-summary native-summary.json \
+  --cpu-slice-artifacts /tmp/cpu-one.json /tmp/cpu-physical.json \
+  --output /tmp/cpu-acceptance.json --enforce
+```
 
 The long-running `physical_checks` cases archive field energy, boundary
 energy (reflection/transmission observables), maximum amplitude, finiteness,

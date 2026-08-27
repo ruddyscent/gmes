@@ -62,6 +62,7 @@ class TorchConfigurationError(ValueError):
 
 
 COMPILE_MODES = ("default", "reduce-overhead", "max-autotune")
+TORCH_SOLVER_ABI = "torch-fdtd-regions-v3"
 
 
 @dataclass(frozen=True)
@@ -1077,14 +1078,19 @@ class TorchSimulation:
             shapes["Ez"][2] == 1
             and bloch is None
             and runtime.compile_policy == "compile"
-            and not self._has_pml
+            and (
+                not self._has_pml
+                or (device.type == "cpu" and _distributed_partition is None)
+            )
         )
         if z_collapsed:
             electric_function = _electric_phase_2d_z
             magnetic_function = _magnetic_phase_2d_z
+            self._phase_specialization = "z-collapsed-v1"
         else:
             electric_function = _electric_phase
             magnetic_function = _magnetic_phase
+            self._phase_specialization = "three-axis-v1"
         self._electric = electric_function
         self._magnetic = magnetic_function
         if runtime.compile_policy == "compile" and not self._fused_local_phases:
@@ -1241,21 +1247,93 @@ class TorchSimulation:
             capability = torch.cuda.get_device_capability(self.device)
         else:
             capability = torch.backends.cpu.get_cpu_capability()
-        signatures = tuple(
-            sorted(
-                repr(bucket.signature)
-                for component in self.plan.components.values()
-                for bucket in component.buckets
-            )
+        planner_only_suffixes = (
+            "_region_keys",
+            "_region_coefficient_indices",
+            "_target_region_indices",
+            "_tile_origins",
+            "_tile_region_indices",
         )
+        inactive_prefixes = tuple(
+            f"bucket_{component_name.lower()}_{index}_"
+            for component_name, component in self.plan.components.items()
+            for index, bucket in enumerate(component.buckets)
+            if bucket.signature.model in {"const", "dielectric", "dummy"}
+        )
+
+        def buffer_layouts(module, *, plan=False, recurse=True):
+            layouts = []
+            for name, value in module.named_buffers(recurse=recurse):
+                if plan:
+                    if name.startswith(
+                        ("material_ids_", "underlying_ids_", "ownership_")
+                    ):
+                        continue
+                    if name.startswith(inactive_prefixes):
+                        continue
+                    if name.endswith(planner_only_suffixes):
+                        continue
+                    if name.endswith("_coefficients") and not name.endswith(
+                        "_cell_coefficients"
+                    ):
+                        continue
+                layouts.append(
+                    (
+                        name,
+                        str(value.device),
+                        str(value.dtype),
+                        str(value.layout),
+                        tuple(value.shape),
+                        tuple(value.stride()),
+                    )
+                )
+            return tuple(layouts)
+
+        signatures = tuple(
+            (component_name, index, repr(bucket.signature))
+            for component_name, component in self.plan.components.items()
+            for index, bucket in enumerate(component.buckets)
+        )
+        if self._fused_local_phases:
+            region_topology = "local-two-fused-half-steps"
+        elif self._distributed_partition is not None:
+            region_topology = "distributed-stencil-and-material-regions"
+        else:
+            region_topology = "local-eager-stencil-and-material-phases"
+        self._compiled_region_topology = region_topology
         payload = (
+            TORCH_SOLVER_ABI,
             torch.__version__,
             capability,
             str(self.dtype),
+            self.runtime.compile_policy,
             self.runtime.compile_mode,
-            self.runtime.execution_policy,
+            region_topology,
+            "dense-base+compact-indexed-materials-v1",
+            self._phase_specialization,
+            tuple(self.plan.dr),
+            self.plan.dt,
+            self.plan.bloch,
+            self.state.paired_real,
+            self._fused_local_phases,
+            (
+                None
+                if self._distributed_partition is None
+                else self._distributed_partition.identity
+            ),
+            (
+                self._has_dm2,
+                DM2_MAX_ITERATIONS,
+                DM2_ITERATIONS_PER_CHUNK,
+                self._has_electric_constants,
+                self._has_magnetic_constants,
+                self._has_pml,
+            ),
             tuple(sorted(self.plan.shapes.items())),
             signatures,
+            buffer_layouts(self.plan, plan=True),
+            buffer_layouts(self.state, recurse=False),
+            tuple(buffer_layouts(bucket) for bucket in self.state.dm2_buckets),
         )
         return hashlib.sha256(repr(payload).encode()).hexdigest()
 
@@ -1786,6 +1864,12 @@ class TorchSimulation:
         result["cpu_threads"] = self.cpu_threads
         result["cpu_interop_threads"] = torch.get_num_interop_threads()
         result["compile_cache_key"] = self.compile_cache_key
+        result["compile_solver_abi"] = TORCH_SOLVER_ABI
+        result["compiled_region_topology"] = self._compiled_region_topology
+        result["material_execution_representation"] = (
+            "dense-base+compact-indexed-materials-v1"
+        )
+        result["phase_specialization"] = self._phase_specialization
         result["cuda_graph_regions"] = tuple(sorted(self._cuda_graphs))
         result["material_plan"] = self.plan.decision_report()
         if self._has_dm2:

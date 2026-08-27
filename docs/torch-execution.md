@@ -93,8 +93,11 @@ signature because their magnetic behavior is physically identical.
 `"compact"`, or `"tiled"`. The default `auto` decision uses a fixed
 CPU/CUDA cost model over occupancy, active-target fragmentation, state width,
 tile coverage, memory, and launch cost; it never inserts material autotuning
-into a timestep. Forced policies exist for differential benchmarks and
-debugging, and do not silently replace an unsupported state equation.
+into a timestep. These choices currently affect planner decisions and optional
+storage only: execution uses a dense dielectric base plus compact indexed
+material updates. Forced-policy timings are therefore exploratory and the
+automatic-policy performance gate remains fail-closed until the policies select
+distinct executable representations.
 `simulation.diagnostics()["material_plan"]` explains every decision and its
 candidate costs.
 
@@ -268,7 +271,7 @@ runtime = TorchRuntimeConfig(
     precision="float32",   # "float32" or "float64"
     compile_policy="compile",  # "eager" or fullgraph Torch compilation
     compile_mode="default",  # CUDA: default/reduce-overhead/max-autotune
-    execution_policy="auto",  # or force dense/compact/tiled for measurements
+    execution_policy="auto",  # forced values currently inspect planner choices
     cpu_threads=4,
     cpu_interop_threads=1,
 )
@@ -291,12 +294,19 @@ requested device's name and capability.
 `advance(steps)` is the throughput API; `step()` is only a one-step
 convenience. Both run under `torch.inference_mode()`. The timestep, source
 time, fields, dielectric coefficients, region IDs, and preallocated curl
-scratch are registered non-trainable buffers. For a local simulation, each complete electric and magnetic half-step is
-compiled with `fullgraph=True` and `dynamic=False`, reducing steady execution to two static
-regions. Distributed communication, geometry, sources, callbacks, snapshots, and
-I/O stay outside those graphs. The compilation cache key includes the PyTorch
-version, device capability, dtype, compile mode, execution policy, field shapes,
-and material/state signatures and is exposed in `simulation.diagnostics()`.
+scratch are registered non-trainable buffers. For a local simulation, each
+complete electric and magnetic half-step is compiled with `fullgraph=True` and
+`dynamic=False`, reducing steady execution to two static regions. Distributed
+communication, geometry, sources, callbacks, snapshots, and I/O stay outside
+those graphs. The compilation cache key includes the solver ABI, PyTorch
+version, device capability, dtype, eager/compiled policy, compile mode, actual
+compiled-region and material representation, DM2 algorithm constants, grid
+spacing, timestep, Bloch vector, local/distributed topology, field shapes, and
+every compiled material/state tensor layout. It is exposed in
+`simulation.diagnostics()` as a specialization fingerprint for evidence and
+cache attribution. It is not a cross-instance callable cache: compiled bound
+methods retain their owning simulation, so wrappers must not be shared between
+instances solely because their fingerprints match.
 
 Bloch fields have a final length-two real plane holding real and imaginary
 parts in the requested real dtype. Complex conversion occurs only at an

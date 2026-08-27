@@ -61,6 +61,9 @@ class TorchConfigurationError(ValueError):
     """A requested Torch execution configuration cannot be honored."""
 
 
+COMPILE_MODES = ("default", "reduce-overhead", "max-autotune")
+
+
 @dataclass(frozen=True)
 class DistributedLaunch:
     """Process metadata reserved for later distributed execution."""
@@ -87,7 +90,9 @@ class TorchRuntimeConfig:
     device: str
     precision: str = "float64"
     compile_policy: str = "eager"
+    compile_mode: str = "default"
     cpu_threads: int | None = None
+    cpu_interop_threads: int | None = None
     launch: DistributedLaunch = field(default_factory=DistributedLaunch)
     autograd: bool = False
     execution_policy: str = "auto"
@@ -103,8 +108,22 @@ class TorchRuntimeConfig:
             raise TorchConfigurationError("precision must be 'float32' or 'float64'")
         if self.compile_policy not in {"eager", "compile"}:
             raise TorchConfigurationError("compile_policy must be 'eager' or 'compile'")
+        if self.compile_mode not in COMPILE_MODES:
+            raise TorchConfigurationError(
+                "compile_mode must be 'default', 'reduce-overhead', or 'max-autotune'"
+            )
+        if self.compile_policy == "eager" and self.compile_mode != "default":
+            raise TorchConfigurationError(
+                "compile_mode is meaningful only when compile_policy='compile'"
+            )
+        if self.device.startswith("cpu") and self.compile_mode != "default":
+            raise TorchConfigurationError(
+                "non-default compile modes are supported only on CUDA"
+            )
         if self.cpu_threads is not None and self.cpu_threads < 1:
             raise TorchConfigurationError("cpu_threads must be positive")
+        if self.cpu_interop_threads is not None and self.cpu_interop_threads < 1:
+            raise TorchConfigurationError("cpu_interop_threads must be positive")
         if self.autograd:
             raise TorchConfigurationError(
                 "autograd is unsupported; GMES field buffers are inference-only"
@@ -165,6 +184,7 @@ def torch_runtime_diagnostics(config):
         "execution_policy": config.execution_policy,
         "requested_precision": config.precision,
         "compile_policy": config.compile_policy,
+        "compile_mode": config.compile_mode,
         "cuda_build": torch.version.cuda,
         "cuda_available": torch.cuda.is_available(),
         "cuda_device_count": torch.cuda.device_count(),
@@ -176,6 +196,14 @@ def torch_runtime_diagnostics(config):
             result["device_name"] = torch.cuda.get_device_name(index)
             result["device_capability"] = torch.cuda.get_device_capability(index)
     return result
+
+
+def _compile_fullgraph(function, runtime, device, *, dynamic):
+    """Compile one fixed solver region under the explicit runtime policy."""
+    arguments = {"fullgraph": True, "dynamic": dynamic}
+    if device.type == "cuda":
+        arguments["mode"] = runtime.compile_mode
+    return torch.compile(function, **arguments)
 
 
 def _field_shapes(space):
@@ -915,6 +943,16 @@ class TorchSimulation:
                 f"processes oversubscribe {processors} available CPUs"
             )
         torch.set_num_threads(threads)
+        if runtime.cpu_interop_threads is not None:
+            current_interop_threads = torch.get_num_interop_threads()
+            if current_interop_threads != runtime.cpu_interop_threads:
+                try:
+                    torch.set_num_interop_threads(runtime.cpu_interop_threads)
+                except RuntimeError as error:
+                    raise TorchConfigurationError(
+                        "cpu_interop_threads must be configured before Torch parallel "
+                        "work starts"
+                    ) from error
         if runtime.launch.world_size == 1:
             if int(space.numprocs) != 1:
                 raise TorchConfigurationError(
@@ -1032,6 +1070,9 @@ class TorchSimulation:
             for component in component_plans
             for bucket in component.buckets
         )
+        self._fused_local_phases = (
+            runtime.compile_policy == "compile" and _distributed_partition is None
+        )
         z_collapsed = (
             shapes["Ez"][2] == 1
             and bloch is None
@@ -1046,20 +1087,18 @@ class TorchSimulation:
             magnetic_function = _magnetic_phase
         self._electric = electric_function
         self._magnetic = magnetic_function
-        compile_options = None
-        if runtime.compile_policy == "compile":
-            compile_options = {"cpp_wrapper": True} if device.type == "cpu" else None
-            self._electric = torch.compile(
+        if runtime.compile_policy == "compile" and not self._fused_local_phases:
+            self._electric = _compile_fullgraph(
                 electric_function,
-                fullgraph=True,
+                runtime,
+                device,
                 dynamic=False,
-                options=compile_options,
             )
-            self._magnetic = torch.compile(
+            self._magnetic = _compile_fullgraph(
                 magnetic_function,
-                fullgraph=True,
+                runtime,
+                device,
                 dynamic=False,
-                options=compile_options,
             )
         self._electric_args = self._electric_arguments()
         self._magnetic_args = self._magnetic_arguments()
@@ -1067,71 +1106,71 @@ class TorchSimulation:
             "upml": _upml_bucket_update,
             "cpml": _cpml_bucket_update,
         }
-        if runtime.compile_policy == "compile":
-            pml_functions = {
-                model: torch.compile(
-                    function,
-                    fullgraph=True,
-                    dynamic=True,
-                    options=compile_options,
-                )
-                for model, function in pml_functions.items()
-            }
         self._electric_pml = self._pml_executions(("Ex", "Ey", "Ez"), pml_functions)
         self._magnetic_pml = self._pml_executions(("Hx", "Hy", "Hz"), pml_functions)
         self._dm2_updates = []
         for bucket_state in state.dm2_buckets:
             metadata = bucket_state.metadata
             prefix = metadata.prefix
-            prepare = bucket_state.prepare
-            iterate = bucket_state.iterate
-            finalize = bucket_state.finalize
             repetitions = DM2_MAX_ITERATIONS // DM2_ITERATIONS_PER_CHUNK
-            if runtime.compile_policy == "compile":
-                prepare, iterate, finalize = (
-                    torch.compile(
-                        function,
-                        fullgraph=True,
-                        dynamic=False,
-                        options=compile_options,
-                    )
-                    for function in (prepare, iterate, finalize)
-                )
-            self._dm2_updates.append(
-                (
-                    prepare,
-                    (
-                        state.field(metadata.component),
-                        state.field(metadata.source_component),
-                        state.step_count,
-                        state.time_step,
-                        getattr(plan, f"{prefix}_targets"),
-                        getattr(plan, f"{prefix}_source_positive_indices"),
-                        getattr(plan, f"{prefix}_source_negative_indices"),
-                        getattr(plan, f"{prefix}_rho30"),
-                        getattr(plan, f"{prefix}_gamma"),
-                        getattr(plan, f"{prefix}_t1"),
-                        getattr(plan, f"{prefix}_t2"),
-                        getattr(plan, f"{prefix}_hbar"),
-                        getattr(plan, f"{prefix}_omega"),
-                        getattr(plan, f"{prefix}_n_atom"),
-                        getattr(plan, f"{prefix}_curl_scale"),
-                    ),
-                    iterate,
-                    (
-                        0.5 * plan.dt,
-                        0.25 * plan.dt,
-                        getattr(plan, f"{prefix}_rtol"),
-                        getattr(plan, f"{prefix}_omega"),
-                    ),
-                    finalize,
-                    (
-                        state.field(metadata.component),
-                        getattr(plan, f"{prefix}_targets"),
-                    ),
-                    repetitions,
-                )
+            prepare_args = (
+                state.field(metadata.component),
+                state.field(metadata.source_component),
+                state.step_count,
+                state.time_step,
+                getattr(plan, f"{prefix}_targets"),
+                getattr(plan, f"{prefix}_source_positive_indices"),
+                getattr(plan, f"{prefix}_source_negative_indices"),
+                getattr(plan, f"{prefix}_rho30"),
+                getattr(plan, f"{prefix}_gamma"),
+                getattr(plan, f"{prefix}_t1"),
+                getattr(plan, f"{prefix}_t2"),
+                getattr(plan, f"{prefix}_hbar"),
+                getattr(plan, f"{prefix}_omega"),
+                getattr(plan, f"{prefix}_n_atom"),
+                getattr(plan, f"{prefix}_curl_scale"),
             )
+            iterate_args = (
+                0.5 * plan.dt,
+                0.25 * plan.dt,
+                getattr(plan, f"{prefix}_rtol"),
+                getattr(plan, f"{prefix}_omega"),
+            )
+            finalize_args = (
+                state.field(metadata.component),
+                getattr(plan, f"{prefix}_targets"),
+            )
+            if runtime.compile_policy == "compile":
+                solve = bucket_state.solve
+                if not self._fused_local_phases:
+                    solve = _compile_fullgraph(
+                        solve,
+                        runtime,
+                        device,
+                        dynamic=False,
+                    )
+                self._dm2_updates.append(
+                    (
+                        solve,
+                        (
+                            *prepare_args,
+                            *iterate_args[:3],
+                            DM2_MAX_ITERATIONS,
+                        ),
+                    )
+                )
+            else:
+                self._dm2_updates.append(
+                    (
+                        bucket_state.prepare,
+                        prepare_args,
+                        bucket_state.iterate,
+                        iterate_args,
+                        bucket_state.finalize,
+                        finalize_args,
+                        repetitions,
+                    )
+                )
         if has_dm2 and device.type == "cuda":
             self._dm2_iterations_host = torch.empty(
                 plan.dm2_target_count,
@@ -1143,15 +1182,44 @@ class TorchSimulation:
             self._dm2_iterations_host = state._dm2_iterations
 
         self._dispersive = self._apply_dispersive
-        if self._dispersive_buckets and runtime.compile_policy == "compile":
-            self._dispersive = torch.compile(
-                self._apply_dispersive,
-                fullgraph=True,
-                dynamic=False,
-                options=compile_options,
-            )
+        self._electric_material = self._electric_material_update
+        self._magnetic_material = self._magnetic_material_update
+        if runtime.compile_policy == "compile" and not self._fused_local_phases:
+            if (
+                self._electric_pml
+                or self._dispersive_buckets
+                or self._has_electric_constants
+            ):
+                self._electric_material = _compile_fullgraph(
+                    self._electric_material_update,
+                    runtime,
+                    device,
+                    dynamic=False,
+                )
+            if self._magnetic_pml or self._has_magnetic_constants:
+                self._magnetic_material = _compile_fullgraph(
+                    self._magnetic_material_update,
+                    runtime,
+                    device,
+                    dynamic=False,
+                )
         self._distributed_partition = _distributed_partition
         self._distributed_exchange = None
+        self._electric_half = None
+        self._magnetic_half = None
+        if self._fused_local_phases:
+            self._electric_half = _compile_fullgraph(
+                self._electric_half_update,
+                runtime,
+                device,
+                dynamic=False,
+            )
+            self._magnetic_half = _compile_fullgraph(
+                self._magnetic_half_update,
+                runtime,
+                device,
+                dynamic=False,
+            )
         simulation_factory = (
             type(self) if _auxiliary_factory is None else _auxiliary_factory
         )
@@ -1165,7 +1233,31 @@ class TorchSimulation:
         self._is_auxiliary = bool(_is_auxiliary)
         self.probes = TorchProbeBuffer(probes, simulation=self)
         self.plan_identity = self._compute_plan_identity()
+        self.compile_cache_key = self._compute_compile_cache_key()
         self._cuda_graphs = {}
+
+    def _compute_compile_cache_key(self):
+        if self.device.type == "cuda":
+            capability = torch.cuda.get_device_capability(self.device)
+        else:
+            capability = torch.backends.cpu.get_cpu_capability()
+        signatures = tuple(
+            sorted(
+                repr(bucket.signature)
+                for component in self.plan.components.values()
+                for bucket in component.buckets
+            )
+        )
+        payload = (
+            torch.__version__,
+            capability,
+            str(self.dtype),
+            self.runtime.compile_mode,
+            self.runtime.execution_policy,
+            tuple(sorted(self.plan.shapes.items())),
+            signatures,
+        )
+        return hashlib.sha256(repr(payload).encode()).hexdigest()
 
     def _compute_plan_identity(self):
         digest = hashlib.sha256()
@@ -1332,15 +1424,20 @@ class TorchSimulation:
                 field.reshape(-1).index_copy_(0, targets, values)
 
     def _update_dm2(self):
-        for (
-            prepare,
-            prepare_args,
-            iterate,
-            iterate_args,
-            finalize,
-            finalize_args,
-            repetitions,
-        ) in self._dm2_updates:
+        for update in self._dm2_updates:
+            if len(update) == 2:
+                solve, solve_args = update
+                solve(*solve_args)
+                continue
+            (
+                prepare,
+                prepare_args,
+                iterate,
+                iterate_args,
+                finalize,
+                finalize_args,
+                repetitions,
+            ) = update
             prepare(*prepare_args)
             for _ in range(repetitions):
                 iterate(*iterate_args)
@@ -1368,18 +1465,34 @@ class TorchSimulation:
         for descriptor in self._dispersive_buckets:
             update_bucket(self.plan, self.state, descriptor)
 
-    def _electric_post_update(self):
+    def _electric_material_update(self):
         self._run_pml(self._electric_pml)
         if self._dispersive_buckets:
             self._dispersive()
-        self._update_dm2()
         if self._has_electric_constants:
             self._apply_constants(("Ex", "Ey", "Ez"))
 
-    def _magnetic_post_update(self):
+    def _magnetic_material_update(self):
         self._run_pml(self._magnetic_pml)
         if self._has_magnetic_constants:
             self._apply_constants(("Hx", "Hy", "Hz"))
+
+    def _electric_post_update(self):
+        self._electric_material()
+        self._update_dm2()
+
+    def _magnetic_post_update(self):
+        self._magnetic_material()
+
+    def _electric_half_update(self):
+        self._sync_magnetic_boundaries()
+        self._electric(*self._electric_args)
+        self._electric_post_update()
+
+    def _magnetic_half_update(self):
+        self._sync_electric_boundaries()
+        self._magnetic(*self._magnetic_args)
+        self._magnetic_post_update()
 
     def _run_compute_region(self, name, function):
         graph = self._cuda_graphs.get(name)
@@ -1396,19 +1509,25 @@ class TorchSimulation:
         if self._cuda_graphs:
             return self
         checkpoint = self.checkpoint()
-        regions = [
-            ("electric", lambda: self._electric(*self._electric_args)),
-            ("magnetic", lambda: self._magnetic(*self._magnetic_args)),
-        ]
-        if (
-            self._has_pml
-            or self._dispersive_buckets
-            or self._has_dm2
-            or self._has_electric_constants
-        ):
-            regions.append(("electric_post", self._electric_post_update))
-        if self._has_pml or self._has_magnetic_constants:
-            regions.append(("magnetic_post", self._magnetic_post_update))
+        if self._electric_half is not None:
+            regions = [
+                ("electric_half", self._electric_half),
+                ("magnetic_half", self._magnetic_half),
+            ]
+        else:
+            regions = [
+                ("electric", lambda: self._electric(*self._electric_args)),
+                ("magnetic", lambda: self._magnetic(*self._magnetic_args)),
+            ]
+            if (
+                self._has_pml
+                or self._dispersive_buckets
+                or self._has_dm2
+                or self._has_electric_constants
+            ):
+                regions.append(("electric_post", self._electric_post_update))
+            if self._has_pml or self._has_magnetic_constants:
+                regions.append(("magnetic_post", self._magnetic_post_update))
         for _name, function in regions:
             function()
         torch.cuda.synchronize(self.device)
@@ -1431,15 +1550,20 @@ class TorchSimulation:
         exchange = self._distributed_exchange
         split_axis = None if exchange is None else exchange.axis
         for _ in range(steps):
-            self._sync_magnetic_boundaries(skip_axis=split_axis)
-            if exchange is not None:
-                exchange.begin("magnetic")
-            self._run_compute_region(
-                "electric", lambda: self._electric(*self._electric_args)
-            )
-            if exchange is not None:
-                exchange.finish("magnetic")
-            self._run_compute_region("electric_post", self._electric_post_update)
+            if self.device.type == "cuda" and self.runtime.compile_policy == "compile":
+                torch.compiler.cudagraph_mark_step_begin()
+            if self._electric_half is not None:
+                self._run_compute_region("electric_half", self._electric_half)
+            else:
+                self._sync_magnetic_boundaries(skip_axis=split_axis)
+                if exchange is not None:
+                    exchange.begin("magnetic")
+                self._run_compute_region(
+                    "electric", lambda: self._electric(*self._electric_args)
+                )
+                if exchange is not None:
+                    exchange.finish("magnetic")
+                self._run_compute_region("electric_post", self._electric_post_update)
             if not self.sources.empty:
                 self.sources.apply(
                     self,
@@ -1454,15 +1578,18 @@ class TorchSimulation:
                     electric=True,
                     time=self.state.source_time + 0.5 * self.state.time_step,
                 )
-            self._sync_electric_boundaries(skip_axis=split_axis)
-            if exchange is not None:
-                exchange.begin("electric")
-            self._run_compute_region(
-                "magnetic", lambda: self._magnetic(*self._magnetic_args)
-            )
-            if exchange is not None:
-                exchange.finish("electric")
-            self._run_compute_region("magnetic_post", self._magnetic_post_update)
+            if self._magnetic_half is not None:
+                self._run_compute_region("magnetic_half", self._magnetic_half)
+            else:
+                self._sync_electric_boundaries(skip_axis=split_axis)
+                if exchange is not None:
+                    exchange.begin("electric")
+                self._run_compute_region(
+                    "magnetic", lambda: self._magnetic(*self._magnetic_args)
+                )
+                if exchange is not None:
+                    exchange.finish("electric")
+                self._run_compute_region("magnetic_post", self._magnetic_post_update)
             if not self.sources.empty:
                 self.sources.apply(
                     self,
@@ -1657,6 +1784,9 @@ class TorchSimulation:
         result = torch_runtime_diagnostics(self.runtime)
         result["resolved_device"] = str(self.device)
         result["cpu_threads"] = self.cpu_threads
+        result["cpu_interop_threads"] = torch.get_num_interop_threads()
+        result["compile_cache_key"] = self.compile_cache_key
+        result["cuda_graph_regions"] = tuple(sorted(self._cuda_graphs))
         result["material_plan"] = self.plan.decision_report()
         if self._has_dm2:
             self._dm2_iterations_host.copy_(self.state._dm2_iterations)

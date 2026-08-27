@@ -200,14 +200,14 @@ class TorchDm2BucketState(nn.Module):
             )
 
             torch.sub(self._e_new, self._e_previous, out=self._cell0)
-            self._cell0.square_()
+            self._cell0.copy_(torch.square(self._cell0))
             torch.sub(self._u_new, self._u_previous, out=self._u_candidate)
-            self._u_candidate.square_()
+            self._u_candidate.copy_(torch.square(self._u_candidate))
             torch.sum(self._u_candidate, dim=(0, 2), out=self._cell2)
             self._cell0.add_(self._cell2).sqrt_()
 
-            self._cell1.copy_(self._e_previous).square_()
-            self._u_previous.square_()
+            self._cell1.copy_(torch.square(self._e_previous))
+            self._u_previous.copy_(torch.square(self._u_previous))
             torch.sum(self._u_previous, dim=(0, 2), out=self._cell2)
             self._cell1.add_(self._cell2).sqrt_()
             torch.div(self._cell0, self._cell1, out=self._error_candidate)
@@ -230,6 +230,175 @@ class TorchDm2BucketState(nn.Module):
             torch.logical_and(self._active, self._mask, out=self._active)
             torch.logical_not(self._invalid, out=self._mask)
             torch.logical_and(self._active, self._mask, out=self._active)
+
+    def solve(
+        self,
+        field,
+        source,
+        step_count,
+        time_step,
+        targets,
+        source_positive_indices,
+        source_negative_indices,
+        rho30,
+        gamma,
+        t1,
+        t2,
+        hbar,
+        omega,
+        n_atom,
+        curl_scale,
+        half_dt,
+        quarter_dt,
+        rtol,
+        repetitions,
+    ):
+        """Run all bounded corrector chunks in one device-side control-flow graph."""
+        self.prepare(
+            field,
+            source,
+            step_count,
+            time_step,
+            targets,
+            source_positive_indices,
+            source_negative_indices,
+            rho30,
+            gamma,
+            t1,
+            t2,
+            hbar,
+            omega,
+            n_atom,
+            curl_scale,
+        )
+
+        def condition(
+            iteration,
+            e_new,
+            u_new,
+            active,
+            invalid,
+            error,
+            iterations,
+        ):
+            del e_new, u_new, invalid, error, iterations
+            return torch.logical_and(iteration < repetitions, torch.any(active))
+
+        def body(
+            iteration,
+            e_new,
+            u_new,
+            active,
+            invalid,
+            error,
+            iterations,
+        ):
+            for _ in range(1):
+                e_previous = e_new
+                u_previous = u_new
+
+                e_candidate = self._e_base
+                e_candidate = e_candidate - half_dt * torch.sum(
+                    (u_new[0] + self.u[0]) * self._a,
+                    dim=1,
+                )
+                e_candidate = e_candidate + half_dt * torch.sum(
+                    (u_new[1] + self.u[1]) * self._b,
+                    dim=1,
+                )
+                e_new = torch.where(active, e_candidate, e_new)
+
+                u0_candidate = self.u[0] + ((u_new[1] + self.u[1]) * omega * half_dt)
+                field_sum = e_new + self._e_old
+                u1_candidate = self.u[1] - (
+                    (u0_candidate + self.u[0]) * omega * half_dt
+                )
+                u1_candidate = u1_candidate + (
+                    (u_new[2] + self.u[2])
+                    * self._c_plus[:, None]
+                    * field_sum[:, None]
+                    * quarter_dt
+                )
+                u1_candidate = u1_candidate + (
+                    self._d[:, None] * field_sum[:, None] * half_dt
+                )
+                u2_candidate = self.u[2] - (
+                    (u1_candidate + self.u[1])
+                    * self._c_minus[:, None]
+                    * field_sum[:, None]
+                    * quarter_dt
+                )
+                u_candidate = torch.stack(
+                    (u0_candidate, u1_candidate, u2_candidate),
+                    dim=0,
+                )
+                u_new = torch.where(
+                    active[None, :, None],
+                    u_candidate,
+                    u_new,
+                )
+
+                numerator = torch.sqrt(
+                    torch.square(e_new - e_previous)
+                    + torch.sum(
+                        torch.square(u_new - u_previous),
+                        dim=(0, 2),
+                    )
+                )
+                denominator = torch.sqrt(
+                    torch.square(e_previous)
+                    + torch.sum(torch.square(u_previous), dim=(0, 2))
+                )
+                error_candidate = numerator / denominator
+                both_zero = torch.logical_and(numerator == 0, denominator == 0)
+                error_candidate = torch.where(
+                    both_zero,
+                    torch.zeros_like(error_candidate),
+                    error_candidate,
+                )
+                error = torch.where(active, error_candidate, error)
+                iterations = iterations + active.to(dtype=iterations.dtype)
+                invalid = torch.logical_or(
+                    invalid,
+                    torch.logical_and(torch.isnan(error_candidate), active),
+                )
+                active = torch.logical_and(active, error > rtol)
+                active = torch.logical_and(active, torch.logical_not(invalid))
+            return (
+                iteration + 1,
+                e_new,
+                u_new,
+                active,
+                invalid,
+                error,
+                iterations,
+            )
+
+        initial = (
+            torch.zeros((), dtype=torch.int64, device=field.device),
+            self._e_new.clone(),
+            self._u_new.clone(),
+            self._active.clone(),
+            self._invalid.clone(),
+            self._error.clone(),
+            self._iterations.clone(),
+        )
+        (
+            _iteration,
+            e_new,
+            u_new,
+            active,
+            invalid,
+            error,
+            iterations,
+        ) = torch.while_loop(condition, body, initial)
+        self._e_new.copy_(e_new)
+        self._u_new.copy_(u_new)
+        self._active.copy_(active)
+        self._invalid.copy_(invalid)
+        self._error.copy_(error)
+        self._iterations.copy_(iterations)
+        self.finalize(field, targets)
 
     def finalize(self, field, targets):
         """Commit converged targets and retain failed targets' prior state."""

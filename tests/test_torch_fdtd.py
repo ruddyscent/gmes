@@ -114,6 +114,13 @@ class TorchRuntimeConfigTest(unittest.TestCase):
             TorchRuntimeConfig(device="cpu", precision="float16"),
             TorchRuntimeConfig(device="mps"),
             TorchRuntimeConfig(device="cpu", autograd=True),
+            TorchRuntimeConfig(device="cpu", compile_mode="reduce-overhead"),
+            TorchRuntimeConfig(
+                device="cuda:0",
+                compile_policy="eager",
+                compile_mode="max-autotune",
+            ),
+            TorchRuntimeConfig(device="cpu", cpu_interop_threads=0),
             TorchRuntimeConfig(
                 device="cpu",
                 launch=DistributedLaunch(world_size=2, local_world_size=2),
@@ -143,6 +150,36 @@ class TorchRuntimeConfigTest(unittest.TestCase):
                 geometry=_geometry(),
                 runtime=config,
             )
+
+    def test_compile_cache_key_tracks_execution_specialization(self):
+        common = {
+            "space": gmes.Cartesian((2, 2, 0), 2),
+            "geometry": _geometry(),
+        }
+        first = TorchSimulation(
+            **common,
+            runtime=TorchRuntimeConfig(
+                device="cpu",
+                compile_policy="compile",
+                execution_policy="auto",
+                cpu_threads=1,
+            ),
+        )
+        second = TorchSimulation(
+            **common,
+            runtime=TorchRuntimeConfig(
+                device="cpu",
+                compile_policy="compile",
+                execution_policy="dense",
+                cpu_threads=1,
+            ),
+        )
+
+        self.assertEqual(len(first.compile_cache_key), 64)
+        self.assertNotEqual(first.compile_cache_key, second.compile_cache_key)
+        self.assertEqual(
+            first.diagnostics()["compile_cache_key"], first.compile_cache_key
+        )
 
     def test_missing_cuda_has_actionable_error_and_no_fallback(self):
         config = TorchRuntimeConfig(device="cuda:0")

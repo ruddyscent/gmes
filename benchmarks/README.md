@@ -103,6 +103,32 @@ allocated/reserved peaks, profiler/graph-break, device-copy, allocator, and
 kernel-launch data.  Synchronize CUDA only at measurement boundaries.  Use
 one process per GPU for the two-GPU cases and record link topology.
 
+## Torch compiler and runtime tuning
+
+`torch_tuning.py` consumes the frozen manifest and native summary while using
+`torch.utils.benchmark.Timer` for repeated measurements. It records construction,
+H2D, cold and cached compilation, one-step latency, batched throughput, compiler
+counters, raw samples, buffer addresses, memory growth, topology, and an optional
+Chrome profiler trace. The strict acceptance summary rejects graph breaks,
+recompilation after warm-up, host-device transfers, storage changes, or unbounded
+device-memory growth.
+
+```sh
+uv run --no-sync python -m benchmarks.torch_tuning \
+  --case cpu-crossover-2d --device cpu --precision float64 \
+  --threads 1 --interop-threads 1 --native-summary native-summary.json \
+  --trace-directory /tmp/gmes-tuning-traces --output /tmp/gmes-tuning.json
+
+uv run --no-sync python -m benchmarks.torch_tuning \
+  --case single-gpu-3d --device cuda:0 --precision float32 \
+  --compile-mode matrix --capture-graphs \
+  --trace-directory /tmp/gmes-tuning-traces --output /tmp/gmes-cuda.json
+```
+
+Use `--policy matrix` for the forced dense/compact/tiled comparison and
+`--enforce` in automation. Keep JSON and profiler traces in CI artifacts or
+`/tmp`; the files contain the complete environment metadata and can be large.
+
 The long-running `physical_checks` cases archive field energy, boundary
 energy (reflection/transmission observables), maximum amplitude, finiteness,
 component spectra, complete fields, and DM2 state at fixed steps.  Large NPZ,

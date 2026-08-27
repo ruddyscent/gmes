@@ -267,8 +267,10 @@ runtime = TorchRuntimeConfig(
     device="cuda:0",       # use "cpu" explicitly for CPU execution
     precision="float32",   # "float32" or "float64"
     compile_policy="compile",  # "eager" or fullgraph Torch compilation
+    compile_mode="default",  # CUDA: default/reduce-overhead/max-autotune
     execution_policy="auto",  # or force dense/compact/tiled for measurements
     cpu_threads=4,
+    cpu_interop_threads=1,
 )
 simulation = TorchSimulation(
     space=Cartesian(size=(8, 6, 0), resolution=20),
@@ -289,10 +291,12 @@ requested device's name and capability.
 `advance(steps)` is the throughput API; `step()` is only a one-step
 convenience. Both run under `torch.inference_mode()`. The timestep, source
 time, fields, dielectric coefficients, region IDs, and preallocated curl
-scratch are registered non-trainable buffers. The electric and magnetic
-functions are compiled independently with `fullgraph=True` and
-`dynamic=False`; geometry, boundary communication, snapshots, and I/O stay
-outside those graphs.
+scratch are registered non-trainable buffers. For a local simulation, each complete electric and magnetic half-step is
+compiled with `fullgraph=True` and `dynamic=False`, reducing steady execution to two static
+regions. Distributed communication, geometry, sources, callbacks, snapshots, and
+I/O stay outside those graphs. The compilation cache key includes the PyTorch
+version, device capability, dtype, compile mode, execution policy, field shapes,
+and material/state signatures and is exposed in `simulation.diagnostics()`.
 
 Bloch fields have a final length-two real plane holding real and imaginary
 parts in the requested real dtype. Complex conversion occurs only at an

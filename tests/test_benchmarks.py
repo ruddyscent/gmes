@@ -1,5 +1,5 @@
-import importlib.util
 import hashlib
+import importlib.util
 import json
 import platform
 import tempfile
@@ -168,6 +168,17 @@ class TorchMaterialPlannerBenchmarkTest(unittest.TestCase):
         self.assertGreater(result["pml"]["active_cells"], 0)
         self.assertGreater(result["pml"]["state_bytes"], 0)
         self.assertGreater(result["pml"]["gather_scatter_bytes_per_step"], 0)
+        self.assertEqual(
+            result["pml"]["traffic_representation"], "compact-full-curl-v1"
+        )
+        self.assertEqual(
+            result["pml"]["indexed_target_cells"], result["pml"]["active_cells"]
+        )
+        self.assertEqual(result["pml"]["sparse_residual_axis_targets"], 0)
+        self.assertEqual(
+            result["pml"]["gather_scatter_scalar_values_per_step"],
+            6 * result["pml"]["active_cells"],
+        )
         self.assertEqual(result["pml"]["launches_per_step"], 6)
         self.assertGreater(result["profile"]["gather_count"], 0)
         self.assertGreater(result["profile"]["scatter_count"], 0)
@@ -177,6 +188,53 @@ class TorchMaterialPlannerBenchmarkTest(unittest.TestCase):
         self.assertIn(
             "flush_probes",
             result["timing_scope"]["excluded_host_boundaries"],
+        )
+
+    def test_compiled_cpu_pml_plan_reports_sparse_residual_traffic(self):
+        _, _, _, plans, _ = self.benchmark.build_host_plan(
+            "pml-thin",
+            policy="auto",
+            precision="float64",
+            device_type="cpu",
+            tile_size=64,
+            gmes=self.gmes,
+            compile_policy="compile",
+        )
+        summary = self.benchmark.plan_summary(plans)
+        self.assertTrue(summary["cpml_sparse_residual"])
+        cpml_buckets = [
+            bucket
+            for plan in plans
+            for bucket in plan.buckets
+            if bucket.signature.model == "cpml"
+        ]
+        logical_targets = sum(bucket.target_count for bucket in cpml_buckets)
+        active_axes = sum(
+            bool(len(axis.targets))
+            for bucket in cpml_buckets
+            for axis in bucket.cpml_residual_axes
+        )
+        traffic = self.benchmark._pml_traffic_summary(
+            plans,
+            scalar_width=1,
+            element_size=8,
+        )
+        self.assertEqual(traffic["traffic_representation"], "axis-sparse-residual-v1")
+        self.assertEqual(traffic["indexed_target_cells"], 0)
+        self.assertGreater(traffic["sparse_residual_axis_targets"], 0)
+        self.assertLess(traffic["sparse_residual_axis_targets"], 2 * logical_targets)
+        self.assertEqual(
+            traffic["gather_scatter_scalar_values_per_step"],
+            4 * traffic["sparse_residual_axis_targets"],
+        )
+        self.assertLess(
+            traffic["gather_scatter_bytes_per_step"],
+            6 * logical_targets * 8,
+        )
+        self.assertEqual(summary["material_launches_per_step"], 6 + active_axes)
+        self.assertEqual(
+            summary["material_launches_per_step"],
+            sum(item["launches"] for item in summary["decisions"]),
         )
 
     def test_fragmented_coverage_matches_contiguous_target_counts(self):
@@ -439,9 +497,7 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
         )
 
     def test_current_rss_fails_closed_when_measurement_is_unavailable(self):
-        with patch.object(
-            self.benchmark.platform, "system", return_value="Windows"
-        ):
+        with patch.object(self.benchmark.platform, "system", return_value="Windows"):
             self.assertIsNone(self.benchmark._current_rss_bytes())
         with (
             patch.object(self.benchmark.platform, "system", return_value="Linux"),
@@ -504,17 +560,13 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
         cpu = self.benchmark.torch.device("cpu")
         self.assertFalse(self.benchmark._memory_growth_bounded(cpu, None, None))
         self.assertTrue(self.benchmark._memory_growth_bounded(cpu, None, 1024**2))
-        self.assertFalse(
-            self.benchmark._memory_growth_bounded(cpu, None, 1024**2 + 1)
-        )
+        self.assertFalse(self.benchmark._memory_growth_bounded(cpu, None, 1024**2 + 1))
 
     def test_cuda_memory_gate_preserves_allocated_growth_behavior(self):
         cuda = self.benchmark.torch.device("cuda")
         self.assertTrue(self.benchmark._memory_growth_bounded(cuda, None, None))
         self.assertTrue(self.benchmark._memory_growth_bounded(cuda, 1024**2, None))
-        self.assertFalse(
-            self.benchmark._memory_growth_bounded(cuda, 1024**2 + 1, None)
-        )
+        self.assertFalse(self.benchmark._memory_growth_bounded(cuda, 1024**2 + 1, None))
 
     def test_trace_summary_counts_raw_allocator_events(self):
         trace = {
@@ -581,9 +633,7 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             },
         )
         self.assertEqual(result["cuda_graph_launches"], 1)
-        self.assertEqual(
-            result["indexed_write_operations_outside_compiled_regions"], 2
-        )
+        self.assertEqual(result["indexed_write_operations_outside_compiled_regions"], 2)
         self.assertEqual(
             result["indexed_write_names_outside_compiled_regions"],
             {"aten::index_add_": 1, "aten::index_put_": 1},
@@ -640,9 +690,7 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             _fused_source_updates=True,
             sources=SimpleNamespace(batches=[batch], auxiliaries=[auxiliary]),
         )
-        self.assertEqual(
-            self.benchmark._compiled_local_simulation_count(simulation), 2
-        )
+        self.assertEqual(self.benchmark._compiled_local_simulation_count(simulation), 2)
         self.assertEqual(
             self.benchmark._source_index_operations_per_step(simulation),
             {"aten::index_add_": 1},
@@ -685,9 +733,7 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
                 "git_status": "",
                 "hostname": platform.node(),
                 "platform": platform.platform(),
-                "cpu_count_physical": cpu_contract[
-                    "cpu_count_physical_affinity"
-                ],
+                "cpu_count_physical": cpu_contract["cpu_count_physical_affinity"],
                 "cpu_topology": cpu_contract["cpu_topology"],
                 "openmp_enabled": True,
             },
@@ -739,9 +785,9 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             path = Path(directory) / "native.json"
             path.write_text(json.dumps(summary))
             pinned_manifest = json.loads(json.dumps(self.manifest))
-            pinned_manifest["reference"]["performance_summary_sha256"] = (
-                hashlib.sha256(path.read_bytes()).hexdigest()
-            )
+            pinned_manifest["reference"]["performance_summary_sha256"] = hashlib.sha256(
+                path.read_bytes()
+            ).hexdigest()
             valid = self.benchmark._native_gate(
                 path, "cpu-crossover-2d", 1, candidate, pinned_manifest
             )
@@ -775,9 +821,7 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
                 "git_status": "",
                 "hostname": platform.node(),
                 "platform": platform.platform(),
-                "cpu_count_physical": cpu_contract[
-                    "cpu_count_physical_affinity"
-                ],
+                "cpu_count_physical": cpu_contract["cpu_count_physical_affinity"],
                 "cpu_topology": cpu_contract["cpu_topology"],
                 "openmp_enabled": True,
             },
@@ -871,9 +915,7 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
         self.assertFalse(slower["passed"])
 
     def test_bootstrap_geomean_fails_closed_for_invalid_evidence(self):
-        statistics = self.manifest["performance_gates"]["cpu_acceptance"][
-            "statistics"
-        ]
+        statistics = self.manifest["performance_gates"]["cpu_acceptance"]["statistics"]
         result = self.benchmark._bootstrap_geomean_regression(
             [{"comparison_valid": False}], statistics
         )
@@ -936,9 +978,7 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
 
     def test_cpu_slice_aggregator_recomputes_and_binds_evidence(self):
         manifest = json.loads(json.dumps(self.manifest))
-        manifest["performance_gates"]["cpu_acceptance"]["statistics"][
-            "resamples"
-        ] = 100
+        manifest["performance_gates"]["cpu_acceptance"]["statistics"]["resamples"] = 100
         cases = manifest["performance_gates"]["cpu_acceptance"]["cases"]
         evidence = {
             "evidence_contract_id": "torch-cpu-acceptance-v3",
@@ -1145,7 +1185,9 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
         output = json.loads(rendered.call_args.args[0])
         self.assertTrue(output["diagnostic_acceptance"]["passed"])
         self.assertFalse(output["suite_acceptance"]["passed"])
-        self.assertEqual(output["suite_acceptance"]["cpu_suite_status"], "diagnostic-only")
+        self.assertEqual(
+            output["suite_acceptance"]["cpu_suite_status"], "diagnostic-only"
+        )
         self.assertEqual(status, 2)
 
 

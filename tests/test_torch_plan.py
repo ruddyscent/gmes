@@ -181,9 +181,7 @@ class ComponentPlanTest(unittest.TestCase):
             gmes.DefaultMedium(gmes.Dielectric(eps_inf=2.5, mu_inf=1.2)),
             gmes.Shell(material=gmes.Cpml(kappa_max=3.0), thickness=0.5),
         ]
-        _, _, plans = _host_plans(
-            geometry, policy="compact", cpml_sparse_residual=True
-        )
+        _, _, plans = _host_plans(geometry, policy="compact", cpml_sparse_residual=True)
         for component_name, plan in plans.items():
             with self.subTest(component=component_name):
                 bucket = next(
@@ -224,12 +222,8 @@ class ComponentPlanTest(unittest.TestCase):
                         np.column_stack(
                             (
                                 bucket.cell_coefficients[expected_positions, 0],
-                                bucket.cell_coefficients[
-                                    expected_positions, b_column
-                                ],
-                                bucket.cell_coefficients[
-                                    expected_positions, c_column
-                                ],
+                                bucket.cell_coefficients[expected_positions, b_column],
+                                bucket.cell_coefficients[expected_positions, c_column],
                                 1.0
                                 / bucket.cell_coefficients[
                                     expected_positions, kappa_column

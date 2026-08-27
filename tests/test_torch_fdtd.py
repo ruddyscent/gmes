@@ -189,9 +189,7 @@ class TorchRuntimeConfigTest(unittest.TestCase):
             first.diagnostics()["material_execution_representation"],
             "dense-base+compact-indexed-materials-v1",
         )
-        self.assertEqual(
-            first.diagnostics()["phase_specialization"], "z-collapsed-v1"
-        )
+        self.assertEqual(first.diagnostics()["phase_specialization"], "z-collapsed-v1")
         self.assertEqual(
             first.diagnostics()["compile_cache_key"], first.compile_cache_key
         )
@@ -257,9 +255,7 @@ class TorchRuntimeConfigTest(unittest.TestCase):
         )
         self.assertNotEqual(first.compile_cache_key, bloch_a.compile_cache_key)
         self.assertNotEqual(bloch_a.compile_cache_key, bloch_b.compile_cache_key)
-        self.assertEqual(
-            bloch_a.diagnostics()["phase_specialization"], "three-axis-v1"
-        )
+        self.assertEqual(bloch_a.diagnostics()["phase_specialization"], "three-axis-v1")
 
         pole = gmes.DrudePole(omega=0.6, gamma=0.03)
         material = gmes.Drude(eps_inf=1.2, dps=(pole,))
@@ -316,9 +312,7 @@ class TorchRuntimeConfigTest(unittest.TestCase):
 
 class TorchStateTest(unittest.TestCase):
     def test_direct_mutation_views_match_the_solver_slices(self):
-        field = torch.arange(5 * 6 * 7 * 2, dtype=torch.float64).reshape(
-            5, 6, 7, 2
-        )
+        field = torch.arange(5 * 6 * 7 * 2, dtype=torch.float64).reshape(5, 6, 7, 2)
         regions = (
             ((0, 0, 0), (0, 1, 1), field[:, :-1, :-1]),
             ((0, 0, 0), (1, 0, 1), field[:-1, :, :-1]),
@@ -340,9 +334,7 @@ class TorchStateTest(unittest.TestCase):
                     expected = field.select(axis, index)
                     actual = _boundary_plane(field, axis, index)
                     self.assertTrue(torch.equal(actual, expected))
-                    self.assertEqual(
-                        actual.storage_offset(), expected.storage_offset()
-                    )
+                    self.assertEqual(actual.storage_offset(), expected.storage_offset())
                     self.assertEqual(actual.stride(), expected.stride())
 
     def test_yee_shapes_cover_collapsed_1d_2d_3d(self):

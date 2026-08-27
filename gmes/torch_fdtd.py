@@ -257,9 +257,9 @@ class CpmlResidualBucketMetadata:
 
 def _cpml_state_dict_post_hook(module, state_dict, prefix, _local_metadata):
     for metadata in module.plan.cpml_residual_buckets:
-        state_dict[f"{prefix}{metadata.state_name}"] = (
-            module._logical_cpml_state(metadata).detach()
-        )
+        state_dict[f"{prefix}{metadata.state_name}"] = module._logical_cpml_state(
+            metadata
+        ).detach()
 
 
 def _cpml_load_state_dict_pre_hook(
@@ -1263,9 +1263,7 @@ def _cpml_residual_axis_update(
     elif reshape_fields:
         field = field.reshape(-1)
         source = source.reshape(-1)
-    _gather_difference(
-        source, stencil[:, 0], stencil[:, 1], scratch0, scratch1, scale
-    )
+    _gather_difference(source, stencil[:, 0], stencil[:, 1], scratch0, scratch1, scale)
     state.mul_(parameters[:, 1]).addcmul_(parameters[:, 2], scratch0)
     torch.index_select(field, 0, targets, out=scratch1)
     scratch0.mul_(parameters[:, 3]).add_(state)
@@ -1455,25 +1453,19 @@ class TorchSimulation:
         self._fused_local_phases = (
             runtime.compile_policy == "compile" and _distributed_partition is None
         )
-        self._packed_dm2 = (
-            runtime.compile_policy == "compile" and device.type == "cpu"
-        )
+        self._packed_dm2 = runtime.compile_policy == "compile" and device.type == "cpu"
         self._dm2_execution_representation = (
             PACKED_DM2_REPRESENTATION
             if self._packed_dm2
             else FUNCTIONAL_DM2_REPRESENTATION
         )
-        self._fused_source_updates = (
-            self._fused_local_phases and device.type == "cpu"
-        )
+        self._fused_source_updates = self._fused_local_phases and device.type == "cpu"
         self._source_execution_representation = (
             FUSED_SOURCE_REPRESENTATION
             if self._fused_source_updates
             else EXTERNAL_SOURCE_REPRESENTATION
         )
-        self._direct_view_mutations = (
-            self._fused_local_phases and device.type == "cpu"
-        )
+        self._direct_view_mutations = self._fused_local_phases and device.type == "cpu"
         self._view_mutation_representation = (
             DIRECT_VIEW_MUTATION_REPRESENTATION
             if self._direct_view_mutations
@@ -1757,8 +1749,7 @@ class TorchSimulation:
             signatures,
             source_topology,
             tuple(
-                auxiliary.compile_cache_key
-                for auxiliary in self.sources.auxiliaries
+                auxiliary.compile_cache_key for auxiliary in self.sources.auxiliaries
             ),
             buffer_layouts(self.plan, plan=True),
             buffer_layouts(self.state, recurse=False),
@@ -1871,9 +1862,7 @@ class TorchSimulation:
                                         self.plan,
                                         f"{metadata.prefix}_stencil_indices",
                                     ),
-                                    getattr(
-                                        self.plan, f"{metadata.prefix}_parameters"
-                                    ),
+                                    getattr(self.plan, f"{metadata.prefix}_parameters"),
                                     getattr(
                                         self.state, f"{metadata.state_prefix}_state"
                                     ),
@@ -2179,8 +2168,7 @@ class TorchSimulation:
                         self,
                         electric=False,
                         time=self.state.source_time + self.state.time_step,
-                        transparent_time=self.state.source_time
-                        + self.state.time_step,
+                        transparent_time=self.state.source_time + self.state.time_step,
                     )
             if not self.probes.empty:
                 self.probes.record(
@@ -2376,13 +2364,9 @@ class TorchSimulation:
         result["material_execution_representation"] = (
             self._material_execution_representation
         )
-        result["cpml_execution_representation"] = (
-            self._cpml_execution_representation
-        )
+        result["cpml_execution_representation"] = self._cpml_execution_representation
         result["view_mutation_representation"] = self._view_mutation_representation
-        result["dm2_execution_representation"] = (
-            self._dm2_execution_representation
-        )
+        result["dm2_execution_representation"] = self._dm2_execution_representation
         result["phase_specialization"] = self._phase_specialization
         result["cuda_graph_regions"] = tuple(sorted(self._cuda_graphs))
         result["material_plan"] = self.plan.decision_report()
@@ -2416,14 +2400,11 @@ class TorchSimulation:
             "state_bytes": sum(
                 value.numel() * value.element_size()
                 for name, value in self.state.named_buffers(recurse=False)
-                if (
-                    name.startswith("pml_") or name.startswith("_pml_")
-                )
+                if (name.startswith("pml_") or name.startswith("_pml_"))
                 and name.endswith("_state")
             ),
             "active_axis_states": sum(
-                metadata.target_count
-                for metadata in self.plan.cpml_residual_axes
+                metadata.target_count for metadata in self.plan.cpml_residual_axes
             ),
             "execution_representation": self._cpml_execution_representation,
             "launches_per_step": len(self._electric_pml) + len(self._magnetic_pml),

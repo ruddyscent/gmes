@@ -213,9 +213,7 @@ class TorchPmlOracleTest(unittest.TestCase):
             (gmes.Cpml, "compile"),
         )
         for model, compile_policy in cases:
-            with self.subTest(
-                model=model.__name__, compile_policy=compile_policy
-            ):
+            with self.subTest(model=model.__name__, compile_policy=compile_policy):
                 if compile_policy == "compile":
                     torch._dynamo.reset()
                 native, simulation = _native_and_torch(
@@ -341,9 +339,7 @@ class TorchPmlOracleTest(unittest.TestCase):
         for precision in ("float64", "float32"):
             with self.subTest(precision=precision):
                 geometry = [
-                    gmes.DefaultMedium(
-                        gmes.Dielectric(eps_inf=2.5, mu_inf=1.2)
-                    ),
+                    gmes.DefaultMedium(gmes.Dielectric(eps_inf=2.5, mu_inf=1.2)),
                     gmes.Block(
                         gmes.Dielectric(eps_inf=3.2, mu_inf=1.15),
                         center=(0, 0, 0),
@@ -477,17 +473,13 @@ class TorchPmlOracleTest(unittest.TestCase):
             self.assertEqual(set(torch_targets), set(native_targets))
             np.testing.assert_allclose(
                 _host_array(bucket_state.u).transpose(1, 2, 0),
-                _select_native_rows(
-                    native_targets, native_values, torch_targets
-                ),
+                _select_native_rows(native_targets, native_values, torch_targets),
                 rtol=tolerance["rtol"],
                 atol=tolerance["atol"],
                 err_msg=f"{metadata.component} DM2 state",
             )
             compared_dm2.add(f"dm2_buckets.{index}.u")
-        expected_dm2 = {
-            name for name in persistent if name.startswith("dm2_buckets.")
-        }
+        expected_dm2 = {name for name in persistent if name.startswith("dm2_buckets.")}
         self.assertEqual(compared_dm2, expected_dm2)
         pml_state = simulation.state.pml_state_snapshot()
         compared_pml = set()
@@ -506,17 +498,13 @@ class TorchPmlOracleTest(unittest.TestCase):
             state_name = f"pml_{component_name.lower()}_{bucket_index}_state"
             np.testing.assert_allclose(
                 pml_state[state_name],
-                _select_native_rows(
-                    native_targets, native_values, torch_targets
-                ),
+                _select_native_rows(native_targets, native_values, torch_targets),
                 rtol=tolerance["rtol"],
                 atol=tolerance["atol"],
                 err_msg=f"{component_name} CPML state",
             )
             compared_pml.add(state_name)
-        expected_pml = {
-            name for name in persistent if name.startswith("pml_")
-        }
+        expected_pml = {name for name in persistent if name.startswith("pml_")}
         self.assertEqual(compared_pml, expected_pml)
 
         updater_prefixes = {
@@ -543,9 +531,7 @@ class TorchPmlOracleTest(unittest.TestCase):
             )
             np.testing.assert_allclose(
                 actual,
-                _select_native_rows(
-                    native_targets, native_values, torch_targets
-                ),
+                _select_native_rows(native_targets, native_values, torch_targets),
                 rtol=tolerance["rtol"],
                 atol=tolerance["atol"],
                 err_msg=f"{descriptor.component} {descriptor.model} state",
@@ -570,10 +556,11 @@ class TorchPmlOracleTest(unittest.TestCase):
                 err_msg=f"{component_name} field",
             )
 
-
         for names in (expected_pml, expected_dispersive, expected_dm2):
             self.assertTrue(names)
-            self.assertTrue(any(np.any(_host_array(persistent[name])) for name in names))
+            self.assertTrue(
+                any(np.any(_host_array(persistent[name])) for name in names)
+            )
         self.assertEqual(int(simulation.state.step_count), 5)
         self.assertAlmostEqual(
             float(simulation.state.source_time), native.time_step.t, places=14
@@ -751,9 +738,7 @@ class TorchPmlStorageTest(unittest.TestCase):
             logical_states += 2 * metadata.target_count
             for axis in metadata.axes:
                 physical_states += axis.target_count
-                state = getattr(
-                    simulation.state, f"{axis.state_prefix}_state"
-                )
+                state = getattr(simulation.state, f"{axis.state_prefix}_state")
                 self.assertTrue(state.is_contiguous())
                 if state.numel():
                     state.copy_(
@@ -778,8 +763,7 @@ class TorchPmlStorageTest(unittest.TestCase):
 
         addresses = simulation.buffer_addresses()
         state_dict = {
-            name: value.clone()
-            for name, value in simulation.state.state_dict().items()
+            name: value.clone() for name, value in simulation.state.state_dict().items()
         }
         self.assertFalse(any(name.startswith("_pml_") for name in state_dict))
         before_state_dict = simulation.state.pml_state_snapshot(numpy=False)

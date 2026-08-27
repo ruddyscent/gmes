@@ -119,7 +119,9 @@ class CpmlResidualAxisPlan:
             self.parameters,
         ):
             if values.flags.writeable or not values.flags.c_contiguous:
-                raise ValueError("CPML residual arrays must be immutable and contiguous")
+                raise ValueError(
+                    "CPML residual arrays must be immutable and contiguous"
+                )
 
 
 @dataclass(frozen=True)
@@ -844,17 +846,13 @@ class TorchExecutionPlanner:
                             cell_coefficients[:, c_column] != 0.0,
                             cell_coefficients[:, kappa_column] != 1.0,
                         )
-                        positions = np.flatnonzero(active).astype(
-                            np.int64, copy=False
-                        )
+                        positions = np.flatnonzero(active).astype(np.int64, copy=False)
                         parameters = np.column_stack(
                             (
                                 cell_coefficients[positions, 0],
                                 cell_coefficients[positions, b_column],
                                 cell_coefficients[positions, c_column],
-                                1.0
-                                / cell_coefficients[positions, kappa_column]
-                                - 1.0,
+                                1.0 / cell_coefficients[positions, kappa_column] - 1.0,
                             )
                         )
                         residual_axes.append(
@@ -863,9 +861,7 @@ class TorchExecutionPlanner:
                                 positions=_readonly(positions, np.int64),
                                 targets=_readonly(targets[positions], np.int64),
                                 stencil_indices=_readonly(
-                                    stencil_indices[
-                                        positions, 2 * axis : 2 * axis + 2
-                                    ],
+                                    stencil_indices[positions, 2 * axis : 2 * axis + 2],
                                     np.int64,
                                 ),
                                 parameters=_readonly(parameters, np.float64),

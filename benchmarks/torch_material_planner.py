@@ -317,9 +317,7 @@ def build_host_plan(
         device_type=device_type,
         policy=policy,
         execution_tile_size=tile_size,
-        cpml_sparse_residual=(
-            compile_policy == "compile" and device_type == "cpu"
-        ),
+        cpml_sparse_residual=(compile_policy == "compile" and device_type == "cpu"),
     ).build()
     seconds = perf_counter() - start
     return space, geometry, bloch, plans, seconds
@@ -362,9 +360,7 @@ def _pml_traffic_summary(plans, *, scalar_width, element_size):
         "indexed_target_cells": indexed_targets,
         "sparse_residual_axis_targets": sparse_axis_targets,
         "gather_scatter_scalar_values_per_step": scalar_values,
-        "gather_scatter_bytes_per_step": (
-            scalar_values * scalar_width * element_size
-        ),
+        "gather_scatter_bytes_per_step": (scalar_values * scalar_width * element_size),
     }
 
 
@@ -399,9 +395,7 @@ def plan_summary(plans):
         "bytes_per_active_component_cell": bytes_used / max(1, active),
         "material_launches_per_step": sum(plan.launch_count for plan in plans),
         "cpml_sparse_residual": any(
-            bucket.cpml_residual_axes
-            for plan in plans
-            for bucket in plan.buckets
+            bucket.cpml_residual_axes for plan in plans for bucket in plan.buckets
         ),
         "signature_count": len(signatures),
         "signatures": [

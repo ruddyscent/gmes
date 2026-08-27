@@ -178,6 +178,81 @@ uv run --no-sync python -m benchmarks.torch_tuning \
   --output /tmp/cpu-acceptance.json --enforce
 ```
 
+### Inductor allocation reproducers
+
+Run the reproducers with Python optimization enabled to confirm that their
+checks do not depend on removable Python `assert` statements. Both scripts
+raise an explicit exception and return nonzero when requested equivalence,
+compiler, allocation, trace, or provenance evidence is missing or differs
+from the affected behavior.
+
+#### Composed mutation
+
+`torch_inductor_composed_mutation.py` is a standalone, Torch-only reproducer
+for the full-field CPU allocation observed when an otherwise allocation-free
+slice mutation is composed with a compact indexed update. It compares the
+compiled result with eager sequential execution and reports allocation traces
+and timings for the isolated and composed graphs. The asserted baseline
+requires exact repeated equivalence, no steady-state compiler-counter changes,
+no allocations outside the measured scopes, one full-field allocation per
+profiled composed call, and no full-field allocation for the isolated compact
+update or public `torch.as_strided` formulation:
+
+```sh
+uv run --no-sync python -O benchmarks/torch_inductor_composed_mutation.py \
+  --assert-affected --trace-directory /tmp/gmes-inductor-repro
+```
+
+`--force-reinplace` replaces only Inductor's private generalized-scatter
+profitability check and is useful for confirming the responsible pass. It is a
+diagnostic, not a GMES runtime workaround. Run it in a separate process so it
+uses a fresh Inductor cache:
+
+```sh
+uv run --no-sync python -O benchmarks/torch_inductor_composed_mutation.py \
+  --force-reinplace --assert-affected \
+  --trace-directory /tmp/gmes-inductor-repro-forced
+```
+
+The selected GMES CPU representation follows the public path demonstrated by
+this reproducer: non-overlapping interior-field and boundary-plane mutations
+use storage-sharing `torch.as_strided` views. CUDA, distributed, and eager
+execution retain their existing slice representation.
+
+#### While-loop state
+
+`torch_inductor_while_loop_allocation.py` is a standalone, Torch-only
+reproducer for recurring allocations in a compiled CPU `torch.while_loop`. It
+measures two full-graph variants independently: the original multiple tensor
+carries, and a GMES-style single carry backed by one exact-size, caller-owned
+workspace containing field, history, and per-cell completion-code state. It
+verifies exact repeated eager equivalence, stable workspace storage, no warm
+steady-state recompilation, and writes a raw Chrome allocation trace for each
+variant:
+
+```sh
+uv run --no-sync python -O \
+  benchmarks/torch_inductor_while_loop_allocation.py \
+  --assert-affected --trace-directory /tmp/gmes-while-loop-repro
+```
+
+Explicit `--cache-directory` and `--trace-directory` paths must be new or
+empty; omitting either uses temporary directories. The assertion mode fails
+closed if any expected predicate or carry allocation disappears, equivalence
+or workspace checks fail, a graph break or new steady-state graph appears, or
+either trace is absent. Only after collecting and freezing that functional
+evidence, the script also compiles a minimal packed carry whose loop body
+mutates the caller-owned input in place. Assertion mode requires the public
+higher-order-op tracer to reject that attempted allocation-free formulation
+specifically because its body mutates an input; the report records only the
+normalized exception type and one-line reason. The functional packed variant
+shows that coalescing loop state removes the separate field/history/counter
+carries, but Inductor still creates the one-byte condition result and packed
+carry storage on every iteration even when the initial workspace belongs to
+the caller. The selected CPU DM2 representation uses this bounded single-carry
+topology; the functional multi-carry implementation remains available to
+non-CPU execution.
+
 The long-running `physical_checks` cases archive field energy, boundary
 energy (reflection/transmission observables), maximum amplitude, finiteness,
 component spectra, complete fields, and DM2 state at fixed steps.  Large NPZ,

@@ -52,6 +52,55 @@ def _simulations(material, *, precision="float64", compile_policy="eager"):
 
 
 class TorchDm2Test(unittest.TestCase):
+    def _build_failure_simulation(self, material, compile_policy):
+        return gmes.TorchSimulation(
+            space=gmes.Cartesian((3, 3, 3), 2),
+            geometry=[
+                gmes.DefaultMedium(gmes.Dielectric(eps_inf=1.7, mu_inf=1.05)),
+                gmes.Block(
+                    material,
+                    center=(0, 0, 0),
+                    size=(1, 1, 1),
+                ),
+                gmes.Shell(gmes.Cpml(), thickness=0.5),
+            ],
+            runtime=gmes.TorchRuntimeConfig(
+                device="cpu",
+                compile_policy=compile_policy,
+                cpu_threads=2,
+            ),
+            dt=0.025,
+        )
+
+    def _assert_simulation_state_matches(self, actual, expected):
+        actual_fields = actual.state.host_snapshot()
+        expected_fields = expected.state.host_snapshot()
+        for name in expected_fields:
+            np.testing.assert_allclose(
+                actual_fields[name], expected_fields[name], rtol=0, atol=2e-18
+            )
+        actual_pml = actual.state.pml_state_snapshot(numpy=False)
+        expected_pml = expected.state.pml_state_snapshot(numpy=False)
+        self.assertEqual(set(actual_pml), set(expected_pml))
+        for name in expected_pml:
+            self.assertTrue(torch.equal(actual_pml[name], expected_pml[name]), name)
+        for actual_bucket, expected_bucket in zip(
+            actual.state.dm2_buckets, expected.state.dm2_buckets
+        ):
+            self.assertTrue(torch.equal(actual_bucket.u, expected_bucket.u))
+        self.assertTrue(
+            torch.equal(actual.state._dm2_status, expected.state._dm2_status)
+        )
+        self.assertTrue(
+            torch.equal(actual.state._dm2_iterations, expected.state._dm2_iterations)
+        )
+        self.assertTrue(
+            torch.equal(actual.state.step_count, expected.state.step_count)
+        )
+        self.assertTrue(
+            torch.equal(actual.state.source_time, expected.state.source_time)
+        )
+
     def test_exact_width_state_is_active_cell_only(self):
         material = gmes.Dm2(
             eps_inf=1.4,
@@ -69,6 +118,51 @@ class TorchDm2Test(unittest.TestCase):
                 metadata.target_count,
                 int(np.prod(simulation.plan.shapes[metadata.component])),
             )
+
+    def test_packed_cpu_workspace_is_exact_nonpersistent_and_fixed(self):
+        material = gmes.Dm2(
+            eps_inf=1.4,
+            omega=(0.7, 0.9, 1.1, 1.3),
+            n_atom=(0.2, 0.3, 0.4, 0.5),
+            gamma=0.15,
+            rtol=1e-9,
+        )
+        _, simulation = _simulations(material, compile_policy="compile")
+        workspaces = []
+        for bucket in simulation.state.dm2_buckets:
+            metadata = bucket.metadata
+            workspace = bucket._packed_loop_state
+            expected_elements = metadata.target_count * (
+                3 * metadata.transition_count + 2
+            )
+            self.assertEqual(tuple(workspace.shape), (expected_elements,))
+            self.assertEqual(workspace.dtype, bucket.u.dtype)
+            self.assertEqual(workspace.device, bucket.u.device)
+            self.assertNotIn("_packed_loop_state", bucket.state_dict())
+            workspaces.append((workspace.data_ptr(), workspace.numel()))
+
+        rng = np.random.default_rng(146)
+        simulation.load_host_fields(
+            {
+                name: rng.normal(size=tuple(field.shape)) * 1e-3
+                for name, field in simulation.state.fields().items()
+            }
+        )
+        simulation.step()
+
+        self.assertEqual(
+            workspaces,
+            [
+                (bucket._packed_loop_state.data_ptr(), bucket._packed_loop_state.numel())
+                for bucket in simulation.state.dm2_buckets
+            ],
+        )
+        self.assertFalse(
+            any(
+                "_packed_loop_state" in name
+                for name in simulation.state.state_dict()
+            )
+        )
 
     def test_complete_fields_match_native_from_nonzero_input(self):
         material = gmes.Dm2(
@@ -396,6 +490,46 @@ class TorchDm2Test(unittest.TestCase):
                 field_after[snapshot["targets"]],
                 field_before[snapshot["targets"]],
             )
+
+    def test_compiled_invalid_error_commits_the_same_state_as_eager(self):
+        eager = self._build_failure_simulation(gmes.Dm2(gamma=np.nan), "eager")
+        compiled = self._build_failure_simulation(
+            gmes.Dm2(gamma=np.nan), "compile"
+        )
+        rng = np.random.default_rng(145)
+        fields = {
+            name: rng.normal(size=tuple(field.shape)) * 1e-3
+            for name, field in eager.state.fields().items()
+        }
+        errors = []
+        for simulation in (eager, compiled):
+            simulation.load_host_fields(fields)
+            with self.assertRaisesRegex(RuntimeError, "invalid error") as caught:
+                simulation.step()
+            errors.append(str(caught.exception))
+
+        self.assertEqual(errors[1], errors[0])
+        self._assert_simulation_state_matches(compiled, eager)
+
+    def test_compiled_nonconvergence_commits_the_same_state_as_eager(self):
+        eager = self._build_failure_simulation(gmes.Dm2(rtol=-1), "eager")
+        compiled = self._build_failure_simulation(gmes.Dm2(rtol=-1), "compile")
+        rng = np.random.default_rng(147)
+        fields = {
+            name: rng.normal(size=tuple(field.shape)) * 1e-3
+            for name, field in eager.state.fields().items()
+        }
+        errors = []
+        for simulation in (eager, compiled):
+            simulation.load_host_fields(fields)
+            with self.assertRaisesRegex(RuntimeError, "failed to converge") as caught:
+                simulation.step()
+            errors.append(str(caught.exception))
+
+        self.assertEqual(errors[1], errors[0])
+        self._assert_simulation_state_matches(compiled, eager)
+        self.assertTrue(torch.all(compiled.state._dm2_status == 2))
+        self.assertTrue(torch.all(compiled.state._dm2_iterations == 100))
 
     def test_compiled_fullgraph_matches_native(self):
         material = gmes.Dm2(

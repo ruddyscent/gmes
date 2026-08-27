@@ -409,6 +409,113 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
         self.assertEqual(samples, [1.0, 1.0, 1.0])
         self.assertEqual(simulation.sample_starts, [0, 5] * 3)
 
+    def test_current_rss_reads_linux_proc_resident_pages(self):
+        with (
+            patch.object(self.benchmark.platform, "system", return_value="Linux"),
+            patch.object(
+                self.benchmark.Path,
+                "read_text",
+                return_value="1000 42 7 0 0 0 0\n",
+            ),
+            patch.object(self.benchmark.os, "sysconf", return_value=4096),
+        ):
+            self.assertEqual(self.benchmark._current_rss_bytes(), 42 * 4096)
+
+    def test_current_rss_reads_macos_ps_kibibytes(self):
+        completed = SimpleNamespace(returncode=0, stdout=" 12345\n")
+        with (
+            patch.object(self.benchmark.platform, "system", return_value="Darwin"),
+            patch.object(self.benchmark.os, "getpid", return_value=321),
+            patch.object(
+                self.benchmark.subprocess, "run", return_value=completed
+            ) as run,
+        ):
+            self.assertEqual(self.benchmark._current_rss_bytes(), 12345 * 1024)
+        run.assert_called_once_with(
+            ("ps", "-o", "rss=", "-p", "321"),
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+    def test_current_rss_fails_closed_when_measurement_is_unavailable(self):
+        with patch.object(
+            self.benchmark.platform, "system", return_value="Windows"
+        ):
+            self.assertIsNone(self.benchmark._current_rss_bytes())
+        with (
+            patch.object(self.benchmark.platform, "system", return_value="Linux"),
+            patch.object(self.benchmark.Path, "read_text", side_effect=OSError),
+        ):
+            self.assertIsNone(self.benchmark._current_rss_bytes())
+
+    def test_cpu_memory_probe_measures_growth_and_restores_warm_checkpoint(self):
+        import torch
+
+        class Simulation:
+            device = torch.device("cpu")
+
+            def __init__(self):
+                self.checkpoints = []
+                self.advances = []
+
+            def load_checkpoint(self, checkpoint):
+                self.checkpoints.append(checkpoint)
+
+            def advance(self, steps):
+                self.advances.append(steps)
+
+        simulation = Simulation()
+        with patch.object(
+            self.benchmark,
+            "_current_rss_bytes",
+            side_effect=[10_000, 10_512],
+        ):
+            result = self.benchmark._cpu_memory_probe(simulation, "warm", 0)
+        self.assertEqual(
+            result,
+            {
+                "probe_steps": 1,
+                "before_bytes": 10_000,
+                "after_bytes": 10_512,
+                "growth_bytes": 512,
+            },
+        )
+        self.assertEqual(simulation.advances, [1])
+        self.assertEqual(simulation.checkpoints, ["warm", "warm"])
+
+    def test_cpu_memory_probe_records_missing_measurement(self):
+        import torch
+
+        simulation = SimpleNamespace(
+            device=torch.device("cpu"),
+            load_checkpoint=lambda checkpoint: None,
+            advance=lambda steps: None,
+        )
+        with patch.object(
+            self.benchmark,
+            "_current_rss_bytes",
+            side_effect=[None, 10_512],
+        ):
+            result = self.benchmark._cpu_memory_probe(simulation, {}, 2)
+        self.assertIsNone(result["growth_bytes"])
+
+    def test_cpu_memory_gate_requires_a_real_bounded_measurement(self):
+        cpu = self.benchmark.torch.device("cpu")
+        self.assertFalse(self.benchmark._memory_growth_bounded(cpu, None, None))
+        self.assertTrue(self.benchmark._memory_growth_bounded(cpu, None, 1024**2))
+        self.assertFalse(
+            self.benchmark._memory_growth_bounded(cpu, None, 1024**2 + 1)
+        )
+
+    def test_cuda_memory_gate_preserves_allocated_growth_behavior(self):
+        cuda = self.benchmark.torch.device("cuda")
+        self.assertTrue(self.benchmark._memory_growth_bounded(cuda, None, None))
+        self.assertTrue(self.benchmark._memory_growth_bounded(cuda, 1024**2, None))
+        self.assertFalse(
+            self.benchmark._memory_growth_bounded(cuda, 1024**2 + 1, None)
+        )
+
     def test_trace_summary_counts_raw_allocator_events(self):
         trace = {
             "traceEvents": [
@@ -439,6 +546,14 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
                     "pid": 1,
                     "tid": 1,
                 },
+                {
+                    "name": "aten::index_put_",
+                    "ph": "X",
+                    "ts": 13,
+                    "dur": 1,
+                    "pid": 1,
+                    "tid": 1,
+                },
                 {"name": "cudaGraphLaunch", "ph": "X"},
                 {"name": "kernel", "cat": "kernel", "ph": "X"},
             ]
@@ -446,7 +561,12 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "trace.json"
             path.write_text(json.dumps(trace))
+            trace_bytes = path.read_bytes()
             result = self.benchmark._trace_summary(path)
+        self.assertEqual(result["chrome_trace_size_bytes"], len(trace_bytes))
+        self.assertEqual(
+            result["chrome_trace_sha256"], hashlib.sha256(trace_bytes).hexdigest()
+        )
         self.assertEqual(result["positive_allocation_events"], 1)
         self.assertEqual(result["allocated_bytes"], 32)
         self.assertEqual(result["freed_bytes"], 32)
@@ -462,10 +582,69 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
         )
         self.assertEqual(result["cuda_graph_launches"], 1)
         self.assertEqual(
-            result["indexed_write_operations_outside_compiled_regions"], 1
+            result["indexed_write_operations_outside_compiled_regions"], 2
         )
         self.assertEqual(
             result["indexed_write_names_outside_compiled_regions"],
+            {"aten::index_add_": 1, "aten::index_put_": 1},
+        )
+
+    def test_cpu_allocation_gate_requires_every_profiler_metric_to_be_zero(self):
+        clean = {
+            "positive_allocation_events": 0,
+            "allocated_bytes": 0,
+            "positive_allocation_operations": 0,
+        }
+        self.assertTrue(
+            self.benchmark._recurring_allocations_zero(
+                self.benchmark.torch.device("cpu"), clean
+            )
+        )
+        for key in clean:
+            with self.subTest(nonzero=key):
+                profiler = dict(clean)
+                profiler[key] = 1
+                self.assertFalse(
+                    self.benchmark._recurring_allocations_zero(
+                        self.benchmark.torch.device("cpu"), profiler
+                    )
+                )
+            with self.subTest(missing=key):
+                profiler = dict(clean)
+                del profiler[key]
+                self.assertFalse(
+                    self.benchmark._recurring_allocations_zero(
+                        self.benchmark.torch.device("cpu"), profiler
+                    )
+                )
+
+    def test_non_cpu_allocation_gate_is_not_applied(self):
+        self.assertTrue(
+            self.benchmark._recurring_allocations_zero(
+                self.benchmark.torch.device("cuda"), {}
+            )
+        )
+
+    def test_source_and_compiled_region_contracts_recurse_auxiliaries(self):
+        target = SimpleNamespace(numel=lambda: 1)
+        batch = SimpleNamespace(additive_targets=target)
+        auxiliary = SimpleNamespace(
+            _electric_half=object(),
+            _magnetic_half=object(),
+            _fused_source_updates=False,
+            sources=SimpleNamespace(batches=[batch], auxiliaries=[]),
+        )
+        simulation = SimpleNamespace(
+            _electric_half=object(),
+            _magnetic_half=object(),
+            _fused_source_updates=True,
+            sources=SimpleNamespace(batches=[batch], auxiliaries=[auxiliary]),
+        )
+        self.assertEqual(
+            self.benchmark._compiled_local_simulation_count(simulation), 2
+        )
+        self.assertEqual(
+            self.benchmark._source_index_operations_per_step(simulation),
             {"aten::index_add_": 1},
         )
 

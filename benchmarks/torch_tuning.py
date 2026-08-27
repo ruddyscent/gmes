@@ -99,6 +99,53 @@ def _rss_bytes():
     return int(value if platform.system() == "Darwin" else value * 1024)
 
 
+def _current_rss_bytes():
+    """Return current resident memory on supported CPU acceptance hosts."""
+    system = platform.system()
+    if system == "Linux":
+        try:
+            fields = Path("/proc/self/statm").read_text(encoding="ascii").split()
+            return int(fields[1]) * int(os.sysconf("SC_PAGE_SIZE"))
+        except (IndexError, OSError, ValueError):
+            return None
+    if system == "Darwin":
+        value = _command_text("ps", "-o", "rss=", "-p", str(os.getpid()))
+        try:
+            return int(value) * 1024 if value is not None else None
+        except ValueError:
+            return None
+    return None
+
+
+def _cpu_memory_probe(simulation, checkpoint, steps):
+    """Measure current RSS across a compiled, post-warmup CPU advance."""
+    probe_steps = max(1, int(steps))
+    simulation.load_checkpoint(checkpoint)
+    before = _current_rss_bytes()
+    try:
+        simulation.advance(probe_steps)
+        _synchronize(simulation.device)
+        after = _current_rss_bytes()
+    finally:
+        simulation.load_checkpoint(checkpoint)
+    return {
+        "probe_steps": probe_steps,
+        "before_bytes": before,
+        "after_bytes": after,
+        "growth_bytes": (
+            after - before if before is not None and after is not None else None
+        ),
+    }
+
+
+def _memory_growth_bounded(device, cuda_growth, cpu_rss_growth):
+    if device.type == "cuda":
+        return cuda_growth is None or cuda_growth <= 1024 * 1024
+    if device.type == "cpu":
+        return cpu_rss_growth is not None and cpu_rss_growth <= 1024 * 1024
+    return False
+
+
 def _percentile(values, value):
     return float(np.percentile(np.asarray(values, dtype=np.float64), value))
 
@@ -403,7 +450,8 @@ def _trace_filename(
 
 
 def _trace_summary(path):
-    trace = json.loads(path.read_text())
+    trace_bytes = path.read_bytes()
+    trace = json.loads(trace_bytes)
     events = trace.get("traceEvents", ())
     kernels = 0
     h2d = 0
@@ -455,6 +503,7 @@ def _trace_summary(path):
         if event.get("ph") != "X" or event.get("name") not in {
             "aten::index_add_",
             "aten::index_copy_",
+            "aten::index_put_",
         }:
             continue
         timestamp = float(event.get("ts", -1))
@@ -468,6 +517,8 @@ def _trace_summary(path):
             indexed_writes_outside_regions[event["name"]] += 1
     return {
         "chrome_trace": str(path),
+        "chrome_trace_size_bytes": len(trace_bytes),
+        "chrome_trace_sha256": hashlib.sha256(trace_bytes).hexdigest(),
         "kernel_launches": kernels,
         "device_copy_events": device_copies,
         "host_to_device_events": h2d,
@@ -489,21 +540,48 @@ def _trace_summary(path):
     }
 
 
+def _recurring_allocations_zero(device, profiler):
+    if device.type != "cpu":
+        return True
+    return all(
+        profiler.get(key) == 0
+        for key in (
+            "positive_allocation_events",
+            "allocated_bytes",
+            "positive_allocation_operations",
+        )
+    )
+
+
 def _source_index_operations_per_step(simulation):
     operations = Counter()
-    for batch in simulation.sources.batches:
-        point_source = False
-        for prefix, operation in (
-            ("additive", "aten::index_add_"),
-            ("overwrite", "aten::index_copy_"),
-        ):
-            targets = getattr(batch, f"{prefix}_targets", None)
-            if targets is not None:
-                point_source = True
-                operations[operation] += int(targets.numel() > 0)
-        if not point_source and hasattr(batch, "targets"):
-            operations["aten::index_add_"] += int(batch.targets.numel() > 0)
+    if not simulation._fused_source_updates:
+        for batch in simulation.sources.batches:
+            point_source = False
+            for prefix, operation in (
+                ("additive", "aten::index_add_"),
+                ("overwrite", "aten::index_copy_"),
+            ):
+                targets = getattr(batch, f"{prefix}_targets", None)
+                if targets is not None:
+                    point_source = True
+                    operations[operation] += int(targets.numel() > 0)
+            if not point_source and hasattr(batch, "targets"):
+                operations["aten::index_add_"] += int(batch.targets.numel() > 0)
+    for auxiliary in simulation.sources.auxiliaries:
+        operations.update(_source_index_operations_per_step(auxiliary))
     return operations
+
+
+def _compiled_local_simulation_count(simulation):
+    count = int(
+        simulation._electric_half is not None
+        and simulation._magnetic_half is not None
+    )
+    return count + sum(
+        _compiled_local_simulation_count(auxiliary)
+        for auxiliary in simulation.sources.auxiliaries
+    )
 
 
 def _profile(simulation, steps, path):
@@ -1148,6 +1226,16 @@ def run_case(
         capture_seconds = time.perf_counter() - start
     after_warmup = _counter_snapshot()
     addresses = simulation.buffer_addresses()
+    cpu_memory = (
+        _cpu_memory_probe(simulation, warm_checkpoint, profile_steps)
+        if simulation.device.type == "cpu"
+        else {
+            "probe_steps": None,
+            "before_bytes": None,
+            "after_bytes": None,
+            "growth_bytes": None,
+        }
+    )
     allocated_before = (
         torch.cuda.memory_allocated(simulation.device)
         if simulation.device.type == "cuda"
@@ -1222,10 +1310,12 @@ def run_case(
         profiler["host_to_device_events"] == 0
         and profiler["device_to_host_events"] == 0
     )
-    allocations_clean = (
-        simulation.device.type != "cpu" or profiler["positive_allocation_events"] == 0
+    allocations_clean = _recurring_allocations_zero(simulation.device, profiler)
+    memory_bounded = _memory_growth_bounded(
+        simulation.device,
+        memory_growth,
+        cpu_memory["growth_bytes"],
     )
-    memory_bounded = memory_growth is None or memory_growth <= 1024 * 1024
     profiler_step_count = int(simulation.state.step_count.cpu())
     expected_one_step_count = warmup + 1
     expected_timed_step_count = warmup + steps
@@ -1236,13 +1326,19 @@ def run_case(
         and repeats == manifest["reference"]["performance_repetitions"]
         and profile_steps == manifest["reference"]["performance_profile_steps"]
     )
+    compiled_simulations = _compiled_local_simulation_count(simulation)
+    expected_compiled_region_events = (
+        2 * profile_steps * compiled_simulations
+    )
     compiled_hot_path_complete = (
         len(simulation._cuda_graphs) == 2
         and profiler["cuda_graph_launches"] == 2 * profile_steps
         if capture_graphs
-        else len(profiler["compiled_region_names"]) == 2
+        else profiler["compiled_region_events"]
+        == expected_compiled_region_events
+        and bool(profiler["compiled_region_names"])
         and all(
-            count == profile_steps
+            count > 0 and count % profile_steps == 0
             for count in profiler["compiled_region_names"].values()
         )
     )
@@ -1319,6 +1415,10 @@ def run_case(
         },
         "memory": {
             "peak_rss_bytes": _rss_bytes(),
+            "cpu_rss_probe_steps": cpu_memory["probe_steps"],
+            "cpu_rss_before_bytes": cpu_memory["before_bytes"],
+            "cpu_rss_after_bytes": cpu_memory["after_bytes"],
+            "cpu_rss_growth_bytes": cpu_memory["growth_bytes"],
             "cuda_allocated_before_bytes": allocated_before,
             "cuda_allocated_after_bytes": allocated_after,
             "cuda_allocated_growth_bytes": memory_growth,

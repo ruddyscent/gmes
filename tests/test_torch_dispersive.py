@@ -222,7 +222,11 @@ class DispersiveOracleTest(unittest.TestCase):
         bloch = (0.07, 0.11, 0.13)
         for model in ("drude", "lorentz", "dcp-ade", "dcp-plrc", "dcp-rc"):
             with self.subTest(model=model):
-                native, simulation = _native_and_torch(model, bloch=bloch)
+                native, simulation = _native_and_torch(
+                    model,
+                    bloch=bloch,
+                    compile_policy="compile" if model == "dcp-plrc" else "eager",
+                )
                 simulation.advance(5)
                 for _ in range(5):
                     native.step()

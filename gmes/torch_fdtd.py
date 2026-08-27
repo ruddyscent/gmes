@@ -62,7 +62,13 @@ class TorchConfigurationError(ValueError):
 
 
 COMPILE_MODES = ("default", "reduce-overhead", "max-autotune")
-TORCH_SOLVER_ABI = "torch-fdtd-regions-v3"
+TORCH_SOLVER_ABI = "torch-fdtd-regions-v5"
+DIRECT_VIEW_MUTATION_REPRESENTATION = "direct-nonoverlapping-as-strided-v1"
+DEFAULT_VIEW_MUTATION_REPRESENTATION = "slice-views-v1"
+PACKED_DM2_REPRESENTATION = "single-carry-packed-loop-v1"
+FUNCTIONAL_DM2_REPRESENTATION = "functional-multi-carry-loop-v1"
+FUSED_SOURCE_REPRESENTATION = "fused-half-step-v1"
+EXTERNAL_SOURCE_REPRESENTATION = "external-v1"
 
 
 @dataclass(frozen=True)
@@ -558,6 +564,11 @@ class TorchSimulationState(nn.Module):
         self.register_buffer(
             "step_count", torch.zeros((), device=device, dtype=torch.int64)
         )
+        self.register_buffer(
+            "_step_increment",
+            torch.ones((), device=device, dtype=torch.int64),
+            persistent=False,
+        )
         self.register_buffer("source_time", torch.zeros((), device=device, dtype=dtype))
         self.register_buffer(
             "time_step", torch.tensor(plan.dt, device=device, dtype=dtype)
@@ -669,6 +680,25 @@ class TorchSimulationState(nn.Module):
         return result
 
 
+def _field_region(field, starts, trims):
+    # Solver fields are contiguous registered buffers with zero storage offset.
+    # A single non-overlapping view lets Inductor safely reinplace the mutation.
+    strides = field.stride()
+    size = tuple(
+        field.shape[axis] - starts[axis] - trims[axis] for axis in range(3)
+    ) + tuple(field.shape[3:])
+    offset = sum(starts[axis] * strides[axis] for axis in range(3))
+    return torch.as_strided(field, size=size, stride=strides, storage_offset=offset)
+
+
+def _boundary_plane(field, axis, index):
+    strides = field.stride()
+    size = tuple(field.shape[:axis]) + tuple(field.shape[axis + 1 :])
+    stride = tuple(strides[:axis]) + tuple(strides[axis + 1 :])
+    offset = (field.shape[axis] - 1 if index == -1 else index) * strides[axis]
+    return torch.as_strided(field, size=size, stride=stride, storage_offset=offset)
+
+
 def _electric_phase(
     ex,
     ey,
@@ -686,8 +716,13 @@ def _electric_phase(
     dx,
     dy,
     dz,
+    direct_view_mutations,
 ):
-    ex_target = ex[:, :-1, :-1]
+    ex_target = (
+        _field_region(ex, (0, 0, 0), (0, 1, 1))
+        if direct_view_mutations
+        else ex[:, :-1, :-1]
+    )
     scratch = scratch_ex
     torch.sub(hz[1:, 1:, :], hz[1:, :-1, :], out=scratch)
     scratch.mul_(1.0 / dy)
@@ -696,7 +731,11 @@ def _electric_phase(
     scratch.mul_(-1.0 / dz)
     ex_target.addcmul_(inv_ex[:, :-1, :-1], scratch, value=dt)
 
-    ey_target = ey[:-1, :, :-1]
+    ey_target = (
+        _field_region(ey, (0, 0, 0), (1, 0, 1))
+        if direct_view_mutations
+        else ey[:-1, :, :-1]
+    )
     scratch = scratch_ey
     torch.sub(hx[:, 1:, 1:], hx[:, 1:, :-1], out=scratch)
     scratch.mul_(1.0 / dz)
@@ -705,7 +744,11 @@ def _electric_phase(
     scratch.mul_(-1.0 / dx)
     ey_target.addcmul_(inv_ey[:-1, :, :-1], scratch, value=dt)
 
-    ez_target = ez[:-1, :-1, :]
+    ez_target = (
+        _field_region(ez, (0, 0, 0), (1, 1, 0))
+        if direct_view_mutations
+        else ez[:-1, :-1, :]
+    )
     scratch = scratch_ez
     torch.sub(hy[1:, :, 1:], hy[:-1, :, 1:], out=scratch)
     scratch.mul_(1.0 / dx)
@@ -732,8 +775,13 @@ def _magnetic_phase(
     dx,
     dy,
     dz,
+    direct_view_mutations,
 ):
-    hx_target = hx[:, 1:, 1:]
+    hx_target = (
+        _field_region(hx, (0, 1, 1), (0, 0, 0))
+        if direct_view_mutations
+        else hx[:, 1:, 1:]
+    )
     scratch = scratch_hx
     torch.sub(ey[:-1, :, 1:], ey[:-1, :, :-1], out=scratch)
     scratch.mul_(1.0 / dz)
@@ -742,7 +790,11 @@ def _magnetic_phase(
     scratch.mul_(-1.0 / dy)
     hx_target.addcmul_(inv_hx[:, 1:, 1:], scratch, value=dt)
 
-    hy_target = hy[1:, :, 1:]
+    hy_target = (
+        _field_region(hy, (1, 0, 1), (0, 0, 0))
+        if direct_view_mutations
+        else hy[1:, :, 1:]
+    )
     scratch = scratch_hy
     torch.sub(ez[1:, :-1, :], ez[:-1, :-1, :], out=scratch)
     scratch.mul_(1.0 / dx)
@@ -751,7 +803,11 @@ def _magnetic_phase(
     scratch.mul_(-1.0 / dz)
     hy_target.addcmul_(inv_hy[1:, :, 1:], scratch, value=dt)
 
-    hz_target = hz[1:, 1:, :]
+    hz_target = (
+        _field_region(hz, (1, 1, 0), (0, 0, 0))
+        if direct_view_mutations
+        else hz[1:, 1:, :]
+    )
     scratch = scratch_hz
     torch.sub(ex[:, 1:, :-1], ex[:, :-1, :-1], out=scratch)
     scratch.mul_(1.0 / dy)
@@ -778,17 +834,33 @@ def _electric_phase_2d_z(
     dx,
     dy,
     dz,
+    direct_view_mutations,
 ):
     del scratch_ex, scratch_ey, scratch_ez, dz
-    ex[:, :-1, :-1].add_(
+    ex_target = (
+        _field_region(ex, (0, 0, 0), (0, 1, 1))
+        if direct_view_mutations
+        else ex[:, :-1, :-1]
+    )
+    ex_target.add_(
         inv_ex[:, :-1, :-1] * (hz[1:, 1:, :] - hz[1:, :-1, :]),
         alpha=dt / dy,
     )
-    ey[:-1, :, :-1].add_(
+    ey_target = (
+        _field_region(ey, (0, 0, 0), (1, 0, 1))
+        if direct_view_mutations
+        else ey[:-1, :, :-1]
+    )
+    ey_target.add_(
         inv_ey[:-1, :, :-1] * (hz[1:, 1:, :] - hz[:-1, 1:, :]),
         alpha=-dt / dx,
     )
-    ez[:-1, :-1, :].add_(
+    ez_target = (
+        _field_region(ez, (0, 0, 0), (1, 1, 0))
+        if direct_view_mutations
+        else ez[:-1, :-1, :]
+    )
+    ez_target.add_(
         inv_ez[:-1, :-1, :]
         * (
             (hy[1:, :, 1:] - hy[:-1, :, 1:]) / dx
@@ -815,17 +887,33 @@ def _magnetic_phase_2d_z(
     dx,
     dy,
     dz,
+    direct_view_mutations,
 ):
     del scratch_hx, scratch_hy, scratch_hz, dz
-    hx[:, 1:, 1:].add_(
+    hx_target = (
+        _field_region(hx, (0, 1, 1), (0, 0, 0))
+        if direct_view_mutations
+        else hx[:, 1:, 1:]
+    )
+    hx_target.add_(
         inv_hx[:, 1:, 1:] * (ez[:-1, 1:, :] - ez[:-1, :-1, :]),
         alpha=-dt / dy,
     )
-    hy[1:, :, 1:].add_(
+    hy_target = (
+        _field_region(hy, (1, 0, 1), (0, 0, 0))
+        if direct_view_mutations
+        else hy[1:, :, 1:]
+    )
+    hy_target.add_(
         inv_hy[1:, :, 1:] * (ez[1:, :-1, :] - ez[:-1, :-1, :]),
         alpha=dt / dx,
     )
-    hz[1:, 1:, :].add_(
+    hz_target = (
+        _field_region(hz, (1, 1, 0), (0, 0, 0))
+        if direct_view_mutations
+        else hz[1:, 1:, :]
+    )
+    hz_target.add_(
         inv_hz[1:, 1:, :]
         * (
             (ex[:, 1:, :-1] - ex[:, :-1, :-1]) / dy
@@ -855,7 +943,16 @@ def _upml_bucket_update(
     scale1,
     scale2,
     direction,
+    reshape_fields,
 ):
+    if reshape_fields and field.ndim == 4:
+        field = field.reshape(-1, field.shape[-1])
+        source1 = source1.reshape(-1, source1.shape[-1])
+        source2 = source2.reshape(-1, source2.shape[-1])
+    elif reshape_fields:
+        field = field.reshape(-1)
+        source1 = source1.reshape(-1)
+        source2 = source2.reshape(-1)
     _gather_difference(
         source1, stencil[:, 0], stencil[:, 1], scratch0, scratch2, scale1
     )
@@ -889,7 +986,16 @@ def _cpml_bucket_update(
     scale2,
     direction,
     dt,
+    reshape_fields,
 ):
+    if reshape_fields and field.ndim == 4:
+        field = field.reshape(-1, field.shape[-1])
+        source1 = source1.reshape(-1, source1.shape[-1])
+        source2 = source2.reshape(-1, source2.shape[-1])
+    elif reshape_fields:
+        field = field.reshape(-1)
+        source1 = source1.reshape(-1)
+        source2 = source2.reshape(-1)
     _gather_difference(
         source1, stencil[:, 0], stencil[:, 1], scratch0, scratch2, scale1
     )
@@ -1074,6 +1180,30 @@ class TorchSimulation:
         self._fused_local_phases = (
             runtime.compile_policy == "compile" and _distributed_partition is None
         )
+        self._packed_dm2 = (
+            runtime.compile_policy == "compile" and device.type == "cpu"
+        )
+        self._dm2_execution_representation = (
+            PACKED_DM2_REPRESENTATION
+            if self._packed_dm2
+            else FUNCTIONAL_DM2_REPRESENTATION
+        )
+        self._fused_source_updates = (
+            self._fused_local_phases and device.type == "cpu"
+        )
+        self._source_execution_representation = (
+            FUSED_SOURCE_REPRESENTATION
+            if self._fused_source_updates
+            else EXTERNAL_SOURCE_REPRESENTATION
+        )
+        self._direct_view_mutations = (
+            self._fused_local_phases and device.type == "cpu"
+        )
+        self._view_mutation_representation = (
+            DIRECT_VIEW_MUTATION_REPRESENTATION
+            if self._direct_view_mutations
+            else DEFAULT_VIEW_MUTATION_REPRESENTATION
+        )
         z_collapsed = (
             shapes["Ez"][2] == 1
             and bloch is None
@@ -1147,7 +1277,11 @@ class TorchSimulation:
                 getattr(plan, f"{prefix}_targets"),
             )
             if runtime.compile_policy == "compile":
-                solve = bucket_state.solve
+                solve = (
+                    bucket_state.solve_packed_cpu
+                    if self._packed_dm2
+                    else bucket_state.solve
+                )
                 if not self._fused_local_phases:
                     solve = _compile_fullgraph(
                         solve,
@@ -1294,6 +1428,16 @@ class TorchSimulation:
             for component_name, component in self.plan.components.items()
             for index, bucket in enumerate(component.buckets)
         )
+        source_topology = tuple(
+            (
+                f"{type(batch).__module__}.{type(batch).__qualname__}",
+                batch.component,
+                getattr(batch, "paired_real", None),
+                getattr(batch, "auxiliary_component", None),
+                getattr(batch, "gaussian_width", None),
+            )
+            for batch in self.sources.batches
+        )
         if self._fused_local_phases:
             region_topology = "local-two-fused-half-steps"
         elif self._distributed_partition is not None:
@@ -1310,6 +1454,9 @@ class TorchSimulation:
             self.runtime.compile_mode,
             region_topology,
             "dense-base+compact-indexed-materials-v1",
+            self._view_mutation_representation,
+            self._dm2_execution_representation,
+            self._source_execution_representation,
             self._phase_specialization,
             tuple(self.plan.dr),
             self.plan.dt,
@@ -1331,9 +1478,15 @@ class TorchSimulation:
             ),
             tuple(sorted(self.plan.shapes.items())),
             signatures,
+            source_topology,
+            tuple(
+                auxiliary.compile_cache_key
+                for auxiliary in self.sources.auxiliaries
+            ),
             buffer_layouts(self.plan, plan=True),
             buffer_layouts(self.state, recurse=False),
             tuple(buffer_layouts(bucket) for bucket in self.state.dm2_buckets),
+            buffer_layouts(self.sources) if self._fused_source_updates else (),
         )
         return hashlib.sha256(repr(payload).encode()).hexdigest()
 
@@ -1370,6 +1523,7 @@ class TorchSimulation:
             state._scratch_ez,
             plan.dt,
             *plan.dr,
+            self._direct_view_mutations,
         )
 
     def _magnetic_arguments(self):
@@ -1390,6 +1544,7 @@ class TorchSimulation:
             state._scratch_hz,
             plan.dt,
             *plan.dr,
+            self._direct_view_mutations,
         )
 
     def _pml_executions(self, names, functions):
@@ -1404,9 +1559,13 @@ class TorchSimulation:
                 prefix = f"bucket_{name.lower()}_{index}"
                 state_prefix = f"pml_{name.lower()}_{index}"
                 flatten = (
-                    (lambda value: value.reshape(-1, paired_width))
-                    if paired_width is not None
-                    else (lambda value: value.reshape(-1))
+                    (lambda value: value)
+                    if self._direct_view_mutations
+                    else (
+                        (lambda value: value.reshape(-1, paired_width))
+                        if paired_width is not None
+                        else (lambda value: value.reshape(-1))
+                    )
                 )
                 terms = component.stencil
                 direction = 1.0
@@ -1431,6 +1590,7 @@ class TorchSimulation:
                 ]
                 if model == "cpml":
                     arguments.append(self.plan.dt)
+                arguments.append(self._direct_view_mutations)
                 executions.append((functions[model], tuple(arguments)))
         return tuple(executions)
 
@@ -1467,14 +1627,22 @@ class TorchSimulation:
             for axis in range(3):
                 if axis == component_axis or axis == skip_axis:
                     continue
-                destination = [slice(None)] * field.ndim
-                source = [slice(None)] * field.ndim
-                destination[axis] = -1 if high_from_low else 0
-                source[axis] = 0 if high_from_low else -1
+                destination_index = -1 if high_from_low else 0
+                source_index = 0 if high_from_low else -1
                 direction = 1 if high_from_low else -1
+                if self._direct_view_mutations:
+                    destination = _boundary_plane(field, axis, destination_index)
+                    source = _boundary_plane(field, axis, source_index)
+                else:
+                    destination_slice = [slice(None)] * field.ndim
+                    source_slice = [slice(None)] * field.ndim
+                    destination_slice[axis] = destination_index
+                    source_slice[axis] = source_index
+                    destination = field[tuple(destination_slice)]
+                    source = field[tuple(source_slice)]
                 self._rotate_or_copy(
-                    field[tuple(destination)],
-                    field[tuple(source)],
+                    destination,
+                    source,
                     self._boundary_angle(name, axis, direction),
                     getattr(self.state, f"_boundary_{name.lower()}_{axis}", None),
                 )
@@ -1566,11 +1734,25 @@ class TorchSimulation:
         self._sync_magnetic_boundaries()
         self._electric(*self._electric_args)
         self._electric_post_update()
+        if self._fused_source_updates and not self.sources.empty:
+            self.sources.apply(
+                self,
+                electric=True,
+                time=self.state.source_time + 0.5 * self.state.time_step,
+                transparent_time=self.state.source_time,
+            )
 
     def _magnetic_half_update(self):
         self._sync_electric_boundaries()
         self._magnetic(*self._magnetic_args)
         self._magnetic_post_update()
+        if self._fused_source_updates and not self.sources.empty:
+            self.sources.apply(
+                self,
+                electric=False,
+                time=self.state.source_time + self.state.time_step,
+                transparent_time=self.state.source_time + self.state.time_step,
+            )
 
     def _run_compute_region(self, name, function):
         graph = self._cuda_graphs.get(name)
@@ -1643,12 +1825,13 @@ class TorchSimulation:
                     exchange.finish("magnetic")
                 self._run_compute_region("electric_post", self._electric_post_update)
             if not self.sources.empty:
-                self.sources.apply(
-                    self,
-                    electric=True,
-                    time=self.state.source_time + 0.5 * self.state.time_step,
-                    transparent_time=self.state.source_time,
-                )
+                if not self._fused_source_updates:
+                    self.sources.apply(
+                        self,
+                        electric=True,
+                        time=self.state.source_time + 0.5 * self.state.time_step,
+                        transparent_time=self.state.source_time,
+                    )
                 self.sources.step_auxiliaries()
             if not self.probes.empty:
                 self.probes.record(
@@ -1669,12 +1852,14 @@ class TorchSimulation:
                     exchange.finish("electric")
                 self._run_compute_region("magnetic_post", self._magnetic_post_update)
             if not self.sources.empty:
-                self.sources.apply(
-                    self,
-                    electric=False,
-                    time=self.state.source_time + self.state.time_step,
-                    transparent_time=self.state.source_time + self.state.time_step,
-                )
+                if not self._fused_source_updates:
+                    self.sources.apply(
+                        self,
+                        electric=False,
+                        time=self.state.source_time + self.state.time_step,
+                        transparent_time=self.state.source_time
+                        + self.state.time_step,
+                    )
             if not self.probes.empty:
                 self.probes.record(
                     self,
@@ -1682,7 +1867,7 @@ class TorchSimulation:
                     time=self.state.source_time + self.state.time_step,
                 )
             self.state.source_time.add_(self.state.time_step)
-            self.state.step_count.add_(1)
+            self.state.step_count.add_(self.state._step_increment)
         return self
 
     def step(self):
@@ -1869,6 +2054,10 @@ class TorchSimulation:
         result["material_execution_representation"] = (
             "dense-base+compact-indexed-materials-v1"
         )
+        result["view_mutation_representation"] = self._view_mutation_representation
+        result["dm2_execution_representation"] = (
+            self._dm2_execution_representation
+        )
         result["phase_specialization"] = self._phase_specialization
         result["cuda_graph_regions"] = tuple(sorted(self._cuda_graphs))
         result["material_plan"] = self.plan.decision_report()
@@ -1925,6 +2114,7 @@ class TorchSimulation:
             ),
         }
         result["sources"] = {
+            "execution_representation": self._source_execution_representation,
             "batches": len(self.sources.batches),
             "target_rows": sum(
                 value.numel()

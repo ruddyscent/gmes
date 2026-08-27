@@ -227,7 +227,14 @@ class TorchPmlOracleTest(unittest.TestCase):
                     model=model.__name__, precision=precision, bloch=bool(bloch)
                 ):
                     native, simulation = _native_and_torch(
-                        model, precision=precision, bloch=bloch
+                        model,
+                        precision=precision,
+                        bloch=bloch,
+                        compile_policy=(
+                            "compile"
+                            if precision == "float64" and bloch is not None
+                            else "eager"
+                        ),
                     )
                     simulation.advance(5)
                     for _ in range(5):

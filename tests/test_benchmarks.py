@@ -168,6 +168,17 @@ class TorchMaterialPlannerBenchmarkTest(unittest.TestCase):
         self.assertGreater(result["pml"]["active_cells"], 0)
         self.assertGreater(result["pml"]["state_bytes"], 0)
         self.assertGreater(result["pml"]["gather_scatter_bytes_per_step"], 0)
+        self.assertEqual(
+            result["pml"]["traffic_representation"], "compact-full-curl-v1"
+        )
+        self.assertEqual(
+            result["pml"]["indexed_target_cells"], result["pml"]["active_cells"]
+        )
+        self.assertEqual(result["pml"]["sparse_residual_axis_targets"], 0)
+        self.assertEqual(
+            result["pml"]["gather_scatter_scalar_values_per_step"],
+            6 * result["pml"]["active_cells"],
+        )
         self.assertEqual(result["pml"]["launches_per_step"], 6)
         self.assertGreater(result["profile"]["gather_count"], 0)
         self.assertGreater(result["profile"]["scatter_count"], 0)
@@ -177,6 +188,57 @@ class TorchMaterialPlannerBenchmarkTest(unittest.TestCase):
         self.assertIn(
             "flush_probes",
             result["timing_scope"]["excluded_host_boundaries"],
+        )
+
+    def test_compiled_cpu_pml_plan_reports_sparse_residual_traffic(self):
+        _, _, _, plans, _ = self.benchmark.build_host_plan(
+            "pml-thin",
+            policy="auto",
+            precision="float64",
+            device_type="cpu",
+            tile_size=64,
+            gmes=self.gmes,
+            compile_policy="compile",
+        )
+        summary = self.benchmark.plan_summary(plans)
+        self.assertTrue(summary["cpml_sparse_residual"])
+        cpml_buckets = [
+            bucket
+            for plan in plans
+            for bucket in plan.buckets
+            if bucket.signature.model == "cpml"
+        ]
+        logical_targets = sum(bucket.target_count for bucket in cpml_buckets)
+        active_axes = sum(
+            bool(len(axis.targets))
+            for bucket in cpml_buckets
+            for axis in bucket.cpml_residual_axes
+        )
+        traffic = self.benchmark._pml_traffic_summary(
+            plans,
+            scalar_width=1,
+            element_size=8,
+        )
+        self.assertEqual(traffic["traffic_representation"], "axis-sparse-residual-v1")
+        self.assertEqual(traffic["indexed_target_cells"], 0)
+        self.assertGreater(traffic["sparse_residual_axis_targets"], 0)
+        self.assertLess(
+            traffic["sparse_residual_axis_targets"], 2 * logical_targets
+        )
+        self.assertEqual(
+            traffic["gather_scatter_scalar_values_per_step"],
+            4 * traffic["sparse_residual_axis_targets"],
+        )
+        self.assertLess(
+            traffic["gather_scatter_bytes_per_step"],
+            6 * logical_targets * 8,
+        )
+        self.assertEqual(
+            summary["material_launches_per_step"], 6 + active_axes
+        )
+        self.assertEqual(
+            summary["material_launches_per_step"],
+            sum(item["launches"] for item in summary["decisions"]),
         )
 
     def test_fragmented_coverage_matches_contiguous_target_counts(self):

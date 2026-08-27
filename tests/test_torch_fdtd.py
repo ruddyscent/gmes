@@ -196,7 +196,7 @@ class TorchRuntimeConfigTest(unittest.TestCase):
             first.diagnostics()["compile_cache_key"], first.compile_cache_key
         )
         self.assertEqual(
-            first.diagnostics()["compile_solver_abi"], "torch-fdtd-regions-v5"
+            first.diagnostics()["compile_solver_abi"], "torch-fdtd-regions-v6"
         )
         self.assertEqual(
             first.diagnostics()["view_mutation_representation"],

@@ -94,25 +94,55 @@ signature because their magnetic behavior is physically identical.
 CPU/CUDA cost model over occupancy, active-target fragmentation, state width,
 tile coverage, memory, and launch cost; it never inserts material autotuning
 into a timestep. These choices currently affect planner decisions and optional
-storage only: execution uses a dense dielectric base plus compact indexed
-material updates. Forced-policy timings are therefore exploratory and the
-automatic-policy performance gate remains fail-closed until the policies select
-distinct executable representations.
+storage only. Execution normally uses a dense dielectric base plus compact
+indexed material updates; local compiled CPU CPML additionally selects the
+dense-base, axis-sparse residual representation described below. Forced-policy
+timings are therefore exploratory and the automatic-policy performance gate
+remains fail-closed until the policies select distinct executable
+representations.
 `simulation.diagnostics()["material_plan"]` explains every decision and its
 candidate costs.
 
-UPML and CPML use active-cell-only contiguous tensor buckets. Coordinate-
-dependent coefficients and four flattened gather indices are finalized once;
-the mutable UPML `b/d` or CPML `psi1/psi2` state and three fixed scratch
-arrays stay on the requested device. The base permittivity/permeability comes
-from each shell cell's lowered underlying-region ID, including corners and
-overlap. Buckets are keyed by model, component, precision, and state width, so
-geometry object count does not create per-region launches.
+UPML and eager, CUDA, and distributed CPML use active-cell-only contiguous
+tensor buckets. Coordinate-dependent coefficients and four flattened gather
+indices are finalized once; the mutable UPML `b/d` or CPML `psi1/psi2` state
+and three fixed scratch arrays stay on the requested device. The base
+permittivity/permeability comes from each shell cell's lowered underlying-region
+ID, including corners and overlap. Buckets are keyed by model, component,
+precision, and state width, so geometry object count does not create per-region
+launches.
+
+Local compiled CPU CPML applies the ordinary curl in the dense field phase
+using that same underlying inverse coefficient. The planner then lowers only
+structurally active curl axes, where `c != 0` or `kappa != 1`, into contiguous
+target, two-index stencil, and parameter tensors. Each active axis keeps one
+one-dimensional `psi` state and two fixed scratch buffers. Its indexed update
+is the residual
+
+```text
+psi = b * psi + c * derivative
+field += dt * direction * inv_base * axis_sign
+         * ((1 / kappa - 1) * derivative + psi)
+```
+
+This avoids gathering both complete curl directions and materializing both
+logical state lanes for every CPML target. Empty axes do not create residual
+updates. Before selecting this decomposition, the planner verifies in the
+requested dtype that adding the residual coefficient back to one reproduces
+the direct reciprocal-kappa coefficient within a small machine-precision
+bound. A bucket that would suffer cancellation, such as extreme float32
+`kappa`, retains the numerically stable compact full-curl path. UPML and other
+non-local-compiled CPML also retain that representation.
 
 `simulation.state.pml_state_snapshot()` is an explicit oracle/debug adapter.
-`simulation.diagnostics()["pml"]` reports active component cells, mutable
-state bytes, and launches per step. Normal stepping uses gather/update/scatter
-over unique targets and performs no host conversion or native fallback.
+For sparse CPU CPML it reconstructs the canonical target-order `(N, 2)` state,
+or `(N, 2, 2)` paired-real state, with zeros in structurally inactive lanes.
+`simulation.diagnostics()["pml"]` reports active component cells, physical
+mutable-state bytes, active-axis states, the selected representation, and
+logical updates per step. The material-planner benchmark derives indexed
+gather/scatter traffic from the selected full-curl or two-index axis stencil
+instead of applying one fixed per-cell estimate. Normal stepping performs no
+host conversion or native fallback.
 
 ## DM2 Maxwell--Bloch execution
 
@@ -221,6 +251,15 @@ copying into the fixed live buffers. Unsupported versions or a different
 execution plan fail without partial restoration. The lower-level
 `simulation.state.checkpoint()` remains useful for material-state debugging
 but intentionally does not include auxiliary solvers or probes.
+
+The compiled CPU sparse CPML layout does not change checkpoint version 1.
+Checkpoint state uses the same canonical `pml_<component>_<bucket>_state` keys
+and logical shapes as the full-curl representation. Restore scatters active
+lanes back into the fixed one-dimensional buffers without replacing their
+storage and rejects nonzero values in structurally inactive lanes rather than
+silently discarding them. Standard `TorchSimulationState.state_dict()` and
+`load_state_dict()` use the same virtual canonical entries, so PyTorch module
+serialization does not expose or lose the physical sparse layout.
 
 Periodic/Bloch halo scheduling remains outside compiled material kernels.
 Every active Yee component applies phase directly to paired-real tensors using

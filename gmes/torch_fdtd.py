@@ -62,13 +62,15 @@ class TorchConfigurationError(ValueError):
 
 
 COMPILE_MODES = ("default", "reduce-overhead", "max-autotune")
-TORCH_SOLVER_ABI = "torch-fdtd-regions-v5"
+TORCH_SOLVER_ABI = "torch-fdtd-regions-v6"
 DIRECT_VIEW_MUTATION_REPRESENTATION = "direct-nonoverlapping-as-strided-v1"
 DEFAULT_VIEW_MUTATION_REPRESENTATION = "slice-views-v1"
 PACKED_DM2_REPRESENTATION = "single-carry-packed-loop-v1"
 FUNCTIONAL_DM2_REPRESENTATION = "functional-multi-carry-loop-v1"
 FUSED_SOURCE_REPRESENTATION = "fused-half-step-v1"
 EXTERNAL_SOURCE_REPRESENTATION = "external-v1"
+SPARSE_CPML_REPRESENTATION = "dense-base-axis-sparse-residual-v1"
+DEFAULT_CPML_REPRESENTATION = "compact-two-axis-state-v1"
 
 
 @dataclass(frozen=True)
@@ -227,6 +229,67 @@ def _field_shapes(space):
     )
 
 
+@dataclass(frozen=True)
+class CpmlResidualAxisMetadata:
+    """Final tensor names and curl geometry for one sparse CPML axis."""
+
+    component: str
+    bucket_index: int
+    axis: int
+    target_count: int
+    prefix: str
+    state_prefix: str
+    source_component: str
+    scale_axis: int
+    axis_sign: float
+
+
+@dataclass(frozen=True)
+class CpmlResidualBucketMetadata:
+    """Canonical logical CPML state backed by active per-axis buffers."""
+
+    component: str
+    bucket_index: int
+    target_count: int
+    state_name: str
+    axes: tuple
+
+
+def _cpml_state_dict_post_hook(module, state_dict, prefix, _local_metadata):
+    for metadata in module.plan.cpml_residual_buckets:
+        state_dict[f"{prefix}{metadata.state_name}"] = (
+            module._logical_cpml_state(metadata).detach()
+        )
+
+
+def _cpml_load_state_dict_pre_hook(
+    module,
+    state_dict,
+    prefix,
+    _local_metadata,
+    _strict,
+    missing_keys,
+    _unexpected_keys,
+    error_msgs,
+):
+    for metadata in module.plan.cpml_residual_buckets:
+        name = f"{prefix}{metadata.state_name}"
+        if name not in state_dict:
+            missing_keys.append(name)
+            continue
+        value = state_dict.pop(name)
+        try:
+            module._validate_logical_cpml_state(
+                metadata,
+                value,
+                exact_dtype=False,
+            )
+        except ValueError as error:
+            error_msgs.append(str(error))
+            continue
+        module._restore_logical_cpml_state(metadata, value)
+
+
 class TorchSimulationPlan(nn.Module):
     """Finalized immutable tensors and metadata for mixed-material execution."""
 
@@ -245,6 +308,8 @@ class TorchSimulationPlan(nn.Module):
         dm2_buckets = []
         dm2_status_offset = 0
         dispersive_buckets = []
+        cpml_residual_buckets = []
+        cpml_residual_axes = []
         for name in COMPONENTS:
             component = plans[name]
             family = "inv_eps" if name in ELECTRIC_COMPONENTS else "inv_mu"
@@ -300,7 +365,68 @@ class TorchSimulationPlan(nn.Module):
                     ),
                     ("coefficients", bucket.coefficient_table, dtype),
                 ]
-                if bucket.signature.model in {"upml", "cpml"}:
+                if bucket.cpml_residual_axes:
+                    terms = component.stencil
+                    if name not in ELECTRIC_COMPONENTS:
+                        terms = tuple(reversed(terms))
+                    axis_metadata = []
+                    for residual, term in zip(
+                        bucket.cpml_residual_axes, terms, strict=True
+                    ):
+                        axis_prefix = f"{prefix}_cpml_axis{residual.axis}"
+                        state_prefix = (
+                            f"_pml_{name.lower()}_{index}_axis{residual.axis}"
+                        )
+                        parameters = residual.parameters
+                        if self.bloch is not None:
+                            parameters = parameters[..., np.newaxis]
+                        arrays.extend(
+                            (
+                                (
+                                    f"cpml_axis{residual.axis}_positions",
+                                    residual.positions,
+                                    torch.int64,
+                                ),
+                                (
+                                    f"cpml_axis{residual.axis}_targets",
+                                    residual.targets,
+                                    torch.int64,
+                                ),
+                                (
+                                    f"cpml_axis{residual.axis}_stencil_indices",
+                                    residual.stencil_indices,
+                                    torch.int64,
+                                ),
+                                (
+                                    f"cpml_axis{residual.axis}_parameters",
+                                    parameters,
+                                    dtype,
+                                ),
+                            )
+                        )
+                        metadata = CpmlResidualAxisMetadata(
+                            component=name,
+                            bucket_index=index,
+                            axis=residual.axis,
+                            target_count=len(residual.targets),
+                            prefix=axis_prefix,
+                            state_prefix=state_prefix,
+                            source_component=term.source,
+                            scale_axis=term.scale_axis,
+                            axis_sign=1.0 if residual.axis == 0 else -1.0,
+                        )
+                        axis_metadata.append(metadata)
+                        cpml_residual_axes.append(metadata)
+                    cpml_residual_buckets.append(
+                        CpmlResidualBucketMetadata(
+                            component=name,
+                            bucket_index=index,
+                            target_count=bucket.target_count,
+                            state_name=f"pml_{name.lower()}_{index}_state",
+                            axes=tuple(axis_metadata),
+                        )
+                    )
+                elif bucket.signature.model in {"upml", "cpml"}:
                     cell_coefficients = bucket.cell_coefficients
                     if self.bloch is not None:
                         cell_coefficients = cell_coefficients[..., np.newaxis]
@@ -472,6 +598,9 @@ class TorchSimulationPlan(nn.Module):
         self.dm2_buckets = tuple(dm2_buckets)
         self.dm2_target_count = dm2_status_offset
         self.dispersive_buckets = tuple(dispersive_buckets)
+        self.cpml_residual_buckets = tuple(cpml_residual_buckets)
+        self.cpml_residual_axes = tuple(cpml_residual_axes)
+        self.cpml_sparse_residual = bool(cpml_residual_buckets)
         self._sealed_names = frozenset(self._buffers) | {
             "components",
             "shapes",
@@ -481,6 +610,9 @@ class TorchSimulationPlan(nn.Module):
             "dm2_buckets",
             "dm2_target_count",
             "dispersive_buckets",
+            "cpml_residual_buckets",
+            "cpml_residual_axes",
+            "cpml_sparse_residual",
         }
 
     def __setattr__(self, name, value):
@@ -597,9 +729,24 @@ class TorchSimulationState(nn.Module):
                 )
             )
         self.dm2_buckets = nn.ModuleList(dm2_states)
+        for metadata in plan.cpml_residual_axes:
+            state_shape = (metadata.target_count,) + plane
+            self.register_buffer(
+                f"{metadata.state_prefix}_state",
+                torch.zeros(state_shape, device=device, dtype=dtype),
+                persistent=False,
+            )
+            for scratch_index in range(2):
+                self.register_buffer(
+                    f"{metadata.state_prefix}_scratch{scratch_index}",
+                    torch.zeros(state_shape, device=device, dtype=dtype),
+                    persistent=False,
+                )
         for component_name, component in plan.components.items():
             for index, bucket in enumerate(component.buckets):
                 if bucket.signature.model not in {"upml", "cpml"}:
+                    continue
+                if bucket.cpml_residual_axes:
                     continue
                 prefix = f"pml_{component_name.lower()}_{index}"
                 state_shape = (bucket.target_count, bucket.state_width) + plane
@@ -614,6 +761,9 @@ class TorchSimulationState(nn.Module):
                         torch.zeros(scratch_shape, device=device, dtype=dtype),
                         persistent=False,
                     )
+        if plan.cpml_residual_buckets:
+            self.register_state_dict_post_hook(_cpml_state_dict_post_hook)
+            self.register_load_state_dict_pre_hook(_cpml_load_state_dict_pre_hook)
         self.requires_grad_(False)
 
     def field(self, component):
@@ -636,19 +786,92 @@ class TorchSimulationState(nn.Module):
             name: value.detach().clone() for name, value in self.state_dict().items()
         }
 
+    def _logical_cpml_state(self, metadata):
+        first_state = getattr(self, f"{metadata.axes[0].state_prefix}_state")
+        plane = (2,) if self.paired_real else ()
+        logical = torch.zeros(
+            (metadata.target_count, 2) + plane,
+            dtype=first_state.dtype,
+            device=first_state.device,
+        )
+        for axis in metadata.axes:
+            positions = getattr(self.plan, f"{axis.prefix}_positions")
+            state = getattr(self, f"{axis.state_prefix}_state")
+            logical[:, axis.axis].index_copy_(0, positions, state)
+        return logical
+
+    def _validate_logical_cpml_state(self, metadata, value, *, exact_dtype):
+        reference = getattr(self, f"{metadata.axes[0].state_prefix}_state")
+        plane = (2,) if self.paired_real else ()
+        if (
+            not torch.is_tensor(value)
+            or value.shape != (metadata.target_count, 2) + plane
+            or (exact_dtype and value.dtype != reference.dtype)
+        ):
+            raise ValueError(
+                f"checkpoint tensor {metadata.state_name!r} has an "
+                "incompatible shape or dtype"
+            )
+        for axis in metadata.axes:
+            positions = getattr(self.plan, f"{axis.prefix}_positions").to(
+                device=value.device
+            )
+            inactive = torch.ones(
+                metadata.target_count, dtype=torch.bool, device=value.device
+            )
+            inactive[positions] = False
+            if torch.count_nonzero(value[:, axis.axis][inactive]):
+                raise ValueError(
+                    f"checkpoint tensor {metadata.state_name!r} contains "
+                    f"nonzero inactive CPML axis {axis.axis} state"
+                )
+
+    @torch.inference_mode()
+    def _restore_logical_cpml_state(self, metadata, value):
+        for axis in metadata.axes:
+            target = getattr(self, f"{axis.state_prefix}_state")
+            positions = getattr(self.plan, f"{axis.prefix}_positions")
+            source = value.to(
+                device=target.device,
+                dtype=target.dtype,
+            ).index_select(0, positions)
+            target.copy_(source[:, axis.axis])
+
     @torch.inference_mode()
     def load_checkpoint(self, checkpoint):
         """Restore a checkpoint without replacing any registered buffer."""
-        expected = set(self.state_dict())
+        logical_names = {
+            metadata.state_name for metadata in self.plan.cpml_residual_buckets
+        }
+        persistent = {
+            name: value
+            for name, value in self.state_dict().items()
+            if name not in logical_names
+        }
+        expected = set(persistent) | logical_names
         if set(checkpoint) != expected:
             raise ValueError("checkpoint keys do not match the simulation state")
-        for name, target in self.state_dict().items():
+        for name, target in persistent.items():
             value = checkpoint[name]
             if value.shape != target.shape or value.dtype != target.dtype:
                 raise ValueError(
                     f"checkpoint tensor {name!r} has an incompatible shape or dtype"
                 )
+        for metadata in self.plan.cpml_residual_buckets:
+            value = checkpoint[metadata.state_name]
+            self._validate_logical_cpml_state(
+                metadata,
+                value,
+                exact_dtype=True,
+            )
+        for name, target in persistent.items():
+            value = checkpoint[name]
             target.copy_(value.to(device=target.device))
+        for metadata in self.plan.cpml_residual_buckets:
+            self._restore_logical_cpml_state(
+                metadata,
+                checkpoint[metadata.state_name],
+            )
 
     @torch.inference_mode()
     def snapshot(self):
@@ -666,6 +889,11 @@ class TorchSimulationState(nn.Module):
             if self.paired_real and complex_state:
                 host = torch.complex(host[..., 0], host[..., 1])
             result[name] = host.numpy() if numpy else host
+        for metadata in self.plan.cpml_residual_buckets:
+            host = self._logical_cpml_state(metadata).to(device="cpu", copy=True)
+            if self.paired_real and complex_state:
+                host = torch.complex(host[..., 0], host[..., 1])
+            result[metadata.state_name] = host.numpy() if numpy else host
         return result
 
     @torch.inference_mode()
@@ -1014,6 +1242,38 @@ def _cpml_bucket_update(
     field.index_copy_(0, targets, scratch2)
 
 
+def _cpml_residual_axis_update(
+    field,
+    source,
+    targets,
+    stencil,
+    parameters,
+    state,
+    scratch0,
+    scratch1,
+    scale,
+    direction,
+    axis_sign,
+    dt,
+    reshape_fields,
+):
+    if reshape_fields and field.ndim == 4:
+        field = field.reshape(-1, field.shape[-1])
+        source = source.reshape(-1, source.shape[-1])
+    elif reshape_fields:
+        field = field.reshape(-1)
+        source = source.reshape(-1)
+    _gather_difference(
+        source, stencil[:, 0], stencil[:, 1], scratch0, scratch1, scale
+    )
+    state.mul_(parameters[:, 1]).addcmul_(parameters[:, 2], scratch0)
+    torch.index_select(field, 0, targets, out=scratch1)
+    scratch0.mul_(parameters[:, 3]).add_(state)
+    scratch0.mul_(parameters[:, 0]).mul_(dt * direction * axis_sign)
+    scratch1.add_(scratch0)
+    field.index_copy_(0, targets, scratch1)
+
+
 class TorchSimulation:
     """Breaking Torch-only construction and execution API.
 
@@ -1110,6 +1370,11 @@ class TorchSimulation:
             device_type=device.type,
             policy=runtime.execution_policy,
             execution_tile_size=runtime.planner_tile_size,
+            cpml_sparse_residual=(
+                runtime.compile_policy == "compile"
+                and device.type == "cpu"
+                and _distributed_partition is None
+            ),
         )
         component_plans = planner.build()
         has_dm2 = any(
@@ -1176,6 +1441,16 @@ class TorchSimulation:
             bucket.signature.model in {"upml", "cpml"}
             for component in component_plans
             for bucket in component.buckets
+        )
+        self._cpml_execution_representation = (
+            SPARSE_CPML_REPRESENTATION
+            if plan.cpml_sparse_residual
+            else DEFAULT_CPML_REPRESENTATION
+        )
+        self._material_execution_representation = (
+            "dense-base+axis-sparse-cpml-v2"
+            if plan.cpml_sparse_residual
+            else "dense-base+compact-indexed-materials-v1"
         )
         self._fused_local_phases = (
             runtime.compile_policy == "compile" and _distributed_partition is None
@@ -1387,6 +1662,7 @@ class TorchSimulation:
             "_target_region_indices",
             "_tile_origins",
             "_tile_region_indices",
+            "_positions",
         )
         inactive_prefixes = tuple(
             f"bucket_{component_name.lower()}_{index}_"
@@ -1453,7 +1729,8 @@ class TorchSimulation:
             self.runtime.compile_policy,
             self.runtime.compile_mode,
             region_topology,
-            "dense-base+compact-indexed-materials-v1",
+            self._material_execution_representation,
+            self._cpml_execution_representation,
             self._view_mutation_representation,
             self._dm2_execution_representation,
             self._source_execution_representation,
@@ -1550,6 +1827,10 @@ class TorchSimulation:
     def _pml_executions(self, names, functions):
         executions = []
         paired_width = 2 if self.state.paired_real else None
+        residual_metadata = {
+            (metadata.component, metadata.bucket_index, metadata.axis): metadata
+            for metadata in self.plan.cpml_residual_axes
+        }
         for name in names:
             component = self.plan.components[name]
             for index, bucket in enumerate(component.buckets):
@@ -1572,6 +1853,47 @@ class TorchSimulation:
                 if name not in ELECTRIC_COMPONENTS:
                     terms = tuple(reversed(terms))
                     direction = -1.0
+                if bucket.cpml_residual_axes:
+                    for residual in bucket.cpml_residual_axes:
+                        metadata = residual_metadata[(name, index, residual.axis)]
+                        if metadata.target_count == 0:
+                            continue
+                        executions.append(
+                            (
+                                _cpml_residual_axis_update,
+                                (
+                                    flatten(self.state.field(name)),
+                                    flatten(
+                                        self.state.field(metadata.source_component)
+                                    ),
+                                    getattr(self.plan, f"{metadata.prefix}_targets"),
+                                    getattr(
+                                        self.plan,
+                                        f"{metadata.prefix}_stencil_indices",
+                                    ),
+                                    getattr(
+                                        self.plan, f"{metadata.prefix}_parameters"
+                                    ),
+                                    getattr(
+                                        self.state, f"{metadata.state_prefix}_state"
+                                    ),
+                                    getattr(
+                                        self.state,
+                                        f"{metadata.state_prefix}_scratch0",
+                                    ),
+                                    getattr(
+                                        self.state,
+                                        f"{metadata.state_prefix}_scratch1",
+                                    ),
+                                    1.0 / self.plan.dr[metadata.scale_axis],
+                                    direction,
+                                    metadata.axis_sign,
+                                    self.plan.dt,
+                                    self._direct_view_mutations,
+                                ),
+                            )
+                        )
+                    continue
                 term1, term2 = terms
                 arguments = [
                     flatten(self.state.field(name)),
@@ -2052,7 +2374,10 @@ class TorchSimulation:
         result["compile_solver_abi"] = TORCH_SOLVER_ABI
         result["compiled_region_topology"] = self._compiled_region_topology
         result["material_execution_representation"] = (
-            "dense-base+compact-indexed-materials-v1"
+            self._material_execution_representation
+        )
+        result["cpml_execution_representation"] = (
+            self._cpml_execution_representation
         )
         result["view_mutation_representation"] = self._view_mutation_representation
         result["dm2_execution_representation"] = (
@@ -2091,8 +2416,16 @@ class TorchSimulation:
             "state_bytes": sum(
                 value.numel() * value.element_size()
                 for name, value in self.state.named_buffers(recurse=False)
-                if name.startswith("pml_") and name.endswith("_state")
+                if (
+                    name.startswith("pml_") or name.startswith("_pml_")
+                )
+                and name.endswith("_state")
             ),
+            "active_axis_states": sum(
+                metadata.target_count
+                for metadata in self.plan.cpml_residual_axes
+            ),
+            "execution_representation": self._cpml_execution_representation,
             "launches_per_step": len(self._electric_pml) + len(self._magnetic_pml),
         }
         result["dispersive"] = {

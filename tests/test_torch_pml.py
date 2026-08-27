@@ -14,6 +14,10 @@ from benchmarks.native_oracle import (
     find_case,
     initial_field_values,
 )
+from gmes.torch_fdtd import (
+    DEFAULT_CPML_REPRESENTATION,
+    SPARSE_CPML_REPRESENTATION,
+)
 
 _COMPONENTS = ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")
 _MANIFEST = json.loads(
@@ -203,9 +207,21 @@ def _torch_dispersive_rows(simulation, descriptor):
 
 class TorchPmlOracleTest(unittest.TestCase):
     def test_nonzero_fields_and_state_match_at_reference_steps(self):
-        for model in (gmes.Upml, gmes.Cpml):
-            with self.subTest(model=model.__name__):
-                native, simulation = _native_and_torch(model)
+        cases = (
+            (gmes.Upml, "eager"),
+            (gmes.Cpml, "eager"),
+            (gmes.Cpml, "compile"),
+        )
+        for model, compile_policy in cases:
+            with self.subTest(
+                model=model.__name__, compile_policy=compile_policy
+            ):
+                if compile_policy == "compile":
+                    torch._dynamo.reset()
+                native, simulation = _native_and_torch(
+                    model,
+                    compile_policy=compile_policy,
+                )
                 completed = 0
                 for target in (1, 2, 5, 20, 100):
                     delta = target - completed
@@ -232,7 +248,8 @@ class TorchPmlOracleTest(unittest.TestCase):
                         bloch=bloch,
                         compile_policy=(
                             "compile"
-                            if precision == "float64" and bloch is not None
+                            if model is gmes.Cpml
+                            or (precision == "float64" and bloch is not None)
                             else "eager"
                         ),
                     )
@@ -245,7 +262,11 @@ class TorchPmlOracleTest(unittest.TestCase):
         for size in ((4, 0, 0), (4, 3, 0), (3, 3, 2)):
             for model in (gmes.Upml, gmes.Cpml):
                 with self.subTest(size=size, model=model.__name__):
-                    native, simulation = _native_and_torch(model, size=size)
+                    native, simulation = _native_and_torch(
+                        model,
+                        size=size,
+                        compile_policy="compile" if model is gmes.Cpml else "eager",
+                    )
                     simulation.advance(5)
                     for _ in range(5):
                         native.step()
@@ -316,6 +337,67 @@ class TorchPmlOracleTest(unittest.TestCase):
                     native.step()
                 _assert_oracle(self, native, simulation, model, "float64")
 
+    def test_compiled_custom_kappa_sparse_residual_matches_native(self):
+        for precision in ("float64", "float32"):
+            with self.subTest(precision=precision):
+                geometry = [
+                    gmes.DefaultMedium(
+                        gmes.Dielectric(eps_inf=2.5, mu_inf=1.2)
+                    ),
+                    gmes.Block(
+                        gmes.Dielectric(eps_inf=3.2, mu_inf=1.15),
+                        center=(0, 0, 0),
+                        size=(1.2, 1.2, 1.2),
+                    ),
+                    gmes.Shell(gmes.Cpml(kappa_max=3.0), thickness=0.75),
+                ]
+                native, simulation = _native_and_torch(
+                    gmes.Cpml,
+                    size=(2, 2, 2),
+                    resolution=4,
+                    precision=precision,
+                    compile_policy="compile",
+                    geometry=geometry,
+                )
+                completed = 0
+                for target in (1, 2, 5, 20, 100):
+                    delta = target - completed
+                    simulation.advance(delta)
+                    for _ in range(delta):
+                        native.step()
+                    _assert_oracle(
+                        self,
+                        native,
+                        simulation,
+                        gmes.Cpml,
+                        precision,
+                    )
+                    completed = target
+                self.assertEqual(
+                    simulation.diagnostics()["pml"]["execution_representation"],
+                    SPARSE_CPML_REPRESENTATION,
+                )
+
+    def test_extreme_float32_kappa_uses_stable_compact_fallback(self):
+        geometry = [
+            gmes.DefaultMedium(gmes.Dielectric(eps_inf=2.5, mu_inf=1.2)),
+            gmes.Shell(gmes.Cpml(kappa_max=1e8), thickness=0.5),
+        ]
+        native, simulation = _native_and_torch(
+            gmes.Cpml,
+            precision="float32",
+            compile_policy="compile",
+            geometry=geometry,
+        )
+        simulation.advance(5)
+        for _ in range(5):
+            native.step()
+        _assert_oracle(self, native, simulation, gmes.Cpml, "float32")
+        self.assertEqual(
+            simulation.diagnostics()["pml"]["execution_representation"],
+            DEFAULT_CPML_REPRESENTATION,
+        )
+
     def test_compiled_cpu_crossover_manifest_matches_complete_native_state(self):
         torch._dynamo.reset()
         spec = find_case(_MANIFEST, "cpu-crossover-2d")
@@ -376,7 +458,7 @@ class TorchPmlOracleTest(unittest.TestCase):
         self.assertEqual(len(diagnostics["dm2"]), 3)
 
         tolerance = _MANIFEST["tolerances"]["torch"]["mixed"]["float64"]
-        persistent = simulation.state.state_dict()
+        persistent = simulation.state.checkpoint()
         compared_dm2 = set()
         for index, bucket_state in enumerate(simulation.state.dm2_buckets):
             metadata = bucket_state.metadata
@@ -498,7 +580,12 @@ class TorchPmlOracleTest(unittest.TestCase):
         )
 
     def test_long_run_absorbs_seeded_energy_like_native(self):
-        native, simulation = _native_and_torch(gmes.Cpml, size=(4, 4, 0), resolution=3)
+        native, simulation = _native_and_torch(
+            gmes.Cpml,
+            size=(4, 4, 0),
+            resolution=3,
+            compile_policy="compile",
+        )
         initial_energy = sum(
             float(np.square(np.abs(values)).sum())
             for values in simulation.state.host_snapshot().values()
@@ -647,6 +734,100 @@ class TorchPmlStorageTest(unittest.TestCase):
                     atol=2e-15,
                     err_msg=f"{model.__name__} {component_name}",
                 )
+
+    def test_compiled_cpml_uses_sparse_state_with_canonical_checkpoint(self):
+        simulation = gmes.TorchSimulation(
+            space=gmes.Cartesian((4, 4, 4), 3),
+            geometry=_geometry(gmes.Cpml),
+            runtime=gmes.TorchRuntimeConfig(
+                device="cpu",
+                compile_policy="compile",
+                cpu_threads=1,
+            ),
+        )
+        logical_states = 0
+        physical_states = 0
+        for metadata in simulation.plan.cpml_residual_buckets:
+            logical_states += 2 * metadata.target_count
+            for axis in metadata.axes:
+                physical_states += axis.target_count
+                state = getattr(
+                    simulation.state, f"{axis.state_prefix}_state"
+                )
+                self.assertTrue(state.is_contiguous())
+                if state.numel():
+                    state.copy_(
+                        torch.linspace(
+                            0.001,
+                            0.002,
+                            state.numel(),
+                            dtype=state.dtype,
+                            device=state.device,
+                        ).reshape_as(state)
+                    )
+        self.assertLess(physical_states, logical_states)
+        diagnostics = simulation.diagnostics()["pml"]
+        self.assertEqual(
+            diagnostics["state_bytes"],
+            physical_states * simulation.state.ex.element_size(),
+        )
+        self.assertEqual(diagnostics["active_axis_states"], physical_states)
+        self.assertEqual(
+            diagnostics["execution_representation"], SPARSE_CPML_REPRESENTATION
+        )
+
+        addresses = simulation.buffer_addresses()
+        state_dict = {
+            name: value.clone()
+            for name, value in simulation.state.state_dict().items()
+        }
+        self.assertFalse(any(name.startswith("_pml_") for name in state_dict))
+        before_state_dict = simulation.state.pml_state_snapshot(numpy=False)
+        for metadata in simulation.plan.cpml_residual_axes:
+            getattr(simulation.state, f"{metadata.state_prefix}_state").zero_()
+        incompatible = simulation.state.load_state_dict(state_dict)
+        self.assertEqual(incompatible.missing_keys, [])
+        self.assertEqual(incompatible.unexpected_keys, [])
+        self.assertEqual(addresses, simulation.buffer_addresses())
+        after_state_dict = simulation.state.pml_state_snapshot(numpy=False)
+        for name in before_state_dict:
+            self.assertIn(name, state_dict)
+            torch.testing.assert_close(before_state_dict[name], after_state_dict[name])
+
+        checkpoint = simulation.checkpoint()
+        self.assertEqual(checkpoint["format"], "gmes.torch.simulation")
+        self.assertEqual(checkpoint["version"], 1)
+        state_checkpoint = checkpoint["state"]
+        before = simulation.state.pml_state_snapshot(numpy=False)
+        for metadata in simulation.plan.cpml_residual_buckets:
+            self.assertEqual(
+                state_checkpoint[metadata.state_name].shape,
+                (metadata.target_count, 2),
+            )
+        for metadata in simulation.plan.cpml_residual_axes:
+            getattr(simulation.state, f"{metadata.state_prefix}_state").zero_()
+        simulation.load_checkpoint(checkpoint)
+        self.assertEqual(addresses, simulation.buffer_addresses())
+        after = simulation.state.pml_state_snapshot(numpy=False)
+        self.assertEqual(set(before), set(after))
+        for name in before:
+            self.assertIn(name, state_checkpoint)
+            self.assertEqual(state_checkpoint[name].shape[1], 2)
+            torch.testing.assert_close(before[name], after[name])
+
+        metadata = simulation.plan.cpml_residual_buckets[0]
+        axis = metadata.axes[0]
+        positions = getattr(simulation.plan, f"{axis.prefix}_positions")
+        inactive = torch.ones(metadata.target_count, dtype=torch.bool)
+        inactive[positions.cpu()] = False
+        inactive_row = int(torch.nonzero(inactive, as_tuple=False)[0])
+        invalid_state = {
+            name: value.clone() for name, value in state_checkpoint.items()
+        }
+        invalid_state[metadata.state_name][inactive_row, axis.axis] = 1.0
+        invalid = {**checkpoint, "state": invalid_state}
+        with self.assertRaisesRegex(ValueError, "nonzero inactive CPML"):
+            simulation.load_checkpoint(invalid)
 
     def test_warm_execution_and_checkpoint_keep_fixed_device_storage(self):
         _native, simulation = _native_and_torch(gmes.Upml)

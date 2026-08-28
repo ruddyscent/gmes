@@ -572,7 +572,9 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
         trace = {
             "traceEvents": [
                 {"name": "[memory]", "args": {"Bytes": 32}},
-                {"name": "[memory]", "args": {"Bytes": -32}},
+                {"name": "[memory]", "args": {"Bytes": 16}},
+                {"name": "[memory]", "args": {"Bytes": 32}},
+                {"name": "[memory]", "args": {"Bytes": -80}},
                 {
                     "name": "Torch-Compiled Region: 0/0",
                     "ph": "X",
@@ -619,11 +621,12 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
         self.assertEqual(
             result["chrome_trace_sha256"], hashlib.sha256(trace_bytes).hexdigest()
         )
-        self.assertEqual(result["positive_allocation_events"], 1)
-        self.assertEqual(result["allocated_bytes"], 32)
-        self.assertEqual(result["freed_bytes"], 32)
+        self.assertEqual(result["positive_allocation_events"], 3)
+        self.assertEqual(result["allocated_bytes"], 80)
+        self.assertEqual(result["freed_bytes"], 80)
         self.assertEqual(result["allocation_net_bytes"], 0)
         self.assertEqual(result["max_allocation_bytes"], 32)
+        self.assertEqual(result["allocation_size_histogram"], {"16": 1, "32": 2})
         self.assertEqual(result["compiled_region_events"], 2)
         self.assertEqual(
             result["compiled_region_names"],
@@ -715,6 +718,7 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             ("threads", 4),
             ("interop_threads", 2),
             ("capture_graphs", True),
+            ("experimental_dispersive_grouping", True),
         ):
             arguments = {**common, name: value}
             variants.append(self.benchmark._trace_filename(**arguments))
@@ -1025,6 +1029,7 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
                             "compile_mode": "default",
                             "explicit_cuda_graphs": False,
                             "execution_policy": "auto",
+                            "experimental_dispersive_grouping": False,
                             "threads": threads,
                             "interop_threads": 1,
                             "cpu_affinity": [0, 1, 2, 3],
@@ -1067,7 +1072,17 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
                 Path("native.json"),
                 evidence,
             )
+            experimental = artifact(4)
+            for case in experimental["cases"]:
+                case["runtime"]["experimental_dispersive_grouping"] = True
+            experimental_result = self.benchmark._aggregate_cpu_slice_outputs(
+                [one, experimental],
+                manifest,
+                Path("native.json"),
+                evidence,
+            )
         self.assertFalse(invalid["suite_acceptance"]["passed"])
+        self.assertFalse(experimental_result["suite_acceptance"]["passed"])
 
     def test_cpu_slice_aggregator_rejects_mixed_candidate_provenance(self):
         output = {"schema_version": 3, "kind": "cpu-acceptance-thread-slice"}

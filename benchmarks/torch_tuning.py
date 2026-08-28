@@ -432,6 +432,7 @@ def _trace_filename(
     execution_policy,
     threads,
     interop_threads,
+    experimental_dispersive_grouping=False,
 ):
     values = (
         name,
@@ -443,6 +444,8 @@ def _trace_filename(
         f"threads-{threads}",
         f"interop-{interop_threads}",
     )
+    if experimental_dispersive_grouping:
+        values += ("exact-schema-dispersive",)
     return "__".join(
         "".join(character if character.isalnum() else "-" for character in value)
         for value in values
@@ -461,6 +464,7 @@ def _trace_summary(path):
     allocated_bytes = 0
     freed_bytes = 0
     max_allocation_bytes = 0
+    allocation_size_histogram = Counter()
     compiled_regions = Counter()
     compiled_intervals = []
     cuda_graph_launches = 0
@@ -471,6 +475,7 @@ def _trace_summary(path):
                 allocation_events += 1
                 allocated_bytes += size
                 max_allocation_bytes = max(max_allocation_bytes, size)
+                allocation_size_histogram[size] += 1
             elif size < 0:
                 freed_bytes -= size
         if event.get("ph") != "X":
@@ -528,6 +533,10 @@ def _trace_summary(path):
         "freed_bytes": freed_bytes,
         "allocation_net_bytes": allocated_bytes - freed_bytes,
         "max_allocation_bytes": max_allocation_bytes,
+        "allocation_size_histogram": {
+            str(size): count
+            for size, count in sorted(allocation_size_histogram.items())
+        },
         "compiled_region_events": sum(compiled_regions.values()),
         "compiled_region_names": dict(sorted(compiled_regions.items())),
         "cuda_graph_launches": cuda_graph_launches,
@@ -1020,6 +1029,7 @@ def _evaluate_cpu_slice(
             or runtime.get("compile_mode") != "default"
             or runtime.get("explicit_cuda_graphs") is not False
             or runtime.get("execution_policy") != "auto"
+            or runtime.get("experimental_dispersive_grouping", False) is not False
         ):
             errors.append("CPU slice runtime execution policy differs from the contract")
             break
@@ -1159,6 +1169,7 @@ def run_case(
     compile_mode,
     capture_graphs,
     execution_policy,
+    experimental_dispersive_grouping,
     threads,
     interop_threads,
     warmup,
@@ -1179,6 +1190,7 @@ def run_case(
         cpu_threads=threads,
         cpu_interop_threads=interop_threads,
         execution_policy=execution_policy,
+        experimental_dispersive_grouping=experimental_dispersive_grouping,
     )
     cpu_contract = _cpu_contract_environment()
     benchmark_device = torch.device(device)
@@ -1293,6 +1305,7 @@ def run_case(
         execution_policy=execution_policy,
         threads=threads,
         interop_threads=interop_threads,
+        experimental_dispersive_grouping=experimental_dispersive_grouping,
     )
     profiler = _profile(simulation, profile_steps, trace_path)
     after_steady = _counter_snapshot()
@@ -1386,6 +1399,9 @@ def run_case(
             "compile_mode": compile_mode,
             "explicit_cuda_graphs": capture_graphs,
             "execution_policy": execution_policy,
+            "experimental_dispersive_grouping": (
+                experimental_dispersive_grouping
+            ),
             "threads": threads,
             "interop_threads": interop_threads,
             **cpu_contract,
@@ -1484,6 +1500,9 @@ def _variant_matrix(args, name, manifest):
             compile_mode=compile_mode,
             capture_graphs=capture_graphs,
             execution_policy=args.policy,
+            experimental_dispersive_grouping=getattr(
+                args, "experimental_dispersive_grouping", False
+            ),
             threads=args.threads,
             interop_threads=args.interop_threads,
             warmup=args.warmup,
@@ -1515,6 +1534,9 @@ def _policy_matrix(args, name, manifest):
             compile_mode=args.compile_mode,
             capture_graphs=args.capture_graphs,
             execution_policy=policy,
+            experimental_dispersive_grouping=getattr(
+                args, "experimental_dispersive_grouping", False
+            ),
             threads=args.threads,
             interop_threads=args.interop_threads,
             warmup=args.warmup,
@@ -1569,6 +1591,11 @@ def _arguments():
         default="auto",
     )
     parser.add_argument("--capture-graphs", action="store_true")
+    parser.add_argument(
+        "--experimental-dispersive-grouping",
+        action="store_true",
+        help="enable the unselected CPU exact-schema dispersive prototype",
+    )
     parser.add_argument("--threads", type=int, default=1)
     parser.add_argument("--interop-threads", type=int, default=1)
     parser.add_argument(
@@ -1673,6 +1700,9 @@ def main():
                 compile_mode=args.compile_mode,
                 capture_graphs=args.capture_graphs,
                 execution_policy=args.policy,
+                experimental_dispersive_grouping=getattr(
+                    args, "experimental_dispersive_grouping", False
+                ),
                 threads=args.threads,
                 interop_threads=args.interop_threads,
                 warmup=args.warmup,

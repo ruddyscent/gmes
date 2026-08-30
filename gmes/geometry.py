@@ -1,6 +1,8 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
+"""Define Cartesian simulation grids and map physical coordinates to Yee cells."""
+
 # This code is based on libctl 3.0.2.
 
 from copy import deepcopy
@@ -52,6 +54,15 @@ class AuxiCartComm(object):
         self.topo = ((1, 1, 1), cyclic, (0, 0, 0))
 
     def Get_cart_rank(self, coords):
+        """Return the sole rank for a Cartesian coordinate.
+
+        Args:
+            coords: Cartesian process coordinate, ignored by the serial fallback.
+
+        Returns:
+            The integer rank 0.
+        """
+
         return 0
 
     def Get_coords(self, rank):
@@ -64,12 +75,18 @@ class AuxiCartComm(object):
         return 0, 0, 0
 
     def Get_dim(self):
+        """Return the number of Cartesian process dimensions."""
+
         return self.dim
 
     def Get_topo(self):
+        """Return MPI-compatible dimensions, periods, and local coordinates."""
+
         return self.topo
 
     def Get_size(self):
+        """Return the serial communicator size of one."""
+
         return 1
 
     def Shift(self, direction, disp):
@@ -764,6 +781,12 @@ class Cartesian(object):
         return tuple(np.floor(array(exact_idx) + 0.5).astype(np.intp))
 
     def display_info(self, indent=0):
+        """Print a human-readable summary of the local Cartesian grid.
+
+        Args:
+            indent: Number of leading spaces for every output line.
+        """
+
         print(" " * indent, "Cartesian space")
 
         print(" " * indent, "MPI topology:", end=" ")

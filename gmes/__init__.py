@@ -22,22 +22,32 @@
 ##    Kyungwon Chun
 ##    kwchun@gist.ac.kr
 
-"""A Python implementation of the explicit FDTD method
+"""Simulate electromagnetic fields with legacy native and PyTorch FDTD backends.
 
-GMES is a Python implementation of the explicit finite-difference
-time-domain (FDTD) method. It is designed to simulate the photonic
-device in 1, 2, and 3-d Cartesian coordinates.
+GMES implements the explicit finite-difference time-domain (FDTD) method
+for one-, two-, and three-dimensional Cartesian photonic simulations. The
+legacy API maps NumPy field arrays to native point-wise update kernels. The
+PyTorch API lowers the same geometry and material models into reusable tensor
+plans for CPU, CUDA, and optional two-rank distributed execution.
 
 Modules:
-    fdtd --- Provide various simulation classes suitable for 1, 2, and 3-d.
-    geometry --- Provide coordinate and geometric primitives.
-    show --- Real-time display classes
-    constant --- Physical and simulation constants
-    source --- Define the input sources
-    pw_source --- Source update mechanism
-    material --- Define the propagating medium
-    pw_material --- Provide the update mechanism
+    fdtd: Legacy FDTD simulation classes backed by native update kernels.
+    geometry: Cartesian grids and geometric primitives.
+    constant: Physical constants and field, axis, and direction identifiers.
+    source: Temporal waveforms and spatial source definitions.
+    material: Nondispersive, absorbing, and dispersive materials.
+    torch_fdtd: Planned PyTorch simulations and runtime configuration.
+    torch_distributed: Two-rank CUDA domain decomposition and halo exchange.
+    torch_output: Device probe buffers, spectra, and checkpoint persistence.
 
+Examples:
+    Run one source-free legacy step in a two-dimensional TMz domain:
+
+    >>> space = Cartesian(size=(2, 2, 0), resolution=2)
+    >>> geometry = [DefaultMedium(material=Dielectric())]
+    >>> simulation = TMzFDTD(space, geometry, verbose=False)
+    >>> simulation.init()
+    >>> simulation.step()
 """
 
 from . import constant, fdtd, geometry, material, pw_material, pw_source, source

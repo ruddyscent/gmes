@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 
+"""Define nondispersive, absorbing, and dispersive electromagnetic materials."""
+
 from cmath import exp as cexp
 from collections.abc import Sequence
 from copy import deepcopy
@@ -465,7 +467,8 @@ class Pml(Material, Compound):
             self.sigma_max = np.array(d["sigma_max"], copy=True)
 
     def init(self, space, param):
-        """
+        """Initialize spatial PML grading from a shell and Cartesian grid.
+
         The thickness of PML layer and size of the Shell instance
         which contain the PML, are required. Also, the
         differential of space and time should get from the space
@@ -578,29 +581,41 @@ class Upml(Pml):
         print("kappa_max:", self.kappa_max)
 
     def c1(self, w, component):
+        """Return the first UPML recurrence coefficient at a coordinate."""
+
         numerator = 2 * self.kappa(w, component) - self.sigma(w, component) * self.dt
         denominator = 2 * self.kappa(w, component) + self.sigma(w, component) * self.dt
         return numerator / denominator
 
     def c2(self, w, component):
+        """Return the second UPML recurrence coefficient at a coordinate."""
+
         numerator = 2 * self.dt
         denominator = 2 * self.kappa(w, component) + self.sigma(w, component) * self.dt
         return numerator / denominator
 
     def c3(self, w, component):
+        """Return the third UPML recurrence coefficient at a coordinate."""
+
         numerator = 2 * self.kappa(w, component) - self.sigma(w, component) * self.dt
         denominator = 2 * self.kappa(w, component) + self.sigma(w, component) * self.dt
         return numerator / denominator
 
     def c4(self, w, component):
+        """Return the fourth UPML recurrence coefficient at a coordinate."""
+
         denominator = 2 * self.kappa(w, component) + self.sigma(w, component) * self.dt
         return 1 / denominator
 
     def c5(self, w, component):
+        """Return the fifth UPML recurrence coefficient at a coordinate."""
+
         numerator = 2 * self.kappa(w, component) + self.sigma(w, component) * self.dt
         return numerator
 
     def c6(self, w, component):
+        """Return the sixth UPML recurrence coefficient at a coordinate."""
+
         numerator = 2 * self.kappa(w, component) - self.sigma(w, component) * self.dt
         return numerator
 
@@ -829,6 +844,8 @@ class Cpml(Pml):
         print("a_max:", self.a_max)
 
     def a(self, w, component):
+        """Return the CPML alpha profile at a coordinate."""
+
         w -= self.center[component]
         half_size = self.half_size[component]
 
@@ -842,6 +859,8 @@ class Cpml(Pml):
             return 0
 
     def b(self, w, component):
+        """Return the CPML memory-decay coefficient at a coordinate."""
+
         exponent = (
             -(
                 self.sigma(w, component) / self.kappa(w, component)
@@ -852,6 +871,8 @@ class Cpml(Pml):
         return exp(exponent)
 
     def c(self, w, component):
+        """Return the CPML memory-source coefficient at a coordinate."""
+
         sigma = self.sigma(w, component)
         kappa = self.kappa(w, component)
         numerator = sigma * (self.b(w, component) - 1)
@@ -1009,13 +1030,15 @@ class Cpml(Pml):
 
 
 class DrudePole(object):
-    def __init__(self, omega, gamma):
-        """
-        DrudePole() -> a new Drude pole
-        omega: a plasma frequency
-        gamma: a relaxation frequency
+    """Describe one Drude plasma pole.
 
-        """
+    Args:
+        omega: Plasma angular frequency in inverse simulation-time units.
+        gamma: Relaxation rate in inverse simulation-time units.
+    """
+
+    def __init__(self, omega, gamma):
+        """Store the plasma frequency and relaxation rate."""
         self.omega = float(omega)
         self.gamma = float(gamma)
 
@@ -1028,14 +1051,16 @@ class DrudePole(object):
 
 
 class LorentzPole(object):
-    def __init__(self, amp, omega, gamma):
-        """
-        LorentzPole() -> a new Lorentz pole
-        amp: amplitude
-        omega: energy of the gap
-        gamma: broadening
+    """Describe one Lorentz resonance pole.
 
-        """
+    Args:
+        amp: Dimensionless oscillator amplitude.
+        omega: Resonance angular frequency in inverse simulation-time units.
+        gamma: Broadening rate in inverse simulation-time units.
+    """
+
+    def __init__(self, amp, omega, gamma):
+        """Store the oscillator amplitude, resonance, and broadening."""
         self.amp = float(amp)
         self.omega = float(omega)
         self.gamma = float(gamma)
@@ -1050,15 +1075,17 @@ class LorentzPole(object):
 
 
 class CriticalPoint(object):
-    def __init__(self, amp, phi, omega, gamma):
-        """
-        CriticalPoint() -> a new critical point
-        amp: amplitude
-        phi: phase
-        omega: energy of the gap
-        gamma: broadening
+    """Describe one complex critical-point oscillator.
 
-        """
+    Args:
+        amp: Dimensionless oscillator amplitude.
+        phi: Oscillator phase in radians.
+        omega: Gap angular frequency in inverse simulation-time units.
+        gamma: Broadening rate in inverse simulation-time units.
+    """
+
+    def __init__(self, amp, phi, omega, gamma):
+        """Store the critical-point amplitude, phase, gap, and broadening."""
         self.amp = float(amp)
         self.phi = float(phi)
         self.omega = float(omega)
@@ -1075,8 +1102,11 @@ class CriticalPoint(object):
 
 
 class DcpAde(Dielectric):
+    """Model Drude and critical-point dispersion with auxiliary equations."""
+
     def __init__(self, eps_inf=1, mu_inf=1, sigma=0, dps=(), cps=()):
-        """
+        """Initialize an ADE Drude-critical-point material.
+
         eps_inf: The (frequency-independent) relative permittivity. Default is 1.
         mu_inf: The (frequency-independent) relative permeability. Default is 1.
         sigma: The (frequency-independent) isotropic conductivity. Default is 0.
@@ -1325,7 +1355,8 @@ class DcpAde(Dielectric):
 
 
 class DcpPlrc(Dielectric):
-    """
+    """Model Drude-critical-point dispersion with piecewise-linear convolution.
+
     The piecewise-linear recursive-convolution implementation of
     Drude-critical points model based on the following references.
     * P. G. Etchegoin, E. C. Le Ru, and M. Meyer, "An analytic model for the optical
@@ -1338,7 +1369,8 @@ class DcpPlrc(Dielectric):
     """
 
     def __init__(self, eps_inf=1, mu_inf=1, sigma=0, dps=(), cps=()):
-        """
+        """Initialize a PLRC Drude-critical-point material.
+
         eps_inf: The (frequency-independent) relative permittivity. Default is 1.
         mu_inf: The (frequency-independent) relative permeability. Default is 1.
         sigma: The (frequency-independent) isotropic conductivity. Default is 0.
@@ -1424,12 +1456,16 @@ class DcpPlrc(Dielectric):
         self.initialized = True
 
     def chi_dp_0(self, dp):
+        """Return the zero-step Drude susceptibility integral."""
+
         omega = dp.omega
         gamma = dp.gamma
         gdt = dp.gamma * self.dt
         return (omega / gamma) ** 2 * (exp(-gdt) + gdt - 1)
 
     def xi_dp_0(self, dp):
+        """Return the zero-step linear Drude interpolation integral."""
+
         chi_dp_0 = self.chi_dp_0(dp)
         omega = dp.omega
         gamma = dp.gamma
@@ -1439,28 +1475,38 @@ class DcpPlrc(Dielectric):
         )
 
     def delta_chi_dp_0(self, dp):
+        """Return the one-step Drude susceptibility difference."""
+
         omega = dp.omega
         gamma = dp.gamma
         gdt = dp.gamma * self.dt
         return -((omega / gamma * (1 - exp(-gdt))) ** 2)
 
     def delta_xi_dp_0(self, dp):
+        """Return the one-step linear Drude interpolation difference."""
+
         gdt = dp.gamma * self.dt
         delta_chi_dp_0 = self.delta_chi_dp_0(dp)
         return delta_chi_dp_0 * (1 / (1 - exp(gdt)) + 1 / gdt)
 
     def chi_cp_0(self, cp):
+        """Return the zero-step critical-point susceptibility integral."""
+
         go = cp.gamma + 1j * cp.omega
         return (
             2j * cp.amp * cp.omega * cexp(1j * cp.phi) * (1 - cexp(-self.dt * go)) / go
         )
 
     def xi_cp_0(self, cp):
+        """Return the zero-step linear critical-point interpolation integral."""
+
         dtgo = self.dt * (cp.gamma + 1j * cp.omega)
         chi_cp_0 = self.chi_cp_0(cp)
         return chi_cp_0 * (1 / (1 - cexp(dtgo)) + 1 / dtgo)
 
     def delta_chi_cp_0(self, cp):
+        """Return the one-step critical-point susceptibility difference."""
+
         go = cp.gamma + 1j * cp.omega
         return (
             2j
@@ -1472,6 +1518,8 @@ class DcpPlrc(Dielectric):
         )
 
     def delta_xi_cp_0(self, cp):
+        """Return the one-step linear critical-point interpolation difference."""
+
         dtgo = self.dt * (cp.gamma + 1j * cp.omega)
         delta_chi_cp_0 = self.delta_chi_cp_0(cp)
         return delta_chi_cp_0 * (1 / (1 - cexp(dtgo)) + 1 / dtgo)
@@ -1604,7 +1652,8 @@ class DcpPlrc(Dielectric):
 
 
 class DcpRc(DcpPlrc):
-    """
+    """Model Drude-critical-point dispersion with recursive convolution.
+
     The recursive convolution implementation of Drude-critical points model
     based on the following articles.
     * P. G. Etchegoin, E. C. Le Ru, and M. Meyer, "An analytic model for the optical
@@ -1631,7 +1680,8 @@ class DcpRc(DcpPlrc):
 
 
 class Drude(Dielectric):
-    """
+    """Model Drude dispersion with auxiliary differential equations.
+
     The auxiliary differential equation implementation of the Drude model based on the
     following article.
     * M. Okoniewski and E. Okoniewska, "Drude dispersion in ADE FDTD revisited,"
@@ -1640,7 +1690,8 @@ class Drude(Dielectric):
     """
 
     def __init__(self, eps_inf=1, mu_inf=1, sigma=0, dps=()):
-        """
+        """Initialize a Drude dispersive material.
+
         Arguments:
             eps_inf: The (frequency-independent) relative permittivity. Default is 1.
             mu_inf: The (frequency-independent) relative permeability. Default is 1.
@@ -1826,13 +1877,15 @@ class Drude(Dielectric):
 
 
 class Lorentz(Dielectric):
-    """
+    """Model Lorentz dispersion with auxiliary differential equations.
+
     The auxiliary differential equation implementation of the Lorentz model.
 
     """
 
     def __init__(self, eps_inf=1, mu_inf=1, sigma=0, lps=()):
-        """
+        """Initialize a Lorentz dispersive material.
+
         Arguments:
             eps_inf: The (frequency-independent) relative permittivity. Default is 1.
             mu_inf: The (frequency-independent) relative permeability. Default is 1.
@@ -2015,7 +2068,8 @@ class Lorentz(Dielectric):
 
 
 class Dm2(Dielectric):
-    """
+    """Model a two-level medium with predictor-corrector density matrices.
+
     The predictor-corrector implementation of the density matrix of
     a two-level medium.
 
@@ -2034,7 +2088,8 @@ class Dm2(Dielectric):
         hbar=1,
         rtol=10e-5,
     ):
-        """
+        """Initialize a two-level density-matrix material.
+
         Arguments:
             eps_inf: float, optional
                 The (frequency-independent) relative permittivity. Defaults to 1.

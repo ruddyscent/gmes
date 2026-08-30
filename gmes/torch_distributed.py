@@ -76,6 +76,8 @@ class TwoGpuDecomposition:
 
     @property
     def identity(self):
+        """Return a stable hash of the partition geometry and device weights."""
+
         payload = (
             self.global_shape,
             self.axis,
@@ -85,6 +87,8 @@ class TwoGpuDecomposition:
         return hashlib.sha256(repr(payload).encode()).hexdigest()
 
     def offset(self, rank):
+        """Return the rank's global cell offset along the split axis."""
+
         self._validate_rank(rank)
         result = [0, 0, 0]
         if rank == 1:
@@ -92,12 +96,16 @@ class TwoGpuDecomposition:
         return tuple(result)
 
     def local_shape(self, rank):
+        """Return the rank-local three-dimensional cell shape."""
+
         self._validate_rank(rank)
         result = list(self.global_shape)
         result[self.axis] = self.cut if rank == 0 else result[self.axis] - self.cut
         return tuple(result)
 
     def metadata(self):
+        """Return serializable decomposition metadata including its identity."""
+
         result = asdict(self)
         result["identity"] = self.identity
         result["axis_name"] = _AXIS_NAMES[self.axis]
@@ -122,29 +130,43 @@ class _TwoRankCartesianComm:
         self._coords = tuple(coords)
 
     def Get_topo(self):
+        """Return MPI-compatible Cartesian topology metadata."""
+
         return self._dims, (1, 1, 1), self._coords
 
     def Get_size(self):
+        """Return the fixed communicator size of two."""
+
         return 2
 
     def Get_coords(self, rank):
+        """Return the Cartesian coordinate for a rank."""
+
         coords = [0, 0, 0]
         coords[self._dims.index(2)] = rank
         return tuple(coords)
 
     def Get_cart_rank(self, coords):
+        """Return the rank at a Cartesian coordinate."""
+
         return int(coords[self._dims.index(2)])
 
     def Shift(self, direction, _disp):
+        """Return source and destination ranks for a Cartesian shift."""
+
         if direction != self._dims.index(2):
             return self.rank, self.rank
         return 1 - self.rank, 1 - self.rank
 
     def bcast(self, obj=None, root=0):
+        """Return the object as the local stand-in for a broadcast."""
+
         del root
         return obj
 
     def allgather(self, obj=None):
+        """Return one local object for each emulated rank."""
+
         return [obj, obj]
 
 
@@ -421,6 +443,14 @@ class TorchHaloExchange:
     """Persistent CUDA halo buffers and overlapped two-rank NCCL scheduling."""
 
     def __init__(self, simulation, decomposition, *, group=None):
+        """Allocate persistent send, receive, and phase-rotation buffers.
+
+        Args:
+            simulation: Rank-local Torch simulation whose fields are exchanged.
+            decomposition: Two-rank domain decomposition.
+            group: Optional initialized PyTorch distributed process group.
+        """
+
         self.simulation = simulation
         self.decomposition = decomposition
         self.axis = decomposition.axis
@@ -446,6 +476,8 @@ class TorchHaloExchange:
                     self._scratch[key] = torch.empty_like(template)
 
     def buffers(self):
+        """Yield every persistent tensor owned by the exchange."""
+
         for send, receive in self._buffers.values():
             yield send
             yield receive
@@ -474,6 +506,16 @@ class TorchHaloExchange:
         return direction * bloch[self.axis] * length
 
     def begin(self, phase):
+        """Pack a boundary and launch nonblocking peer communication.
+
+        Args:
+            phase: Either "magnetic" or "electric".
+
+        Raises:
+            ValueError: If the phase name is unsupported.
+            TorchDistributedError: If an earlier exchange is still active.
+        """
+
         if phase not in {"magnetic", "electric"}:
             raise ValueError("halo phase must be 'magnetic' or 'electric'")
         if self._works is not None:
@@ -510,6 +552,15 @@ class TorchHaloExchange:
             self._phase = phase
 
     def finish(self, phase):
+        """Wait for the active exchange and apply received boundary values.
+
+        Args:
+            phase: Phase passed to the matching begin call.
+
+        Raises:
+            TorchDistributedError: If no matching exchange is active.
+        """
+
         if phase != self._phase or self._works is None:
             raise TorchDistributedError(
                 "halo completion does not match the active phase"
@@ -650,6 +701,26 @@ class TorchDistributedSimulation:
         _decomposition=None,
         _is_auxiliary=False,
     ):
+        """Initialize a non-replicated two-rank CUDA simulation.
+
+        Args:
+            space: Global Cartesian simulation space.
+            geometry: Legacy geometric objects to lower on each rank.
+            runtime: Runtime configuration with a two-rank distributed launch.
+            courant_ratio: Fraction of the Courant stability limit.
+            dt: Optional explicit time step; inferred from space when omitted.
+            bloch: Optional three-component Bloch wave vector.
+            sources: Source specifications in global coordinates.
+            probes: Probe specifications in global coordinates.
+            split_axis: Optional Cartesian axis index to force.
+            cut: Optional global cell index at which to split the domain.
+            timeout_seconds: NCCL process-group initialization timeout.
+            require_peer_access: Require direct CUDA peer access between devices.
+
+        Raises:
+            TorchConfigurationError: If ranks disagree or launch requirements fail.
+        """
+
         if not isinstance(runtime, TorchRuntimeConfig):
             raise TypeError("runtime must be a TorchRuntimeConfig")
         device = _initialize_nccl(
@@ -771,6 +842,8 @@ class TorchDistributedSimulation:
         return tuple(result)
 
     def advance(self, steps):
+        """Advance the distributed simulation by a number of complete steps."""
+
         try:
             self.local.advance(steps)
         except Exception:
@@ -779,6 +852,8 @@ class TorchDistributedSimulation:
         return self
 
     def step(self):
+        """Advance the distributed simulation by one complete step."""
+
         return self.advance(1)
 
     def load_host_fields(self, fields):
@@ -826,6 +901,8 @@ class TorchDistributedSimulation:
         return self
 
     def checkpoint(self):
+        """Return rank-local tensors and decomposition metadata for restart."""
+
         return {
             "format": "gmes.torch.distributed",
             "version": 1,
@@ -837,6 +914,15 @@ class TorchDistributedSimulation:
         }
 
     def load_checkpoint(self, checkpoint):
+        """Restore a collectively compatible rank-local checkpoint.
+
+        Args:
+            checkpoint: Mapping returned by checkpoint on this rank.
+
+        Raises:
+            TorchDistributedError: If any rank reports incompatible metadata.
+        """
+
         valid = (
             isinstance(checkpoint, dict)
             and checkpoint.get("format") == "gmes.torch.distributed"
@@ -913,6 +999,8 @@ class TorchDistributedSimulation:
         return field[tuple(slices)]
 
     def diagnostics(self):
+        """Return device, NCCL, decomposition, and halo-allocation diagnostics."""
+
         props = torch.cuda.get_device_properties(self.device)
         return {
             "rank": self.rank,
@@ -947,6 +1035,8 @@ class TorchDistributedSimulation:
 
     @staticmethod
     def close():
+        """Destroy the active PyTorch distributed process group, if any."""
+
         if dist.is_initialized():
             dist.destroy_process_group()
 

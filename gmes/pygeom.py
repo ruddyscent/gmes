@@ -1,4 +1,7 @@
 # -*- coding: utf-8 -*-
+
+"""Define geometric primitives and accelerate material lookup on Yee grids."""
+
 from copy import deepcopy
 from dataclasses import dataclass
 from math import sqrt
@@ -7,6 +10,8 @@ import numpy as np
 
 
 def norm(p):
+    """Return the Euclidean norm of a three-component vector."""
+
     return sqrt(p[0] ** 2 + p[1] ** 2 + p[2] ** 2)
 
 
@@ -19,6 +24,8 @@ class Material(object):
 
     @property
     def eps_inf(self):
+        """Return the infinite-frequency relative permittivity."""
+
         return self._eps_inf
 
     @eps_inf.setter
@@ -27,6 +34,8 @@ class Material(object):
 
     @property
     def mu_inf(self):
+        """Return the infinite-frequency relative permeability."""
+
         return self._mu_inf
 
     @mu_inf.setter
@@ -122,6 +131,8 @@ class Material(object):
         """
 
     def init(self, space, param=None):
+        """Initialize material coefficients for a Cartesian simulation space."""
+
         raise NotImplementedError
 
 
@@ -249,6 +260,8 @@ class GeomBox(object):
         return bool(truth)
 
     def divide(self, axis, x):
+        """Split this box at one coordinate and return the adjacent boxes."""
+
         high1 = list(self.high)
         high1[axis] = x
 
@@ -258,6 +271,8 @@ class GeomBox(object):
         return GeomBox(self.low, high1), GeomBox(low2, self.high)
 
     def display_info(self, indent=0):
+        """Print this box's lower and upper coordinates."""
+
         print(" " * indent, "geom box:", end=" ")
         print("low:", self.low, "high:", self.high)
 
@@ -385,7 +400,8 @@ class GeomBoxTree(object):
         self.root = deepcopy(d["root"])
 
     def find_best_partition(self, node, divide_axis):
-        """
+        """Find the most even object partition along one axis.
+
         Find the best place to "cut" along the axis divide_axis in
         order to maximally divide the objects between the partitions.
         Upon return, n1 and n2 are the number of objects below and
@@ -464,6 +480,8 @@ class GeomBoxTree(object):
         )
 
     def branch_out(self, node):
+        """Recursively split a geometry-tree node while partitions improve."""
+
         node.t1, node.t2 = self.divide_geom_box_tree(node)
 
         if node.t1 or node.t2:
@@ -471,6 +489,8 @@ class GeomBoxTree(object):
             self.branch_out(node.t2)
 
     def tree_search(self, node, point):
+        """Return the leaf node containing a physical point."""
+
         if node.box.in_box(point) == False:
             return None
         else:
@@ -484,6 +504,8 @@ class GeomBoxTree(object):
                     return self.tree_search(node.t2, point)
 
     def object_of_point(self, point):
+        """Return the topmost object and underlying object at a point."""
+
         leaf = self.tree_search(self.root, point)
         geom_obj, idx = find_object(point, leaf.geom_list)
 
@@ -498,6 +520,8 @@ class GeomBoxTree(object):
         return geom_obj, underneath_obj
 
     def material_of_point(self, point):
+        """Return the topmost material and underlying material at a point."""
+
         geom_obj, underneath_obj = self.object_of_point(point)
 
         if underneath_obj:
@@ -645,6 +669,8 @@ class GeomBoxTree(object):
         yield from self._leaf_tiles(node.t2, x, y, z, remaining[in_second])
 
     def display_info(self, node=None, indent=0):
+        """Print the geometry tree recursively from a node."""
+
         if not node:
             node = self.root
 
@@ -693,17 +719,18 @@ class GeometricObject(object):
     _gmes_vectorized_geometry = False
 
     def __init__(self, material):
-        """
+        """Initialize a geometric object with its filling material.
 
-        Keyword arguments:
-        material -- The material that the object is made of. No default.
-
+        Args:
+            material: Material filling the object.
         """
         self.material = material
         self.box = None
 
     @property
     def material(self):
+        """Return the material filling this object."""
+
         return self._material
 
     @material.setter
@@ -726,6 +753,8 @@ class GeometricObject(object):
         self.box = deepcopy(d["box"])
 
     def init(self, space):
+        """Initialize the material and cache this object's bounding box."""
+
         self.material.init(space)
         self.box = self.geom_box()
 
@@ -770,10 +799,7 @@ class DefaultMedium(GeometricObject):
         GeometricObject.__init__(self, material)
 
     def in_object(self, point):
-        """
-        Override GeometricObject.in_object.
-
-        """
+        """Return whether a point lies in the default infinite medium."""
 
         return self.box.in_box(point)
 
@@ -781,17 +807,11 @@ class DefaultMedium(GeometricObject):
         return self.box._contains_points(x, y, z)
 
     def geom_box(self):
-        """
-        Override GeometriObject.geom_box.
-
-        """
+        """Return an unbounded box spanning the simulation space."""
         return GeomBox((-np.inf, -np.inf, -np.inf), (np.inf, np.inf, np.inf))
 
     def display_info(self, indent=0):
-        """
-        Override GeometricObject.display_info.
-
-        """
+        """Print the default-medium material summary."""
         print(" " * indent, "default medium")
         if self.material:
             self.material.display_info(indent + 5)
@@ -817,7 +837,7 @@ class Cone(GeometricObject):
         radius=1,
         height=1,
     ):
-        """
+        """Initialize a cone or truncated cone.
 
         Keyword arguments:
         radius2 -- Radius of the tip of the cone (i.e. the end of the
@@ -899,10 +919,7 @@ class Cone(GeometricObject):
         return axial & (np.sqrt(perpendicular_squared) <= np.abs(radius))
 
     def display_info(self, indent=0):
-        """
-        Override GeometricObject.display_info.
-
-        """
+        """Print this cone's geometry and material."""
         print(" " * indent, "cone")
         print(" " * indent, end=" ")
         print("center:", self.center, end=" ")
@@ -914,10 +931,7 @@ class Cone(GeometricObject):
             self.material.display_info(indent + 5)
 
     def geom_box(self):
-        """
-        Override GeometricObject.geom_box.
-
-        """
+        """Return an axis-aligned box enclosing the cone."""
         h = 0.5 * self.height
 
         # Project a radius perpendicular to the axis onto each Cartesian
@@ -947,7 +961,8 @@ class Cylinder(Cone):
     """Form a cylinder."""
 
     def __init__(self, material, center=(0, 0, 0), axis=(0, 0, 1), radius=1, height=1):
-        """
+        """Initialize a finite cylinder.
+
         Keyword arguments:
             material -- The material that the object is made of.
                 No default.
@@ -985,7 +1000,8 @@ class Block(GeometricObject):
         e3=(0, 0, 1),
         size=(1, 1, 1),
     ):
-        """
+        """Initialize a parallelepiped from its center, axes, and edge lengths.
+
         Keyword arguments:
             center -- center location. Default is (0, 0, 0).
             e1, e2, e3 -- The directions of the axes of the block; the
@@ -1119,7 +1135,8 @@ class Ellipsoid(Block):
         e3=(0, 0, 1),
         size=(1, 1, 1),
     ):
-        """ """
+        """Initialize an ellipsoid from its center, principal axes, and diameters."""
+
         Block.__init__(self, material, center, e1, e2, e3, size)
         self.inverse_semi_axes = 2 / np.array(size, np.double)
 
@@ -1183,7 +1200,7 @@ class Sphere(GeometricObject):
     """
 
     def __init__(self, material, center=(0, 0, 0), radius=1):
-        """
+        """Initialize a sphere.
 
         Keyword arguments:
         radius -- Radius of the sphere. Default is 1.
@@ -1263,7 +1280,8 @@ class Shell(GeometricObject):
         plus_z=True,
         minus_z=True,
     ):
-        """
+        """Initialize selected faces of a rectangular boundary shell.
+
         Keyword arguments:
             material -- The filling material
             center -- coordinates of the center of this geometric object. Default is (0,0,0).

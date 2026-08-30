@@ -68,6 +68,14 @@ the former `.[dev,hdf5]` pip workflow.
 
 ## Branch and merge workflow
 
+### GitHub authentication
+
+- Treat `gh auth status` as a diagnostic check of stored GitHub CLI credentials, not as an interactive login step.
+- When persistent GitHub CLI authentication is configured, run routine authenticated `gh` operations directly without an unconditional `gh auth status` preflight.
+- If a GitHub operation reports an authentication or authorization failure, run `gh auth status`, restore authentication as appropriate, verify it, and automatically retry the original operation.
+- Recheck authentication proactively when the GitHub host, active account, credential configuration, or execution environment has changed, or when the user explicitly requests verification.
+- Never expose authentication tokens, credentials, private keys, or secrets in command output, files, commits, or responses.
+
 The active `Protect master` GitHub ruleset governs the default branch. Follow
 this sequence for every change:
 

@@ -100,9 +100,7 @@ class NativeOracleTest(unittest.TestCase):
                 "bloch-3d",
             ],
         )
-        self.assertEqual(
-            gates["cpu_acceptance"]["thread_modes"], ["one", "physical"]
-        )
+        self.assertEqual(gates["cpu_acceptance"]["thread_modes"], ["one", "physical"])
         self.assertEqual(
             gates["cpu_acceptance"]["statistics"]["method"],
             "independent-stratified-bootstrap-log-geomean-v1",

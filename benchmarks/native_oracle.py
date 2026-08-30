@@ -36,8 +36,7 @@ def load_manifest(path=DEFAULT_MANIFEST):
         raise ValueError("observer_commit must be a full lowercase Git commit")
     performance_summary_sha256 = reference.get("performance_summary_sha256", "")
     if len(performance_summary_sha256) != 64 or any(
-        character not in "0123456789abcdef"
-        for character in performance_summary_sha256
+        character not in "0123456789abcdef" for character in performance_summary_sha256
     ):
         raise ValueError(
             "performance_summary_sha256 must be a lowercase SHA-256 digest"

@@ -298,12 +298,8 @@ class TorchDm2BucketState(nn.Module):
         flat_field = field.reshape(-1)
         flat_source = source.reshape(-1)
         e_old = torch.index_select(flat_field, 0, targets)
-        source_positive = torch.index_select(
-            flat_source, 0, source_positive_indices
-        )
-        source_negative = torch.index_select(
-            flat_source, 0, source_negative_indices
-        )
+        source_positive = torch.index_select(flat_source, 0, source_positive_indices)
+        source_negative = torch.index_select(flat_source, 0, source_negative_indices)
         e_base = source_positive - source_negative
         e_base = e_base * curl_scale
         e_base = e_base + e_old
@@ -344,22 +340,16 @@ class TorchDm2BucketState(nn.Module):
             )
             e_new = torch.where(active, e_candidate, e_new)
 
-            u0_candidate = u_old[0] + (
-                (u_new[1] + u_old[1]) * omega * half_dt
-            )
+            u0_candidate = u_old[0] + ((u_new[1] + u_old[1]) * omega * half_dt)
             field_sum = e_new + e_old
-            u1_candidate = u_old[1] - (
-                (u0_candidate + u_old[0]) * omega * half_dt
-            )
+            u1_candidate = u_old[1] - ((u0_candidate + u_old[0]) * omega * half_dt)
             u1_candidate = u1_candidate + (
                 (u_new[2] + u_old[2])
                 * c_plus[:, None]
                 * field_sum[:, None]
                 * quarter_dt
             )
-            u1_candidate = u1_candidate + (
-                d[:, None] * field_sum[:, None] * half_dt
-            )
+            u1_candidate = u1_candidate + (d[:, None] * field_sum[:, None] * half_dt)
             u2_candidate = u_old[2] - (
                 (u1_candidate + u_old[1])
                 * c_minus[:, None]
@@ -474,8 +464,7 @@ class TorchDm2BucketState(nn.Module):
 
         def views(value):
             e_new, u_new, code = tuple(
-                value.narrow(0, offset, size)
-                for offset, size in zip(offsets, sizes)
+                value.narrow(0, offset, size) for offset, size in zip(offsets, sizes)
             )
             return e_new, u_new.view(3, cells, transitions), code
 
@@ -652,6 +641,7 @@ class TorchDm2BucketState(nn.Module):
         torch.where(self._mask, self._e_new, self._e_old, out=self._e_new)
         flat_field.index_copy_(0, targets, self._e_new)
         torch.where(self._mask[None, :, None], self._u_new, self.u, out=self.u)
+
 
 __all__ = [
     "DM2_ITERATIONS_PER_CHUNK",

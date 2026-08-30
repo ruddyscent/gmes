@@ -16,13 +16,13 @@ import argparse
 import hashlib
 import json
 import os
-from pathlib import Path
 import platform
 import re
 import statistics
 import sys
 import tempfile
 import time
+from pathlib import Path
 from typing import Any, Callable
 
 CELLS = 99
@@ -285,9 +285,7 @@ def _single_packed_carry_update(
         field_candidate = field_current * 0.5 + weighted * 0.25
         history_candidate = history_current * 0.5 + field_candidate[:, None] * 0.25
         field_next = torch.where(active, field_candidate, field_current)
-        history_next = torch.where(
-            active[:, None], history_candidate, history_current
-        )
+        history_next = torch.where(active[:, None], history_candidate, history_current)
         code_next = code + active.to(dtype=code.dtype)
         return (
             torch.cat(
@@ -321,11 +319,7 @@ def _normalize_rejection(error: BaseException) -> str:
     lines = [re.sub(r"\s+", " ", line).strip() for line in str(error).splitlines()]
     lines = [line for line in lines if line]
     reason = next(
-        (
-            line
-            for line in lines
-            if "mutat" in line.lower() and "input" in line.lower()
-        ),
+        (line for line in lines if "mutat" in line.lower() and "input" in line.lower()),
         lines[0] if lines else type(error).__qualname__,
     )
     return reason[:500]
@@ -545,9 +539,7 @@ def main() -> None:
     torch.compiler.reset()
     torch._dynamo.utils.counters.clear()
 
-    compiled_multi = torch.compile(
-        _multi_carry_update, fullgraph=True, dynamic=False
-    )
+    compiled_multi = torch.compile(_multi_carry_update, fullgraph=True, dynamic=False)
     compiled_packed = torch.compile(
         _single_packed_carry_update, fullgraph=True, dynamic=False
     )

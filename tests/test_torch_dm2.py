@@ -94,9 +94,7 @@ class TorchDm2Test(unittest.TestCase):
         self.assertTrue(
             torch.equal(actual.state._dm2_iterations, expected.state._dm2_iterations)
         )
-        self.assertTrue(
-            torch.equal(actual.state.step_count, expected.state.step_count)
-        )
+        self.assertTrue(torch.equal(actual.state.step_count, expected.state.step_count))
         self.assertTrue(
             torch.equal(actual.state.source_time, expected.state.source_time)
         )
@@ -153,15 +151,15 @@ class TorchDm2Test(unittest.TestCase):
         self.assertEqual(
             workspaces,
             [
-                (bucket._packed_loop_state.data_ptr(), bucket._packed_loop_state.numel())
+                (
+                    bucket._packed_loop_state.data_ptr(),
+                    bucket._packed_loop_state.numel(),
+                )
                 for bucket in simulation.state.dm2_buckets
             ],
         )
         self.assertFalse(
-            any(
-                "_packed_loop_state" in name
-                for name in simulation.state.state_dict()
-            )
+            any("_packed_loop_state" in name for name in simulation.state.state_dict())
         )
 
     def test_complete_fields_match_native_from_nonzero_input(self):
@@ -493,9 +491,7 @@ class TorchDm2Test(unittest.TestCase):
 
     def test_compiled_invalid_error_commits_the_same_state_as_eager(self):
         eager = self._build_failure_simulation(gmes.Dm2(gamma=np.nan), "eager")
-        compiled = self._build_failure_simulation(
-            gmes.Dm2(gamma=np.nan), "compile"
-        )
+        compiled = self._build_failure_simulation(gmes.Dm2(gamma=np.nan), "compile")
         rng = np.random.default_rng(145)
         fields = {
             name: rng.normal(size=tuple(field.shape)) * 1e-3

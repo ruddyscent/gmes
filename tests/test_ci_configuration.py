@@ -38,6 +38,12 @@ class CiConfigurationTest(unittest.TestCase):
             self.ci_workflow,
         )
 
+    def test_required_ci_lints_only_tracked_python_sources(self):
+        self.assertIn(
+            "python -m pylint $(git ls-files 'gmes/*.py') setup.py",
+            self.ci_workflow,
+        )
+
     def test_macos_default_suite_runs_without_plot_extra(self):
         self.assertIn(
             """- name: Install macOS test dependencies without plot extra

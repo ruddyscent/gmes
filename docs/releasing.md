@@ -60,7 +60,7 @@ API token is stored in GitHub.
    uv run --no-sync python -m black --check gmes examples tests utils setup.py
    uv run --no-sync python -m mypy
    uv run --no-sync python -m mypy.stubtest --mypy-config-file pyproject.toml gmes.constant gmes.pw_material
-   uv run --no-sync python -m pylint gmes setup.py
+   uv run --no-sync python -m pylint $(git ls-files 'gmes/*.py') setup.py
    uv run --no-sync python -m unittest discover -v
    uv build
    ```

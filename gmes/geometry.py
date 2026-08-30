@@ -5,14 +5,70 @@
 
 # This code is based on libctl 3.0.2.
 
+from collections.abc import Collection, Sequence
 from copy import deepcopy
+from typing import Any, Protocol, TypeVar, cast
 
 import numpy as np
 from numpy import array, dot, empty, inf, zeros
+from numpy.typing import NDArray
+
+type Index3 = tuple[int, int, int]
+type Shape3 = tuple[int, int, int]
+type CoordinateScalar = float | np.float64
+type Coordinate3 = tuple[CoordinateScalar, CoordinateScalar, CoordinateScalar]
+type RealArray = NDArray[np.float64]
+type ComplexArray = NDArray[np.complex128]
+type FieldArray = RealArray | ComplexArray
+type IndexArray = NDArray[np.intp]
+type IndexLike = Sequence[int] | IndexArray
+type Resolution = float | Sequence[float] | NDArray[np.float64]
+
+_T = TypeVar("_T")
+
+
+class _CartComm(Protocol):
+    """MPI-compatible operations used by Cartesian."""
+
+    def Get_topo(self) -> tuple[Index3, Index3, Index3]:
+        """Return Cartesian dimensions, periods, and coordinates."""
+
+    def Get_size(self) -> int:
+        """Return the communicator size."""
+
+    def recv(self, source: int | None = None) -> object:
+        """Receive an object from a rank."""
+
+    def send(self, obj: object, dest: int = 0) -> None:
+        """Send an object to a rank."""
+
+    def Shift(self, direction: int, disp: int) -> tuple[int, int]:
+        """Return source and destination ranks for a Cartesian shift."""
+
+    def sendrecv(
+        self,
+        sendbuf: _T,
+        dest: int = 0,
+        sendtag: int = 0,
+        recvbuf: object | None = None,
+        source: int = 0,
+        recvtag: int = 0,
+        status: object | None = None,
+    ) -> _T | None:
+        """Exchange an object with a neighboring rank."""
+
+    def bcast(self, obj: _T | None = None, root: int = 0) -> _T | None:
+        """Broadcast an object from the root rank."""
+
+    def allgather(self, obj: _T | None = None) -> list[_T | None]:
+        """Gather an object from every rank."""
+
 
 # GMES modules
 from . import constant as const
 from .pygeom import *
+
+type ComponentType = type[const.Component]
 
 _BUILTIN_GEOMETRY_TYPES = (
     DefaultMedium,
@@ -36,7 +92,12 @@ class AuxiCartComm(object):
 
     """
 
-    def __init__(self, dims=(1, 1, 1), periods=None, reorder=(0, 0, 0)):
+    def __init__(
+        self,
+        dims: Index3 = (1, 1, 1),
+        periods: Index3 | None = None,
+        reorder: Index3 = (0, 0, 0),
+    ) -> None:
         """Constructor.
 
         Keyword arguments:
@@ -53,7 +114,7 @@ class AuxiCartComm(object):
             cyclic = (0, 0, 0)
         self.topo = ((1, 1, 1), cyclic, (0, 0, 0))
 
-    def Get_cart_rank(self, coords):
+    def Get_cart_rank(self, coords: Sequence[int]) -> int:
         """Return the sole rank for a Cartesian coordinate.
 
         Args:
@@ -65,7 +126,7 @@ class AuxiCartComm(object):
 
         return 0
 
-    def Get_coords(self, rank):
+    def Get_coords(self, rank: int) -> Index3:
         """Get local or remote grid coordinate.
 
         Keyword arguments:
@@ -74,22 +135,22 @@ class AuxiCartComm(object):
         """
         return 0, 0, 0
 
-    def Get_dim(self):
+    def Get_dim(self) -> int:
         """Return the number of Cartesian process dimensions."""
 
         return self.dim
 
-    def Get_topo(self):
+    def Get_topo(self) -> tuple[Index3, Index3, Index3]:
         """Return MPI-compatible dimensions, periods, and local coordinates."""
 
-        return self.topo
+        return cast(tuple[Index3, Index3, Index3], self.topo)
 
-    def Get_size(self):
+    def Get_size(self) -> int:
         """Return the serial communicator size of one."""
 
         return 1
 
-    def Shift(self, direction, disp):
+    def Shift(self, direction: int, disp: int) -> tuple[int, int]:
         """Get source/destination with specified shift.
 
         Keyword arguments:
@@ -103,8 +164,15 @@ class AuxiCartComm(object):
             return -1, -1
 
     def sendrecv(
-        self, sendbuf, dest=0, sendtag=0, recvbuf=None, source=0, recvtag=0, status=None
-    ):
+        self,
+        sendbuf: _T,
+        dest: int = 0,
+        sendtag: int = 0,
+        recvbuf: object | None = None,
+        source: int = 0,
+        recvtag: int = 0,
+        status: object | None = None,
+    ) -> _T | None:
         """Mimic Sendrecv method.
 
         All arguments except message are ignored.
@@ -115,17 +183,24 @@ class AuxiCartComm(object):
         else:
             return sendbuf
 
-    def reduce(self, value, root=0, op=None):
+    def reduce(self, value: _T, root: int = 0, op: object | None = None) -> _T:
         """Mimic reduce method."""
         return value
 
-    def bcast(self, obj=None, root=0):
+    def bcast(self, obj: _T | None = None, root: int = 0) -> _T | None:
         """Mimic bcast method."""
         return obj
 
-    def allgather(self, obj=None):
+    def allgather(self, obj: _T | None = None) -> list[_T | None]:
         """Mimic allgather method."""
         return [obj]
+
+    def recv(self, source: int | None = None) -> None:
+        """Return no message in the single-process fallback."""
+        return None
+
+    def send(self, obj: object, dest: int = 0) -> None:
+        """Accept a no-op send in the single-process fallback."""
 
 
 class Cartesian(object):
@@ -149,7 +224,12 @@ class Cartesian(object):
 
     """
 
-    def __init__(self, size, resolution=15, parallel=False):
+    cart_comm: _CartComm
+    dt: float
+
+    def __init__(
+        self, size: Vector3, resolution: Resolution = 15, parallel: bool = False
+    ) -> None:
         """Constructor
 
         Keyword arguments:
@@ -160,7 +240,7 @@ class Cartesian(object):
 
         """
         try:
-            if len(resolution) == 3:
+            if len(cast(Sequence[float], resolution)) == 3:
                 self.res = array(resolution, np.double)
         except TypeError:
             self.res = array((resolution,) * 3, np.double)
@@ -181,12 +261,16 @@ class Cartesian(object):
         self.cart_comm = AuxiCartComm((1, 1, 1), (1, 1, 1))
         try:
             if parallel:
+                # mpi4py is an optional runtime backend without a base install.
                 from mpi4py import MPI
 
                 self.my_id = MPI.COMM_WORLD.rank
                 self.numprocs = MPI.COMM_WORLD.size
-                self.cart_comm = MPI.COMM_WORLD.Create_cart(
-                    self.find_best_deploy(), (1, 1, 1)
+                self.cart_comm = cast(
+                    _CartComm,
+                    MPI.COMM_WORLD.Create_cart(
+                        self.find_best_deploy(), (True, True, True)
+                    ),
                 )
         except ImportError:
             pass
@@ -202,7 +286,7 @@ class Cartesian(object):
         self.my_field_size = self.get_my_field_size()
         self.global_field_offset = self.general_field_size * self.my_cart_idx
 
-    def bcast(self, obj=None, root=None):
+    def bcast(self, obj: _T | None = None, root: int | None = None) -> _T | None:
         """Same with the Broadcast but, it handles for unknown root among
         the nodes.
 
@@ -214,7 +298,7 @@ class Cartesian(object):
         if root is None:
             from mpi4py import MPI
 
-            obj = self.cart_comm.recv(source=MPI.ANY_SOURCE)
+            obj = cast(_T, self.cart_comm.recv(source=MPI.ANY_SOURCE))
         else:
             for dest in range(size):
                 if dest != root:
@@ -222,7 +306,7 @@ class Cartesian(object):
 
         return obj
 
-    def get_my_field_size(self):
+    def get_my_field_size(self) -> IndexArray:
         """Return the field size of this node.
 
         This method depends on
@@ -245,14 +329,14 @@ class Cartesian(object):
 
         return field_size
 
-    def find_best_deploy(self):
+    def find_best_deploy(self) -> Index3:
         """Return the minimum load deploy of the nodes.
 
         This method depends on
         self.numprocs
 
         """
-        best_partition = ()
+        best_partition: tuple[int, int, int] = (1, 1, 1)
         min_load = inf
 
         factors = [i for i in range(1, self.numprocs + 1) if self.numprocs % i == 0]
@@ -269,7 +353,7 @@ class Cartesian(object):
 
         return best_partition
 
-    def load_metric(self, l, m, n):
+    def load_metric(self, l: int, m: int, n: int) -> float:
         """Estimate the load on a node.
 
         Keyword arguments:
@@ -279,8 +363,6 @@ class Cartesian(object):
         self.whole_field_size
 
         """
-        l, m, n = float(l), float(m), float(n)
-
         # network load ratio compared to CPU
         R = 1000
 
@@ -299,15 +381,17 @@ class Cartesian(object):
             )
         )
 
-        return cpu_load + net_load
+        return cast(float, cpu_load + net_load)
 
-    def _get_em_field_storage(self, shape, cmplx):
+    def _get_em_field_storage(self, shape: Sequence[int], cmplx: bool) -> FieldArray:
         if cmplx:
             return zeros(shape, complex)
         else:
             return zeros(shape, np.double)
 
-    def component_coordinate_axes(self, component, shape):
+    def component_coordinate_axes(
+        self, component: ComponentType, shape: Sequence[int]
+    ) -> tuple[RealArray, RealArray, RealArray]:
         """Return global coordinate axes for a local Yee-grid field."""
         offsets = {
             const.Ex: (0.5, 0.0, 0.0),
@@ -334,7 +418,9 @@ class Cartesian(object):
             for axis, length in enumerate(shape)
         )
 
-    def get_ex_storage(self, field_compnt, cmplx=False):
+    def get_ex_storage(
+        self, field_compnt: Collection[ComponentType], cmplx: bool = False
+    ) -> FieldArray:
         """Return an initialized array for Ex field component."""
         if const.Ex in field_compnt:
             shape = (
@@ -347,7 +433,9 @@ class Cartesian(object):
 
         return self._get_em_field_storage(shape, cmplx)
 
-    def get_ey_storage(self, field_compnt, cmplx=False):
+    def get_ey_storage(
+        self, field_compnt: Collection[ComponentType], cmplx: bool = False
+    ) -> FieldArray:
         """Return an initialized array for Ey field component."""
         if const.Ey in field_compnt:
             shape = (
@@ -360,7 +448,9 @@ class Cartesian(object):
 
         return self._get_em_field_storage(shape, cmplx)
 
-    def get_ez_storage(self, field_compnt, cmplx=False):
+    def get_ez_storage(
+        self, field_compnt: Collection[ComponentType], cmplx: bool = False
+    ) -> FieldArray:
         """Return an initialized array for Ez field component."""
         if const.Ez in field_compnt:
             shape = (
@@ -373,7 +463,9 @@ class Cartesian(object):
 
         return self._get_em_field_storage(shape, cmplx)
 
-    def get_hx_storage(self, field_compnt, cmplx=False):
+    def get_hx_storage(
+        self, field_compnt: Collection[ComponentType], cmplx: bool = False
+    ) -> FieldArray:
         """Return an initialized array for Hx field component."""
         if const.Hx in field_compnt:
             shape = (
@@ -386,7 +478,9 @@ class Cartesian(object):
 
         return self._get_em_field_storage(shape, cmplx)
 
-    def get_hy_storage(self, field_compnt, cmplx=False):
+    def get_hy_storage(
+        self, field_compnt: Collection[ComponentType], cmplx: bool = False
+    ) -> FieldArray:
         """Return an initialized array for Hy field component."""
         if const.Hy in field_compnt:
             shape = (
@@ -399,7 +493,9 @@ class Cartesian(object):
 
         return self._get_em_field_storage(shape, cmplx)
 
-    def get_hz_storage(self, field_compnt, cmplx=False):
+    def get_hz_storage(
+        self, field_compnt: Collection[ComponentType], cmplx: bool = False
+    ) -> FieldArray:
         """Return an initialized array for Hz field component."""
         if const.Hz in field_compnt:
             shape = (
@@ -412,7 +508,7 @@ class Cartesian(object):
 
         return self._get_em_field_storage(shape, cmplx)
 
-    def ex_index_to_space(self, i, j, k):
+    def ex_index_to_space(self, i: int, j: int, k: int) -> Coordinate3:
         """Return space coordinate of the given index.
 
         This method returns the (global) space coordinates corresponding to
@@ -431,7 +527,7 @@ class Cartesian(object):
 
         return spc_0, spc_1, spc_2
 
-    def spc_to_exact_ex_idx(self, x, y, z):
+    def spc_to_exact_ex_idx(self, x: float, y: float, z: float) -> Coordinate3:
         """Return the exact mesh point of the given space coordinate.
 
         This method returns the (local) position, in index dimension,
@@ -456,9 +552,9 @@ class Cartesian(object):
             else:
                 idx[i] = global_idx[i] - self.global_field_offset[i]
 
-        return tuple(idx)
+        return cast(Coordinate3, tuple(idx))
 
-    def space_to_ex_index(self, x, y, z):
+    def space_to_ex_index(self, x: float, y: float, z: float) -> Index3:
         """Return the nearest mesh point of the given space coordinate.
 
         This method returns the (local) index of the nearest Ex mesh point of
@@ -470,9 +566,9 @@ class Cartesian(object):
 
         """
         exact_idx = self.spc_to_exact_ex_idx(x, y, z)
-        return tuple(np.floor(array(exact_idx) + 0.5).astype(np.intp))
+        return cast(Index3, tuple(np.floor(array(exact_idx) + 0.5).astype(np.intp)))
 
-    def ey_index_to_space(self, i, j, k):
+    def ey_index_to_space(self, i: int, j: int, k: int) -> Coordinate3:
         """Return space coordinate of the given index.
 
         This method returns the (global) space coordinates corresponding to
@@ -492,7 +588,7 @@ class Cartesian(object):
 
         return coords_0, coords_1, coords_2
 
-    def spc_to_exact_ey_idx(self, x, y, z):
+    def spc_to_exact_ey_idx(self, x: float, y: float, z: float) -> Coordinate3:
         """Return the exact mesh point of the given space coordinate.
 
         This method returns the (local) position, in index dimension,
@@ -517,9 +613,9 @@ class Cartesian(object):
             else:
                 idx[i] = global_idx[i] - self.global_field_offset[i]
 
-        return tuple(idx)
+        return cast(Coordinate3, tuple(idx))
 
-    def space_to_ey_index(self, x, y, z):
+    def space_to_ey_index(self, x: float, y: float, z: float) -> Index3:
         """Return the nearest mesh point of the given space coordinate.
 
         This method returns the (local) index of the nearest Ey mesh point of
@@ -531,9 +627,9 @@ class Cartesian(object):
 
         """
         exact_idx = self.spc_to_exact_ey_idx(x, y, z)
-        return tuple(np.floor(array(exact_idx) + 0.5).astype(np.intp))
+        return cast(Index3, tuple(np.floor(array(exact_idx) + 0.5).astype(np.intp)))
 
-    def ez_index_to_space(self, i, j, k):
+    def ez_index_to_space(self, i: int, j: int, k: int) -> Coordinate3:
         """Return space coordinate of the given index.
 
         This method returns the (global) space coordinates corresponding to
@@ -553,7 +649,7 @@ class Cartesian(object):
 
         return coords_0, coords_1, coords_2
 
-    def spc_to_exact_ez_idx(self, x, y, z):
+    def spc_to_exact_ez_idx(self, x: float, y: float, z: float) -> Coordinate3:
         """Return the exact mesh point of the given space coordinate.
 
         This method returns the (local) position, in index dimension,
@@ -578,9 +674,9 @@ class Cartesian(object):
             else:
                 idx[i] = global_idx[i] - self.global_field_offset[i]
 
-        return tuple(idx)
+        return cast(Coordinate3, tuple(idx))
 
-    def space_to_ez_index(self, x, y, z):
+    def space_to_ez_index(self, x: float, y: float, z: float) -> Index3:
         """Return the nearest mesh point of the given space coordinate.
 
         This method returns the (local) index of the nearest Ez mesh point of
@@ -592,9 +688,9 @@ class Cartesian(object):
 
         """
         exact_idx = self.spc_to_exact_ez_idx(x, y, z)
-        return tuple(np.floor(array(exact_idx) + 0.5).astype(np.intp))
+        return cast(Index3, tuple(np.floor(array(exact_idx) + 0.5).astype(np.intp)))
 
-    def hx_index_to_space(self, i, j, k):
+    def hx_index_to_space(self, i: int, j: int, k: int) -> Coordinate3:
         """Return space coordinate of the given index.
 
         This method returns the (global) space coordinates corresponding to
@@ -614,7 +710,7 @@ class Cartesian(object):
 
         return coords_0, coords_1, coords_2
 
-    def spc_to_exact_hx_idx(self, x, y, z):
+    def spc_to_exact_hx_idx(self, x: float, y: float, z: float) -> Coordinate3:
         """Return the exact mesh point of the given space coordinate.
 
         This method returns the (local) position, in index dimension,
@@ -640,9 +736,9 @@ class Cartesian(object):
         if self.whole_field_size[2] == 1:
             idx[2] = 1
 
-        return tuple(idx)
+        return cast(Coordinate3, tuple(idx))
 
-    def space_to_hx_index(self, x, y, z):
+    def space_to_hx_index(self, x: float, y: float, z: float) -> Index3:
         """Return the nearest mesh point of the given space coordinate.
 
         This method returns the (local) index of the nearest Hx mesh point of
@@ -654,9 +750,9 @@ class Cartesian(object):
 
         """
         exact_idx = self.spc_to_exact_hx_idx(x, y, z)
-        return tuple(np.floor(array(exact_idx) + 0.5).astype(np.intp))
+        return cast(Index3, tuple(np.floor(array(exact_idx) + 0.5).astype(np.intp)))
 
-    def hy_index_to_space(self, i, j, k):
+    def hy_index_to_space(self, i: int, j: int, k: int) -> Coordinate3:
         """Return space coordinate of the given index.
 
         This method returns the (global) space coordinates corresponding to
@@ -676,7 +772,7 @@ class Cartesian(object):
 
         return coords_0, coords_1, coords_2
 
-    def spc_to_exact_hy_idx(self, x, y, z):
+    def spc_to_exact_hy_idx(self, x: float, y: float, z: float) -> Coordinate3:
         """Return the exact mesh point of the given space coordinate.
 
         This method returns the (local) position, in index dimension,
@@ -702,9 +798,9 @@ class Cartesian(object):
         if self.whole_field_size[2] == 1:
             idx[2] = 1
 
-        return tuple(idx)
+        return cast(Coordinate3, tuple(idx))
 
-    def space_to_hy_index(self, x, y, z):
+    def space_to_hy_index(self, x: float, y: float, z: float) -> Index3:
         """Return the nearest mesh point of the given space coordinate.
 
         This method returns the (local) index of the nearest Hy mesh point of
@@ -716,9 +812,9 @@ class Cartesian(object):
 
         """
         exact_idx = self.spc_to_exact_hy_idx(x, y, z)
-        return tuple(np.floor(array(exact_idx) + 0.5).astype(np.intp))
+        return cast(Index3, tuple(np.floor(array(exact_idx) + 0.5).astype(np.intp)))
 
-    def hz_index_to_space(self, i, j, k):
+    def hz_index_to_space(self, i: int, j: int, k: int) -> Coordinate3:
         """Return space coordinate of the given index.
 
         This method returns the (global) space coordinates corresponding to
@@ -738,7 +834,7 @@ class Cartesian(object):
 
         return coords_0, coords_1, coords_2
 
-    def spc_to_exact_hz_idx(self, x, y, z):
+    def spc_to_exact_hz_idx(self, x: float, y: float, z: float) -> Coordinate3:
         """Return the exact mesh point of the given space coordinate.
 
         This method returns the (local) position, in index dimension,
@@ -764,9 +860,9 @@ class Cartesian(object):
         if self.whole_field_size[2] == 1:
             idx[2] = 0
 
-        return tuple(idx)
+        return cast(Coordinate3, tuple(idx))
 
-    def space_to_hz_index(self, x, y, z):
+    def space_to_hz_index(self, x: float, y: float, z: float) -> Index3:
         """Return the nearest mesh point of the given space coordinate.
 
         This method returns the (local) index of the nearest Hy mesh point of
@@ -778,9 +874,9 @@ class Cartesian(object):
 
         """
         exact_idx = self.spc_to_exact_hz_idx(x, y, z)
-        return tuple(np.floor(array(exact_idx) + 0.5).astype(np.intp))
+        return cast(Index3, tuple(np.floor(array(exact_idx) + 0.5).astype(np.intp)))
 
-    def display_info(self, indent=0):
+    def display_info(self, indent: int = 0) -> None:
         """Print a human-readable summary of the local Cartesian grid.
 
         Args:
@@ -803,7 +899,7 @@ class Cartesian(object):
         print("number of participating nodes:", self.numprocs)
 
 
-def in_range(idx, shape, component):
+def in_range(idx: IndexLike, shape: Sequence[int], component: ComponentType) -> bool:
     """Perform bounds checking.
 
 

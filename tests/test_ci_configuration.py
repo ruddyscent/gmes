@@ -31,6 +31,19 @@ class CiConfigurationTest(unittest.TestCase):
         self.assertIn("GMES_ENABLE_OPENMP=1 uv build", self.ci_workflow)
         self.assertIn("GMES_ENABLE_OPENMP=auto uv build", self.ci_workflow)
 
+    def test_required_ci_runs_static_and_native_stub_checks(self):
+        self.assertIn("python -m mypy", self.ci_workflow)
+        self.assertIn(
+            "python -m mypy.stubtest --mypy-config-file pyproject.toml gmes.constant gmes.pw_material",
+            self.ci_workflow,
+        )
+
+    def test_required_ci_lints_only_tracked_python_sources(self):
+        self.assertIn(
+            "python -m pylint $(git ls-files 'gmes/*.py') setup.py",
+            self.ci_workflow,
+        )
+
     def test_macos_default_suite_runs_without_plot_extra(self):
         self.assertIn(
             """- name: Install macOS test dependencies without plot extra

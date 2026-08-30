@@ -1,9 +1,9 @@
 """Device-resident source lowering and execution for :mod:`gmes.torch_fdtd`."""
 
-from __future__ import annotations
-
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
+from typing import Any, Protocol, cast
 
 import numpy as np
 import torch
@@ -75,7 +75,7 @@ class TorchPointSourceRecord:
     current_scale: float | None = None
 
 
-def _time_parameters(source_time):
+def _time_parameters(source_time: Any) -> Any:
     if isinstance(source_time, Continuous):
         return 0, (
             source_time.freq,
@@ -103,7 +103,9 @@ def _time_parameters(source_time):
     )
 
 
-def _evaluate_time(model, parameters, time, paired_real, output):
+def _evaluate_time(
+    model: Any, parameters: Any, time: Any, paired_real: Any, output: Any
+) -> Any:
     """Evaluate all built-in source-time models without a per-source callback."""
     frequency = parameters[:, 0]
     phase = parameters[:, 1]
@@ -165,12 +167,34 @@ def _evaluate_time(model, parameters, time, paired_real, output):
 class TorchPointSourceBatch(nn.Module):
     """Unique-target point/current source batch for one Yee component."""
 
-    def __init__(self, component, records, *, shape, paired_real, device, dtype):
+    component: str
+    paired_real: bool
+    overwrite_targets: torch.Tensor
+    overwrite_models: torch.Tensor
+    overwrite_parameters: torch.Tensor
+    overwrite_amplitudes: torch.Tensor
+    _overwrite_values: torch.Tensor
+    additive_targets: torch.Tensor
+    additive_models: torch.Tensor
+    additive_parameters: torch.Tensor
+    additive_amplitudes: torch.Tensor
+    _additive_values: torch.Tensor
+
+    def __init__(
+        self,
+        component: Any,
+        records: Any,
+        *,
+        shape: Any,
+        paired_real: Any,
+        device: Any,
+        dtype: Any,
+    ) -> None:
         super().__init__()
         self.component = component
         self.paired_real = paired_real
-        overwrite = []
-        additive = []
+        overwrite: list[tuple[int, int, tuple[float, ...], float, float]] = []
+        additive: list[tuple[int, int, tuple[float, ...], float, float]] = []
         # PwSource.merge() has last-source-wins semantics at one target.  Make
         # that decision here, before any indexed device write occurs.
         normalized = {}
@@ -199,7 +223,9 @@ class TorchPointSourceBatch(nn.Module):
             dtype=dtype,
         )
 
-    def _register(self, prefix, records, *, paired_real, device, dtype):
+    def _register(
+        self, prefix: Any, records: Any, *, paired_real: Any, device: Any, dtype: Any
+    ) -> Any:
         self.register_buffer(
             f"{prefix}_targets",
             torch.tensor(
@@ -233,7 +259,11 @@ class TorchPointSourceBatch(nn.Module):
             persistent=False,
         )
 
-    def apply(self, field, time):
+    def apply(  # type: ignore[override]  # Source execution, not Module traversal
+        self, field: torch.Tensor, time: torch.Tensor
+    ) -> None:
+        """Apply this point-source batch to ``field`` in place."""
+
         plane = 2 if self.paired_real else 1
         flat = field.reshape(-1, plane)
         for prefix, additive in (("additive", True), ("overwrite", False)):
@@ -255,7 +285,9 @@ class TorchPointSourceBatch(nn.Module):
                 flat.index_copy_(0, targets, values)
 
 
-def _transparent_coefficient(component, face, parameter, dt, dr):
+def _transparent_coefficient(
+    component: Any, face: Any, parameter: Any, dt: Any, dr: Any
+) -> Any:
     axis = {
         const.MinusX: 0,
         const.PlusX: 0,
@@ -284,20 +316,31 @@ def _transparent_coefficient(component, face, parameter, dt, dr):
 class TorchTransparentBatch(nn.Module):
     """Unique-target TFSF face plan sampling one device-resident auxiliary solver."""
 
+    component: str
+    auxiliary: Any
+    auxiliary_component: str
+    paired_real: bool
+    gaussian_width: float | None
+    targets: torch.Tensor
+    samples: torch.Tensor
+    weights: torch.Tensor
+    _sample_values: torch.Tensor
+    _values: torch.Tensor
+
     def __init__(
         self,
-        component,
-        parameters,
+        component: Any,
+        parameters: Any,
         *,
-        shape,
-        auxiliary,
-        gaussian_width,
-        dt,
-        dr,
-        paired_real,
-        device,
-        dtype,
-    ):
+        shape: Any,
+        auxiliary: Any,
+        gaussian_width: Any,
+        dt: Any,
+        dr: Any,
+        paired_real: Any,
+        device: Any,
+        dtype: Any,
+    ) -> None:
         super().__init__()
         self.component = component
         self.auxiliary = auxiliary
@@ -323,7 +366,7 @@ class TorchTransparentBatch(nn.Module):
                             coefficient * weight,
                         )
                     )
-            consolidated = {}
+            consolidated: dict[int, float] = {}
             for sample, weight in target_terms:
                 consolidated[sample] = consolidated.get(sample, 0.0) + weight
             targets.append(int(np.ravel_multi_index(target, shape)))
@@ -356,7 +399,11 @@ class TorchTransparentBatch(nn.Module):
             persistent=False,
         )
 
-    def apply(self, field, source_time):
+    def apply(  # type: ignore[override]  # Source execution, not Module traversal
+        self, field: torch.Tensor, source_time: torch.Tensor
+    ) -> None:
+        """Apply this transparent-source batch to ``field`` in place."""
+
         plane = 2 if self.paired_real else 1
         auxiliary = self.auxiliary.state.field(self.auxiliary_component).reshape(
             -1, plane
@@ -379,23 +426,75 @@ class TorchTransparentBatch(nn.Module):
         field.reshape(-1, plane).index_add_(0, self.targets, self._values)
 
 
+class _SourceState(Protocol):
+    """Field access required while executing a lowered source plan."""
+
+    def field(self, component: str) -> torch.Tensor:
+        """Return a live component field."""
+
+
+class _SourceSimulation(Protocol):
+    """Simulation surface consumed by source batches."""
+
+    @property
+    def state(self) -> _SourceState:
+        """Return live simulation state."""
+
+
+class _AuxiliarySimulation(_SourceSimulation, Protocol):
+    """Nested simulation lifecycle owned by transparent sources."""
+
+    plan_identity: str
+    compile_cache_key: str
+
+    def step(self) -> object:
+        """Advance the auxiliary simulation once."""
+
+    def checkpoint(self) -> Mapping[str, object]:
+        """Return auxiliary checkpoint data."""
+
+    def load_checkpoint(self, checkpoint: Mapping[str, object]) -> object:
+        """Restore auxiliary checkpoint data."""
+
+    def buffer_addresses(self) -> Mapping[str, int]:
+        """Return persistent buffer addresses."""
+
+
 class TorchSourcePlan(nn.Module):
     """Static source batches and their device-resident auxiliary simulations."""
 
-    def __init__(self, batches, auxiliaries):
+    batches: nn.ModuleList
+    auxiliaries: tuple[_AuxiliarySimulation, ...]
+
+    def __init__(
+        self,
+        batches: Iterable[TorchPointSourceBatch | TorchTransparentBatch],
+        auxiliaries: Iterable[_AuxiliarySimulation],
+    ) -> None:
         super().__init__()
         self.batches = nn.ModuleList(batches)
         self.auxiliaries = tuple(auxiliaries)
 
     @property
-    def empty(self):
+    def empty(self) -> bool:
         """Return whether the plan contains no source batches."""
 
         return not self.batches
 
-    def apply(self, simulation, *, electric, time, transparent_time):
+    def apply(  # type: ignore[override]  # Source execution, not Module traversal
+        self,
+        simulation: _SourceSimulation,
+        *,
+        electric: bool,
+        time: torch.Tensor,
+        transparent_time: torch.Tensor,
+    ) -> None:
+        """Execute source batches for the selected field phase."""
+
         prefix = "E" if electric else "H"
-        for batch in self.batches:
+        for batch in cast(
+            Iterable[TorchPointSourceBatch | TorchTransparentBatch], self.batches
+        ):
             if batch.component.startswith(prefix):
                 batch_time = (
                     transparent_time
@@ -404,14 +503,14 @@ class TorchSourcePlan(nn.Module):
                 )
                 batch.apply(simulation.state.field(batch.component), batch_time)
 
-    def step_auxiliaries(self):
+    def step_auxiliaries(self) -> None:
         """Advance every device-resident auxiliary source simulation once."""
 
         for auxiliary in self.auxiliaries:
             auxiliary.step()
 
 
-def _is_owned_target(simulation, component, target):
+def _is_owned_target(simulation: Any, component: Any, target: Any) -> Any:
     shape = simulation.plan.shapes[component]
     target = tuple(int(value) for value in target)
     if len(target) != 3 or any(
@@ -423,13 +522,13 @@ def _is_owned_target(simulation, component, target):
 
 
 def lower_sources(
-    sources,
+    sources: Any,
     *,
-    simulation,
-    simulation_factory,
-    runtime,
-    bloch,
-):
+    simulation: Any,
+    simulation_factory: Any,
+    runtime: Any,
+    bloch: Any,
+) -> Any:
     """Lower legacy built-ins or explicit extension records exactly once."""
     sources = tuple(sources)
     if not sources:
@@ -442,8 +541,10 @@ def lower_sources(
         simulation.device,
         simulation.plan.dt,
     )
-    extension_records = {name: [] for name in COMPONENTS}
-    legacy_sources = []
+    extension_records: dict[str, list[TorchPointSourceRecord]] = {
+        name: [] for name in COMPONENTS
+    }
+    legacy_sources: list[Any] = []
     for source in sources:
         if type(source) in (PointSource, TotalFieldScatteredField, GaussianBeam):
             if isinstance(source, PointSource) and source.filename is not None:
@@ -462,8 +563,8 @@ def lower_sources(
                 f"unsupported legacy source {type(source).__name__!r}; implement "
                 "lower_torch_source(context) to emit TorchPointSourceRecord values"
             )
-        records = tuple(lower(context))
-        for record in records:
+        lowered_records = tuple(lower(context))
+        for record in lowered_records:
             if not isinstance(record, TorchPointSourceRecord):
                 raise TypeError(
                     "lower_torch_source() must emit TorchPointSourceRecord values"
@@ -472,14 +573,14 @@ def lower_sources(
                 raise ValueError(f"unknown source component {record.component!r}")
             extension_records[record.component].append(record)
 
-    auxiliary_by_native = {}
-    auxiliaries = []
+    auxiliary_by_native: dict[int, tuple[Any, float | None]] = {}
+    auxiliaries: list[Any] = []
     for source in legacy_sources:
         if not isinstance(source, TotalFieldScatteredField):
             continue
         native_auxiliary = source.aux_fdtd
-        base = (
-            native_auxiliary.aux_fdtd
+        base: Any = (
+            cast(Any, native_auxiliary).aux_fdtd
             if isinstance(source, GaussianBeam)
             else native_auxiliary
         )
@@ -500,9 +601,9 @@ def lower_sources(
         )
         auxiliaries.append(auxiliary)
 
-    batches = []
+    batches: list[TorchPointSourceBatch | TorchTransparentBatch] = []
     for component in COMPONENTS:
-        merged = {}
+        merged: dict[type[Any], Any] = {}
         getter_name = f"get_pw_source_{component.lower()}"
         for source in legacy_sources:
             pointwise = getattr(source, getter_name)(
@@ -519,7 +620,7 @@ def lower_sources(
                 merged[source_type] = pointwise
         for pointwise in merged.values():
             if isinstance(pointwise, (PointSourceElectric, PointSourceMagnetic)):
-                records = []
+                records: list[TorchPointSourceRecord] = []
                 for target, parameter in pointwise._param.items():
                     if not _is_owned_target(simulation, component, target):
                         continue
@@ -535,7 +636,7 @@ def lower_sources(
                     records.append(
                         TorchPointSourceRecord(
                             component,
-                            tuple(int(value) for value in target),
+                            (int(target[0]), int(target[1]), int(target[2])),
                             parameter.src_time,
                             parameter.amp,
                             scale,
@@ -555,15 +656,15 @@ def lower_sources(
                 isinstance(value, TransparentParam)
                 for value in pointwise._param.values()
             ):
-                by_auxiliary = {}
+                by_auxiliary: dict[int, dict[tuple[int, ...], TransparentParam]] = {}
                 for target, parameter in pointwise._param.items():
                     if not _is_owned_target(simulation, component, target):
                         continue
                     by_auxiliary.setdefault(id(parameter.aux_fdtd), {})[
                         target
                     ] = parameter
-                for native_auxiliary, parameters in by_auxiliary.items():
-                    auxiliary, gaussian_width = auxiliary_by_native[native_auxiliary]
+                for native_auxiliary_id, parameters in by_auxiliary.items():
+                    auxiliary, gaussian_width = auxiliary_by_native[native_auxiliary_id]
                     batches.append(
                         TorchTransparentBatch(
                             component,

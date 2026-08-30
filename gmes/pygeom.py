@@ -2,14 +2,47 @@
 
 """Define geometric primitives and accelerate material lookup on Yee grids."""
 
+from collections.abc import Iterator, Sequence
 from copy import deepcopy
 from dataclasses import dataclass
 from math import sqrt
+from typing import Any, Protocol, cast
 
 import numpy as np
+from numpy.typing import NDArray
+
+type Index3 = tuple[int, int, int]
+type Vector3 = Sequence[float] | NDArray[np.float64]
+type RealArray = NDArray[np.float64]
+type BoolArray = NDArray[np.bool_]
+# Pickle state is an intentionally dynamic compatibility boundary.
+type PickleState = dict[str, Any]
 
 
-def norm(p):
+class _MaterialSpace(Protocol):
+    """Grid values required by material initialization."""
+
+    @property
+    def dt(self) -> float:
+        """Return the simulation time step."""
+
+    @property
+    def dr(self) -> RealArray:
+        """Return the three spatial step sizes."""
+
+    @property
+    def half_size(self) -> RealArray:
+        """Return half the simulation-domain extent."""
+
+
+class _NativeMaterial(Protocol):
+    """Minimal native updater returned by material lowering hooks."""
+
+    def attach(self, idx: Index3, parameter: Any) -> None:
+        """Attach one native update record."""
+
+
+def norm(p: Vector3) -> float:
     """Return the Euclidean norm of a three-component vector."""
 
     return sqrt(p[0] ** 2 + p[1] ** 2 + p[2] ** 2)
@@ -18,48 +51,54 @@ def norm(p):
 class Material(object):
     """A base class for material types."""
 
-    def __init__(self, eps_inf=1, mu_inf=1):
+    def __init__(self, eps_inf: float = 1, mu_inf: float = 1) -> None:
         self.eps_inf = float(eps_inf)
         self.mu_inf = float(mu_inf)
 
     @property
-    def eps_inf(self):
+    def eps_inf(self) -> float:
         """Return the infinite-frequency relative permittivity."""
 
         return self._eps_inf
 
     @eps_inf.setter
-    def eps_inf(self, value):
+    def eps_inf(self, value: float) -> None:
         self._eps_inf = float(value)
 
     @property
-    def mu_inf(self):
+    def mu_inf(self) -> float:
         """Return the infinite-frequency relative permeability."""
 
         return self._mu_inf
 
     @mu_inf.setter
-    def mu_inf(self, value):
+    def mu_inf(self, value: float) -> None:
         self._mu_inf = float(value)
 
-    def __getstate__(self):
-        d = {}
+    def __getstate__(self) -> PickleState:
+        d: PickleState = {}
         d["eps_inf"] = self.eps_inf
         d["mu_inf"] = self.mu_inf
         return d
 
-    def __reduce__(self):
+    def __reduce__(self) -> tuple[object, ...]:
         return self.__class__, (), self.__getstate__()
 
-    def __setstate__(self, d):
+    def __setstate__(self, d: PickleState) -> None:
         self.eps_inf = d["eps_inf"]
         self.mu_inf = d["mu_inf"]
 
-    def display_info(self, indent=0):
+    def display_info(self, indent: int = 0) -> None:
         """Display the parameter values."""
         raise NotImplementedError
 
-    def get_pw_material_ex(self, idx, coords, underneath=None, cmplx=False):
+    def get_pw_material_ex(
+        self,
+        idx: Index3,
+        coords: Vector3,
+        underneath: Material | None = None,
+        cmplx: bool = False,
+    ) -> _NativeMaterial | None:
         """Return an ElectricParam structure of the given point.
 
         Arguments:
@@ -71,7 +110,13 @@ class Material(object):
         """
         raise NotImplementedError
 
-    def get_pw_material_ey(self, idx, coords, underneath=None, cmplx=False):
+    def get_pw_material_ey(
+        self,
+        idx: Index3,
+        coords: Vector3,
+        underneath: Material | None = None,
+        cmplx: bool = False,
+    ) -> _NativeMaterial | None:
         """Return an ElectricParam structure of the given point.
 
         Arguments:
@@ -83,7 +128,13 @@ class Material(object):
         """
         raise NotImplementedError
 
-    def get_pw_material_ez(self, idx, coords, underneath=None, cmplx=False):
+    def get_pw_material_ez(
+        self,
+        idx: Index3,
+        coords: Vector3,
+        underneath: Material | None = None,
+        cmplx: bool = False,
+    ) -> _NativeMaterial | None:
         """Return an ElectricParam structure of the given point.
 
         Arguments:
@@ -95,7 +146,13 @@ class Material(object):
         """
         raise NotImplementedError
 
-    def get_pw_material_hx(self, idx, coords, underneath=None, cmplx=False):
+    def get_pw_material_hx(
+        self,
+        idx: Index3,
+        coords: Vector3,
+        underneath: Material | None = None,
+        cmplx: bool = False,
+    ) -> _NativeMaterial | None:
         """Return a MagneticParam structure of the given point.
 
         Arguments:
@@ -107,7 +164,13 @@ class Material(object):
         """
         raise NotImplementedError
 
-    def get_pw_material_hy(self, idx, coords, underneath=None, cmplx=False):
+    def get_pw_material_hy(
+        self,
+        idx: Index3,
+        coords: Vector3,
+        underneath: Material | None = None,
+        cmplx: bool = False,
+    ) -> _NativeMaterial | None:
         """Return a MagneticParam structure of the given point.
 
         Arguments:
@@ -119,7 +182,13 @@ class Material(object):
         """
         raise NotImplementedError
 
-    def get_pw_material_hz(self, idx, coords, underneath=None, cmplx=False):
+    def get_pw_material_hz(
+        self,
+        idx: Index3,
+        coords: Vector3,
+        underneath: Material | None = None,
+        cmplx: bool = False,
+    ) -> _NativeMaterial | None:
         """Return a MagneticParam structure of the given point.
 
         Arguments:
@@ -130,7 +199,7 @@ class Material(object):
 
         """
 
-    def init(self, space, param=None):
+    def init(self, space: _MaterialSpace, param: object | None = None) -> None:
         """Initialize material coefficients for a Cartesian simulation space."""
 
         raise NotImplementedError
@@ -158,7 +227,9 @@ class Compound(object):
 ####################################################################
 
 
-def find_object(point, geom_list):
+def find_object(
+    point: Vector3, geom_list: Sequence[GeometricObject]
+) -> tuple[GeometricObject, int]:
     """Find the last object including point in geom_list.
 
     find_object returns (object, array index). If no object includes
@@ -181,43 +252,43 @@ class GeomBox(object):
 
     """
 
-    def __init__(self, low=(0, 0, 0), high=(0, 0, 0)):
+    def __init__(self, low: Vector3 = (0, 0, 0), high: Vector3 = (0, 0, 0)) -> None:
         self.low = np.array(low, np.double)
         self.high = np.array(high, np.double)
 
-    def __getstate__(self):
-        d = {}
+    def __getstate__(self) -> PickleState:
+        d: PickleState = {}
         d["low"] = self.low
         d["high"] = self.high
         return d
 
-    def __reduce__(self):
+    def __reduce__(self) -> tuple[object, ...]:
         return self.__class__, (), self.__getstate__()
 
-    def __setstate__(self, d):
+    def __setstate__(self, d: PickleState) -> None:
         self.low.setfield(d["low"], np.double)
         self.high.setfield(d["high"], np.double)
 
-    def union(self, box):
+    def union(self, box: GeomBox) -> None:
         """Enlarge the box to include the given box."""
         self.low.setfield([min(a, b) for a, b in zip(self.low, box.low)], np.double)
         self.high.setfield([max(a, b) for a, b in zip(self.high, box.high)], np.double)
 
-    def intersection(self, box):
+    def intersection(self, box: GeomBox) -> None:
         """Reduce the box to intersect volume with the given box."""
         self.low.setfield([max(a, b) for a, b in zip(self.low, box.low)], np.double)
         self.high.setfield([min(a, b) for a, b in zip(self.high, box.high)], np.double)
 
-    def add_point(self, point):
+    def add_point(self, point: Vector3) -> None:
         """Enlarge the box to include the given point."""
         self.low.setfield([min(a, b) for a, b in zip(self.low, point)], np.double)
         self.high.setfield([max(a, b) for a, b in zip(self.high, point)], np.double)
 
-    def between(self, x, low, high):
+    def between(self, x: float, low: float, high: float) -> bool:
         """Return truth of low <= x <= high."""
         return bool(low <= x <= high)
 
-    def in_box(self, point):
+    def in_box(self, point: Vector3) -> bool:
         """Check whether the given point is in this box."""
         truth = (
             self.between(point[0], self.low[0], self.high[0])
@@ -227,17 +298,18 @@ class GeomBox(object):
 
         return bool(truth)
 
-    def _contains_points(self, x, y, z):
-        return (
+    def _contains_points(self, x: RealArray, y: RealArray, z: RealArray) -> BoolArray:
+        return cast(
+            BoolArray,
             (self.low[0] <= x)
             & (x <= self.high[0])
             & (self.low[1] <= y)
             & (y <= self.high[1])
             & (self.low[2] <= z)
-            & (z <= self.high[2])
+            & (z <= self.high[2]),
         )
 
-    def overlap(self, box):
+    def overlap(self, box: GeomBox) -> bool:
         """Check whether the given box intersect with the box."""
         truth = (
             (
@@ -259,7 +331,7 @@ class GeomBox(object):
 
         return bool(truth)
 
-    def divide(self, axis, x):
+    def divide(self, axis: int, x: float) -> tuple[GeomBox, GeomBox]:
         """Split this box at one coordinate and return the adjacent boxes."""
 
         high1 = list(self.high)
@@ -270,13 +342,13 @@ class GeomBox(object):
 
         return GeomBox(self.low, high1), GeomBox(low2, self.high)
 
-    def display_info(self, indent=0):
+    def display_info(self, indent: int = 0) -> None:
         """Print this box's lower and upper coordinates."""
 
         print(" " * indent, "geom box:", end=" ")
         print("low:", self.low, "high:", self.high)
 
-    def __str__(self):
+    def __str__(self) -> str:
         return "low: " + self.low.__str__() + " high: " + self.high.__str__()
 
 
@@ -292,14 +364,22 @@ class GeomBoxNode(object):
 
     """
 
-    def __init__(self, box, geom_list, depth):
+    box: GeomBox
+    t1: GeomBoxNode | None
+    t2: GeomBoxNode | None
+    geom_list: tuple[GeometricObject, ...]
+    depth: int
+
+    def __init__(
+        self, box: GeomBox, geom_list: Sequence[GeometricObject], depth: int
+    ) -> None:
         self.box = box
         self.t1, self.t2 = None, None
         self.geom_list = tuple(geom_list)
         self.depth = depth
 
-    def __getstate__(self):
-        d = {}
+    def __getstate__(self) -> PickleState:
+        d: PickleState = {}
         d["box"] = self.box
         d["t1"] = self.t1
         d["t2"] = self.t2
@@ -307,10 +387,10 @@ class GeomBoxNode(object):
         d["depth"] = self.depth
         return d
 
-    def __reduce__(self):
+    def __reduce__(self) -> tuple[object, ...]:
         return self.__class__, (None, (), 0), self.__getstate__()
 
-    def __setstate__(self, d):
+    def __setstate__(self, d: PickleState) -> None:
         self.box = deepcopy(d["box"])
         self.t1 = deepcopy(d["t1"])
         self.t2 = deepcopy(d["t2"])
@@ -322,15 +402,15 @@ class GeomBoxNode(object):
 class GeometryMap:
     """A bounded, backend-neutral material map for one rectilinear tile."""
 
-    material_ids: np.ndarray
-    underlying_ids: np.ndarray
-    geometries: tuple
-    shape: tuple
+    material_ids: NDArray[np.int32]
+    underlying_ids: NDArray[np.int32]
+    geometries: tuple[GeometricObject, ...]
+    shape: tuple[int, int, int]
     start: int
     stop: int
-    component: object = None
+    component: object | None = None
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if (
             not isinstance(self.geometries, tuple)
             or not self.geometries
@@ -367,7 +447,7 @@ class GeometryMap:
             raise ValueError("geometry-map region ID is outside the geometry table")
 
     @property
-    def materials(self):
+    def materials(self) -> tuple[Material, ...]:
         """Return the stable region-ID-to-material table."""
         return tuple(geometry.material for geometry in self.geometries)
 
@@ -383,23 +463,27 @@ class GeomBoxTree(object):
 
     """
 
-    def __init__(self, geom_list):
+    root: GeomBoxNode
+
+    def __init__(self, geom_list: Sequence[GeometricObject]) -> None:
         box = GeomBox((-np.inf, -np.inf, -np.inf), (np.inf, np.inf, np.inf))
         self.root = GeomBoxNode(box, geom_list, 0)
         self.branch_out(self.root)
 
-    def __getstate__(self):
-        d = {}
+    def __getstate__(self) -> PickleState:
+        d: PickleState = {}
         d["root"] = self.root
         return d
 
-    def __reduce__(self):
+    def __reduce__(self) -> tuple[object, ...]:
         return self.__class__, ((),), self.__getstate__()
 
-    def __setstate__(self, d):
+    def __setstate__(self, d: PickleState) -> None:
         self.root = deepcopy(d["root"])
 
-    def find_best_partition(self, node, divide_axis):
+    def find_best_partition(
+        self, node: GeomBoxNode, divide_axis: int
+    ) -> tuple[float | None, int, int]:
         """Find the most even object partition along one axis.
 
         Find the best place to "cut" along the axis divide_axis in
@@ -417,26 +501,30 @@ class GeomBoxTree(object):
         # either just above the high end of an object or just below the low
         # end of an object.
 
-        for i in node.geom_list:
-            curPartition = i.box.high[divide_axis] + small
+        for geometry in node.geom_list:
+            geometry_box = cast(GeomBox, geometry.box)
+            curPartition = geometry_box.high[divide_axis] + small
             curN1 = curN2 = 0
-            for j in node.geom_list:
-                if j.box.low[divide_axis] <= curPartition:
+            for candidate in node.geom_list:
+                candidate_box = cast(GeomBox, candidate.box)
+                if candidate_box.low[divide_axis] <= curPartition:
                     curN1 += 1
-                if j.box.high[divide_axis] >= curPartition:
+                if candidate_box.high[divide_axis] >= curPartition:
                     curN2 += 1
             if max(curN1, curN2) < max(n1, n2):
                 best_partition = curPartition
                 n1 = curN1
                 n2 = curN2
 
-        for i in node.geom_list:
-            curPartition = i.box.low[divide_axis] - small
+        for geometry in node.geom_list:
+            geometry_box = cast(GeomBox, geometry.box)
+            curPartition = geometry_box.low[divide_axis] - small
             curN1 = curN2 = 0
-            for j in node.geom_list:
-                if j.box.low[divide_axis] <= curPartition:
+            for candidate in node.geom_list:
+                candidate_box = cast(GeomBox, candidate.box)
+                if candidate_box.low[divide_axis] <= curPartition:
                     curN1 += 1
-                if j.box.high[divide_axis] >= curPartition:
+                if candidate_box.high[divide_axis] >= curPartition:
                     curN2 += 1
             if max(curN1, curN2) < max(n1, n2):
                 best_partition = curPartition
@@ -445,13 +533,15 @@ class GeomBoxTree(object):
 
         return best_partition, n1, n2
 
-    def divide_geom_box_tree(self, node):
+    def divide_geom_box_tree(
+        self, node: GeomBoxNode
+    ) -> tuple[GeomBoxNode | None, GeomBoxNode | None]:
         """Divide box in two, along the axis that maximally partitions the boxes."""
         # Try partitioning along each dimension, counting the
         # number of objects in the partitioned boxes and finding
         # the best partition.
         best = 0
-        division = []
+        division: list[tuple[float | None, int, int]] = []
         for i in range(3):
             partition, n1, n2 = self.find_best_partition(node, i)
             division.append((partition, n1, n2))
@@ -465,30 +555,32 @@ class GeomBoxTree(object):
         if division[best][0] is None:
             return None, None
 
-        box1, box2 = node.box.divide(best, division[best][0])
+        partition = cast(float, division[best][0])
+        box1, box2 = node.box.divide(best, partition)
         b1GeomList = []
         b2GeomList = []
 
-        for i in node.geom_list:
-            if box1.overlap(i.box):
-                b1GeomList.append(i)
-            if box2.overlap(i.box):
-                b2GeomList.append(i)
+        for geometry in node.geom_list:
+            geometry_box = cast(GeomBox, geometry.box)
+            if box1.overlap(geometry_box):
+                b1GeomList.append(geometry)
+            if box2.overlap(geometry_box):
+                b2GeomList.append(geometry)
 
         return GeomBoxNode(box1, b1GeomList, node.depth + 1), GeomBoxNode(
             box2, b2GeomList, node.depth + 1
         )
 
-    def branch_out(self, node):
+    def branch_out(self, node: GeomBoxNode) -> None:
         """Recursively split a geometry-tree node while partitions improve."""
 
         node.t1, node.t2 = self.divide_geom_box_tree(node)
 
-        if node.t1 or node.t2:
+        if node.t1 is not None and node.t2 is not None:
             self.branch_out(node.t1)
             self.branch_out(node.t2)
 
-    def tree_search(self, node, point):
+    def tree_search(self, node: GeomBoxNode, point: Vector3) -> GeomBoxNode | None:
         """Return the leaf node containing a physical point."""
 
         if node.box.in_box(point) == False:
@@ -503,10 +595,14 @@ class GeomBoxTree(object):
                 if node.t2.box.in_box(point):
                     return self.tree_search(node.t2, point)
 
-    def object_of_point(self, point):
+        return None
+
+    def object_of_point(
+        self, point: Vector3
+    ) -> tuple[GeometricObject, GeometricObject | None]:
         """Return the topmost object and underlying object at a point."""
 
-        leaf = self.tree_search(self.root, point)
+        leaf = cast(GeomBoxNode, self.tree_search(self.root, point))
         geom_obj, idx = find_object(point, leaf.geom_list)
 
         # eps_inf and mu_inf of compound material
@@ -519,7 +615,7 @@ class GeomBoxTree(object):
 
         return geom_obj, underneath_obj
 
-    def material_of_point(self, point):
+    def material_of_point(self, point: Vector3) -> tuple[Material, Material | None]:
         """Return the topmost material and underlying material at a point."""
 
         geom_obj, underneath_obj = self.object_of_point(point)
@@ -533,12 +629,12 @@ class GeomBoxTree(object):
 
     def material_of_grid(
         self,
-        x_axis,
-        y_axis,
-        z_axis,
-        start=0,
-        stop=None,
-    ):
+        x_axis: RealArray,
+        y_axis: RealArray,
+        z_axis: RealArray,
+        start: int = 0,
+        stop: int | None = None,
+    ) -> tuple[list[Material], list[Material | None]]:
         """Return materials for a bounded C-order tile of a rectilinear grid."""
         geometry_map = self.lower_grid(x_axis, y_axis, z_axis, start, stop)
         geometries = geometry_map.geometries
@@ -551,14 +647,14 @@ class GeomBoxTree(object):
 
     def lower_grid(
         self,
-        x_axis,
-        y_axis,
-        z_axis,
-        start=0,
-        stop=None,
+        x_axis: RealArray,
+        y_axis: RealArray,
+        z_axis: RealArray,
+        start: int = 0,
+        stop: int | None = None,
         *,
-        component=None,
-    ):
+        component: object | None = None,
+    ) -> GeometryMap:
         """Lower a bounded C-order tile to integer geometry identifiers."""
         axes = x_axis, y_axis, z_axis
         for axis in axes:
@@ -636,20 +732,27 @@ class GeomBoxTree(object):
         )
 
     @staticmethod
-    def _uses_vectorized_predicate(geometry):
+    def _uses_vectorized_predicate(geometry: GeometricObject) -> bool:
         geometry_type = type(geometry)
         return geometry_type in _BUILTIN_VECTOR_GEOMETRY_TYPES or (
             getattr(geometry_type, "_gmes_vectorized_geometry", False) is True
         )
 
-    def supports_bulk_lowering(self):
+    def supports_bulk_lowering(self) -> bool:
         """Return whether every geometry opted into bounded array predicates."""
         return all(
             self._uses_vectorized_predicate(geometry)
             for geometry in self.root.geom_list
         )
 
-    def _leaf_tiles(self, node, x, y, z, positions):
+    def _leaf_tiles(
+        self,
+        node: GeomBoxNode,
+        x: RealArray,
+        y: RealArray,
+        z: RealArray,
+        positions: NDArray[np.intp],
+    ) -> Iterator[tuple[GeomBoxNode, NDArray[np.intp]]]:
         if not positions.size:
             return
         if node.t1 is None or node.t2 is None:
@@ -668,7 +771,7 @@ class GeomBoxTree(object):
         )
         yield from self._leaf_tiles(node.t2, x, y, z, remaining[in_second])
 
-    def display_info(self, node=None, indent=0):
+    def display_info(self, node: GeomBoxNode | None = None, indent: int = 0) -> None:
         """Print the geometry tree recursively from a node."""
 
         if not node:
@@ -718,7 +821,11 @@ class GeometricObject(object):
     # The opt-in is inherited by parameter-only subclasses.
     _gmes_vectorized_geometry = False
 
-    def __init__(self, material):
+    center: RealArray
+    box: GeomBox | None
+    _material: Material | None
+
+    def __init__(self, material: Material | None) -> None:
         """Initialize a geometric object with its filling material.
 
         Args:
@@ -728,37 +835,37 @@ class GeometricObject(object):
         self.box = None
 
     @property
-    def material(self):
+    def material(self) -> Material:
         """Return the material filling this object."""
 
-        return self._material
+        return cast(Material, self._material)
 
     @material.setter
-    def material(self, value):
+    def material(self, value: Material | None) -> None:
         if value is not None and not isinstance(value, Material):
             raise TypeError("material must be a Material instance")
         self._material = value
 
-    def __getstate__(self):
-        d = {}
+    def __getstate__(self) -> PickleState:
+        d: PickleState = {}
         d["material"] = self.material
         d["box"] = self.box
         return d
 
-    def __reduce__(self):
+    def __reduce__(self) -> tuple[object, ...]:
         return self.__class__, (None,), self.__getstate__()
 
-    def __setstate__(self, d):
+    def __setstate__(self, d: PickleState) -> None:
         self.material = deepcopy(d["material"])
         self.box = deepcopy(d["box"])
 
-    def init(self, space):
+    def init(self, space: _MaterialSpace) -> None:
         """Initialize the material and cache this object's bounding box."""
 
         self.material.init(space)
         self.box = self.geom_box()
 
-    def geom_box(self):
+    def geom_box(self) -> GeomBox:
         """Return a bounding box enclosing this geometric object.
 
         The derived classes should override this method.
@@ -766,7 +873,7 @@ class GeometricObject(object):
         """
         raise NotImplementedError
 
-    def in_object(self, point):
+    def in_object(self, point: Vector3) -> bool:
         """Return whether or not the point is inside.
 
         Return whether or not the point (in the lattice basis) is
@@ -777,14 +884,14 @@ class GeometricObject(object):
         """
         raise NotImplementedError
 
-    def _contains_points(self, x, y, z):
+    def _contains_points(self, x: RealArray, y: RealArray, z: RealArray) -> BoolArray:
         return np.fromiter(
             (self.in_object(point) for point in zip(x, y, z, strict=True)),
             dtype=np.bool_,
             count=len(x),
         )
 
-    def display_info(self, indent=0):
+    def display_info(self, indent: int = 0) -> None:
         """Display some information about this geometric object."""
         print(" " * indent, "geometric object")
         print(" " * indent, "center:", self.center)
@@ -795,22 +902,22 @@ class GeometricObject(object):
 class DefaultMedium(GeometricObject):
     """A geometric object expanding the whole space."""
 
-    def __init__(self, material):
+    def __init__(self, material: Material | None) -> None:
         GeometricObject.__init__(self, material)
 
-    def in_object(self, point):
+    def in_object(self, point: Vector3) -> bool:
         """Return whether a point lies in the default infinite medium."""
 
-        return self.box.in_box(point)
+        return cast(GeomBox, self.box).in_box(point)
 
-    def _contains_points(self, x, y, z):
-        return self.box._contains_points(x, y, z)
+    def _contains_points(self, x: RealArray, y: RealArray, z: RealArray) -> BoolArray:
+        return cast(GeomBox, self.box)._contains_points(x, y, z)
 
-    def geom_box(self):
+    def geom_box(self) -> GeomBox:
         """Return an unbounded box spanning the simulation space."""
         return GeomBox((-np.inf, -np.inf, -np.inf), (np.inf, np.inf, np.inf))
 
-    def display_info(self, indent=0):
+    def display_info(self, indent: int = 0) -> None:
         """Print the default-medium material summary."""
         print(" " * indent, "default medium")
         if self.material:
@@ -830,13 +937,13 @@ class Cone(GeometricObject):
 
     def __init__(
         self,
-        material,
-        center=(0, 0, 0),
-        radius2=0,
-        axis=(1, 0, 0),
-        radius=1,
-        height=1,
-    ):
+        material: Material,
+        center: Vector3 = (0, 0, 0),
+        radius2: float = 0,
+        axis: Vector3 = (1, 0, 0),
+        radius: float = 1,
+        height: float = 1,
+    ) -> None:
         """Initialize a cone or truncated cone.
 
         Keyword arguments:
@@ -863,7 +970,7 @@ class Cone(GeometricObject):
         self.axis = np.array(axis, np.double) / norm(axis)
         self.height = float(height)
 
-    def __getstate__(self):
+    def __getstate__(self) -> PickleState:
         d = GeometricObject.__getstate__(self)
         d["radius"] = self.radius
         d["radius2"] = self.radius2
@@ -872,7 +979,7 @@ class Cone(GeometricObject):
         d["axis"] = self.axis
         return d
 
-    def __setstate__(self, d):
+    def __setstate__(self, d: PickleState) -> None:
         GeometricObject.__setstate__(self, d)
         self.radius = d["radius"]
         self.radius2 = d["radius2"]
@@ -880,7 +987,7 @@ class Cone(GeometricObject):
         self.center.setfield(d["center"], np.double)
         self.axis.setfield(d["axis"], np.double)
 
-    def in_object(self, point):
+    def in_object(self, point: Vector3) -> bool:
         """Check whether the given point is in this Cone."""
         rx = point[0] - self.center[0]
         ry = point[1] - self.center[1]
@@ -901,14 +1008,14 @@ class Cone(GeometricObject):
 
         return bool(truth)
 
-    def _contains_points(self, x, y, z):
+    def _contains_points(self, x: RealArray, y: RealArray, z: RealArray) -> BoolArray:
         rx = x - self.center[0]
         ry = y - self.center[1]
         rz = z - self.center[2]
         projection = self.axis[0] * rx + self.axis[1] * ry + self.axis[2] * rz
         axial = np.abs(projection) <= 0.5 * self.height
         if self.radius2 == self.radius == np.inf:
-            return axial
+            return cast(BoolArray, axial)
 
         radius = self.radius + (projection / self.height + 0.5) * (
             self.radius2 - self.radius
@@ -916,9 +1023,11 @@ class Cone(GeometricObject):
         perpendicular_squared = np.maximum(
             0, rx * rx + ry * ry + rz * rz - projection * projection
         )
-        return axial & (np.sqrt(perpendicular_squared) <= np.abs(radius))
+        return cast(
+            BoolArray, axial & (np.sqrt(perpendicular_squared) <= np.abs(radius))
+        )
 
-    def display_info(self, indent=0):
+    def display_info(self, indent: int = 0) -> None:
         """Print this cone's geometry and material."""
         print(" " * indent, "cone")
         print(" " * indent, end=" ")
@@ -930,7 +1039,7 @@ class Cone(GeometricObject):
         if self.material:
             self.material.display_info(indent + 5)
 
-    def geom_box(self):
+    def geom_box(self) -> GeomBox:
         """Return an axis-aligned box enclosing the cone."""
         h = 0.5 * self.height
 
@@ -960,7 +1069,14 @@ class Cone(GeometricObject):
 class Cylinder(Cone):
     """Form a cylinder."""
 
-    def __init__(self, material, center=(0, 0, 0), axis=(0, 0, 1), radius=1, height=1):
+    def __init__(
+        self,
+        material: Material,
+        center: Vector3 = (0, 0, 0),
+        axis: Vector3 = (0, 0, 1),
+        radius: float = 1,
+        height: float = 1,
+    ) -> None:
         """Initialize a finite cylinder.
 
         Keyword arguments:
@@ -976,7 +1092,7 @@ class Cylinder(Cone):
         """
         Cone.__init__(self, material, center, radius, axis, radius, height)
 
-    def display_info(self, indent=0):
+    def display_info(self, indent: int = 0) -> None:
         """Display information of this cylinder."""
         print(" " * indent, "cylinder")
         print(" " * indent, end=" ")
@@ -993,13 +1109,13 @@ class Block(GeometricObject):
 
     def __init__(
         self,
-        material,
-        center=(0, 0, 0),
-        e1=(1, 0, 0),
-        e2=(0, 1, 0),
-        e3=(0, 0, 1),
-        size=(1, 1, 1),
-    ):
+        material: Material,
+        center: Vector3 = (0, 0, 0),
+        e1: Vector3 = (1, 0, 0),
+        e2: Vector3 = (0, 1, 0),
+        e3: Vector3 = (0, 0, 1),
+        size: Vector3 = (1, 1, 1),
+    ) -> None:
         """Initialize a parallelepiped from its center, axes, and edge lengths.
 
         Keyword arguments:
@@ -1023,7 +1139,7 @@ class Block(GeometricObject):
         basis = np.column_stack((self.e1, self.e2, self.e3))
         self.projection_matrix = np.linalg.inv(basis)
 
-    def __getstate__(self):
+    def __getstate__(self) -> PickleState:
         d = GeometricObject.__getstate__(self)
         d["center"] = self.center
         d["e1"] = self.e1
@@ -1033,7 +1149,7 @@ class Block(GeometricObject):
         d["pm"] = self.projection_matrix
         return d
 
-    def __setstate__(self, d):
+    def __setstate__(self, d: PickleState) -> None:
         GeometricObject.__setstate__(self, d)
         self.center.setfield(d["center"], np.double)
         self.e1.setfield(d["e1"], np.double)
@@ -1043,7 +1159,7 @@ class Block(GeometricObject):
         basis = np.column_stack((self.e1, self.e2, self.e3))
         self.projection_matrix.setfield(np.linalg.inv(basis), np.double)
 
-    def in_object(self, point):
+    def in_object(self, point: Vector3) -> bool:
         """Check whether the given point is in this block."""
         rx = point[0] - self.center[0]
         ry = point[1] - self.center[1]
@@ -1071,7 +1187,9 @@ class Block(GeometricObject):
 
         return bool(truth)
 
-    def _project_points(self, x, y, z):
+    def _project_points(
+        self, x: RealArray, y: RealArray, z: RealArray
+    ) -> tuple[RealArray, RealArray, RealArray]:
         rx = x - self.center[0]
         ry = y - self.center[1]
         rz = z - self.center[2]
@@ -1082,15 +1200,16 @@ class Block(GeometricObject):
             for row in range(3)
         )
 
-    def _contains_points(self, x, y, z):
+    def _contains_points(self, x: RealArray, y: RealArray, z: RealArray) -> BoolArray:
         projection = self._project_points(x, y, z)
-        return (
+        return cast(
+            BoolArray,
             (np.abs(projection[0]) <= 0.5 * self.size[0])
             & (np.abs(projection[1]) <= 0.5 * self.size[1])
-            & (np.abs(projection[2]) <= 0.5 * self.size[2])
+            & (np.abs(projection[2]) <= 0.5 * self.size[2]),
         )
 
-    def geom_box(self):
+    def geom_box(self) -> GeomBox:
         """Return a GeomBox for this block."""
         tmpBox = GeomBox(low=self.center, high=self.center)
         # enlarge the box to be big enough to contain all 8 corners
@@ -1112,7 +1231,7 @@ class Block(GeometricObject):
 
         return tmpBox
 
-    def display_info(self, indent=0):
+    def display_info(self, indent: int = 0) -> None:
         """Display information of this block."""
         print(" " * indent, "block")
         print(" " * indent, end=" ")
@@ -1128,28 +1247,28 @@ class Ellipsoid(Block):
 
     def __init__(
         self,
-        material,
-        center=(0, 0, 0),
-        e1=(1, 0, 0),
-        e2=(0, 1, 0),
-        e3=(0, 0, 1),
-        size=(1, 1, 1),
-    ):
+        material: Material,
+        center: Vector3 = (0, 0, 0),
+        e1: Vector3 = (1, 0, 0),
+        e2: Vector3 = (0, 1, 0),
+        e3: Vector3 = (0, 0, 1),
+        size: Vector3 = (1, 1, 1),
+    ) -> None:
         """Initialize an ellipsoid from its center, principal axes, and diameters."""
 
         Block.__init__(self, material, center, e1, e2, e3, size)
         self.inverse_semi_axes = 2 / np.array(size, np.double)
 
-    def __getstate__(self):
+    def __getstate__(self) -> PickleState:
         d = Block.__getstate__(self)
         d["isa"] = self.inverse_semi_axes
         return d
 
-    def __setstate__(self, d):
+    def __setstate__(self, d: PickleState) -> None:
         Block.__setstate__(self, d)
         self.inverse_semi_axes = d["isa"]
 
-    def in_object(self, point):
+    def in_object(self, point: Vector3) -> bool:
         """Check whether the given point is in this ellipsoid."""
         rx = point[0] - self.center[0]
         ry = point[1] - self.center[1]
@@ -1173,14 +1292,14 @@ class Ellipsoid(Block):
 
         return bool(truth)
 
-    def _contains_points(self, x, y, z):
+    def _contains_points(self, x: RealArray, y: RealArray, z: RealArray) -> BoolArray:
         projection = self._project_points(x, y, z)
         q0 = self.inverse_semi_axes[0] * projection[0]
         q1 = self.inverse_semi_axes[1] * projection[1]
         q2 = self.inverse_semi_axes[2] * projection[2]
-        return q0 * q0 + q1 * q1 + q2 * q2 <= 1
+        return cast(BoolArray, q0 * q0 + q1 * q1 + q2 * q2 <= 1)
 
-    def display_info(self, indent=0):
+    def display_info(self, indent: int = 0) -> None:
         """Display information of this ellipsoid."""
         print(" " * indent, "ellipsoid")
         print(" " * indent, end=" ")
@@ -1199,7 +1318,9 @@ class Sphere(GeometricObject):
 
     """
 
-    def __init__(self, material, center=(0, 0, 0), radius=1):
+    def __init__(
+        self, material: Material, center: Vector3 = (0, 0, 0), radius: float = 1
+    ) -> None:
         """Initialize a sphere.
 
         Keyword arguments:
@@ -1219,18 +1340,18 @@ class Sphere(GeometricObject):
 
         self.center = np.array(center, np.double)
 
-    def __getstate__(self):
+    def __getstate__(self) -> PickleState:
         d = GeometricObject.__getstate__(self)
         d["radius"] = self.radius
         d["center"] = self.center
         return d
 
-    def __setstate__(self, d):
+    def __setstate__(self, d: PickleState) -> None:
         GeometricObject.__setstate__(self, d)
         self.radius = d["radius"]
         self.center.setfield(d["center"], np.double)
 
-    def geom_box(self):
+    def geom_box(self) -> GeomBox:
         """Return GeomBox for the sphere."""
         box = GeomBox(low=self.center, high=self.center)
 
@@ -1239,7 +1360,7 @@ class Sphere(GeometricObject):
 
         return box
 
-    def in_object(self, point):
+    def in_object(self, point: Vector3) -> bool:
         """Check whether the given point is in the sphere."""
         rx = point[0] - self.center[0]
         ry = point[1] - self.center[1]
@@ -1248,13 +1369,13 @@ class Sphere(GeometricObject):
 
         return bool(truth)
 
-    def _contains_points(self, x, y, z):
+    def _contains_points(self, x: RealArray, y: RealArray, z: RealArray) -> BoolArray:
         rx = x - self.center[0]
         ry = y - self.center[1]
         rz = z - self.center[2]
-        return rx * rx + ry * ry + rz * rz <= self.radius * self.radius
+        return cast(BoolArray, rx * rx + ry * ry + rz * rz <= self.radius * self.radius)
 
-    def display_info(self, indent=0):
+    def display_info(self, indent: int = 0) -> None:
         """Display information of the sphere."""
         print(" " * indent, "sphere")
         print(" " * indent, end=" ")
@@ -1269,17 +1390,17 @@ class Shell(GeometricObject):
 
     def __init__(
         self,
-        material,
-        center=(0, 0, 0),
-        size=None,
-        thickness=1,
-        plus_x=True,
-        minus_x=True,
-        plus_y=True,
-        minus_y=True,
-        plus_z=True,
-        minus_z=True,
-    ):
+        material: Material,
+        center: Vector3 = (0, 0, 0),
+        size: Vector3 | None = None,
+        thickness: float = 1,
+        plus_x: bool = True,
+        minus_x: bool = True,
+        plus_y: bool = True,
+        minus_y: bool = True,
+        plus_z: bool = True,
+        minus_z: bool = True,
+    ) -> None:
         """Initialize selected faces of a rectangular boundary shell.
 
         Keyword arguments:
@@ -1308,7 +1429,7 @@ class Shell(GeometricObject):
         self.center = np.array(center, np.double)
         self.d = float(thickness)
 
-        self.box_list = []
+        self.box_list: list[GeomBox] = []
 
         self.minus_x, self.plus_x = minus_x, plus_x
         self.minus_y, self.plus_y = minus_y, plus_y
@@ -1323,7 +1444,7 @@ class Shell(GeometricObject):
 
         # do someting for the PML derived class?
 
-    def __getstate__(self):
+    def __getstate__(self) -> PickleState:
         d = GeometricObject.__getstate__(self)
         d["center"] = self.center
         d["half_size"] = self.half_size
@@ -1338,7 +1459,7 @@ class Shell(GeometricObject):
         d["boundary"] = self.boundary
         return d
 
-    def __setstate__(self, d):
+    def __setstate__(self, d: PickleState) -> None:
         GeometricObject.__setstate__(self, d)
         self.center.setfield(d["center"], np.double)
         self.half_size.setfield(d["half_size"], np.double)
@@ -1352,7 +1473,7 @@ class Shell(GeometricObject):
         self.plus_z = d["plus_z"]
         self.boundary = d["boundary"]
 
-    def init(self, space):
+    def init(self, space: _MaterialSpace) -> None:
         if self.boundary:
             self.half_size.setfield(space.half_size, np.double)
 
@@ -1372,6 +1493,8 @@ class Shell(GeometricObject):
             self.plus_z = False
             self.minus_z = False
 
+        low: Vector3
+        high: Vector3
         if self.plus_x:
             low = (
                 self.center[0] + self.half_size[0] - self.d,
@@ -1429,22 +1552,22 @@ class Shell(GeometricObject):
         self.material.init(space, (self.center, self.half_size, self.d))
         self.box = self.geom_box()
 
-    def in_object(self, point):
+    def in_object(self, point: Vector3) -> bool:
         for box in self.box_list:
             if box.in_box(point):
                 return True
         return False
 
-    def _contains_points(self, x, y, z):
+    def _contains_points(self, x: RealArray, y: RealArray, z: RealArray) -> BoolArray:
         matches = np.zeros(len(x), dtype=np.bool_)
         for box in self.box_list:
             matches |= box._contains_points(x, y, z)
         return matches
 
-    def geom_box(self):
+    def geom_box(self) -> GeomBox:
         return GeomBox(self.center - self.half_size, self.center + self.half_size)
 
-    def display_info(self, indent=0):
+    def display_info(self, indent: int = 0) -> None:
         print(" " * indent, "shell")
         print(" " * indent, "center:", self.center)
         print(" " * indent, "size:", 2 * self.half_size)

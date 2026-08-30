@@ -1,6 +1,7 @@
 """Device-resident Maxwell--Bloch updates for Torch DM2 material buckets."""
 
 from dataclasses import dataclass
+from typing import Any
 
 import torch
 from torch import nn
@@ -10,7 +11,7 @@ DM2_ITERATIONS_PER_CHUNK = 10
 _DM2_INVALID_CODE_OFFSET = DM2_MAX_ITERATIONS + 1
 
 
-def _packed_loop_layout(cells, transitions):
+def _packed_loop_layout(cells: Any, transitions: Any) -> Any:
     sizes = (cells, 3 * cells * transitions, cells)
     offsets = []
     offset = 0
@@ -36,7 +37,47 @@ class Dm2BucketMetadata:
 class TorchDm2BucketState(nn.Module):
     """Contiguous mutable state and fixed scratch for one DM2 bucket."""
 
-    def __init__(self, metadata, *, status, iterations, device, dtype):
+    metadata: Dm2BucketMetadata
+    u: torch.Tensor
+    _status: torch.Tensor
+    _iterations: torch.Tensor
+    _u_new: torch.Tensor
+    _u_previous: torch.Tensor
+    _u_candidate: torch.Tensor
+    _a: torch.Tensor
+    _b: torch.Tensor
+    _transition: torch.Tensor
+    _e_old: torch.Tensor
+    _e_base: torch.Tensor
+    _e_new: torch.Tensor
+    _e_previous: torch.Tensor
+    _e_candidate: torch.Tensor
+    _source_positive: torch.Tensor
+    _source_negative: torch.Tensor
+    _c_plus: torch.Tensor
+    _c_minus: torch.Tensor
+    _d: torch.Tensor
+    _error: torch.Tensor
+    _error_candidate: torch.Tensor
+    _cell0: torch.Tensor
+    _cell1: torch.Tensor
+    _cell2: torch.Tensor
+    _active: torch.Tensor
+    _invalid: torch.Tensor
+    _mask: torch.Tensor
+    _mask2: torch.Tensor
+    _time: torch.Tensor
+    _packed_loop_state: torch.Tensor
+
+    def __init__(
+        self,
+        metadata: Dm2BucketMetadata,
+        *,
+        status: torch.Tensor,
+        iterations: torch.Tensor,
+        device: torch.device | str,
+        dtype: torch.dtype,
+    ) -> None:
         super().__init__()
         self.metadata = metadata
         self._status = status
@@ -102,22 +143,22 @@ class TorchDm2BucketState(nn.Module):
 
     def prepare(
         self,
-        field,
-        source,
-        step_count,
-        time_step,
-        targets,
-        source_positive_indices,
-        source_negative_indices,
-        rho30,
-        gamma,
-        t1,
-        t2,
-        hbar,
-        omega,
-        n_atom,
-        curl_scale,
-    ):
+        field: torch.Tensor,
+        source: torch.Tensor,
+        step_count: torch.Tensor,
+        time_step: torch.Tensor,
+        targets: torch.Tensor,
+        source_positive_indices: torch.Tensor,
+        source_negative_indices: torch.Tensor,
+        rho30: torch.Tensor,
+        gamma: torch.Tensor,
+        t1: torch.Tensor,
+        t2: torch.Tensor,
+        hbar: torch.Tensor,
+        omega: torch.Tensor,
+        n_atom: torch.Tensor,
+        curl_scale: torch.Tensor,
+    ) -> None:
         """Prepare time-dependent coefficients and initial corrector state."""
         self._time.copy_(step_count).add_(1).mul_(time_step)
         self._cell0.copy_(self._time).div_(t2).neg_().exp_()
@@ -157,7 +198,13 @@ class TorchDm2BucketState(nn.Module):
         self._status.zero_()
         self._iterations.zero_()
 
-    def iterate(self, half_dt, quarter_dt, rtol, omega):
+    def iterate(
+        self,
+        half_dt: float,
+        quarter_dt: float,
+        rtol: torch.Tensor,
+        omega: torch.Tensor,
+    ) -> None:
         """Advance one fixed device-side masked corrector chunk."""
         for _ in range(DM2_ITERATIONS_PER_CHUNK):
             self._e_previous.copy_(self._e_new)
@@ -252,26 +299,26 @@ class TorchDm2BucketState(nn.Module):
 
     def solve(
         self,
-        field,
-        source,
-        step_count,
-        time_step,
-        targets,
-        source_positive_indices,
-        source_negative_indices,
-        rho30,
-        gamma,
-        t1,
-        t2,
-        hbar,
-        omega,
-        n_atom,
-        curl_scale,
-        half_dt,
-        quarter_dt,
-        rtol,
-        repetitions,
-    ):
+        field: torch.Tensor,
+        source: torch.Tensor,
+        step_count: torch.Tensor,
+        time_step: torch.Tensor,
+        targets: torch.Tensor,
+        source_positive_indices: torch.Tensor,
+        source_negative_indices: torch.Tensor,
+        rho30: torch.Tensor,
+        gamma: torch.Tensor,
+        t1: torch.Tensor,
+        t2: torch.Tensor,
+        hbar: torch.Tensor,
+        omega: torch.Tensor,
+        n_atom: torch.Tensor,
+        curl_scale: torch.Tensor,
+        half_dt: float,
+        quarter_dt: float,
+        rtol: torch.Tensor,
+        repetitions: int,
+    ) -> None:
         """Run all bounded corrector chunks in one device-side control-flow graph."""
         time = (step_count.to(dtype=time_step.dtype) + 1) * time_step
         decay = torch.exp(-(time / t2))
@@ -306,26 +353,26 @@ class TorchDm2BucketState(nn.Module):
         u_old = self.u.clone()
 
         def condition(
-            iteration,
-            e_new,
-            u_new,
-            active,
-            invalid,
-            error,
-            iterations,
-        ):
+            iteration: Any,
+            e_new: Any,
+            u_new: Any,
+            active: Any,
+            invalid: Any,
+            error: Any,
+            iterations: Any,
+        ) -> Any:
             del e_new, u_new, invalid, error, iterations
             return torch.logical_and(iteration < repetitions, torch.any(active))
 
         def body(
-            iteration,
-            e_new,
-            u_new,
-            active,
-            invalid,
-            error,
-            iterations,
-        ):
+            iteration: Any,
+            e_new: Any,
+            u_new: Any,
+            active: Any,
+            invalid: Any,
+            error: Any,
+            iterations: Any,
+        ) -> Any:
             e_previous = e_new
             u_previous = u_new
 
@@ -419,7 +466,9 @@ class TorchDm2BucketState(nn.Module):
             invalid,
             error,
             iterations,
-        ) = torch.while_loop(condition, body, initial)
+        ) = torch.while_loop(
+            condition, body, initial
+        )  # type: ignore[no-untyped-call]  # Torch while_loop lacks a typed callable signature.
         del error
         status = torch.zeros_like(self._status)
         status = torch.where(invalid, 1, status)
@@ -436,33 +485,33 @@ class TorchDm2BucketState(nn.Module):
 
     def solve_packed_cpu(
         self,
-        field,
-        source,
-        step_count,
-        time_step,
-        targets,
-        source_positive_indices,
-        source_negative_indices,
-        rho30,
-        gamma,
-        t1,
-        t2,
-        hbar,
-        omega,
-        n_atom,
-        curl_scale,
-        half_dt,
-        quarter_dt,
-        rtol,
-        repetitions,
-    ):
+        field: torch.Tensor,
+        source: torch.Tensor,
+        step_count: torch.Tensor,
+        time_step: torch.Tensor,
+        targets: torch.Tensor,
+        source_positive_indices: torch.Tensor,
+        source_negative_indices: torch.Tensor,
+        rho30: torch.Tensor,
+        gamma: torch.Tensor,
+        t1: torch.Tensor,
+        t2: torch.Tensor,
+        hbar: torch.Tensor,
+        omega: torch.Tensor,
+        n_atom: torch.Tensor,
+        curl_scale: torch.Tensor,
+        half_dt: float,
+        quarter_dt: float,
+        rtol: torch.Tensor,
+        repetitions: int,
+    ) -> None:
         """Run the CPU corrector with one exact-size packed functional carry."""
         cells = self.metadata.target_count
         transitions = self.metadata.transition_count
         offsets, sizes, _total = _packed_loop_layout(cells, transitions)
         packed = self._packed_loop_state
 
-        def views(value):
+        def views(value: Any) -> Any:
             e_new, u_new, code = tuple(
                 value.narrow(0, offset, size) for offset, size in zip(offsets, sizes)
             )
@@ -513,12 +562,12 @@ class TorchDm2BucketState(nn.Module):
             )
         )
 
-        def condition(value):
+        def condition(value: Any) -> Any:
             code = value.narrow(0, offsets[2], sizes[2])
             active = torch.logical_and(code >= 0, code < repetitions)
             return torch.any(active)
 
-        def body(value):
+        def body(value: Any) -> Any:
             e_new, u_new, code = views(value)
             active = torch.logical_and(code >= 0, code < repetitions)
             e_previous = e_new
@@ -604,7 +653,7 @@ class TorchDm2BucketState(nn.Module):
                 ),
             )
 
-        (result,) = torch.while_loop(condition, body, (packed,))
+        (result,) = torch.while_loop(condition, body, (packed,))  # type: ignore[no-untyped-call]  # Torch while_loop lacks a typed callable signature.
         packed.copy_(result)
         e_new, u_new, code = views(result)
         nonconverged = code >= repetitions
@@ -630,7 +679,7 @@ class TorchDm2BucketState(nn.Module):
         self.u.copy_(committed_u)
         self._iterations.copy_(iterations.to(dtype=self._iterations.dtype))
 
-    def finalize(self, field, targets):
+    def finalize(self, field: torch.Tensor, targets: torch.Tensor) -> None:
         """Commit converged targets and retain failed targets' prior state."""
         flat_field = field.reshape(-1)
         self._status.masked_fill_(self._invalid, 1)

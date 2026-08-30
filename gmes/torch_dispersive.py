@@ -1,12 +1,43 @@
 """Device-resident exact-width tensor buckets for linear dispersive media."""
 
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from typing import Any, Protocol
 
 import numpy as np
 import torch
+from torch import nn
+
+from .torch_plan import ComponentPlan, MaterialBucketPlan
 
 DISPERSIVE_MODELS = frozenset(("drude", "lorentz", "dcp-ade", "dcp-plrc", "dcp-rc"))
 DISPERSIVE_GROUPING_SCOPES = ("combined", "two-level", "dcp-convolution")
+
+
+class _DispersiveState(Protocol):
+    """Mutable tensor state required by dispersive bucket updates."""
+
+    paired_real: bool
+
+    def field(self, component: str) -> torch.Tensor:
+        """Return a live component tensor."""
+
+    def register_buffer(
+        self, name: str, tensor: torch.Tensor, persistent: bool = True
+    ) -> None:
+        """Register device state without changing module ownership."""
+
+
+class _DispersivePlan(Protocol):
+    """Read-only plan surface used to construct an execution overlay."""
+
+    @property
+    def components(self) -> Mapping[str, ComponentPlan]:
+        """Return component plans keyed by Yee component name."""
+
+    @property
+    def dr(self) -> tuple[float, float, float]:
+        """Return grid spacings in Cartesian axis order."""
 
 
 @dataclass(frozen=True)
@@ -30,7 +61,7 @@ class DispersiveSpan:
     start: int
     stop: int
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if self.start < 0 or self.stop - self.start != self.descriptor.target_count:
             raise ValueError("dispersive span does not match its logical bucket")
 
@@ -45,9 +76,9 @@ class DispersiveExecutionGroup:
     pole_count: int
     point_count: int
     target_count: int
-    spans: tuple
+    spans: tuple[DispersiveSpan, ...]
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         offset = 0
         for span in self.spans:
             descriptor = span.descriptor
@@ -63,7 +94,7 @@ class DispersiveExecutionGroup:
             raise ValueError("dispersive group must contain exactly two full spans")
 
 
-def _group_recurrence(descriptor):
+def _group_recurrence(descriptor: DispersiveBucket) -> str | None:
     if descriptor.model in {"drude", "lorentz"}:
         return "two-level"
     if descriptor.model in {"dcp-plrc", "dcp-rc"}:
@@ -71,7 +102,9 @@ def _group_recurrence(descriptor):
     return None
 
 
-def _matching_pair(first, second, scope):
+def _matching_pair(
+    first: DispersiveBucket, second: DispersiveBucket, scope: str
+) -> str | None:
     recurrence = _group_recurrence(first)
     if recurrence is None or recurrence != _group_recurrence(second):
         return None
@@ -104,8 +137,15 @@ class DispersiveExecutionOverlay(torch.nn.Module):
     )
 
     def __init__(
-        self, plan, descriptors, *, paired_real, dtype, device, scope="combined"
-    ):
+        self,
+        plan: _DispersivePlan,
+        descriptors: Sequence[DispersiveBucket],
+        *,
+        paired_real: bool,
+        dtype: torch.dtype,
+        device: torch.device | str,
+        scope: str = "combined",
+    ) -> None:
         super().__init__()
         device = torch.device(device)
         if device.type != "cpu":
@@ -113,9 +153,9 @@ class DispersiveExecutionOverlay(torch.nn.Module):
         if scope not in DISPERSIVE_GROUPING_SCOPES:
             raise ValueError(f"unsupported dispersive grouping scope: {scope!r}")
 
-        entries = []
-        groups = []
-        spans_by_prefix = {}
+        entries: list[DispersiveBucket | DispersiveExecutionGroup] = []
+        groups: list[DispersiveExecutionGroup] = []
+        spans_by_prefix: dict[str, tuple[DispersiveExecutionGroup, DispersiveSpan]] = {}
         channels = 2 if paired_real else 1
         index = 0
         while index < len(descriptors):
@@ -129,6 +169,7 @@ class DispersiveExecutionOverlay(torch.nn.Module):
                 index += 1
                 continue
 
+            assert second is not None
             descriptors_in_group = (first, second)
             first_stop = first.target_count
             target_count = first_stop + second.target_count
@@ -147,7 +188,7 @@ class DispersiveExecutionOverlay(torch.nn.Module):
                 spans=spans,
             )
 
-            def concatenate(suffix, dim):
+            def concatenate(suffix: str, dim: int) -> torch.Tensor:
                 return torch.cat(
                     tuple(
                         getattr(plan, f"{descriptor.prefix}_{suffix}")
@@ -225,7 +266,9 @@ class DispersiveExecutionOverlay(torch.nn.Module):
         self._spans_by_prefix = spans_by_prefix
         self.requires_grad_(False)
 
-    def logical_state_views(self, descriptor):
+    def logical_state_views(
+        self, descriptor: DispersiveBucket
+    ) -> tuple[tuple[str, torch.Tensor], ...] | None:
         """Return canonical persistent state views for one grouped bucket."""
         item = self._spans_by_prefix.get(descriptor.prefix)
         if item is None:
@@ -246,7 +289,9 @@ class DispersiveExecutionOverlay(torch.nn.Module):
         )
 
 
-def _canonical_state_dict_post_hook(module, state_dict, prefix, _local_metadata):
+def _canonical_state_dict_post_hook(
+    module: Any, state_dict: Any, prefix: Any, _local_metadata: Any
+) -> Any:
     """Expose grouped physical state through canonical contiguous bucket tensors."""
     for name in module._grouped_dispersive_state_names:
         key = f"{prefix}{name}"
@@ -255,21 +300,23 @@ def _canonical_state_dict_post_hook(module, state_dict, prefix, _local_metadata)
         )
 
 
-def _tensor(values, *, dtype, device):
+def _tensor(values: Any, *, dtype: Any, device: Any) -> Any:
     return torch.tensor(values, dtype=dtype, device=device).contiguous()
 
 
-def _target_rows(bucket):
+def _target_rows(bucket: Any) -> Any:
     rows = bucket.region_coefficient_indices[bucket.target_region_indices]
     return bucket.coefficient_table[rows]
 
 
-def _coefficient_columns(bucket, target_rows, names):
+def _coefficient_columns(bucket: Any, target_rows: Any, names: Any) -> Any:
     indices = {name: index for index, name in enumerate(bucket.coefficient_names)}
     return np.stack([target_rows[:, indices[name]] for name in names])
 
 
-def _real_recurrence(bucket, target_rows, stem, width, terms):
+def _real_recurrence(
+    bucket: Any, target_rows: Any, stem: Any, width: Any, terms: Any
+) -> Any:
     if width == 0:
         return np.empty((terms, 0, len(target_rows)), dtype=np.float64)
     names = tuple(
@@ -280,7 +327,9 @@ def _real_recurrence(bucket, target_rows, stem, width, terms):
     )
 
 
-def _complex_recurrence(bucket, target_rows, stem, width, terms):
+def _complex_recurrence(
+    bucket: Any, target_rows: Any, stem: Any, width: Any, terms: Any
+) -> Any:
     values = np.empty((terms, width, len(target_rows), 2), dtype=np.float64)
     indices = {name: index for index, name in enumerate(bucket.coefficient_names)}
     for term in range(terms):
@@ -294,7 +343,15 @@ def _complex_recurrence(bucket, target_rows, stem, width, terms):
     return values
 
 
-def register_plan_buffers(module, bucket, component, prefix, *, dtype, device):
+def register_plan_buffers(
+    module: nn.Module,
+    bucket: MaterialBucketPlan,
+    component: ComponentPlan,
+    prefix: str,
+    *,
+    dtype: torch.dtype,
+    device: torch.device | str,
+) -> DispersiveBucket | None:
     """Finalize one host bucket as contiguous device-side SoA tensors."""
     model = bucket.signature.model
     if model not in DISPERSIVE_MODELS:
@@ -375,19 +432,19 @@ def register_plan_buffers(module, bucket, component, prefix, *, dtype, device):
 
 
 def register_state_buffers(
-    module,
-    descriptors,
+    module: nn.Module,
+    descriptors: Sequence[DispersiveBucket],
     *,
-    paired_real,
-    dtype,
-    device,
-    execution_overlay=None,
-):
+    paired_real: bool,
+    dtype: torch.dtype,
+    device: torch.device | str,
+    execution_overlay: DispersiveExecutionOverlay | None = None,
+) -> None:
     """Allocate exact-width mutable state and fixed scratch storage."""
     channels = 2 if paired_real else 1
-    grouped_state_names = []
+    grouped_state_names: list[str] = []
 
-    def zeros(name, shape, *, persistent=True):
+    def zeros(name: str, shape: tuple[int, ...], *, persistent: bool = True) -> None:
         module.register_buffer(
             name,
             torch.zeros(shape, dtype=dtype, device=device),
@@ -415,6 +472,7 @@ def register_state_buffers(
 
         poles = descriptor.pole_count
         points = descriptor.point_count
+        point_shape: tuple[int, ...]
         if descriptor.model in {"drude", "lorentz"}:
             shape = (poles, count, channels)
             zeros(f"{prefix}_previous", shape)
@@ -440,21 +498,21 @@ def register_state_buffers(
             zeros(f"{prefix}_point_work", point_shape, persistent=False)
 
     if grouped_state_names:
-        module._grouped_dispersive_state_names = tuple(grouped_state_names)
-        module.register_state_dict_post_hook(_canonical_state_dict_post_hook)
+        setattr(module, "_grouped_dispersive_state_names", tuple(grouped_state_names))
+        module.register_state_dict_post_hook(_canonical_state_dict_post_hook)  # type: ignore[no-untyped-call]  # Torch hook registration lacks a typed callable signature.
 
 
 def _prepare_indexed_curl(
-    plan,
-    state,
-    component_name,
-    buffers,
-    prefix,
-    field_now,
-    curl,
-    gather_a,
-    gather_b,
-):
+    plan: Any,
+    state: Any,
+    component_name: Any,
+    buffers: Any,
+    prefix: Any,
+    field_now: Any,
+    curl: Any,
+    gather_a: Any,
+    gather_b: Any,
+) -> Any:
     channels = 2 if state.paired_real else 1
     field = state.field(component_name).reshape(-1, channels)
     targets = getattr(buffers, f"{prefix}_targets")
@@ -480,7 +538,7 @@ def _prepare_indexed_curl(
     return field, targets
 
 
-def _prepare_curl(plan, state, descriptor):
+def _prepare_curl(plan: Any, state: Any, descriptor: Any) -> Any:
     prefix = descriptor.prefix
     return _prepare_indexed_curl(
         plan,
@@ -496,17 +554,17 @@ def _prepare_curl(plan, state, descriptor):
 
 
 def _update_two_level_tensors(
-    a,
-    c,
-    previous,
-    current,
-    pole_work,
-    pole_delta,
-    field_now,
-    field_new,
-    curl,
-    response,
-):
+    a: Any,
+    c: Any,
+    previous: Any,
+    current: Any,
+    pole_work: Any,
+    pole_delta: Any,
+    field_now: Any,
+    field_new: Any,
+    curl: Any,
+    response: Any,
+) -> Any:
     pole_work.copy_(previous).mul_(a[0].unsqueeze(-1))
     pole_work.addcmul_(a[1].unsqueeze(-1), current)
     pole_work.addcmul_(a[2].unsqueeze(-1), field_now.unsqueeze(0))
@@ -521,14 +579,14 @@ def _update_two_level_tensors(
 
 
 def _update_two_level(
-    plan,
-    state,
-    descriptor,
-    field_now,
-    field_new,
-    curl,
-    response,
-):
+    plan: Any,
+    state: Any,
+    descriptor: Any,
+    field_now: Any,
+    field_new: Any,
+    curl: Any,
+    response: Any,
+) -> Any:
     prefix = descriptor.prefix
     _update_two_level_tensors(
         getattr(plan, f"{prefix}_a"),
@@ -545,15 +603,15 @@ def _update_two_level(
 
 
 def _update_dcp_ade(
-    plan,
-    state,
-    descriptor,
-    field_now,
-    field_new,
-    curl,
-    response,
-    combo,
-):
+    plan: Any,
+    state: Any,
+    descriptor: Any,
+    field_now: Any,
+    field_new: Any,
+    curl: Any,
+    response: Any,
+    combo: Any,
+) -> Any:
     prefix = descriptor.prefix
     a = getattr(plan, f"{prefix}_a")
     b = getattr(plan, f"{prefix}_b")
@@ -599,19 +657,19 @@ def _update_dcp_ade(
 
 
 def _update_dcp_convolution_tensors(
-    a,
-    b,
-    c,
-    pole_state,
-    point_state,
-    pole_work,
-    point_work,
-    field_now,
-    field_new,
-    curl,
-    response,
-    point_response,
-):
+    a: Any,
+    b: Any,
+    c: Any,
+    pole_state: Any,
+    point_state: Any,
+    pole_work: Any,
+    point_work: Any,
+    field_now: Any,
+    field_new: Any,
+    curl: Any,
+    response: Any,
+    point_response: Any,
+) -> Any:
     torch.sum(pole_state, dim=0, out=response)
     torch.sum(point_state[..., 0], dim=0, out=point_response)
     response.add_(point_response)
@@ -643,15 +701,15 @@ def _update_dcp_convolution_tensors(
 
 
 def _update_dcp_convolution(
-    plan,
-    state,
-    descriptor,
-    field_now,
-    field_new,
-    curl,
-    response,
-    point_response,
-):
+    plan: Any,
+    state: Any,
+    descriptor: Any,
+    field_now: Any,
+    field_new: Any,
+    curl: Any,
+    response: Any,
+    point_response: Any,
+) -> Any:
     prefix = descriptor.prefix
     _update_dcp_convolution_tensors(
         getattr(plan, f"{prefix}_a"),
@@ -670,15 +728,15 @@ def _update_dcp_convolution(
 
 
 def _update_recurrence(
-    plan,
-    state,
-    descriptor,
-    field_now,
-    field_new,
-    curl,
-    gather_a,
-    response,
-):
+    plan: Any,
+    state: Any,
+    descriptor: Any,
+    field_now: Any,
+    field_new: Any,
+    curl: Any,
+    gather_a: Any,
+    response: Any,
+) -> Any:
     if descriptor.model in {"drude", "lorentz"}:
         _update_two_level(
             plan,
@@ -713,7 +771,9 @@ def _update_recurrence(
         )
 
 
-def update_bucket(plan, state, descriptor):
+def update_bucket(
+    plan: _DispersivePlan, state: _DispersiveState, descriptor: DispersiveBucket
+) -> None:
     """Apply one exact-width bucket with unique indexed destinations."""
     field, targets = _prepare_curl(plan, state, descriptor)
     prefix = descriptor.prefix
@@ -731,7 +791,12 @@ def update_bucket(plan, state, descriptor):
     field.index_copy_(0, targets, field_new)
 
 
-def update_group(plan, state, overlay, group):
+def update_group(
+    plan: _DispersivePlan,
+    state: _DispersiveState,
+    overlay: DispersiveExecutionOverlay,
+    group: DispersiveExecutionGroup,
+) -> None:
     """Apply two exact-schema buckets through one physical recurrence."""
     prefix = group.prefix
     field_now = getattr(overlay, f"{prefix}_field_now")
@@ -782,7 +847,12 @@ def update_group(plan, state, overlay, group):
     field.index_copy_(0, targets, field_new)
 
 
-def update_execution_entry(plan, state, overlay, entry):
+def update_execution_entry(
+    plan: _DispersivePlan,
+    state: _DispersiveState,
+    overlay: DispersiveExecutionOverlay,
+    entry: DispersiveBucket | DispersiveExecutionGroup,
+) -> None:
     """Apply one canonical bucket or one exact-schema physical group."""
     if isinstance(entry, DispersiveExecutionGroup):
         update_group(plan, state, overlay, entry)

@@ -1,29 +1,30 @@
 """Two-GPU spatial decomposition and NCCL halo exchange for Torch FDTD."""
 
-from __future__ import annotations
-
 import hashlib
 import os
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import nullcontext
 from copy import deepcopy
 from dataclasses import asdict, dataclass, replace
 from datetime import timedelta
 from math import prod
 from types import MappingProxyType
+from typing import Any, Literal, Self, cast
 
 import numpy as np
 import torch
 import torch.distributed as dist
 
 from . import constant as const
-from .geometry import GeomBoxTree
+from .geometry import Cartesian, GeomBoxTree
+from .pygeom import GeometricObject
 from .torch_fdtd import (
     DistributedLaunch,
     TorchConfigurationError,
     TorchRuntimeConfig,
     TorchSimulation,
 )
-from .torch_output import TorchProbeSpec
+from .torch_output import TorchProbeSamples, TorchProbeSpec
 from .torch_plan import COMPONENTS
 
 _AXIS_NAMES = ("x", "y", "z")
@@ -66,7 +67,7 @@ class TwoGpuDecomposition:
     communication_cells: int
     source_crossings: int
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if self.axis not in (0, 1, 2):
             raise ValueError("split axis must be 0, 1, or 2")
         if len(self.global_shape) != 3 or any(value < 1 for value in self.global_shape):
@@ -75,7 +76,7 @@ class TwoGpuDecomposition:
             raise ValueError("cut must leave nonempty partitions on both ranks")
 
     @property
-    def identity(self):
+    def identity(self) -> str:
         """Return a stable hash of the partition geometry and device weights."""
 
         payload = (
@@ -86,24 +87,24 @@ class TwoGpuDecomposition:
         )
         return hashlib.sha256(repr(payload).encode()).hexdigest()
 
-    def offset(self, rank):
+    def offset(self, rank: int) -> tuple[int, int, int]:
         """Return the rank's global cell offset along the split axis."""
 
         self._validate_rank(rank)
         result = [0, 0, 0]
         if rank == 1:
             result[self.axis] = self.cut
-        return tuple(result)
+        return cast(tuple[int, int, int], tuple(result))
 
-    def local_shape(self, rank):
+    def local_shape(self, rank: int) -> tuple[int, int, int]:
         """Return the rank-local three-dimensional cell shape."""
 
         self._validate_rank(rank)
         result = list(self.global_shape)
         result[self.axis] = self.cut if rank == 0 else result[self.axis] - self.cut
-        return tuple(result)
+        return cast(tuple[int, int, int], tuple(result))
 
-    def metadata(self):
+    def metadata(self) -> dict[str, object]:
         """Return serializable decomposition metadata including its identity."""
 
         result = asdict(self)
@@ -112,7 +113,7 @@ class TwoGpuDecomposition:
         return result
 
     @staticmethod
-    def _validate_rank(rank):
+    def _validate_rank(rank: int) -> None:
         if rank not in (0, 1):
             raise ValueError("two-GPU decomposition rank must be 0 or 1")
 
@@ -120,7 +121,7 @@ class TwoGpuDecomposition:
 class _TwoRankCartesianComm:
     """Minimal Cartesian metadata used by legacy geometry/source lowering."""
 
-    def __init__(self, axis, rank):
+    def __init__(self, axis: Any, rank: Any) -> None:
         dims = [1, 1, 1]
         coords = [0, 0, 0]
         dims[axis] = 2
@@ -129,63 +130,65 @@ class _TwoRankCartesianComm:
         self._dims = tuple(dims)
         self._coords = tuple(coords)
 
-    def Get_topo(self):
+    def Get_topo(self) -> Any:
         """Return MPI-compatible Cartesian topology metadata."""
 
         return self._dims, (1, 1, 1), self._coords
 
-    def Get_size(self):
+    def Get_size(self) -> Any:
         """Return the fixed communicator size of two."""
 
         return 2
 
-    def Get_coords(self, rank):
+    def Get_coords(self, rank: Any) -> Any:
         """Return the Cartesian coordinate for a rank."""
 
         coords = [0, 0, 0]
         coords[self._dims.index(2)] = rank
         return tuple(coords)
 
-    def Get_cart_rank(self, coords):
+    def Get_cart_rank(self, coords: Any) -> Any:
         """Return the rank at a Cartesian coordinate."""
 
         return int(coords[self._dims.index(2)])
 
-    def Shift(self, direction, _disp):
+    def Shift(self, direction: Any, _disp: Any) -> Any:
         """Return source and destination ranks for a Cartesian shift."""
 
         if direction != self._dims.index(2):
             return self.rank, self.rank
         return 1 - self.rank, 1 - self.rank
 
-    def bcast(self, obj=None, root=0):
+    def bcast(self, obj: Any = None, root: Any = 0) -> Any:
         """Return the object as the local stand-in for a broadcast."""
 
         del root
         return obj
 
-    def allgather(self, obj=None):
+    def allgather(self, obj: Any = None) -> Any:
         """Return one local object for each emulated rank."""
 
         return [obj, obj]
 
 
-def rank_local_space(global_space, decomposition, rank):
+def rank_local_space(
+    global_space: Cartesian, decomposition: TwoGpuDecomposition, rank: int
+) -> Cartesian:
     """Clone a global Cartesian description into one non-replicated rank view."""
     local = deepcopy(global_space)
     local.numprocs = 2
     local.my_id = rank
-    local.my_cart_idx = np.asarray(
+    cast(Any, local).my_cart_idx = np.asarray(
         _TwoRankCartesianComm(decomposition.axis, rank).Get_coords(rank),
         dtype=np.intp,
     )
-    local.cart_comm = _TwoRankCartesianComm(decomposition.axis, rank)
+    cast(Any, local).cart_comm = _TwoRankCartesianComm(decomposition.axis, rank)
     local.my_field_size = np.asarray(decomposition.local_shape(rank), dtype=np.intp)
     local.global_field_offset = np.asarray(decomposition.offset(rank), dtype=np.intp)
     return local
 
 
-def _material_weight(material):
+def _material_weight(material: Any) -> Any:
     name = type(material).__name__.lower()
     if name.startswith("dcp"):
         return _MATERIAL_COSTS["dcp"]
@@ -195,7 +198,9 @@ def _material_weight(material):
     return 2.0
 
 
-def _axis_cost_profile(space, geom_tree, axis, *, sample_limit=32):
+def _axis_cost_profile(
+    space: Any, geom_tree: Any, axis: Any, *, sample_limit: Any = 32
+) -> Any:
     shape = tuple(int(value) for value in space.whole_field_size)
     indices = []
     for current_axis, length in enumerate(shape):
@@ -227,6 +232,7 @@ def _axis_cost_profile(space, geom_tree, axis, *, sample_limit=32):
                 [_material_weight(item.material) for item in geometries],
                 dtype=np.float64,
             )
+        assert weight_table is not None
         weights = weight_table[lowered.material_ids]
         flat = np.arange(start, stop, dtype=np.int64)
         sampled_axis_indices = np.unravel_index(flat, sampled_shape)[axis]
@@ -244,7 +250,7 @@ def _axis_cost_profile(space, geom_tree, axis, *, sample_limit=32):
     return profile
 
 
-def _source_crossings(sources, space, axis, cut):
+def _source_crossings(sources: Any, space: Any, axis: Any, cut: Any) -> Any:
     coordinate = cut * space.dr[axis] - space.half_size[axis]
     crossings = 0
     for source in sources:
@@ -259,14 +265,14 @@ def _source_crossings(sources, space, axis, cut):
 
 
 def choose_two_gpu_decomposition(
-    space,
-    geometry,
+    space: Cartesian,
+    geometry: Sequence[GeometricObject],
     *,
-    sources=(),
-    device_weights=(1.0, 1.0),
-    split_axis=None,
-    cut=None,
-):
+    sources: Sequence[object] = (),
+    device_weights: Sequence[float] = (1.0, 1.0),
+    split_axis: int | None = None,
+    cut: int | None = None,
+) -> TwoGpuDecomposition:
     """Choose a material-, source-, surface-, and device-aware two-rank cut."""
     shape = tuple(int(value) for value in space.whole_field_size)
     weights = tuple(float(value) for value in device_weights)
@@ -322,18 +328,20 @@ def choose_two_gpu_decomposition(
             "no nontrivial two-GPU Cartesian cut is available"
         )
     _, axis, selected_cut, costs, communication, crossings = best
+    global_shape = (int(shape[0]), int(shape[1]), int(shape[2]))
+    normalized_weights = (float(weights[0]), float(weights[1]))
     return TwoGpuDecomposition(
-        shape,
+        global_shape,
         axis,
         selected_cut,
         costs,
-        weights,
+        normalized_weights,
         communication,
         crossings,
     )
 
 
-def distributed_launch_from_environment():
+def distributed_launch_from_environment() -> DistributedLaunch:
     """Resolve the four torchrun rank variables without implicit defaults."""
     required = ("RANK", "WORLD_SIZE", "LOCAL_RANK", "LOCAL_WORLD_SIZE")
     missing = [name for name in required if name not in os.environ]
@@ -350,7 +358,9 @@ def distributed_launch_from_environment():
     )
 
 
-def _initialize_nccl(runtime, timeout_seconds, *, require_peer_access=False):
+def _initialize_nccl(
+    runtime: Any, timeout_seconds: Any, *, require_peer_access: Any = False
+) -> Any:
     launch = runtime.launch
     if (launch.world_size, launch.local_world_size) != (2, 2):
         raise TorchConfigurationError(
@@ -411,23 +421,23 @@ def _initialize_nccl(runtime, timeout_seconds, *, require_peer_access=False):
     return expected_device
 
 
-def _device_weight(device):
+def _device_weight(device: Any) -> Any:
     props = torch.cuda.get_device_properties(device)
     return float(props.multi_processor_count * props.max_threads_per_multi_processor)
 
 
-def _collect_device_weights(device):
+def _collect_device_weights(device: Any) -> Any:
     local = torch.tensor([_device_weight(device)], device=device, dtype=torch.float64)
     gathered = [torch.empty_like(local) for _ in range(2)]
     dist.all_gather(gathered, local)
     return tuple(float(value) for tensor in gathered for value in tensor.tolist())
 
 
-def _plane(value, axis, index):
+def _plane(value: Any, axis: Any, index: Any) -> Any:
     return value.select(axis, index)
 
 
-def _rotate_in_place(value, angle, scratch):
+def _rotate_in_place(value: Any, angle: Any, scratch: Any) -> Any:
     if angle is None or angle == 0.0:
         return
     scratch.copy_(value)
@@ -442,7 +452,18 @@ def _rotate_in_place(value, angle, scratch):
 class TorchHaloExchange:
     """Persistent CUDA halo buffers and overlapped two-rank NCCL scheduling."""
 
-    def __init__(self, simulation, decomposition, *, group=None):
+    _buffers: dict[tuple[str, str], tuple[torch.Tensor, torch.Tensor]]
+    _scratch: dict[tuple[str, str], torch.Tensor]
+    _works: list[dist.Work] | None
+    _phase: str | None
+
+    def __init__(
+        self,
+        simulation: TorchSimulation,
+        decomposition: TwoGpuDecomposition,
+        *,
+        group: dist.ProcessGroup | None = None,
+    ) -> None:
         """Allocate persistent send, receive, and phase-rotation buffers.
 
         Args:
@@ -475,7 +496,7 @@ class TorchHaloExchange:
                 if simulation.state.paired_real:
                     self._scratch[key] = torch.empty_like(template)
 
-    def buffers(self):
+    def buffers(self) -> Iterator[torch.Tensor]:
         """Yield every persistent tensor owned by the exchange."""
 
         for send, receive in self._buffers.values():
@@ -483,13 +504,13 @@ class TorchHaloExchange:
             yield receive
         yield from self._scratch.values()
 
-    def _send_index(self, phase):
+    def _send_index(self, phase: Any) -> Any:
         return -1 if phase == "magnetic" else 0
 
-    def _receive_index(self, phase):
+    def _receive_index(self, phase: Any) -> Any:
         return 0 if phase == "magnetic" else -1
 
-    def _wrap_angle(self, phase):
+    def _wrap_angle(self, phase: Any) -> Any:
         bloch = self.simulation.plan.bloch
         if bloch is None:
             return None
@@ -505,7 +526,7 @@ class TorchHaloExchange:
         )
         return direction * bloch[self.axis] * length
 
-    def begin(self, phase):
+    def begin(self, phase: Literal["magnetic", "electric"]) -> None:
         """Pack a boundary and launch nonblocking peer communication.
 
         Args:
@@ -528,7 +549,7 @@ class TorchHaloExchange:
         with context:
             prefix = "H" if phase == "magnetic" else "E"
             angle = self._wrap_angle(phase)
-            operations = []
+            operations: list[dist.P2POp] = []
             for component in _HALO_COMPONENTS[self.axis]:
                 name = prefix + component[1]
                 key = (phase, name)
@@ -551,7 +572,7 @@ class TorchHaloExchange:
             self._works = dist.batch_isend_irecv(operations)
             self._phase = phase
 
-    def finish(self, phase):
+    def finish(self, phase: Literal["magnetic", "electric"]) -> None:
         """Wait for the active exchange and apply received boundary values.
 
         Args:
@@ -598,14 +619,14 @@ class TorchHaloExchange:
             self._works = None
             self._phase = None
 
-    def _delta(self, phase, name):
+    def _delta(self, phase: Any, name: Any) -> Any:
         _, receive = self._buffers[(phase, name)]
         ghost = _plane(
             self.simulation.state.field(name), self.axis, self._receive_index(phase)
         )
         return receive - ghost
 
-    def _apply_dense_boundary_correction(self, phase):
+    def _apply_dense_boundary_correction(self, phase: Any) -> Any:
         sim = self.simulation
         state = sim.state
         plan = sim.plan
@@ -686,21 +707,21 @@ class TorchDistributedSimulation:
     def __init__(
         self,
         *,
-        space,
-        geometry,
-        runtime,
-        courant_ratio=0.99,
-        dt=None,
-        bloch=None,
-        sources=(),
-        probes=(),
-        split_axis=None,
-        cut=None,
-        timeout_seconds=120,
-        require_peer_access=False,
-        _decomposition=None,
-        _is_auxiliary=False,
-    ):
+        space: Cartesian,
+        geometry: Sequence[GeometricObject],
+        runtime: TorchRuntimeConfig,
+        courant_ratio: float = 0.99,
+        dt: float | None = None,
+        bloch: Sequence[float] | None = None,
+        sources: Sequence[object] = (),
+        probes: Sequence[TorchProbeSpec] = (),
+        split_axis: int | None = None,
+        cut: int | None = None,
+        timeout_seconds: float = 120,
+        require_peer_access: bool = False,
+        _decomposition: TwoGpuDecomposition | None = None,
+        _is_auxiliary: bool = False,
+    ) -> None:
         """Initialize a non-replicated two-rank CUDA simulation.
 
         Args:
@@ -755,7 +776,7 @@ class TorchDistributedSimulation:
         local_space = rank_local_space(space, decomposition, self.rank)
         local_probes = self._localize_probes(probes, space, local_space)
 
-        def auxiliary_factory(**kwargs):
+        def auxiliary_factory(**kwargs: Any) -> Any:
             auxiliary_space = kwargs.pop("space")
             auxiliary_runtime = kwargs.pop("runtime")
             serial_runtime = replace(
@@ -787,12 +808,12 @@ class TorchDistributedSimulation:
             (self.local.plan_identity + decomposition.identity).encode()
         ).hexdigest()
 
-    def __getattr__(self, name):
+    def __getattr__(self, name: Any) -> Any:
         if name == "local":
             raise AttributeError(name)
         return getattr(self.local, name)
 
-    def _localize_probes(self, probes, global_space, local_space):
+    def _localize_probes(self, probes: Any, global_space: Any, local_space: Any) -> Any:
         result = []
         axis = self.decomposition.axis
         offset = self.decomposition.offset(self.rank)[axis]
@@ -805,7 +826,7 @@ class TorchDistributedSimulation:
             name = (
                 spec.component
                 if isinstance(spec.component, str)
-                else spec.component.__name__
+                else str(getattr(spec.component, "__name__"))
             )
             if spec.coordinates == "space":
                 method = getattr(global_space, f"space_to_{name.lower()}_index")
@@ -839,9 +860,9 @@ class TorchDistributedSimulation:
                     coordinates="index",
                 )
             )
-        return tuple(result)
+        return cast(tuple[int, int, int], tuple(result))
 
-    def advance(self, steps):
+    def advance(self, steps: int) -> Self:
         """Advance the distributed simulation by a number of complete steps."""
 
         try:
@@ -851,12 +872,12 @@ class TorchDistributedSimulation:
             raise
         return self
 
-    def step(self):
+    def step(self) -> Self:
         """Advance the distributed simulation by one complete step."""
 
         return self.advance(1)
 
-    def load_host_fields(self, fields):
+    def load_host_fields(self, fields: Mapping[str, object]) -> Self:
         """Copy complete global host fields into rank-local slabs and ghosts."""
         if set(fields) != set(COMPONENTS):
             raise ValueError("host fields must contain Ex, Ey, Ez, Hx, Hy, and Hz")
@@ -882,14 +903,14 @@ class TorchDistributedSimulation:
         self.local.load_host_fields(local_fields)
         return self
 
-    def flush_probes(self):
+    def flush_probes(self) -> dict[str, int | tuple[TorchProbeSamples, ...]]:
         """Return this rank's explicitly synchronized owned probe samples."""
         return {
             "rank": self.rank,
             "samples": self.local.flush_probes(),
         }
 
-    def capture_cuda_graphs(self):
+    def capture_cuda_graphs(self) -> Self:
         """Collectively capture only rank-local fixed compute regions."""
         try:
             dist.barrier(group=self.group)
@@ -900,7 +921,7 @@ class TorchDistributedSimulation:
             raise
         return self
 
-    def checkpoint(self):
+    def checkpoint(self) -> dict[str, object]:
         """Return rank-local tensors and decomposition metadata for restart."""
 
         return {
@@ -913,7 +934,7 @@ class TorchDistributedSimulation:
             "local": self.local.checkpoint(),
         }
 
-    def load_checkpoint(self, checkpoint):
+    def load_checkpoint(self, checkpoint: Mapping[str, object]) -> Self:
         """Restore a collectively compatible rank-local checkpoint.
 
         Args:
@@ -939,10 +960,12 @@ class TorchDistributedSimulation:
             raise TorchDistributedError(
                 "distributed checkpoint metadata does not match every rank"
             )
-        self.local.load_checkpoint(checkpoint["local"])
+        self.local.load_checkpoint(cast(Mapping[str, object], checkpoint["local"]))
         return self
 
-    def global_field_snapshot(self, *, root=0, numpy=True, complex_fields=True):
+    def global_field_snapshot(
+        self, *, root: int = 0, numpy: bool = True, complex_fields: bool = True
+    ) -> dict[str, np.ndarray | torch.Tensor] | None:
         """Explicitly gather uneven owned CUDA slabs and reconstruct global fields."""
         result = {}
         for name in COMPONENTS:
@@ -971,7 +994,7 @@ class TorchDistributedSimulation:
             result[name] = host.numpy() if numpy else host
         return result if self.rank == root else None
 
-    def _owned_shape(self, name, rank):
+    def _owned_shape(self, name: Any, rank: Any) -> Any:
         shape = list(self.plan.shapes[name])
         local_n = self.decomposition.local_shape(rank)[self.decomposition.axis]
         perpendicular = name[1].lower() != _AXIS_NAMES[self.decomposition.axis]
@@ -984,7 +1007,7 @@ class TorchDistributedSimulation:
             shape.append(2)
         return tuple(shape)
 
-    def _owned_field(self, name):
+    def _owned_field(self, name: Any) -> Any:
         field = self.state.field(name)
         axis = self.decomposition.axis
         perpendicular = name[1].lower() != _AXIS_NAMES[axis]
@@ -998,7 +1021,7 @@ class TorchDistributedSimulation:
             slices[axis] = slice(1, None)
         return field[tuple(slices)]
 
-    def diagnostics(self):
+    def diagnostics(self) -> dict[str, object]:
         """Return device, NCCL, decomposition, and halo-allocation diagnostics."""
 
         props = torch.cuda.get_device_properties(self.device)
@@ -1010,7 +1033,7 @@ class TorchDistributedSimulation:
             "device_capability": (props.major, props.minor),
             "torch": torch.__version__,
             "cuda": torch.version.cuda,
-            "nccl": torch.cuda.nccl.version(),
+            "nccl": torch.cuda.nccl.version(),  # type: ignore[no-untyped-call]  # Torch exposes no typed NCCL version signature.,
             "peer_access": torch.cuda.can_device_access_peer(self.rank, 1 - self.rank),
             "decomposition": self.decomposition.metadata(),
             "local_field_shape": tuple(
@@ -1023,7 +1046,7 @@ class TorchDistributedSimulation:
         }
 
     @staticmethod
-    def _abort_group():
+    def _abort_group() -> Any:
         if not dist.is_initialized():
             return
         group = dist.group.WORLD
@@ -1034,7 +1057,7 @@ class TorchDistributedSimulation:
             dist.destroy_process_group()
 
     @staticmethod
-    def close():
+    def close() -> None:
         """Destroy the active PyTorch distributed process group, if any."""
 
         if dist.is_initialized():

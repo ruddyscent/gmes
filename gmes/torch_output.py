@@ -1,23 +1,66 @@
 """Bounded device probes and explicit host-output adapters for Torch FDTD."""
 
-from __future__ import annotations
-
 import json
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from os import PathLike
 from pathlib import Path
+from typing import Any, Literal, Protocol, cast
 
 import numpy as np
 import torch
+from numpy.typing import NDArray
 from torch import nn
 
 from .torch_plan import COMPONENTS
+
+type Index3 = tuple[int, int, int]
+type RealArray = NDArray[np.float64]
+type SampleArray = NDArray[np.float64] | NDArray[np.complex128]
+
+
+class _ProbeState(Protocol):
+    @property
+    def paired_real(self) -> bool:
+        """Return whether complex fields use paired real storage."""
+
+    def field(self, component: str) -> torch.Tensor:
+        """Return the tensor for a field component."""
+
+
+class _ProbePlan(Protocol):
+    @property
+    def shapes(self) -> Mapping[str, Index3]:
+        """Return component field shapes."""
+
+
+class _ProbeSimulation(Protocol):
+    @property
+    def space(self) -> object:
+        """Return the simulation space."""
+
+    @property
+    def plan(self) -> _ProbePlan:
+        """Return the lowered execution plan."""
+
+    @property
+    def state(self) -> _ProbeState:
+        """Return the device field state."""
+
+    @property
+    def device(self) -> torch.device:
+        """Return the execution device."""
+
+    @property
+    def dtype(self) -> torch.dtype:
+        """Return the field tensor dtype."""
 
 
 @dataclass(frozen=True)
 class TorchProbeSpec:
     """Describe a bounded probe at an index or spatial coordinate."""
 
-    component: object
+    component: str | type[object]
     location: tuple[float, float, float]
     capacity: int = 1024
     coordinates: str = "index"
@@ -27,8 +70,8 @@ class TorchProbeSpec:
 class TorchProbeSpectrum:
     """Frequency-domain view produced at an explicit host boundary."""
 
-    frequencies: np.ndarray
-    amplitudes: np.ndarray
+    frequencies: RealArray
+    amplitudes: NDArray[np.complex128]
 
 
 @dataclass(frozen=True)
@@ -37,20 +80,20 @@ class TorchProbeSamples:
 
     component: str
     index: tuple[int, int, int]
-    times: np.ndarray
-    values: np.ndarray
+    times: RealArray
+    values: SampleArray
     dropped: int
     total: int
 
 
-def _component_name(component):
+def _component_name(component: str | type[object]) -> str:
     name = component if isinstance(component, str) else component.__name__
     if name not in COMPONENTS:
         raise ValueError(f"unknown probe component {name!r}")
     return name
 
 
-def _resolve_index(spec, space, shape):
+def _resolve_index(spec: TorchProbeSpec, space: object, shape: Sequence[int]) -> Index3:
     if spec.coordinates not in {"index", "space"}:
         raise ValueError("probe coordinates must be 'index' or 'space'")
     if spec.coordinates == "space":
@@ -73,7 +116,25 @@ def _resolve_index(spec, space, shape):
 
 
 class _TorchProbeRing(nn.Module):
-    def __init__(self, spec, *, space, shape, paired_real, device, dtype):
+    component: str
+    index: tuple[int, int, int]
+    capacity: int
+    paired_real: bool
+    samples: torch.Tensor
+    times: torch.Tensor
+    write_count: torch.Tensor
+    total_count: torch.Tensor
+
+    def __init__(
+        self,
+        spec: TorchProbeSpec,
+        *,
+        space: object,
+        shape: Sequence[int],
+        paired_real: bool,
+        device: torch.device | str,
+        dtype: torch.dtype,
+    ) -> None:
         super().__init__()
         if (
             isinstance(spec.capacity, bool)
@@ -99,7 +160,7 @@ class _TorchProbeRing(nn.Module):
             "total_count", torch.zeros((), device=device, dtype=torch.int64)
         )
 
-    def record(self, field, time):
+    def record(self, field: torch.Tensor, time: torch.Tensor) -> None:
         """Copy one field sample and its time into the device ring."""
 
         slot = torch.remainder(self.write_count, self.capacity).reshape(1)
@@ -109,7 +170,7 @@ class _TorchProbeRing(nn.Module):
         self.total_count.add_(1)
 
     @torch.inference_mode()
-    def flush(self):
+    def flush(self) -> TorchProbeSamples:
         """Return chronological host samples and reset the ring cursor."""
 
         count = int(self.write_count.detach().cpu())
@@ -119,10 +180,10 @@ class _TorchProbeRing(nn.Module):
         order = (np.arange(available, dtype=np.int64) + start) % self.capacity
         order_device = torch.as_tensor(order, device=self.samples.device)
         times = self.times.index_select(0, order_device).detach().cpu().numpy().copy()
-        values = self.samples.index_select(0, order_device).detach().cpu()
+        value_tensor = self.samples.index_select(0, order_device).detach().cpu()
         if self.paired_real:
-            values = torch.complex(values[..., 0], values[..., 1])
-        values = values.numpy().copy()
+            value_tensor = torch.complex(value_tensor[..., 0], value_tensor[..., 1])
+        values = value_tensor.numpy().copy()
         self.write_count.zero_()
         return TorchProbeSamples(
             self.component,
@@ -137,7 +198,11 @@ class _TorchProbeRing(nn.Module):
 class TorchProbeBuffer(nn.Module):
     """A set of bounded overwrite-on-backpressure device probe rings."""
 
-    def __init__(self, specs, *, simulation):
+    rings: nn.ModuleList
+
+    def __init__(
+        self, specs: Iterable[TorchProbeSpec], *, simulation: _ProbeSimulation
+    ) -> None:
         """Allocate bounded device rings for probe specifications.
 
         Args:
@@ -164,26 +229,30 @@ class TorchProbeBuffer(nn.Module):
         self.rings = nn.ModuleList(rings)
 
     @property
-    def empty(self):
+    def empty(self) -> bool:
         """Return whether no probe rings are configured."""
 
         return not self.rings
 
-    def record(self, simulation, *, electric, time):
+    def record(
+        self, simulation: _ProbeSimulation, *, electric: bool, time: torch.Tensor
+    ) -> None:
         """Record probes belonging to one electric or magnetic half step."""
 
         prefix = "E" if electric else "H"
-        for ring in self.rings:
+        for ring in cast(Iterable[_TorchProbeRing], self.rings):
             if ring.component.startswith(prefix):
                 ring.record(simulation.state.field(ring.component), time)
 
     @torch.inference_mode()
-    def flush(self):
+    def flush(self) -> tuple[TorchProbeSamples, ...]:
         """Synchronize buffered samples explicitly and reset each ring cursor."""
-        return tuple(ring.flush() for ring in self.rings)
+        return tuple(
+            ring.flush() for ring in cast(Iterable[_TorchProbeRing], self.rings)
+        )
 
     @torch.inference_mode()
-    def checkpoint(self):
+    def checkpoint(self) -> dict[str, torch.Tensor]:
         """Clone device ring state for inclusion in a simulation checkpoint."""
 
         return {
@@ -191,7 +260,7 @@ class TorchProbeBuffer(nn.Module):
         }
 
     @torch.inference_mode()
-    def load_checkpoint(self, values):
+    def load_checkpoint(self, values: Mapping[str, torch.Tensor]) -> None:
         """Restore compatible ring tensors from a checkpoint mapping."""
 
         expected = self.state_dict()
@@ -204,7 +273,9 @@ class TorchProbeBuffer(nn.Module):
             target.copy_(source.to(target.device))
 
 
-def probe_spectrum(samples, *, window=None):
+def probe_spectrum(
+    samples: TorchProbeSamples, *, window: Literal["hann"] | None = None
+) -> TorchProbeSpectrum:
     """Transform one flushed probe batch without entering the solver hot path."""
     if len(samples.times) < 2:
         raise ValueError("at least two probe samples are required for a spectrum")
@@ -218,14 +289,14 @@ def probe_spectrum(samples, *, window=None):
         values = values * np.hanning(len(values))
     if np.iscomplexobj(values):
         frequencies = np.fft.fftfreq(len(values), d=float(spacing[0]))
-        amplitudes = np.fft.fft(values)
+        amplitudes = cast(NDArray[np.complex128], np.fft.fft(values))
     else:
         frequencies = np.fft.rfftfreq(len(values), d=float(spacing[0]))
-        amplitudes = np.fft.rfft(values)
+        amplitudes = cast(NDArray[np.complex128], np.fft.rfft(cast(RealArray, values)))
     return TorchProbeSpectrum(frequencies, amplitudes)
 
 
-def _encode_checkpoint(value, arrays):
+def _encode_checkpoint(value: Any, arrays: Any) -> Any:
     if isinstance(value, torch.Tensor):
         name = f"tensor_{len(arrays):06d}"
         arrays[name] = value.detach().to(device="cpu").contiguous().numpy()
@@ -248,7 +319,7 @@ def _encode_checkpoint(value, arrays):
     raise TypeError(f"unsupported checkpoint value {type(value).__name__!r}")
 
 
-def _decode_checkpoint(description, arrays, device):
+def _decode_checkpoint(description: Any, arrays: Any, device: Any) -> Any:
     if not isinstance(description, dict):
         raise ValueError("checkpoint node descriptions must be mappings")
     kind = description.get("kind")
@@ -271,7 +342,9 @@ def _decode_checkpoint(description, arrays, device):
     raise ValueError(f"unsupported checkpoint node kind {kind!r}")
 
 
-def write_torch_checkpoint(checkpoint, filename):
+def write_torch_checkpoint(
+    checkpoint: Mapping[str, object], filename: str | PathLike[str]
+) -> Path:
     """Persist a versioned tensor/JSON schema without arbitrary object pickle."""
     if (
         not isinstance(checkpoint, dict)
@@ -279,7 +352,7 @@ def write_torch_checkpoint(checkpoint, filename):
         or checkpoint.get("version") != 1
     ):
         raise ValueError("only gmes.torch.simulation checkpoint version 1 is writable")
-    arrays = {}
+    arrays: dict[str, np.ndarray] = {}
     description = _encode_checkpoint(checkpoint, arrays)
     metadata = np.frombuffer(
         json.dumps(description, separators=(",", ":"), sort_keys=True).encode(),
@@ -287,11 +360,13 @@ def write_torch_checkpoint(checkpoint, filename):
     )
     path = Path(filename)
     with path.open("wb") as output:
-        np.savez_compressed(output, __metadata__=metadata, **arrays)
+        np.savez_compressed(output, __metadata__=metadata, **arrays)  # type: ignore[arg-type]  # NumPy stubs type all **values as bool.
     return path
 
 
-def read_torch_checkpoint(filename, *, device="cpu"):
+def read_torch_checkpoint(
+    filename: str | PathLike[str], *, device: torch.device | str = "cpu"
+) -> dict[str, object]:
     """Read the safe tensor/JSON checkpoint schema with pickle disabled."""
     with np.load(Path(filename), allow_pickle=False) as archive:
         if "__metadata__" not in archive:
@@ -316,7 +391,9 @@ def read_torch_checkpoint(filename, *, device="cpu"):
     return checkpoint
 
 
-def write_probe_text(samples, directory):
+def write_probe_text(
+    samples: Iterable[TorchProbeSamples], directory: str | PathLike[str]
+) -> tuple[Path, ...]:
     """Write flushed probe batches; never called by the solver hot path."""
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)

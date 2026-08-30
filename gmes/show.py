@@ -3,19 +3,46 @@
 
 """Display live field slices and material snapshots with Matplotlib."""
 
+from collections.abc import Callable, Sequence
 from threading import Thread
+from typing import Any, Protocol, cast
 
 import numpy as np
-from matplotlib.backend_bases import NonGuiException
-from matplotlib.pyplot import cm, new_figure_manager, show
+from matplotlib.backend_bases import FigureManagerBase, NonGuiException
+from matplotlib.pyplot import cm
+from matplotlib.pyplot import new_figure_manager as _new_figure_manager
+from matplotlib.pyplot import show
 from numpy import arange, array, empty, linspace, ndindex
+from numpy.typing import NDArray
+
+new_figure_manager = cast(Callable[[int | str], FigureManagerBase], _new_figure_manager)
 
 # GMES modules
 from .constant import *
+from .fdtd import FDTD
 from .geometry import in_range
 
+type Vector3 = Sequence[float] | NDArray[np.float64]
+type ComponentType = type[Component]
+type AxisType = type[X] | type[Y] | type[Z]
+type FigureId = int | str
 
-def _show_manager(manager, window_title):
+
+class _ElectricMaterial(Protocol):
+    """Electric material query used by slice rendering."""
+
+    def get_eps_inf(self, idx: tuple[int, int, int]) -> float:
+        """Return relative permittivity at an array index."""
+
+
+class _MagneticMaterial(Protocol):
+    """Magnetic material query used by slice rendering."""
+
+    def get_mu_inf(self, idx: tuple[int, int, int]) -> float:
+        """Return relative permeability at an array index."""
+
+
+def _show_manager(manager: FigureManagerBase, window_title: str) -> None:
     """Display a figure when the active Matplotlib backend supports it."""
     manager.set_window_title(window_title)
     try:
@@ -31,7 +58,17 @@ def _show_manager(manager, window_title):
 class ShowLine(Thread):
     """Animated 1-D on-time display."""
 
-    def __init__(self, fdtd, component, start, end, vrange, interval, title, fig_id):
+    def __init__(
+        self,
+        fdtd: FDTD,
+        component: ComponentType,
+        start: Vector3,
+        end: Vector3,
+        vrange: Sequence[float] | None,
+        interval: int,
+        title: str,
+        fig_id: FigureId,
+    ) -> None:
         """Constructor.
 
         Argumetns:
@@ -100,7 +137,7 @@ class ShowLine(Thread):
             else:
                 raise ValueError("unsupported electric component")
         elif issubclass(comp, Magnetic):
-            end_bndry_idx = [i - 1 for i in field.shape]
+            end_bndry_idx = tuple(i - 1 for i in field.shape)
             if comp is Hx:
                 start_bndry_idx = (0, 1, 1)
             elif comp is Hy:
@@ -113,17 +150,17 @@ class ShowLine(Thread):
             msg = "component should be of class constant.Component."
             raise ValueError(msg)
 
-        start_idx = array(spc2idx[comp](*start), int)
-        end_idx = array(spc2idx[comp](*end), int)
+        start_idx = array(spc2idx[comp](*start), np.intp)
+        end_idx = array(spc2idx[comp](*end), np.intp)
         label = "x", "y", "z"
         for i, v in enumerate(end_idx - start_idx):
             if v > 0:
                 for j in (j for j in range(3) if j != i):
-                    tmp1_idx = array(start_bndry_idx, int)
+                    tmp1_idx = array(start_bndry_idx, np.intp)
                     tmp1_idx[j] = start_idx[j]
                     if in_range(tmp1_idx, field.shape, comp) is False:
                         return None
-                    tmp2_idx = array(end_bndry_idx, int)
+                    tmp2_idx = array(end_bndry_idx, np.intp)
                     tmp2_idx[j] = end_idx[j]
                     if in_range(tmp2_idx, field.shape, comp) is False:
                         return None
@@ -166,7 +203,7 @@ class ShowLine(Thread):
         self.ylabel = "displacement"
         self.window_title = "GMES" + " " + str(fdtd.space.cart_comm.Get_topo()[2])
 
-    def animate(self):
+    def animate(self) -> None:
         """Refresh the plotted line and schedule the next GUI update."""
 
         self.line.set_ydata(self.ydata)
@@ -177,7 +214,7 @@ class ShowLine(Thread):
         if window is not None and hasattr(window, "after"):
             window.after(self.interval, self.animate)
 
-    def run(self):
+    def run(self) -> None:
         """Create and run the one-dimensional Matplotlib view."""
 
         self.manager = new_figure_manager(self.id)
@@ -199,7 +236,17 @@ class ShowLine(Thread):
 class ShowPlane(Thread):
     """Animated 2-D on-time display."""
 
-    def __init__(self, fdtd, component, axis, cut, vrange, interval, title, fig_id):
+    def __init__(
+        self,
+        fdtd: FDTD,
+        component: ComponentType,
+        axis: AxisType,
+        cut: float,
+        vrange: Sequence[float] | None,
+        interval: int,
+        title: str,
+        fig_id: FigureId,
+    ) -> None:
         """Constructor.
 
         Arguments:
@@ -269,7 +316,7 @@ class ShowPlane(Thread):
             else:
                 raise ValueError("unsupported electric component")
         elif issubclass(comp, Magnetic):
-            end_bndry_idx = [i - 1 for i in field.shape]
+            end_bndry_idx = tuple(i - 1 for i in field.shape)
             if comp is Hx:
                 start_bndry_idx = (0, 1, 1)
             elif comp is Hy:
@@ -346,7 +393,7 @@ class ShowPlane(Thread):
         self.window_title = "GMES" + " " + str(fdtd.space.cart_comm.Get_topo()[2])
         self.note_form = "time: %f"
 
-    def animate(self):
+    def animate(self) -> None:
         """Refresh the plotted plane and schedule the next GUI update."""
 
         self.im.set_data(self.data)
@@ -356,7 +403,7 @@ class ShowPlane(Thread):
         if window is not None and hasattr(window, "after"):
             window.after(self.interval, self.animate)
 
-    def run(self):
+    def run(self) -> None:
         """Create and run the two-dimensional Matplotlib view."""
 
         self.manager = new_figure_manager(self.id)
@@ -387,7 +434,16 @@ class Snapshot(Thread):
 
     """
 
-    def __init__(self, fdtd, component, axis, cut, vrange, title, fig_id):
+    def __init__(
+        self,
+        fdtd: FDTD,
+        component: ComponentType,
+        axis: AxisType,
+        cut: float,
+        vrange: Sequence[float] | None,
+        title: str,
+        fig_id: FigureId,
+    ) -> None:
         """Constructor.
 
         Arguments:
@@ -451,7 +507,7 @@ class Snapshot(Thread):
             else:
                 raise ValueError("unsupported electric component")
         elif issubclass(comp, Magnetic):
-            end_bndry_idx = [i - 1 for i in field.shape]
+            end_bndry_idx = tuple(i - 1 for i in field.shape)
             if comp is Hx:
                 start_bndry_idx = (0, 1, 1)
             elif comp is Hy:
@@ -523,9 +579,13 @@ class Snapshot(Thread):
             mat_idx[axis_int] = cut_idx[axis_int]
             for pw_mat in material.values():
                 if issubclass(comp, Electric):
-                    value = pw_mat.get_eps_inf(tuple(mat_idx))
+                    value = cast(_ElectricMaterial, pw_mat).get_eps_inf(
+                        cast(tuple[int, int, int], tuple(map(int, mat_idx)))
+                    )
                 elif issubclass(comp, Magnetic):
-                    value = pw_mat.get_mu_inf(tuple(mat_idx))
+                    value = cast(_MagneticMaterial, pw_mat).get_mu_inf(
+                        cast(tuple[int, int, int], tuple(map(int, mat_idx)))
+                    )
                 else:
                     raise ValueError("unsupported field component")
                 if value != 0:
@@ -547,7 +607,7 @@ class Snapshot(Thread):
 
         self.id = fig_id
 
-    def run(self):
+    def run(self) -> None:
         """Create and display the static material snapshot."""
 
         self.manager = new_figure_manager(self.id)

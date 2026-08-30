@@ -54,6 +54,7 @@ dev = [
     "build>=1.2",
     "coverage>=7.10",
     "isort>=8.0",
+    "mypy>=1.18.2",
     "pylint>=4.0",
 ]
 
@@ -118,6 +119,9 @@ explicit = true
 [tool.setuptools]
 packages = ["gmes"]
 
+[tool.setuptools.package-data]
+gmes = ["py.typed", "*.pyi"]
+
 [tool.setuptools.dynamic]
 version = {file = "VERSION"}
 
@@ -131,6 +135,37 @@ extend_skip = [
     "gmes/constant.py",
     "gmes/pw_material.py",
 ]
+
+[tool.mypy]
+python_version = "3.14"
+files = [
+    "gmes",
+    "tests/typing/public_api.py",
+    "tests/typing/star_import.py",
+]
+exclude = [
+    "^gmes/constant\\.py$",
+    "^gmes/pw_material\\.py$",
+]
+strict = true
+extra_checks = true
+warn_unreachable = true
+warn_unused_configs = true
+show_error_codes = true
+pretty = true
+
+[[tool.mypy.overrides]]
+module = ["gmes.constant", "gmes.pw_material"]
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+
+[[tool.mypy.overrides]]
+module = ["mpi4py"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["matplotlib", "matplotlib.*"]
+ignore_missing_imports = true
 
 [tool.pylint.main]
 py-version = "3.14"

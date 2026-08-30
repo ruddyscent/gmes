@@ -1,11 +1,14 @@
 """Occupancy-aware host lowering for Torch material execution plans."""
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
+from typing import Any, Literal
 
 import numpy as np
 
 from .constant import Ex, Ey, Ez, Hx, Hy, Hz
+from .geometry import Cartesian, GeomBoxTree
 from .material import (
     Const,
     Cpml,
@@ -28,14 +31,19 @@ SINGLE_BUCKET_MODELS = frozenset(
 )
 EXECUTION_POLICIES = frozenset(("auto", "dense", "compact", "tiled"))
 
+type Shape3 = tuple[int, int, int]
+type Bounds3 = tuple[tuple[int, int], tuple[int, int], tuple[int, int]]
+type StencilCoordinate = tuple[str, Shape3, Shape3, int, int]
+type EstimatedCosts = tuple[tuple[str, float], ...]
 
-def _readonly(values, dtype=None):
+
+def _readonly(values: Any, dtype: Any = None) -> Any:
     result = np.ascontiguousarray(values, dtype=dtype)
     result.flags.writeable = False
     return result
 
 
-def _cpml_residual_is_numerically_stable(cell_coefficients, precision):
+def _cpml_residual_is_numerically_stable(cell_coefficients: Any, precision: Any) -> Any:
     """Return whether base-plus-residual preserves direct reciprocal kappa."""
     dtype = np.dtype(precision)
     kappas = np.asarray(cell_coefficients[:, (3, 6)], dtype=dtype)
@@ -67,7 +75,7 @@ class ExecutionSignature:
     model: str
     component: str
     precision: str
-    state_shape: tuple
+    state_shape: tuple[int, ...]
 
 
 @dataclass(frozen=True)
@@ -75,8 +83,8 @@ class FlattenedStencilTerm:
     """One signed finite-difference term in flattened-source coordinates."""
 
     source: str
-    source_shape: tuple
-    source_strides: tuple
+    source_shape: Shape3
+    source_strides: Shape3
     positive_offset: int
     negative_offset: int
     scale_axis: int
@@ -93,7 +101,7 @@ class CpmlResidualAxisPlan:
     stencil_indices: np.ndarray
     parameters: np.ndarray
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if self.axis not in (0, 1):
             raise ValueError("a CPML residual axis must be zero or one")
         count = len(self.targets)
@@ -131,7 +139,7 @@ class MaterialBucketPlan:
     signature: ExecutionSignature
     selected_policy: str
     decision: str
-    estimated_costs: tuple
+    estimated_costs: EstimatedCosts
     occupancy: float
     fragmentation: float
     target_count: int
@@ -139,21 +147,21 @@ class MaterialBucketPlan:
     padded_state_width: int
     padding_elements_avoided: int
     width_decision: str
-    coefficient_names: tuple
+    coefficient_names: tuple[str, ...]
     targets: np.ndarray
     target_region_indices: np.ndarray
     region_keys: np.ndarray
     region_coefficient_indices: np.ndarray
     coefficient_table: np.ndarray
-    cell_coefficient_names: tuple
+    cell_coefficient_names: tuple[str, ...]
     cell_coefficients: np.ndarray
     stencil_indices: np.ndarray
-    cpml_residual_axes: tuple
+    cpml_residual_axes: tuple[CpmlResidualAxisPlan, ...]
     tile_origins: np.ndarray
     tile_region_indices: np.ndarray
     estimated_bytes: int
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if self.selected_policy not in EXECUTION_POLICIES - {"auto"}:
             raise ValueError("a material bucket must have a concrete execution policy")
         if self.targets.dtype != np.int64 or self.targets.ndim != 1:
@@ -215,7 +223,7 @@ class MaterialBucketPlan:
                 raise ValueError("bucket arrays must be immutable and contiguous")
 
     @property
-    def launch_count(self):
+    def launch_count(self) -> int:
         """Return the steady-state material launch estimate for this signature."""
         if self.target_count == 0 or self.signature.model == "dummy":
             return 0
@@ -234,20 +242,20 @@ class ComponentPlan:
     """Immutable ownership and execution plan for one Yee component."""
 
     name: str
-    shape: tuple
-    active_bounds: tuple
-    stencil: tuple
+    shape: Shape3
+    active_bounds: Bounds3
+    stencil: tuple[FlattenedStencilTerm, ...]
     material_ids: np.ndarray
     underlying_ids: np.ndarray
     ownership: np.ndarray
     dense_inverse: np.ndarray
     constant_targets: np.ndarray
     constant_values: np.ndarray
-    buckets: tuple
+    buckets: tuple[MaterialBucketPlan, ...]
     requested_policy: str
     tile_size: int
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if self.name not in COMPONENTS or len(self.shape) != 3:
             raise ValueError("unknown Yee component plan")
         if self.requested_policy not in EXECUTION_POLICIES:
@@ -315,12 +323,12 @@ class ComponentPlan:
             )
 
     @property
-    def active_count(self):
+    def active_count(self) -> int:
         """Number of complete, uniquely owned update destinations."""
         return int(np.count_nonzero(self.ownership >= 0))
 
     @property
-    def launch_count(self):
+    def launch_count(self) -> int:
         """Object-independent material launch estimate for this component."""
         dense = np.any(self.dense_inverse)
         non_dense = sum(
@@ -330,7 +338,7 @@ class ComponentPlan:
         )
         return int(dense) + non_dense
 
-    def decision_record(self):
+    def decision_record(self) -> dict[str, object]:
         """Return JSON-compatible policy diagnostics for benchmarks and debugging."""
         return {
             "component": self.name,
@@ -369,7 +377,7 @@ class ComponentPlan:
         }
 
 
-def _active_bounds(name, shape):
+def _active_bounds(name: Any, shape: Any) -> Any:
     if name == "Ex":
         return ((0, shape[0]), (0, shape[1] - 1), (0, shape[2] - 1))
     if name == "Ey":
@@ -383,7 +391,7 @@ def _active_bounds(name, shape):
     return ((1, shape[0]), (1, shape[1]), (0, shape[2]))
 
 
-def _active_targets(name, shape):
+def _active_targets(name: Any, shape: Any) -> Any:
     bounds = _active_bounds(name, shape)
     mask = np.zeros(shape, dtype=np.bool_)
     slices = tuple(slice(start, stop) for start, stop in bounds)
@@ -410,7 +418,7 @@ _STENCIL_COORDINATES = {
 }
 
 
-def _stencil(name, shapes):
+def _stencil(name: Any, shapes: Any) -> Any:
     terms = []
     for source, positive, negative, axis, sign in _STENCIL_COORDINATES[name]:
         source_shape = shapes[source]
@@ -429,7 +437,7 @@ def _stencil(name, shapes):
     return tuple(terms)
 
 
-def _model_and_state(material, component):
+def _model_and_state(material: Any, component: Any) -> Any:
     magnetic = component not in ELECTRIC_COMPONENTS
     if isinstance(material, Dummy):
         return "dummy", ()
@@ -460,7 +468,7 @@ def _model_and_state(material, component):
     return f"custom:{type(material).__module__}.{type(material).__qualname__}", ()
 
 
-def _coefficient_descriptor(material, component, underlying):
+def _coefficient_descriptor(material: Any, component: Any, underlying: Any) -> Any:
     effective = underlying if underlying is not None else material
     base_name = "inv_eps" if component in ELECTRIC_COMPONENTS else "inv_mu"
     base_parameter = float(
@@ -549,7 +557,7 @@ _PML_AXES = {
 }
 
 
-def _pml_profile(material, coordinates, axis):
+def _pml_profile(material: Any, coordinates: Any, axis: Any) -> Any:
     """Vectorize the native PML grading functions over one coordinate axis."""
     offset = coordinates[:, axis] - material.center[axis]
     half_size = material.half_size[axis]
@@ -566,7 +574,9 @@ def _pml_profile(material, coordinates, axis):
     return sigma, kappa, depth, boundary
 
 
-def _pml_cell_coefficients(material, component, coordinates, inverse_base):
+def _pml_cell_coefficients(
+    material: Any, component: Any, coordinates: Any, inverse_base: Any
+) -> Any:
     """Lower coordinate-dependent PML parameters without per-cell objects."""
     first_axis, second_axis, field_axis = _PML_AXES[component]
     profiles = {
@@ -579,7 +589,7 @@ def _pml_cell_coefficients(material, component, coordinates, inverse_base):
         sigma2, kappa2, _, _ = profiles[second_axis]
         sigmaf, kappaf, _, _ = profiles[field_axis]
 
-        def pair(sigma, kappa):
+        def pair(sigma: Any, kappa: Any) -> Any:
             denominator = 2.0 * kappa + sigma * material.dt
             return (
                 (2.0 * kappa - sigma * material.dt) / denominator,
@@ -607,10 +617,12 @@ def _pml_cell_coefficients(material, component, coordinates, inverse_base):
     return np.column_stack(rows)
 
 
-def _pml_stencil_indices(component, targets, target_shape, shapes):
+def _pml_stencil_indices(
+    component: Any, targets: Any, target_shape: Any, shapes: Any
+) -> Any:
     coordinates = np.unravel_index(targets, target_shape)
     columns = []
-    stencil = _STENCIL_COORDINATES[component]
+    stencil: tuple[StencilCoordinate, ...] = _STENCIL_COORDINATES[component]
     if component not in ELECTRIC_COMPONENTS:
         stencil = tuple(reversed(stencil))
     for source, positive, negative, _axis, _sign in stencil:
@@ -626,7 +638,7 @@ def _pml_stencil_indices(component, targets, target_shape, shapes):
     return np.column_stack(columns)
 
 
-def _state_width(signature):
+def _state_width(signature: Any) -> Any:
     if signature.model in {"drude", "lorentz"}:
         return 2 * signature.state_shape[0]
     if signature.model == "dcp-ade":
@@ -638,7 +650,16 @@ def _state_width(signature):
     return int(sum(signature.state_shape))
 
 
-def _select_policy(requested, *, device_type, count, active_count, runs, tiles, width):
+def _select_policy(
+    requested: Any,
+    *,
+    device_type: Any,
+    count: Any,
+    active_count: Any,
+    runs: Any,
+    tiles: Any,
+    width: Any,
+) -> Any:
     occupancy = count / active_count if active_count else 0.0
     fragmentation = runs / count if count else 0.0
     launch = 4096.0 if device_type == "cuda" else 256.0
@@ -648,7 +669,7 @@ def _select_policy(requested, *, device_type, count, active_count, runs, tiles, 
         "compact": count * (2.15 + 0.18 * width) + launch,
         "tiled": tile_cells * (1.20 + 0.12 * width) + launch * 1.15,
     }
-    selected = min(costs, key=costs.get) if requested == "auto" else requested
+    selected = min(costs, key=costs.__getitem__) if requested == "auto" else requested
     reason = (
         f"{selected} minimizes the static {device_type} cost model at "
         f"occupancy={occupancy:.4f}, fragmentation={fragmentation:.4f}, "
@@ -665,16 +686,16 @@ class TorchExecutionPlanner:
     def __init__(
         self,
         *,
-        geom_tree,
-        space,
-        shapes,
-        precision,
-        device_type,
-        policy="auto",
-        material_tile_size=65536,
-        execution_tile_size=4096,
-        cpml_sparse_residual=False,
-    ):
+        geom_tree: GeomBoxTree,
+        space: Cartesian,
+        shapes: Mapping[str, Shape3],
+        precision: Literal["float32", "float64"],
+        device_type: str,
+        policy: str = "auto",
+        material_tile_size: int = 65536,
+        execution_tile_size: int = 4096,
+        cpml_sparse_residual: bool = False,
+    ) -> None:
         if policy not in EXECUTION_POLICIES:
             raise ValueError(
                 "execution policy must be 'auto', 'dense', 'compact', or 'tiled'"
@@ -691,11 +712,11 @@ class TorchExecutionPlanner:
         self.execution_tile_size = int(execution_tile_size)
         self.cpml_sparse_residual = bool(cpml_sparse_residual)
 
-    def build(self):
+    def build(self) -> tuple[ComponentPlan, ...]:
         """Build and validate all six component plans before tensor finalization."""
         return tuple(self._lower_component(name) for name in COMPONENTS)
 
-    def _lower_component(self, name):
+    def _lower_component(self, name: Any) -> Any:
         shape = self.shapes[name]
         component = COMPONENT_TYPES[name]
         axes = self.space.component_coordinate_axes(component, shape)
@@ -735,9 +756,9 @@ class TorchExecutionPlanner:
         signature_widths = {
             signature: _state_width(signature) for signature in unique_signatures
         }
-        padded_widths = {}
+        padded_widths: dict[tuple[str, str, str], int] = {}
         signature_counts = {}
-        width_groups = {}
+        width_groups: dict[tuple[str, str, str], list[ExecutionSignature]] = {}
         for signature, width in signature_widths.items():
             key = (signature.model, signature.component, signature.precision)
             padded_widths[key] = max(padded_widths.get(key, 0), width)
@@ -801,14 +822,14 @@ class TorchExecutionPlanner:
                         "one execution signature produced ragged coefficients"
                     )
                 coefficient_rows.append(row)
-            coefficient_rows = np.asarray(coefficient_rows, dtype=np.float64)
+            coefficient_row_array = np.asarray(coefficient_rows, dtype=np.float64)
             coefficient_table, region_coefficient_indices = np.unique(
-                coefficient_rows, axis=0, return_inverse=True
+                coefficient_row_array, axis=0, return_inverse=True
             )
-            cell_coefficient_names = ()
+            cell_coefficient_names: tuple[str, ...] = ()
             cell_coefficients = np.empty((0, 0), dtype=np.float64)
             stencil_indices = np.empty((0, 4), dtype=np.int64)
-            cpml_residual_axes = ()
+            cpml_residual_axes: tuple[CpmlResidualAxisPlan, ...] = ()
             if signature.model in {"upml", "cpml"}:
                 cell_coefficient_names = _PML_CELL_COEFFICIENT_NAMES[signature.model]
                 linear_coordinates = np.unravel_index(targets, shape)
@@ -838,7 +859,7 @@ class TorchExecutionPlanner:
                         cell_coefficients, self.precision
                     )
                 ):
-                    residual_axes = []
+                    residual_axes: list[CpmlResidualAxisPlan] = []
                     for axis, (b_column, c_column, kappa_column) in enumerate(
                         ((1, 2, 3), (4, 5, 6))
                     ):

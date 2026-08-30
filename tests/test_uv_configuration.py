@@ -122,6 +122,22 @@ class UvCacheKeyTest(unittest.TestCase):
             },
         )
 
+    def test_locks_strict_python_314_typing_and_pep561_data(self):
+        self.assertIn(
+            "mypy>=1.18.2", self.project_configuration["dependency-groups"]["dev"]
+        )
+        mypy = self.project_configuration["tool"]["mypy"]
+        self.assertEqual(mypy["python_version"], "3.14")
+        self.assertTrue(mypy["strict"])
+        self.assertTrue(mypy["warn_unreachable"])
+        self.assertTrue(mypy["warn_unused_configs"])
+        self.assertEqual(
+            self.project_configuration["tool"]["setuptools"]["package-data"]["gmes"],
+            ["py.typed", "*.pyi"],
+        )
+        locked_names = {package["name"] for package in self.lockfile["package"]}
+        self.assertIn("mypy", locked_names)
+
 
 if __name__ == "__main__":
     unittest.main()

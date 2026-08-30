@@ -168,6 +168,9 @@ See [`examples/`](examples/) for simulations of wave propagation, Fresnel reflec
 Run the complete test suite and build both distribution formats with:
 
 ```sh
+uv run --no-sync python -m mypy
+uv run --no-sync python -m mypy.stubtest --mypy-config-file pyproject.toml gmes.constant gmes.pw_material
+uv run --no-sync python -m pylint $(git ls-files 'gmes/*.py') setup.py
 uv run --no-sync python -m unittest discover -v
 uv build
 ```

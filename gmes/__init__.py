@@ -50,7 +50,11 @@ Examples:
     >>> simulation.step()
 """
 
+from typing import Any
+
 from . import constant, fdtd, geometry, material, pw_material, pw_source, source
+
+norm: Any
 from .constant import *
 from .fdtd import *
 from .geometry import *
@@ -60,7 +64,7 @@ from .torch_distributed import *
 from .torch_fdtd import *
 
 # List here only the objects we want to be publicly available
-_module = [
+__all__ = [
     "fdtd",
     "geometry",
     "constant",
@@ -68,8 +72,6 @@ _module = [
     "pw_source",
     "material",
     "pw_material",
-]
-_class = [
     "TimeStep",
     "FDTD",
     "TExFDTD",
@@ -150,8 +152,6 @@ _class = [
     "TorchSimulationState",
     "TorchSourceLoweringContext",
     "TwoGpuDecomposition",
-]
-_constant = [
     "pi",
     "c0",
     "mu0",
@@ -169,8 +169,6 @@ _constant = [
     "FEMTO",
     "ATTO",
     "inf",
-]
-_function = [
     "choose_two_gpu_decomposition",
     "distributed_launch_from_environment",
     "probe_spectrum",
@@ -180,8 +178,3 @@ _function = [
     "write_probe_text",
     "write_torch_checkpoint",
 ]
-__all__ = []
-__all__.extend(_module)
-__all__.extend(_class)
-__all__.extend(_constant)
-__all__.extend(_function)

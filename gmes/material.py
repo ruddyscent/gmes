@@ -7,25 +7,34 @@ from collections.abc import Sequence
 from copy import deepcopy
 from math import cos, exp, pi, sin, sqrt, tanh
 from sys import stderr
+from typing import Any, cast
 
 import numpy as np
 from numpy import array, empty, inf, zeros
+from numpy.typing import NDArray
 
 from .constant import c0
 from .pw_material import *
-from .pygeom import Compound, Material
+from .pygeom import Compound, Material, _MaterialSpace
+
+type Index3 = tuple[int, int, int]
+type Coordinate3 = Sequence[float] | NDArray[np.float64]
+type NativeMaterial = PwMaterialReal | PwMaterialCmplx
+type PmlParameters = tuple[Sequence[float], Sequence[float], float]
+# Pickle state is an intentionally dynamic compatibility boundary.
+type PickleState = dict[str, Any]
 
 
 class Dummy(Material):
     """A dummy material type which dosen't update the field component."""
 
-    def __init__(self, eps_inf=1, mu_inf=1):
+    def __init__(self, eps_inf: float = 1, mu_inf: float = 1) -> None:
         Material.__init__(self, eps_inf, mu_inf)
 
-    def init(self, space, param=None):
+    def init(self, space: _MaterialSpace, param: object | None = None) -> None:
         pass
 
-    def display_info(self, indent=0):
+    def display_info(self, indent: int = 0) -> None:
         """Display the parameter values."""
         print(" " * indent, "dummy object")
         print(" " * indent, end=" ")
@@ -33,14 +42,19 @@ class Dummy(Material):
         print("frequency independent permeability:", self.mu_inf)
 
     def get_pw_material_ex(
-        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
-    ):
+        self,
+        idx: Index3,
+        coords: Coordinate3,
+        underneath: Material | None = None,
+        cmplx: bool = False,
+        _aggregate: NativeMaterial | None = None,
+    ) -> NativeMaterial:
         if cmplx:
             pw_obj = _aggregate if _aggregate is not None else DummyExCmplx()
-            pw_param = DummyElectricParamCmplx()
+            pw_param = cast(Any, DummyElectricParamCmplx())
         else:
             pw_obj = _aggregate if _aggregate is not None else DummyExReal()
-            pw_param = DummyElectricParamReal()
+            pw_param = cast(Any, DummyElectricParamReal())
 
         if underneath is None:
             pw_param.eps_inf = self.eps_inf
@@ -51,14 +65,19 @@ class Dummy(Material):
         return pw_obj
 
     def get_pw_material_ey(
-        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
-    ):
+        self,
+        idx: Index3,
+        coords: Coordinate3,
+        underneath: Material | None = None,
+        cmplx: bool = False,
+        _aggregate: NativeMaterial | None = None,
+    ) -> NativeMaterial:
         if cmplx:
             pw_obj = _aggregate if _aggregate is not None else DummyEyCmplx()
-            pw_param = DummyElectricParamCmplx()
+            pw_param = cast(Any, DummyElectricParamCmplx())
         else:
             pw_obj = _aggregate if _aggregate is not None else DummyEyReal()
-            pw_param = DummyElectricParamReal()
+            pw_param = cast(Any, DummyElectricParamReal())
 
         if underneath is None:
             pw_param.eps_inf = self.eps_inf
@@ -69,14 +88,19 @@ class Dummy(Material):
         return pw_obj
 
     def get_pw_material_ez(
-        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
-    ):
+        self,
+        idx: Index3,
+        coords: Coordinate3,
+        underneath: Material | None = None,
+        cmplx: bool = False,
+        _aggregate: NativeMaterial | None = None,
+    ) -> NativeMaterial:
         if cmplx:
             pw_obj = _aggregate if _aggregate is not None else DummyEzCmplx()
-            pw_param = DummyElectricParamCmplx()
+            pw_param = cast(Any, DummyElectricParamCmplx())
         else:
             pw_obj = _aggregate if _aggregate is not None else DummyEzReal()
-            pw_param = DummyElectricParamReal()
+            pw_param = cast(Any, DummyElectricParamReal())
 
         if underneath is None:
             pw_param.eps_inf = self.eps_inf
@@ -87,14 +111,19 @@ class Dummy(Material):
         return pw_obj
 
     def get_pw_material_hx(
-        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
-    ):
+        self,
+        idx: Index3,
+        coords: Coordinate3,
+        underneath: Material | None = None,
+        cmplx: bool = False,
+        _aggregate: NativeMaterial | None = None,
+    ) -> NativeMaterial:
         if cmplx:
             pw_obj = _aggregate if _aggregate is not None else DummyHxCmplx()
-            pw_param = DummyMagneticParamCmplx()
+            pw_param = cast(Any, DummyMagneticParamCmplx())
         else:
             pw_obj = _aggregate if _aggregate is not None else DummyHxReal()
-            pw_param = DummyMagneticParamReal()
+            pw_param = cast(Any, DummyMagneticParamReal())
 
         if underneath is None:
             pw_param.mu_inf = self.mu_inf
@@ -105,14 +134,19 @@ class Dummy(Material):
         return pw_obj
 
     def get_pw_material_hy(
-        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
-    ):
+        self,
+        idx: Index3,
+        coords: Coordinate3,
+        underneath: Material | None = None,
+        cmplx: bool = False,
+        _aggregate: NativeMaterial | None = None,
+    ) -> NativeMaterial:
         if cmplx:
             pw_obj = _aggregate if _aggregate is not None else DummyHyCmplx()
-            pw_param = DummyMagneticParamCmplx()
+            pw_param = cast(Any, DummyMagneticParamCmplx())
         else:
             pw_obj = _aggregate if _aggregate is not None else DummyHyReal()
-            pw_param = DummyMagneticParamReal()
+            pw_param = cast(Any, DummyMagneticParamReal())
 
         if underneath is None:
             pw_param.mu_inf = self.mu_inf
@@ -123,14 +157,19 @@ class Dummy(Material):
         return pw_obj
 
     def get_pw_material_hz(
-        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
-    ):
+        self,
+        idx: Index3,
+        coords: Coordinate3,
+        underneath: Material | None = None,
+        cmplx: bool = False,
+        _aggregate: NativeMaterial | None = None,
+    ) -> NativeMaterial:
         if cmplx:
             pw_obj = _aggregate if _aggregate is not None else DummyHzCmplx()
-            pw_param = DummyMagneticParamCmplx()
+            pw_param = cast(Any, DummyMagneticParamCmplx())
         else:
             pw_obj = _aggregate if _aggregate is not None else DummyHzReal()
-            pw_param = DummyMagneticParamReal()
+            pw_param = cast(Any, DummyMagneticParamReal())
 
         if underneath is None:
             pw_param.mu_inf = self.mu_inf
@@ -144,7 +183,9 @@ class Dummy(Material):
 class Const(Material):
     """A material type which sets the field to the given value."""
 
-    def __init__(self, value=0, eps_inf=1, mu_inf=1):
+    def __init__(
+        self, value: complex = 0, eps_inf: float = 1, mu_inf: float = 1
+    ) -> None:
         """Arguments:
         value -- field value
         eps_inf -- frequency independent permittivity
@@ -156,21 +197,21 @@ class Const(Material):
         if type(value) is complex:
             self.value = value
         else:
-            self.value = float(value)
+            self.value = float(cast(float, value))
 
-    def __getstate__(self):
+    def __getstate__(self) -> PickleState:
         d = Material.__getstate__(self)
         d["value"] = self.value
         return d
 
-    def __setstate__(self, d):
+    def __setstate__(self, d: PickleState) -> None:
         Material.__setstate__(self, d)
         self.value = d["value"]
 
-    def init(self, space, param=None):
+    def init(self, space: _MaterialSpace, param: object | None = None) -> None:
         pass
 
-    def display_info(self, indent=0):
+    def display_info(self, indent: int = 0) -> None:
         """Display the parameter values."""
         print(" " * indent, "const object")
         print(" " * indent, end=" ")
@@ -179,14 +220,19 @@ class Const(Material):
         print("frequency independent permeability:", self.mu_inf)
 
     def get_pw_material_ex(
-        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
-    ):
+        self,
+        idx: Index3,
+        coords: Coordinate3,
+        underneath: Material | None = None,
+        cmplx: bool = False,
+        _aggregate: NativeMaterial | None = None,
+    ) -> NativeMaterial:
         if cmplx:
             pw_obj = _aggregate if _aggregate is not None else ConstExCmplx()
-            pw_param = ConstElectricParamCmplx()
+            pw_param = cast(Any, ConstElectricParamCmplx())
         else:
             pw_obj = _aggregate if _aggregate is not None else ConstExReal()
-            pw_param = ConstElectricParamReal()
+            pw_param = cast(Any, ConstElectricParamReal())
 
         pw_param.value = self.value
         if underneath is None:
@@ -198,14 +244,19 @@ class Const(Material):
         return pw_obj
 
     def get_pw_material_ey(
-        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
-    ):
+        self,
+        idx: Index3,
+        coords: Coordinate3,
+        underneath: Material | None = None,
+        cmplx: bool = False,
+        _aggregate: NativeMaterial | None = None,
+    ) -> NativeMaterial:
         if cmplx:
             pw_obj = _aggregate if _aggregate is not None else ConstEyCmplx()
-            pw_param = ConstElectricParamCmplx()
+            pw_param = cast(Any, ConstElectricParamCmplx())
         else:
             pw_obj = _aggregate if _aggregate is not None else ConstEyReal()
-            pw_param = ConstElectricParamReal()
+            pw_param = cast(Any, ConstElectricParamReal())
 
         pw_param.value = self.value
         if underneath is None:
@@ -217,14 +268,19 @@ class Const(Material):
         return pw_obj
 
     def get_pw_material_ez(
-        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
-    ):
+        self,
+        idx: Index3,
+        coords: Coordinate3,
+        underneath: Material | None = None,
+        cmplx: bool = False,
+        _aggregate: NativeMaterial | None = None,
+    ) -> NativeMaterial:
         if cmplx:
             pw_obj = _aggregate if _aggregate is not None else ConstEzCmplx()
-            pw_param = ConstElectricParamCmplx()
+            pw_param = cast(Any, ConstElectricParamCmplx())
         else:
             pw_obj = _aggregate if _aggregate is not None else ConstEzReal()
-            pw_param = ConstElectricParamReal()
+            pw_param = cast(Any, ConstElectricParamReal())
 
         pw_param.value = self.value
         if underneath is None:
@@ -236,14 +292,19 @@ class Const(Material):
         return pw_obj
 
     def get_pw_material_hx(
-        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
-    ):
+        self,
+        idx: Index3,
+        coords: Coordinate3,
+        underneath: Material | None = None,
+        cmplx: bool = False,
+        _aggregate: NativeMaterial | None = None,
+    ) -> NativeMaterial:
         if cmplx:
             pw_obj = _aggregate if _aggregate is not None else ConstHxCmplx()
-            pw_param = ConstMagneticParamCmplx()
+            pw_param = cast(Any, ConstMagneticParamCmplx())
         else:
             pw_obj = _aggregate if _aggregate is not None else ConstHxReal()
-            pw_param = ConstMagneticParamReal()
+            pw_param = cast(Any, ConstMagneticParamReal())
 
         pw_param.value = self.value
         if underneath is None:
@@ -255,14 +316,19 @@ class Const(Material):
         return pw_obj
 
     def get_pw_material_hy(
-        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
-    ):
+        self,
+        idx: Index3,
+        coords: Coordinate3,
+        underneath: Material | None = None,
+        cmplx: bool = False,
+        _aggregate: NativeMaterial | None = None,
+    ) -> NativeMaterial:
         if cmplx:
             pw_obj = _aggregate if _aggregate is not None else ConstHyCmplx()
-            pw_param = ConstMagneticParamCmplx()
+            pw_param = cast(Any, ConstMagneticParamCmplx())
         else:
             pw_obj = _aggregate if _aggregate is not None else ConstHyReal()
-            pw_param = ConstMagneticParamReal()
+            pw_param = cast(Any, ConstMagneticParamReal())
 
         pw_param.value = self.value
         if underneath is None:
@@ -274,14 +340,19 @@ class Const(Material):
         return pw_obj
 
     def get_pw_material_hz(
-        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
-    ):
+        self,
+        idx: Index3,
+        coords: Coordinate3,
+        underneath: Material | None = None,
+        cmplx: bool = False,
+        _aggregate: NativeMaterial | None = None,
+    ) -> NativeMaterial:
         if cmplx:
             pw_obj = _aggregate if _aggregate is not None else ConstHzCmplx()
-            pw_param = ConstMagneticParamCmplx()
+            pw_param = cast(Any, ConstMagneticParamCmplx())
         else:
             pw_obj = _aggregate if _aggregate is not None else ConstHzReal()
-            pw_param = ConstMagneticParamReal()
+            pw_param = cast(Any, ConstMagneticParamReal())
 
         pw_param.value = self.value
         if underneath is None:
@@ -296,7 +367,9 @@ class Const(Material):
 class Dielectric(Material):
     """Representation of non-dispersive isotropic dielectric medium."""
 
-    def __init__(self, eps_inf=1, mu_inf=1):
+    dt: float
+
+    def __init__(self, eps_inf: float = 1, mu_inf: float = 1) -> None:
         """Arguments:
         eps_inf -- frequency independent permittivity
         mu_inf -- frequency independent permeability
@@ -304,10 +377,10 @@ class Dielectric(Material):
         """
         Material.__init__(self, eps_inf, mu_inf)
 
-    def init(self, space, param=None):
+    def init(self, space: _MaterialSpace, param: object | None = None) -> None:
         pass
 
-    def display_info(self, indent=0):
+    def display_info(self, indent: int = 0) -> None:
         """Display the parameter values."""
         print(" " * indent, "dielectric")
         print(" " * indent, end=" ")
@@ -315,14 +388,19 @@ class Dielectric(Material):
         print("frequency independent permeability:", self.mu_inf)
 
     def get_pw_material_ex(
-        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
-    ):
+        self,
+        idx: Index3,
+        coords: Coordinate3,
+        underneath: Material | None = None,
+        cmplx: bool = False,
+        _aggregate: NativeMaterial | None = None,
+    ) -> NativeMaterial:
         if cmplx:
             pw_obj = _aggregate if _aggregate is not None else DielectricExCmplx()
-            pw_param = DielectricElectricParamCmplx()
+            pw_param = cast(Any, DielectricElectricParamCmplx())
         else:
             pw_obj = _aggregate if _aggregate is not None else DielectricExReal()
-            pw_param = DielectricElectricParamReal()
+            pw_param = cast(Any, DielectricElectricParamReal())
 
         if underneath is None:
             pw_param.eps_inf = self.eps_inf
@@ -333,14 +411,19 @@ class Dielectric(Material):
         return pw_obj
 
     def get_pw_material_ey(
-        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
-    ):
+        self,
+        idx: Index3,
+        coords: Coordinate3,
+        underneath: Material | None = None,
+        cmplx: bool = False,
+        _aggregate: NativeMaterial | None = None,
+    ) -> NativeMaterial:
         if cmplx:
             pw_obj = _aggregate if _aggregate is not None else DielectricEyCmplx()
-            pw_param = DielectricElectricParamCmplx()
+            pw_param = cast(Any, DielectricElectricParamCmplx())
         else:
             pw_obj = _aggregate if _aggregate is not None else DielectricEyReal()
-            pw_param = DielectricElectricParamReal()
+            pw_param = cast(Any, DielectricElectricParamReal())
 
         if underneath is None:
             pw_param.eps_inf = self.eps_inf
@@ -351,14 +434,19 @@ class Dielectric(Material):
         return pw_obj
 
     def get_pw_material_ez(
-        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
-    ):
+        self,
+        idx: Index3,
+        coords: Coordinate3,
+        underneath: Material | None = None,
+        cmplx: bool = False,
+        _aggregate: NativeMaterial | None = None,
+    ) -> NativeMaterial:
         if cmplx:
             pw_obj = _aggregate if _aggregate is not None else DielectricEzCmplx()
-            pw_param = DielectricElectricParamCmplx()
+            pw_param = cast(Any, DielectricElectricParamCmplx())
         else:
             pw_obj = _aggregate if _aggregate is not None else DielectricEzReal()
-            pw_param = DielectricElectricParamReal()
+            pw_param = cast(Any, DielectricElectricParamReal())
 
         if underneath is None:
             pw_param.eps_inf = self.eps_inf
@@ -369,14 +457,19 @@ class Dielectric(Material):
         return pw_obj
 
     def get_pw_material_hx(
-        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
-    ):
+        self,
+        idx: Index3,
+        coords: Coordinate3,
+        underneath: Material | None = None,
+        cmplx: bool = False,
+        _aggregate: NativeMaterial | None = None,
+    ) -> NativeMaterial:
         if cmplx:
             pw_obj = _aggregate if _aggregate is not None else DielectricHxCmplx()
-            pw_param = DielectricMagneticParamCmplx()
+            pw_param = cast(Any, DielectricMagneticParamCmplx())
         else:
             pw_obj = _aggregate if _aggregate is not None else DielectricHxReal()
-            pw_param = DielectricMagneticParamReal()
+            pw_param = cast(Any, DielectricMagneticParamReal())
 
         if underneath is None:
             pw_param.mu_inf = self.mu_inf
@@ -387,14 +480,19 @@ class Dielectric(Material):
         return pw_obj
 
     def get_pw_material_hy(
-        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
-    ):
+        self,
+        idx: Index3,
+        coords: Coordinate3,
+        underneath: Material | None = None,
+        cmplx: bool = False,
+        _aggregate: NativeMaterial | None = None,
+    ) -> NativeMaterial:
         if cmplx:
             pw_obj = _aggregate if _aggregate is not None else DielectricHyCmplx()
-            pw_param = DielectricMagneticParamCmplx()
+            pw_param = cast(Any, DielectricMagneticParamCmplx())
         else:
             pw_obj = _aggregate if _aggregate is not None else DielectricHyReal()
-            pw_param = DielectricMagneticParamReal()
+            pw_param = cast(Any, DielectricMagneticParamReal())
 
         if underneath is None:
             pw_param.mu_inf = self.mu_inf
@@ -405,14 +503,19 @@ class Dielectric(Material):
         return pw_obj
 
     def get_pw_material_hz(
-        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
-    ):
+        self,
+        idx: Index3,
+        coords: Coordinate3,
+        underneath: Material | None = None,
+        cmplx: bool = False,
+        _aggregate: NativeMaterial | None = None,
+    ) -> NativeMaterial:
         if cmplx:
             pw_obj = _aggregate if _aggregate is not None else DielectricHzCmplx()
-            pw_param = DielectricMagneticParamCmplx()
+            pw_param = cast(Any, DielectricMagneticParamCmplx())
         else:
             pw_obj = _aggregate if _aggregate is not None else DielectricHzReal()
-            pw_param = DielectricMagneticParamReal()
+            pw_param = cast(Any, DielectricMagneticParamReal())
 
         if underneath is None:
             pw_param.mu_inf = self.mu_inf
@@ -436,11 +539,22 @@ class Pml(Material, Compound):
 
     """
 
-    def __init__(self, eps_inf, mu_inf):
+    sigma_max_ratio: float
+    kappa_max: float
+    m: float
+    center: NDArray[np.float64]
+    half_size: NDArray[np.float64]
+    d: float
+    dt: float
+    dw: NDArray[np.float64]
+    sigma_max: NDArray[np.float64]
+    initialized: bool
+
+    def __init__(self, eps_inf: float, mu_inf: float) -> None:
         Material.__init__(self, eps_inf, mu_inf)
         self.initialized = False
 
-    def __getstate__(self):
+    def __getstate__(self) -> PickleState:
         d = Material.__getstate__(self)
         d["initialized"] = self.initialized
 
@@ -454,7 +568,7 @@ class Pml(Material, Compound):
 
         return d
 
-    def __setstate__(self, d):
+    def __setstate__(self, d: PickleState) -> None:
         Material.__setstate__(self, d)
         self.initialized = d["initialized"]
 
@@ -466,7 +580,7 @@ class Pml(Material, Compound):
             self.dw = d["dw"].copy()
             self.sigma_max = np.array(d["sigma_max"], copy=True)
 
-    def init(self, space, param):
+    def init(self, space: _MaterialSpace, param: object | None = None) -> None:
         """Initialize spatial PML grading from a shell and Cartesian grid.
 
         The thickness of PML layer and size of the Shell instance
@@ -477,9 +591,10 @@ class Pml(Material, Compound):
         param: (center, half_size, thickness) of the the Shell.
 
         """
-        self.center = np.array(param[0], np.double)
-        self.half_size = array(param[1], np.double)
-        self.d = param[2]
+        center, half_size, thickness = cast(PmlParameters, param)
+        self.center = np.array(center, np.double)
+        self.half_size = array(half_size, np.double)
+        self.d = thickness
 
         for i in range(3):
             if self.half_size[i] < self.d:
@@ -491,35 +606,35 @@ class Pml(Material, Compound):
 
         self.initialized = True
 
-    def get_sigma_opt(self):
+    def get_sigma_opt(self) -> NDArray[np.float64]:
         """Calculate the optimal value of conductivity."""
         eta = sqrt(self.mu_inf / self.eps_inf)
         return 0.8 * (self.m + 1) / (eta * self.dw)
 
-    def sigma(self, w, component):
+    def sigma(self, w: float, component: int) -> float:
         """Polynomial grading of conductivity."""
         w -= self.center[component]
         half_size = self.half_size[component]
 
         if w <= self.d - half_size:
             depth = min(max((half_size + w) / self.d, 0), 1)
-            return self.sigma_max[component] * (1 - depth) ** self.m
+            return cast(float, self.sigma_max[component] * (1 - depth) ** self.m)
         elif half_size - self.d <= w:
             depth = min(max((half_size - w) / self.d, 0), 1)
-            return self.sigma_max[component] * (1 - depth) ** self.m
+            return cast(float, self.sigma_max[component] * (1 - depth) ** self.m)
         else:
             return 0
 
-    def kappa(self, w, component):
+    def kappa(self, w: float, component: int) -> float:
         """Polynomial grading of kappa."""
         w -= self.center[component]
         half_size = self.half_size[component]
         if w <= self.d - half_size:
             depth = min(max((half_size + w) / self.d, 0), 1)
-            return 1 + (self.kappa_max - 1) * (1 - depth) ** self.m
+            return cast(float, 1 + (self.kappa_max - 1) * (1 - depth) ** self.m)
         elif half_size - self.d <= w:
             depth = min(max((half_size - w) / self.d, 0), 1)
-            return 1 + (self.kappa_max - 1) * (1 - depth) ** self.m
+            return cast(float, 1 + (self.kappa_max - 1) * (1 - depth) ** self.m)
         else:
             return 1
 
@@ -543,28 +658,33 @@ class Upml(Pml):
     """
 
     def __init__(
-        self, eps_inf=1, mu_inf=1, m=3.6, kappa_max=4.6, sigma_max_ratio=0.745
-    ):
+        self,
+        eps_inf: float = 1,
+        mu_inf: float = 1,
+        m: float = 3.6,
+        kappa_max: float = 4.6,
+        sigma_max_ratio: float = 0.745,
+    ) -> None:
         Pml.__init__(self, eps_inf, mu_inf)
 
         self.m = float(m)
         self.kappa_max = float(kappa_max)
         self.sigma_max_ratio = float(sigma_max_ratio)
 
-    def __getstate__(self):
+    def __getstate__(self) -> PickleState:
         d = Pml.__getstate__(self)
         d["m"] = self.m
         d["kappa_max"] = self.kappa_max
         d["sigma_max_ratio"] = self.sigma_max_ratio
         return d
 
-    def __setstate__(self, d):
+    def __setstate__(self, d: PickleState) -> None:
         Pml.__setstate__(self, d)
         self.m = d["m"]
         self.kappa_max = d["kappa_max"]
         self.sigma_max_ratio = d["sigma_max_ratio"]
 
-    def display_info(self, indent=0):
+    def display_info(self, indent: int = 0) -> None:
         """Display the parameter values.
 
         Override PML.display_info.
@@ -580,54 +700,59 @@ class Upml(Pml):
         print("m:", self.m, end=" ")
         print("kappa_max:", self.kappa_max)
 
-    def c1(self, w, component):
+    def c1(self, w: float, component: int) -> float:
         """Return the first UPML recurrence coefficient at a coordinate."""
 
         numerator = 2 * self.kappa(w, component) - self.sigma(w, component) * self.dt
         denominator = 2 * self.kappa(w, component) + self.sigma(w, component) * self.dt
         return numerator / denominator
 
-    def c2(self, w, component):
+    def c2(self, w: float, component: int) -> float:
         """Return the second UPML recurrence coefficient at a coordinate."""
 
         numerator = 2 * self.dt
         denominator = 2 * self.kappa(w, component) + self.sigma(w, component) * self.dt
         return numerator / denominator
 
-    def c3(self, w, component):
+    def c3(self, w: float, component: int) -> float:
         """Return the third UPML recurrence coefficient at a coordinate."""
 
         numerator = 2 * self.kappa(w, component) - self.sigma(w, component) * self.dt
         denominator = 2 * self.kappa(w, component) + self.sigma(w, component) * self.dt
         return numerator / denominator
 
-    def c4(self, w, component):
+    def c4(self, w: float, component: int) -> float:
         """Return the fourth UPML recurrence coefficient at a coordinate."""
 
         denominator = 2 * self.kappa(w, component) + self.sigma(w, component) * self.dt
         return 1 / denominator
 
-    def c5(self, w, component):
+    def c5(self, w: float, component: int) -> float:
         """Return the fifth UPML recurrence coefficient at a coordinate."""
 
         numerator = 2 * self.kappa(w, component) + self.sigma(w, component) * self.dt
         return numerator
 
-    def c6(self, w, component):
+    def c6(self, w: float, component: int) -> float:
         """Return the sixth UPML recurrence coefficient at a coordinate."""
 
         numerator = 2 * self.kappa(w, component) - self.sigma(w, component) * self.dt
         return numerator
 
     def get_pw_material_ex(
-        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
-    ):
+        self,
+        idx: Index3,
+        coords: Coordinate3,
+        underneath: Material | None = None,
+        cmplx: bool = False,
+        _aggregate: NativeMaterial | None = None,
+    ) -> NativeMaterial:
         if cmplx:
             pw_obj = _aggregate if _aggregate is not None else UpmlExCmplx()
-            pw_param = UpmlElectricParamCmplx()
+            pw_param = cast(Any, UpmlElectricParamCmplx())
         else:
             pw_obj = _aggregate if _aggregate is not None else UpmlExReal()
-            pw_param = UpmlElectricParamReal()
+            pw_param = cast(Any, UpmlElectricParamReal())
 
         if underneath is None:
             pw_param.eps_inf = self.eps_inf
@@ -645,14 +770,19 @@ class Upml(Pml):
         return pw_obj
 
     def get_pw_material_ey(
-        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
-    ):
+        self,
+        idx: Index3,
+        coords: Coordinate3,
+        underneath: Material | None = None,
+        cmplx: bool = False,
+        _aggregate: NativeMaterial | None = None,
+    ) -> NativeMaterial:
         if cmplx:
             pw_obj = _aggregate if _aggregate is not None else UpmlEyCmplx()
-            pw_param = UpmlElectricParamCmplx()
+            pw_param = cast(Any, UpmlElectricParamCmplx())
         else:
             pw_obj = _aggregate if _aggregate is not None else UpmlEyReal()
-            pw_param = UpmlElectricParamReal()
+            pw_param = cast(Any, UpmlElectricParamReal())
 
         if underneath is None:
             pw_param.eps_inf = self.eps_inf
@@ -670,14 +800,19 @@ class Upml(Pml):
         return pw_obj
 
     def get_pw_material_ez(
-        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
-    ):
+        self,
+        idx: Index3,
+        coords: Coordinate3,
+        underneath: Material | None = None,
+        cmplx: bool = False,
+        _aggregate: NativeMaterial | None = None,
+    ) -> NativeMaterial:
         if cmplx:
             pw_obj = _aggregate if _aggregate is not None else UpmlEzCmplx()
-            pw_param = UpmlElectricParamCmplx()
+            pw_param = cast(Any, UpmlElectricParamCmplx())
         else:
             pw_obj = _aggregate if _aggregate is not None else UpmlEzReal()
-            pw_param = UpmlElectricParamReal()
+            pw_param = cast(Any, UpmlElectricParamReal())
 
         if underneath is None:
             pw_param.eps_inf = self.eps_inf
@@ -695,14 +830,19 @@ class Upml(Pml):
         return pw_obj
 
     def get_pw_material_hx(
-        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
-    ):
+        self,
+        idx: Index3,
+        coords: Coordinate3,
+        underneath: Material | None = None,
+        cmplx: bool = False,
+        _aggregate: NativeMaterial | None = None,
+    ) -> NativeMaterial:
         if cmplx:
             pw_obj = _aggregate if _aggregate is not None else UpmlHxCmplx()
-            pw_param = UpmlMagneticParamCmplx()
+            pw_param = cast(Any, UpmlMagneticParamCmplx())
         else:
             pw_obj = _aggregate if _aggregate is not None else UpmlHxReal()
-            pw_param = UpmlMagneticParamReal()
+            pw_param = cast(Any, UpmlMagneticParamReal())
 
         if underneath is None:
             pw_param.mu_inf = self.mu_inf
@@ -720,14 +860,19 @@ class Upml(Pml):
         return pw_obj
 
     def get_pw_material_hy(
-        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
-    ):
+        self,
+        idx: Index3,
+        coords: Coordinate3,
+        underneath: Material | None = None,
+        cmplx: bool = False,
+        _aggregate: NativeMaterial | None = None,
+    ) -> NativeMaterial:
         if cmplx:
             pw_obj = _aggregate if _aggregate is not None else UpmlHyCmplx()
-            pw_param = UpmlMagneticParamCmplx()
+            pw_param = cast(Any, UpmlMagneticParamCmplx())
         else:
             pw_obj = _aggregate if _aggregate is not None else UpmlHyReal()
-            pw_param = UpmlMagneticParamReal()
+            pw_param = cast(Any, UpmlMagneticParamReal())
 
         if underneath is None:
             pw_param.mu_inf = self.mu_inf
@@ -745,14 +890,19 @@ class Upml(Pml):
         return pw_obj
 
     def get_pw_material_hz(
-        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
-    ):
+        self,
+        idx: Index3,
+        coords: Coordinate3,
+        underneath: Material | None = None,
+        cmplx: bool = False,
+        _aggregate: NativeMaterial | None = None,
+    ) -> NativeMaterial:
         if cmplx:
             pw_obj = _aggregate if _aggregate is not None else UpmlHzCmplx()
-            pw_param = UpmlMagneticParamCmplx()
+            pw_param = cast(Any, UpmlMagneticParamCmplx())
         else:
             pw_obj = _aggregate if _aggregate is not None else UpmlHzReal()
-            pw_param = UpmlMagneticParamReal()
+            pw_param = cast(Any, UpmlMagneticParamReal())
 
         if underneath is None:
             pw_param.mu_inf = self.mu_inf
@@ -792,14 +942,14 @@ class Cpml(Pml):
 
     def __init__(
         self,
-        eps_inf=1,
-        mu_inf=1,
-        m=3.4,
-        kappa_max=1,
-        m_a=4.8,
-        a_max=0.8,
-        sigma_max_ratio=0.65,
-    ):
+        eps_inf: float = 1,
+        mu_inf: float = 1,
+        m: float = 3.4,
+        kappa_max: float = 1,
+        m_a: float = 4.8,
+        a_max: float = 0.8,
+        sigma_max_ratio: float = 0.65,
+    ) -> None:
         Pml.__init__(self, eps_inf, mu_inf)
 
         self.m = float(m)
@@ -808,7 +958,7 @@ class Cpml(Pml):
         self.a_max = float(a_max)
         self.sigma_max_ratio = float(sigma_max_ratio)
 
-    def __getstate__(self):
+    def __getstate__(self) -> PickleState:
         d = Pml.__getstate__(self)
         d["m"] = self.m
         d["kappa_max"] = self.kappa_max
@@ -817,7 +967,7 @@ class Cpml(Pml):
         d["sigma_max_ratio"] = self.sigma_max_ratio
         return d
 
-    def __setstate__(self, d):
+    def __setstate__(self, d: PickleState) -> None:
         Pml.__setstate__(self, d)
         self.m = d["m"]
         self.kappa_max = d["kappa_max"]
@@ -825,7 +975,7 @@ class Cpml(Pml):
         self.a_max = d["a_max"]
         self.sigma_max_ratio = d["sigma_max_ratio"]
 
-    def display_info(self, indent=0):
+    def display_info(self, indent: int = 0) -> None:
         """Display the parameter values.
 
         Override PML.display_info.
@@ -843,7 +993,7 @@ class Cpml(Pml):
         print("m_a:", self.m_a, end=" ")
         print("a_max:", self.a_max)
 
-    def a(self, w, component):
+    def a(self, w: float, component: int) -> float:
         """Return the CPML alpha profile at a coordinate."""
 
         w -= self.center[component]
@@ -851,14 +1001,14 @@ class Cpml(Pml):
 
         if w <= self.d - half_size:
             depth = min(max((half_size + w) / self.d, 0), 1)
-            return self.a_max * depth**self.m_a
+            return cast(float, self.a_max * depth**self.m_a)
         elif half_size - self.d <= w:
             depth = min(max((half_size - w) / self.d, 0), 1)
-            return self.a_max * depth**self.m_a
+            return cast(float, self.a_max * depth**self.m_a)
         else:
             return 0
 
-    def b(self, w, component):
+    def b(self, w: float, component: int) -> float:
         """Return the CPML memory-decay coefficient at a coordinate."""
 
         exponent = (
@@ -870,7 +1020,7 @@ class Cpml(Pml):
         )
         return exp(exponent)
 
-    def c(self, w, component):
+    def c(self, w: float, component: int) -> float:
         """Return the CPML memory-source coefficient at a coordinate."""
 
         sigma = self.sigma(w, component)
@@ -883,14 +1033,19 @@ class Cpml(Pml):
             return 0
 
     def get_pw_material_ex(
-        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
-    ):
+        self,
+        idx: Index3,
+        coords: Coordinate3,
+        underneath: Material | None = None,
+        cmplx: bool = False,
+        _aggregate: NativeMaterial | None = None,
+    ) -> NativeMaterial:
         if cmplx:
             pw_obj = _aggregate if _aggregate is not None else CpmlExCmplx()
-            pw_param = CpmlElectricParamCmplx()
+            pw_param = cast(Any, CpmlElectricParamCmplx())
         else:
             pw_obj = _aggregate if _aggregate is not None else CpmlExReal()
-            pw_param = CpmlElectricParamReal()
+            pw_param = cast(Any, CpmlElectricParamReal())
 
         if underneath is None:
             pw_param.eps_inf = self.eps_inf
@@ -908,14 +1063,19 @@ class Cpml(Pml):
         return pw_obj
 
     def get_pw_material_ey(
-        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
-    ):
+        self,
+        idx: Index3,
+        coords: Coordinate3,
+        underneath: Material | None = None,
+        cmplx: bool = False,
+        _aggregate: NativeMaterial | None = None,
+    ) -> NativeMaterial:
         if cmplx:
             pw_obj = _aggregate if _aggregate is not None else CpmlEyCmplx()
-            pw_param = CpmlElectricParamCmplx()
+            pw_param = cast(Any, CpmlElectricParamCmplx())
         else:
             pw_obj = _aggregate if _aggregate is not None else CpmlEyReal()
-            pw_param = CpmlElectricParamReal()
+            pw_param = cast(Any, CpmlElectricParamReal())
 
         if underneath is None:
             pw_param.eps_inf = self.eps_inf
@@ -933,14 +1093,19 @@ class Cpml(Pml):
         return pw_obj
 
     def get_pw_material_ez(
-        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
-    ):
+        self,
+        idx: Index3,
+        coords: Coordinate3,
+        underneath: Material | None = None,
+        cmplx: bool = False,
+        _aggregate: NativeMaterial | None = None,
+    ) -> NativeMaterial:
         if cmplx:
             pw_obj = _aggregate if _aggregate is not None else CpmlEzCmplx()
-            pw_param = CpmlElectricParamCmplx()
+            pw_param = cast(Any, CpmlElectricParamCmplx())
         else:
             pw_obj = _aggregate if _aggregate is not None else CpmlEzReal()
-            pw_param = CpmlElectricParamReal()
+            pw_param = cast(Any, CpmlElectricParamReal())
 
         if underneath is None:
             pw_param.eps_inf = self.eps_inf
@@ -957,14 +1122,19 @@ class Cpml(Pml):
         return pw_obj
 
     def get_pw_material_hx(
-        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
-    ):
+        self,
+        idx: Index3,
+        coords: Coordinate3,
+        underneath: Material | None = None,
+        cmplx: bool = False,
+        _aggregate: NativeMaterial | None = None,
+    ) -> NativeMaterial:
         if cmplx:
             pw_obj = _aggregate if _aggregate is not None else CpmlHxCmplx()
-            pw_param = CpmlMagneticParamCmplx()
+            pw_param = cast(Any, CpmlMagneticParamCmplx())
         else:
             pw_obj = _aggregate if _aggregate is not None else CpmlHxReal()
-            pw_param = CpmlMagneticParamReal()
+            pw_param = cast(Any, CpmlMagneticParamReal())
 
         if underneath is None:
             pw_param.mu_inf = self.mu_inf
@@ -981,14 +1151,19 @@ class Cpml(Pml):
         return pw_obj
 
     def get_pw_material_hy(
-        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
-    ):
+        self,
+        idx: Index3,
+        coords: Coordinate3,
+        underneath: Material | None = None,
+        cmplx: bool = False,
+        _aggregate: NativeMaterial | None = None,
+    ) -> NativeMaterial:
         if cmplx:
             pw_obj = _aggregate if _aggregate is not None else CpmlHyCmplx()
-            pw_param = CpmlMagneticParamCmplx()
+            pw_param = cast(Any, CpmlMagneticParamCmplx())
         else:
             pw_obj = _aggregate if _aggregate is not None else CpmlHyReal()
-            pw_param = CpmlMagneticParamReal()
+            pw_param = cast(Any, CpmlMagneticParamReal())
 
         if underneath is None:
             pw_param.mu_inf = self.mu_inf
@@ -1005,14 +1180,19 @@ class Cpml(Pml):
         return pw_obj
 
     def get_pw_material_hz(
-        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
-    ):
+        self,
+        idx: Index3,
+        coords: Coordinate3,
+        underneath: Material | None = None,
+        cmplx: bool = False,
+        _aggregate: NativeMaterial | None = None,
+    ) -> NativeMaterial:
         if cmplx:
             pw_obj = _aggregate if _aggregate is not None else CpmlHzCmplx()
-            pw_param = CpmlMagneticParamCmplx()
+            pw_param = cast(Any, CpmlMagneticParamCmplx())
         else:
             pw_obj = _aggregate if _aggregate is not None else CpmlHzReal()
-            pw_param = CpmlMagneticParamReal()
+            pw_param = cast(Any, CpmlMagneticParamReal())
 
         if underneath is None:
             pw_param.mu_inf = self.mu_inf
@@ -1037,12 +1217,15 @@ class DrudePole(object):
         gamma: Relaxation rate in inverse simulation-time units.
     """
 
-    def __init__(self, omega, gamma):
+    omega: float
+    gamma: float
+
+    def __init__(self, omega: float, gamma: float) -> None:
         """Store the plasma frequency and relaxation rate."""
         self.omega = float(omega)
         self.gamma = float(gamma)
 
-    def display_info(self, indent=0):
+    def display_info(self, indent: int = 0) -> None:
         """Display the parameter values."""
         print(" " * indent, "Drude pole")
         print(" " * indent, end=" ")
@@ -1059,13 +1242,17 @@ class LorentzPole(object):
         gamma: Broadening rate in inverse simulation-time units.
     """
 
-    def __init__(self, amp, omega, gamma):
+    amp: float
+    omega: float
+    gamma: float
+
+    def __init__(self, amp: float, omega: float, gamma: float) -> None:
         """Store the oscillator amplitude, resonance, and broadening."""
         self.amp = float(amp)
         self.omega = float(omega)
         self.gamma = float(gamma)
 
-    def display_info(self, indent=0):
+    def display_info(self, indent: int = 0) -> None:
         """Display the parameter values."""
         print(" " * indent, "Lorentz pole")
         print(" " * indent, end=" ")
@@ -1084,14 +1271,19 @@ class CriticalPoint(object):
         gamma: Broadening rate in inverse simulation-time units.
     """
 
-    def __init__(self, amp, phi, omega, gamma):
+    amp: float
+    phi: float
+    omega: float
+    gamma: float
+
+    def __init__(self, amp: float, phi: float, omega: float, gamma: float) -> None:
         """Store the critical-point amplitude, phase, gap, and broadening."""
         self.amp = float(amp)
         self.phi = float(phi)
         self.omega = float(omega)
         self.gamma = float(gamma)
 
-    def display_info(self, indent=0):
+    def display_info(self, indent: int = 0) -> None:
         """Display the parameter values."""
         print(" " * indent, "critical point")
         print(" " * indent, end=" ")
@@ -1104,7 +1296,14 @@ class CriticalPoint(object):
 class DcpAde(Dielectric):
     """Model Drude and critical-point dispersion with auxiliary equations."""
 
-    def __init__(self, eps_inf=1, mu_inf=1, sigma=0, dps=(), cps=()):
+    def __init__(
+        self,
+        eps_inf: float = 1,
+        mu_inf: float = 1,
+        sigma: float = 0,
+        dps: Sequence[DrudePole] = (),
+        cps: Sequence[CriticalPoint] = (),
+    ) -> None:
         """Initialize an ADE Drude-critical-point material.
 
         eps_inf: The (frequency-independent) relative permittivity. Default is 1.
@@ -1120,7 +1319,7 @@ class DcpAde(Dielectric):
         self.cps = tuple(cps)  # tuple of critical points
         self.initialized = False
 
-    def __getstate__(self):
+    def __getstate__(self) -> PickleState:
         d = Dielectric.__getstate__(self)
         d["sigma"] = self.sigma
         d["dps"] = self.dps
@@ -1135,7 +1334,7 @@ class DcpAde(Dielectric):
 
         return d
 
-    def __setstate__(self, d):
+    def __setstate__(self, d: PickleState) -> None:
         Dielectric.__setstate__(self, d)
 
         self.sigma = d["sigma"]
@@ -1149,7 +1348,7 @@ class DcpAde(Dielectric):
             self.b = d["b"].copy()
             self.c = d["c"].copy()
 
-    def init(self, space, param=None):
+    def init(self, space: _MaterialSpace, param: object | None = None) -> None:
         self.dt = space.dt
 
         # parameters for the ADE of the Drude model
@@ -1224,7 +1423,7 @@ class DcpAde(Dielectric):
 
         self.initialized = True
 
-    def display_info(self, indent=0):
+    def display_info(self, indent: int = 0) -> None:
         """Display the parameter values."""
         print(" " * indent, "Drude-critical points dispersive media")
         print(" " * indent, end=" ")
@@ -1233,21 +1432,26 @@ class DcpAde(Dielectric):
         print("conductivity:", self.sigma)
 
         print(" " * indent, "Drude pole(s):")
-        for i in self.dps:
-            i.display_info(indent + 4)
+        for pole in self.dps:
+            pole.display_info(indent + 4)
         print(" " * indent, "critical point(s):")
-        for i in self.cps:
-            i.display_info(indent + 4)
+        for point in self.cps:
+            point.display_info(indent + 4)
 
     def get_pw_material_ex(
-        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
-    ):
+        self,
+        idx: Index3,
+        coords: Coordinate3,
+        underneath: Material | None = None,
+        cmplx: bool = False,
+        _aggregate: NativeMaterial | None = None,
+    ) -> NativeMaterial:
         if cmplx:
             pw_obj = _aggregate if _aggregate is not None else DcpAdeExCmplx()
-            pw_param = DcpAdeElectricParamCmplx()
+            pw_param = cast(Any, DcpAdeElectricParamCmplx())
         else:
             pw_obj = _aggregate if _aggregate is not None else DcpAdeExReal()
-            pw_param = DcpAdeElectricParamReal()
+            pw_param = cast(Any, DcpAdeElectricParamReal())
 
         if underneath is None:
             pw_param.eps_inf = self.eps_inf
@@ -1260,14 +1464,19 @@ class DcpAde(Dielectric):
         return pw_obj
 
     def get_pw_material_ey(
-        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
-    ):
+        self,
+        idx: Index3,
+        coords: Coordinate3,
+        underneath: Material | None = None,
+        cmplx: bool = False,
+        _aggregate: NativeMaterial | None = None,
+    ) -> NativeMaterial:
         if cmplx:
             pw_obj = _aggregate if _aggregate is not None else DcpAdeEyCmplx()
-            pw_param = DcpAdeElectricParamCmplx()
+            pw_param = cast(Any, DcpAdeElectricParamCmplx())
         else:
             pw_obj = _aggregate if _aggregate is not None else DcpAdeEyReal()
-            pw_param = DcpAdeElectricParamReal()
+            pw_param = cast(Any, DcpAdeElectricParamReal())
 
         if underneath is None:
             pw_param.eps_inf = self.eps_inf
@@ -1280,14 +1489,19 @@ class DcpAde(Dielectric):
         return pw_obj
 
     def get_pw_material_ez(
-        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
-    ):
+        self,
+        idx: Index3,
+        coords: Coordinate3,
+        underneath: Material | None = None,
+        cmplx: bool = False,
+        _aggregate: NativeMaterial | None = None,
+    ) -> NativeMaterial:
         if cmplx:
             pw_obj = _aggregate if _aggregate is not None else DcpAdeEzCmplx()
-            pw_param = DcpAdeElectricParamCmplx()
+            pw_param = cast(Any, DcpAdeElectricParamCmplx())
         else:
             pw_obj = _aggregate if _aggregate is not None else DcpAdeEzReal()
-            pw_param = DcpAdeElectricParamReal()
+            pw_param = cast(Any, DcpAdeElectricParamReal())
 
         if underneath is None:
             pw_param.eps_inf = self.eps_inf
@@ -1300,14 +1514,19 @@ class DcpAde(Dielectric):
         return pw_obj
 
     def get_pw_material_hx(
-        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
-    ):
+        self,
+        idx: Index3,
+        coords: Coordinate3,
+        underneath: Material | None = None,
+        cmplx: bool = False,
+        _aggregate: NativeMaterial | None = None,
+    ) -> NativeMaterial:
         if cmplx:
             pw_obj = _aggregate if _aggregate is not None else DcpAdeHxCmplx()
-            pw_param = DcpAdeMagneticParamCmplx()
+            pw_param = cast(Any, DcpAdeMagneticParamCmplx())
         else:
             pw_obj = _aggregate if _aggregate is not None else DcpAdeHxReal()
-            pw_param = DcpAdeMagneticParamReal()
+            pw_param = cast(Any, DcpAdeMagneticParamReal())
 
         if underneath is None:
             pw_param.mu_inf = self.mu_inf
@@ -1318,14 +1537,19 @@ class DcpAde(Dielectric):
         return pw_obj
 
     def get_pw_material_hy(
-        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
-    ):
+        self,
+        idx: Index3,
+        coords: Coordinate3,
+        underneath: Material | None = None,
+        cmplx: bool = False,
+        _aggregate: NativeMaterial | None = None,
+    ) -> NativeMaterial:
         if cmplx:
             pw_obj = _aggregate if _aggregate is not None else DcpAdeHyCmplx()
-            pw_param = DcpAdeMagneticParamCmplx()
+            pw_param = cast(Any, DcpAdeMagneticParamCmplx())
         else:
             pw_obj = _aggregate if _aggregate is not None else DcpAdeHyReal()
-            pw_param = DcpAdeMagneticParamReal()
+            pw_param = cast(Any, DcpAdeMagneticParamReal())
 
         if underneath is None:
             pw_param.mu_inf = self.mu_inf
@@ -1336,14 +1560,19 @@ class DcpAde(Dielectric):
         return pw_obj
 
     def get_pw_material_hz(
-        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
-    ):
+        self,
+        idx: Index3,
+        coords: Coordinate3,
+        underneath: Material | None = None,
+        cmplx: bool = False,
+        _aggregate: NativeMaterial | None = None,
+    ) -> NativeMaterial:
         if cmplx:
             pw_obj = _aggregate if _aggregate is not None else DcpAdeHzCmplx()
-            pw_param = DcpAdeMagneticParamCmplx()
+            pw_param = cast(Any, DcpAdeMagneticParamCmplx())
         else:
             pw_obj = _aggregate if _aggregate is not None else DcpAdeHzReal()
-            pw_param = DcpAdeMagneticParamReal()
+            pw_param = cast(Any, DcpAdeMagneticParamReal())
 
         if underneath is None:
             pw_param.mu_inf = self.mu_inf
@@ -1368,7 +1597,14 @@ class DcpPlrc(Dielectric):
 
     """
 
-    def __init__(self, eps_inf=1, mu_inf=1, sigma=0, dps=(), cps=()):
+    def __init__(
+        self,
+        eps_inf: float = 1,
+        mu_inf: float = 1,
+        sigma: float = 0,
+        dps: Sequence[DrudePole] = (),
+        cps: Sequence[CriticalPoint] = (),
+    ) -> None:
         """Initialize a PLRC Drude-critical-point material.
 
         eps_inf: The (frequency-independent) relative permittivity. Default is 1.
@@ -1384,7 +1620,7 @@ class DcpPlrc(Dielectric):
         self.cps = tuple(cps)  # tuple of critical points
         self.initialized = False
 
-    def __getstate__(self):
+    def __getstate__(self) -> PickleState:
         d = Dielectric.__getstate__(self)
         d["sigma"] = self.sigma
         d["dps"] = self.dps
@@ -1399,7 +1635,7 @@ class DcpPlrc(Dielectric):
 
         return d
 
-    def __setstate__(self, d):
+    def __setstate__(self, d: PickleState) -> None:
         Dielectric.__setstate__(self, d)
         self.sigma = d["sigma"]
         self.dps = deepcopy(d["dps"])
@@ -1412,7 +1648,7 @@ class DcpPlrc(Dielectric):
             self.b = d["b"].copy()
             self.c = d["c"].copy()
 
-    def init(self, space, param=None):
+    def init(self, space: _MaterialSpace, param: object | None = None) -> None:
         self.dt = space.dt
 
         # parameters of the recursion relation for the Drude pole recursive accumulator.
@@ -1455,7 +1691,7 @@ class DcpPlrc(Dielectric):
 
         self.initialized = True
 
-    def chi_dp_0(self, dp):
+    def chi_dp_0(self, dp: DrudePole) -> float:
         """Return the zero-step Drude susceptibility integral."""
 
         omega = dp.omega
@@ -1463,7 +1699,7 @@ class DcpPlrc(Dielectric):
         gdt = dp.gamma * self.dt
         return (omega / gamma) ** 2 * (exp(-gdt) + gdt - 1)
 
-    def xi_dp_0(self, dp):
+    def xi_dp_0(self, dp: DrudePole) -> float:
         """Return the zero-step linear Drude interpolation integral."""
 
         chi_dp_0 = self.chi_dp_0(dp)
@@ -1474,7 +1710,7 @@ class DcpPlrc(Dielectric):
             gdt / 2 / tanh(gdt / 2) - 1
         )
 
-    def delta_chi_dp_0(self, dp):
+    def delta_chi_dp_0(self, dp: DrudePole) -> float:
         """Return the one-step Drude susceptibility difference."""
 
         omega = dp.omega
@@ -1482,14 +1718,14 @@ class DcpPlrc(Dielectric):
         gdt = dp.gamma * self.dt
         return -((omega / gamma * (1 - exp(-gdt))) ** 2)
 
-    def delta_xi_dp_0(self, dp):
+    def delta_xi_dp_0(self, dp: DrudePole) -> float:
         """Return the one-step linear Drude interpolation difference."""
 
         gdt = dp.gamma * self.dt
         delta_chi_dp_0 = self.delta_chi_dp_0(dp)
         return delta_chi_dp_0 * (1 / (1 - exp(gdt)) + 1 / gdt)
 
-    def chi_cp_0(self, cp):
+    def chi_cp_0(self, cp: CriticalPoint) -> complex:
         """Return the zero-step critical-point susceptibility integral."""
 
         go = cp.gamma + 1j * cp.omega
@@ -1497,14 +1733,14 @@ class DcpPlrc(Dielectric):
             2j * cp.amp * cp.omega * cexp(1j * cp.phi) * (1 - cexp(-self.dt * go)) / go
         )
 
-    def xi_cp_0(self, cp):
+    def xi_cp_0(self, cp: CriticalPoint) -> complex:
         """Return the zero-step linear critical-point interpolation integral."""
 
         dtgo = self.dt * (cp.gamma + 1j * cp.omega)
         chi_cp_0 = self.chi_cp_0(cp)
         return chi_cp_0 * (1 / (1 - cexp(dtgo)) + 1 / dtgo)
 
-    def delta_chi_cp_0(self, cp):
+    def delta_chi_cp_0(self, cp: CriticalPoint) -> complex:
         """Return the one-step critical-point susceptibility difference."""
 
         go = cp.gamma + 1j * cp.omega
@@ -1517,14 +1753,14 @@ class DcpPlrc(Dielectric):
             / go
         )
 
-    def delta_xi_cp_0(self, cp):
+    def delta_xi_cp_0(self, cp: CriticalPoint) -> complex:
         """Return the one-step linear critical-point interpolation difference."""
 
         dtgo = self.dt * (cp.gamma + 1j * cp.omega)
         delta_chi_cp_0 = self.delta_chi_cp_0(cp)
         return delta_chi_cp_0 * (1 / (1 - cexp(dtgo)) + 1 / dtgo)
 
-    def display_info(self, indent=0):
+    def display_info(self, indent: int = 0) -> None:
         """Display the parameter values."""
         print(" " * indent, "Drude-critical points dispersive media")
         print(" " * indent, end=" ")
@@ -1533,21 +1769,26 @@ class DcpPlrc(Dielectric):
         print("conductivity:", self.sigma)
 
         print(" " * indent, "Drude pole(s):")
-        for i in self.dps:
-            i.display_info(indent + 4)
+        for pole in self.dps:
+            pole.display_info(indent + 4)
         print(" " * indent, "critical point(s):")
-        for i in self.cps:
-            i.display_info(indent + 4)
+        for point in self.cps:
+            point.display_info(indent + 4)
 
     def get_pw_material_ex(
-        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
-    ):
+        self,
+        idx: Index3,
+        coords: Coordinate3,
+        underneath: Material | None = None,
+        cmplx: bool = False,
+        _aggregate: NativeMaterial | None = None,
+    ) -> NativeMaterial:
         if cmplx:
             pw_obj = _aggregate if _aggregate is not None else DcpPlrcExCmplx()
-            pw_param = DcpPlrcElectricParamCmplx()
+            pw_param = cast(Any, DcpPlrcElectricParamCmplx())
         else:
             pw_obj = _aggregate if _aggregate is not None else DcpPlrcExReal()
-            pw_param = DcpPlrcElectricParamReal()
+            pw_param = cast(Any, DcpPlrcElectricParamReal())
 
         if underneath is None:
             pw_param.eps_inf = self.eps_inf
@@ -1559,14 +1800,19 @@ class DcpPlrc(Dielectric):
         return pw_obj
 
     def get_pw_material_ey(
-        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
-    ):
+        self,
+        idx: Index3,
+        coords: Coordinate3,
+        underneath: Material | None = None,
+        cmplx: bool = False,
+        _aggregate: NativeMaterial | None = None,
+    ) -> NativeMaterial:
         if cmplx:
             pw_obj = _aggregate if _aggregate is not None else DcpPlrcEyCmplx()
-            pw_param = DcpPlrcElectricParamCmplx()
+            pw_param = cast(Any, DcpPlrcElectricParamCmplx())
         else:
             pw_obj = _aggregate if _aggregate is not None else DcpPlrcEyReal()
-            pw_param = DcpPlrcElectricParamReal()
+            pw_param = cast(Any, DcpPlrcElectricParamReal())
 
         if underneath is None:
             pw_param.eps_inf = self.eps_inf
@@ -1578,14 +1824,19 @@ class DcpPlrc(Dielectric):
         return pw_obj
 
     def get_pw_material_ez(
-        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
-    ):
+        self,
+        idx: Index3,
+        coords: Coordinate3,
+        underneath: Material | None = None,
+        cmplx: bool = False,
+        _aggregate: NativeMaterial | None = None,
+    ) -> NativeMaterial:
         if cmplx:
             pw_obj = _aggregate if _aggregate is not None else DcpPlrcEzCmplx()
-            pw_param = DcpPlrcElectricParamCmplx()
+            pw_param = cast(Any, DcpPlrcElectricParamCmplx())
         else:
             pw_obj = _aggregate if _aggregate is not None else DcpPlrcEzReal()
-            pw_param = DcpPlrcElectricParamReal()
+            pw_param = cast(Any, DcpPlrcElectricParamReal())
 
         if underneath is None:
             pw_param.eps_inf = self.eps_inf
@@ -1597,14 +1848,19 @@ class DcpPlrc(Dielectric):
         return pw_obj
 
     def get_pw_material_hx(
-        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
-    ):
+        self,
+        idx: Index3,
+        coords: Coordinate3,
+        underneath: Material | None = None,
+        cmplx: bool = False,
+        _aggregate: NativeMaterial | None = None,
+    ) -> NativeMaterial:
         if cmplx:
             pw_obj = _aggregate if _aggregate is not None else DcpPlrcHxCmplx()
-            pw_param = DcpPlrcMagneticParamCmplx()
+            pw_param = cast(Any, DcpPlrcMagneticParamCmplx())
         else:
             pw_obj = _aggregate if _aggregate is not None else DcpPlrcHxReal()
-            pw_param = DcpPlrcMagneticParamReal()
+            pw_param = cast(Any, DcpPlrcMagneticParamReal())
 
         if underneath is None:
             pw_param.mu_inf = self.mu_inf
@@ -1615,14 +1871,19 @@ class DcpPlrc(Dielectric):
         return pw_obj
 
     def get_pw_material_hy(
-        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
-    ):
+        self,
+        idx: Index3,
+        coords: Coordinate3,
+        underneath: Material | None = None,
+        cmplx: bool = False,
+        _aggregate: NativeMaterial | None = None,
+    ) -> NativeMaterial:
         if cmplx:
             pw_obj = _aggregate if _aggregate is not None else DcpPlrcHyCmplx()
-            pw_param = DcpPlrcMagneticParamCmplx()
+            pw_param = cast(Any, DcpPlrcMagneticParamCmplx())
         else:
             pw_obj = _aggregate if _aggregate is not None else DcpPlrcHyReal()
-            pw_param = DcpPlrcMagneticParamReal()
+            pw_param = cast(Any, DcpPlrcMagneticParamReal())
 
         if underneath is None:
             pw_param.mu_inf = self.mu_inf
@@ -1633,14 +1894,19 @@ class DcpPlrc(Dielectric):
         return pw_obj
 
     def get_pw_material_hz(
-        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
-    ):
+        self,
+        idx: Index3,
+        coords: Coordinate3,
+        underneath: Material | None = None,
+        cmplx: bool = False,
+        _aggregate: NativeMaterial | None = None,
+    ) -> NativeMaterial:
         if cmplx:
             pw_obj = _aggregate if _aggregate is not None else DcpPlrcHzCmplx()
-            pw_param = DcpPlrcMagneticParamCmplx()
+            pw_param = cast(Any, DcpPlrcMagneticParamCmplx())
         else:
             pw_obj = _aggregate if _aggregate is not None else DcpPlrcHzReal()
-            pw_param = DcpPlrcMagneticParamReal()
+            pw_param = cast(Any, DcpPlrcMagneticParamReal())
 
         if underneath is None:
             pw_param.mu_inf = self.mu_inf
@@ -1666,16 +1932,16 @@ class DcpRc(DcpPlrc):
 
     """
 
-    def xi_dp_0(self, dp):
+    def xi_dp_0(self, dp: DrudePole) -> float:
         return 0
 
-    def xi_cp_0(self, cp):
+    def xi_cp_0(self, cp: CriticalPoint) -> complex:
         return 0j
 
-    def delta_xi_dp_0(self, dp):
+    def delta_xi_dp_0(self, dp: DrudePole) -> float:
         return 0
 
-    def delta_xi_cp_0(self, cp):
+    def delta_xi_cp_0(self, cp: CriticalPoint) -> complex:
         return 0j
 
 
@@ -1689,7 +1955,13 @@ class Drude(Dielectric):
 
     """
 
-    def __init__(self, eps_inf=1, mu_inf=1, sigma=0, dps=()):
+    def __init__(
+        self,
+        eps_inf: float = 1,
+        mu_inf: float = 1,
+        sigma: float = 0,
+        dps: Sequence[DrudePole] = (),
+    ) -> None:
         """Initialize a Drude dispersive material.
 
         Arguments:
@@ -1704,7 +1976,7 @@ class Drude(Dielectric):
         self.dps = tuple(dps)
         self.initialized = False
 
-    def __getstate__(self):
+    def __getstate__(self) -> PickleState:
         d = Dielectric.__getstate__(self)
         d["sigma"] = self.sigma
         d["dps"] = self.dps
@@ -1717,7 +1989,7 @@ class Drude(Dielectric):
 
         return d
 
-    def __setstate__(self, d):
+    def __setstate__(self, d: PickleState) -> None:
         Dielectric.__setstate__(self, d)
         self.sigma = d["sigma"]
         self.dps = deepcopy(d["dps"])
@@ -1728,7 +2000,7 @@ class Drude(Dielectric):
             self.a = d["a"].copy()
             self.c = d["c"].copy()
 
-    def init(self, space, param=None):
+    def init(self, space: _MaterialSpace, param: object | None = None) -> None:
         self.dt = space.dt
 
         # parameters for the ADE of the Drude model.
@@ -1749,7 +2021,7 @@ class Drude(Dielectric):
 
         self.initialized = True
 
-    def display_info(self, indent=0):
+    def display_info(self, indent: int = 0) -> None:
         """Display the parameter values."""
         print(" " * indent, "Drude dispersion media")
         print(" " * indent, end=" ")
@@ -1762,14 +2034,19 @@ class Drude(Dielectric):
             p.display_info(indent + 4)
 
     def get_pw_material_ex(
-        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
-    ):
+        self,
+        idx: Index3,
+        coords: Coordinate3,
+        underneath: Material | None = None,
+        cmplx: bool = False,
+        _aggregate: NativeMaterial | None = None,
+    ) -> NativeMaterial:
         if cmplx:
             pw_obj = _aggregate if _aggregate is not None else DrudeExCmplx()
-            pw_param = DrudeElectricParamCmplx()
+            pw_param = cast(Any, DrudeElectricParamCmplx())
         else:
             pw_obj = _aggregate if _aggregate is not None else DrudeExReal()
-            pw_param = DrudeElectricParamReal()
+            pw_param = cast(Any, DrudeElectricParamReal())
 
         if underneath is None:
             pw_param.eps_inf = self.eps_inf
@@ -1782,14 +2059,19 @@ class Drude(Dielectric):
         return pw_obj
 
     def get_pw_material_ey(
-        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
-    ):
+        self,
+        idx: Index3,
+        coords: Coordinate3,
+        underneath: Material | None = None,
+        cmplx: bool = False,
+        _aggregate: NativeMaterial | None = None,
+    ) -> NativeMaterial:
         if cmplx:
             pw_obj = _aggregate if _aggregate is not None else DrudeEyCmplx()
-            pw_param = DrudeElectricParamCmplx()
+            pw_param = cast(Any, DrudeElectricParamCmplx())
         else:
             pw_obj = _aggregate if _aggregate is not None else DrudeEyReal()
-            pw_param = DrudeElectricParamReal()
+            pw_param = cast(Any, DrudeElectricParamReal())
 
         if underneath is None:
             pw_param.eps_inf = self.eps_inf
@@ -1802,14 +2084,19 @@ class Drude(Dielectric):
         return pw_obj
 
     def get_pw_material_ez(
-        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
-    ):
+        self,
+        idx: Index3,
+        coords: Coordinate3,
+        underneath: Material | None = None,
+        cmplx: bool = False,
+        _aggregate: NativeMaterial | None = None,
+    ) -> NativeMaterial:
         if cmplx:
             pw_obj = _aggregate if _aggregate is not None else DrudeEzCmplx()
-            pw_param = DrudeElectricParamCmplx()
+            pw_param = cast(Any, DrudeElectricParamCmplx())
         else:
             pw_obj = _aggregate if _aggregate is not None else DrudeEzReal()
-            pw_param = DrudeElectricParamReal()
+            pw_param = cast(Any, DrudeElectricParamReal())
 
         if underneath is None:
             pw_param.eps_inf = self.eps_inf
@@ -1822,14 +2109,19 @@ class Drude(Dielectric):
         return pw_obj
 
     def get_pw_material_hx(
-        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
-    ):
+        self,
+        idx: Index3,
+        coords: Coordinate3,
+        underneath: Material | None = None,
+        cmplx: bool = False,
+        _aggregate: NativeMaterial | None = None,
+    ) -> NativeMaterial:
         if cmplx:
             pw_obj = _aggregate if _aggregate is not None else DrudeHxCmplx()
-            pw_param = DrudeMagneticParamCmplx()
+            pw_param = cast(Any, DrudeMagneticParamCmplx())
         else:
             pw_obj = _aggregate if _aggregate is not None else DrudeHxReal()
-            pw_param = DrudeMagneticParamReal()
+            pw_param = cast(Any, DrudeMagneticParamReal())
 
         if underneath is None:
             pw_param.mu_inf = self.mu_inf
@@ -1840,14 +2132,19 @@ class Drude(Dielectric):
         return pw_obj
 
     def get_pw_material_hy(
-        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
-    ):
+        self,
+        idx: Index3,
+        coords: Coordinate3,
+        underneath: Material | None = None,
+        cmplx: bool = False,
+        _aggregate: NativeMaterial | None = None,
+    ) -> NativeMaterial:
         if cmplx:
             pw_obj = _aggregate if _aggregate is not None else DrudeHyCmplx()
-            pw_param = DrudeMagneticParamCmplx()
+            pw_param = cast(Any, DrudeMagneticParamCmplx())
         else:
             pw_obj = _aggregate if _aggregate is not None else DrudeHyReal()
-            pw_param = DrudeMagneticParamReal()
+            pw_param = cast(Any, DrudeMagneticParamReal())
 
         if underneath is None:
             pw_param.mu_inf = self.mu_inf
@@ -1858,14 +2155,19 @@ class Drude(Dielectric):
         return pw_obj
 
     def get_pw_material_hz(
-        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
-    ):
+        self,
+        idx: Index3,
+        coords: Coordinate3,
+        underneath: Material | None = None,
+        cmplx: bool = False,
+        _aggregate: NativeMaterial | None = None,
+    ) -> NativeMaterial:
         if cmplx:
             pw_obj = _aggregate if _aggregate is not None else DrudeHzCmplx()
-            pw_param = DrudeMagneticParamCmplx()
+            pw_param = cast(Any, DrudeMagneticParamCmplx())
         else:
             pw_obj = _aggregate if _aggregate is not None else DrudeHzReal()
-            pw_param = DrudeMagneticParamReal()
+            pw_param = cast(Any, DrudeMagneticParamReal())
 
         if underneath is None:
             pw_param.mu_inf = self.mu_inf
@@ -1883,7 +2185,13 @@ class Lorentz(Dielectric):
 
     """
 
-    def __init__(self, eps_inf=1, mu_inf=1, sigma=0, lps=()):
+    def __init__(
+        self,
+        eps_inf: float = 1,
+        mu_inf: float = 1,
+        sigma: float = 0,
+        lps: Sequence[LorentzPole] = (),
+    ) -> None:
         """Initialize a Lorentz dispersive material.
 
         Arguments:
@@ -1898,7 +2206,7 @@ class Lorentz(Dielectric):
         self.lps = tuple(lps)
         self.initialized = False
 
-    def __getstate__(self):
+    def __getstate__(self) -> PickleState:
         d = Dielectric.__getstate__(self)
         d["sigma"] = self.sigma
         d["lps"] = self.lps
@@ -1911,7 +2219,7 @@ class Lorentz(Dielectric):
 
         return d
 
-    def __setstate__(self, d):
+    def __setstate__(self, d: PickleState) -> None:
         Dielectric.__setstate__(self, d)
         self.sigma = d["sigma"]
         self.lps = deepcopy(d["lps"])
@@ -1922,7 +2230,7 @@ class Lorentz(Dielectric):
             self.a = d["a"].copy()
             self.c = d["c"].copy()
 
-    def init(self, space, param=None):
+    def init(self, space: _MaterialSpace, param: object | None = None) -> None:
         self.dt = space.dt
 
         # parameters for the ADE of the Drude model.
@@ -1943,7 +2251,7 @@ class Lorentz(Dielectric):
 
         self.initialized = True
 
-    def display_info(self, indent=0):
+    def display_info(self, indent: int = 0) -> None:
         """Display the parameter values."""
         print(" " * indent, "Lorentz dispersion media")
         print(" " * indent, end=" ")
@@ -1956,14 +2264,19 @@ class Lorentz(Dielectric):
             p.display_info(indent + 4)
 
     def get_pw_material_ex(
-        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
-    ):
+        self,
+        idx: Index3,
+        coords: Coordinate3,
+        underneath: Material | None = None,
+        cmplx: bool = False,
+        _aggregate: NativeMaterial | None = None,
+    ) -> NativeMaterial:
         if cmplx:
             pw_obj = _aggregate if _aggregate is not None else LorentzExCmplx()
-            pw_param = LorentzElectricParamCmplx()
+            pw_param = cast(Any, LorentzElectricParamCmplx())
         else:
             pw_obj = _aggregate if _aggregate is not None else LorentzExReal()
-            pw_param = LorentzElectricParamReal()
+            pw_param = cast(Any, LorentzElectricParamReal())
 
         if underneath is None:
             pw_param.eps_inf = self.eps_inf
@@ -1975,14 +2288,19 @@ class Lorentz(Dielectric):
         return pw_obj
 
     def get_pw_material_ey(
-        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
-    ):
+        self,
+        idx: Index3,
+        coords: Coordinate3,
+        underneath: Material | None = None,
+        cmplx: bool = False,
+        _aggregate: NativeMaterial | None = None,
+    ) -> NativeMaterial:
         if cmplx:
             pw_obj = _aggregate if _aggregate is not None else LorentzEyCmplx()
-            pw_param = LorentzElectricParamCmplx()
+            pw_param = cast(Any, LorentzElectricParamCmplx())
         else:
             pw_obj = _aggregate if _aggregate is not None else LorentzEyReal()
-            pw_param = LorentzElectricParamReal()
+            pw_param = cast(Any, LorentzElectricParamReal())
 
         if underneath is None:
             pw_param.eps_inf = self.eps_inf
@@ -1994,14 +2312,19 @@ class Lorentz(Dielectric):
         return pw_obj
 
     def get_pw_material_ez(
-        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
-    ):
+        self,
+        idx: Index3,
+        coords: Coordinate3,
+        underneath: Material | None = None,
+        cmplx: bool = False,
+        _aggregate: NativeMaterial | None = None,
+    ) -> NativeMaterial:
         if cmplx:
             pw_obj = _aggregate if _aggregate is not None else LorentzEzCmplx()
-            pw_param = LorentzElectricParamCmplx()
+            pw_param = cast(Any, LorentzElectricParamCmplx())
         else:
             pw_obj = _aggregate if _aggregate is not None else LorentzEzReal()
-            pw_param = LorentzElectricParamReal()
+            pw_param = cast(Any, LorentzElectricParamReal())
 
         if underneath is None:
             pw_param.eps_inf = self.eps_inf
@@ -2013,14 +2336,19 @@ class Lorentz(Dielectric):
         return pw_obj
 
     def get_pw_material_hx(
-        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
-    ):
+        self,
+        idx: Index3,
+        coords: Coordinate3,
+        underneath: Material | None = None,
+        cmplx: bool = False,
+        _aggregate: NativeMaterial | None = None,
+    ) -> NativeMaterial:
         if cmplx:
             pw_obj = _aggregate if _aggregate is not None else LorentzHxCmplx()
-            pw_param = LorentzMagneticParamCmplx()
+            pw_param = cast(Any, LorentzMagneticParamCmplx())
         else:
             pw_obj = _aggregate if _aggregate is not None else LorentzHxReal()
-            pw_param = LorentzMagneticParamReal()
+            pw_param = cast(Any, LorentzMagneticParamReal())
 
         if underneath is None:
             pw_param.mu_inf = self.mu_inf
@@ -2031,14 +2359,19 @@ class Lorentz(Dielectric):
         return pw_obj
 
     def get_pw_material_hy(
-        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
-    ):
+        self,
+        idx: Index3,
+        coords: Coordinate3,
+        underneath: Material | None = None,
+        cmplx: bool = False,
+        _aggregate: NativeMaterial | None = None,
+    ) -> NativeMaterial:
         if cmplx:
             pw_obj = _aggregate if _aggregate is not None else LorentzHyCmplx()
-            pw_param = LorentzMagneticParamCmplx()
+            pw_param = cast(Any, LorentzMagneticParamCmplx())
         else:
             pw_obj = _aggregate if _aggregate is not None else LorentzHyReal()
-            pw_param = LorentzMagneticParamReal()
+            pw_param = cast(Any, LorentzMagneticParamReal())
 
         if underneath is None:
             pw_param.mu_inf = self.mu_inf
@@ -2049,14 +2382,19 @@ class Lorentz(Dielectric):
         return pw_obj
 
     def get_pw_material_hz(
-        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
-    ):
+        self,
+        idx: Index3,
+        coords: Coordinate3,
+        underneath: Material | None = None,
+        cmplx: bool = False,
+        _aggregate: NativeMaterial | None = None,
+    ) -> NativeMaterial:
         if cmplx:
             pw_obj = _aggregate if _aggregate is not None else LorentzHzCmplx()
-            pw_param = LorentzMagneticParamCmplx()
+            pw_param = cast(Any, LorentzMagneticParamCmplx())
         else:
             pw_obj = _aggregate if _aggregate is not None else LorentzHzReal()
-            pw_param = LorentzMagneticParamReal()
+            pw_param = cast(Any, LorentzMagneticParamReal())
 
         if underneath is None:
             pw_param.mu_inf = self.mu_inf
@@ -2077,17 +2415,17 @@ class Dm2(Dielectric):
 
     def __init__(
         self,
-        eps_inf=1,
-        mu_inf=1,
-        omega=(1,),
-        n_atom=(1,),
-        rho30=-1,
-        gamma=1,
-        t1=1,
-        t2=1,
-        hbar=1,
-        rtol=10e-5,
-    ):
+        eps_inf: float = 1,
+        mu_inf: float = 1,
+        omega: float | Sequence[float] = (1,),
+        n_atom: float | Sequence[float] = (1,),
+        rho30: float = -1,
+        gamma: float = 1,
+        t1: float = 1,
+        t2: float = 1,
+        hbar: float = 1,
+        rtol: float = 10e-5,
+    ) -> None:
         """Initialize a two-level density-matrix material.
 
         Arguments:
@@ -2133,7 +2471,7 @@ class Dm2(Dielectric):
         self.rtol = float(rtol)
         self.initialized = False
 
-    def __getstate__(self):
+    def __getstate__(self) -> PickleState:
         d = Dielectric.__getstate__(self)
         d["omega"] = deepcopy(self.omega)
         d["n_atom"] = deepcopy(self.n_atom)
@@ -2150,7 +2488,7 @@ class Dm2(Dielectric):
 
         return d
 
-    def __setstate__(self, d):
+    def __setstate__(self, d: PickleState) -> None:
         Dielectric.__setstate__(self, d)
 
         self.omega = deepcopy(d["omega"])
@@ -2166,11 +2504,11 @@ class Dm2(Dielectric):
         if self.initialized:
             self.dt = d["dt"]
 
-    def init(self, space, param=None):
+    def init(self, space: _MaterialSpace, param: object | None = None) -> None:
         self.dt = space.dt
         self.initialized = True
 
-    def display_info(self, indent=0):
+    def display_info(self, indent: int = 0) -> None:
         """Display the parameter values."""
         print(" " * indent, "2-level media")
         print(" " * indent, end=" ")
@@ -2190,13 +2528,18 @@ class Dm2(Dielectric):
         print("relative tolerance:", self.rtol)
 
     def get_pw_material_ex(
-        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
-    ):
+        self,
+        idx: Index3,
+        coords: Coordinate3,
+        underneath: Material | None = None,
+        cmplx: bool = False,
+        _aggregate: NativeMaterial | None = None,
+    ) -> NativeMaterial:
         if cmplx:
             raise ValueError("Dm2 class supports real fields only")
         else:
             pw_obj = _aggregate if _aggregate is not None else Dm2ExReal()
-            pw_param = Dm2ElectricParamReal()
+            pw_param = cast(Any, Dm2ElectricParamReal())
 
         if underneath is None:
             pw_param.eps_inf = self.eps_inf
@@ -2215,13 +2558,18 @@ class Dm2(Dielectric):
         return pw_obj
 
     def get_pw_material_ey(
-        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
-    ):
+        self,
+        idx: Index3,
+        coords: Coordinate3,
+        underneath: Material | None = None,
+        cmplx: bool = False,
+        _aggregate: NativeMaterial | None = None,
+    ) -> NativeMaterial:
         if cmplx:
             raise ValueError("Dm2 class supports real fields only")
         else:
             pw_obj = _aggregate if _aggregate is not None else Dm2EyReal()
-            pw_param = Dm2ElectricParamReal()
+            pw_param = cast(Any, Dm2ElectricParamReal())
 
         if underneath is None:
             pw_param.eps_inf = self.eps_inf
@@ -2240,13 +2588,18 @@ class Dm2(Dielectric):
         return pw_obj
 
     def get_pw_material_ez(
-        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
-    ):
+        self,
+        idx: Index3,
+        coords: Coordinate3,
+        underneath: Material | None = None,
+        cmplx: bool = False,
+        _aggregate: NativeMaterial | None = None,
+    ) -> NativeMaterial:
         if cmplx:
             raise ValueError("Dm2 class supports real fields only")
         else:
             pw_obj = _aggregate if _aggregate is not None else Dm2EzReal()
-            pw_param = Dm2ElectricParamReal()
+            pw_param = cast(Any, Dm2ElectricParamReal())
 
         if underneath is None:
             pw_param.eps_inf = self.eps_inf
@@ -2265,13 +2618,18 @@ class Dm2(Dielectric):
         return pw_obj
 
     def get_pw_material_hx(
-        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
-    ):
+        self,
+        idx: Index3,
+        coords: Coordinate3,
+        underneath: Material | None = None,
+        cmplx: bool = False,
+        _aggregate: NativeMaterial | None = None,
+    ) -> NativeMaterial:
         if cmplx:
             raise ValueError("Dm2 class supports real fields only")
         else:
             pw_obj = _aggregate if _aggregate is not None else Dm2HxReal()
-            pw_param = Dm2MagneticParamReal()
+            pw_param = cast(Any, Dm2MagneticParamReal())
 
         if underneath is None:
             pw_param.mu_inf = self.mu_inf
@@ -2282,13 +2640,18 @@ class Dm2(Dielectric):
         return pw_obj
 
     def get_pw_material_hy(
-        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
-    ):
+        self,
+        idx: Index3,
+        coords: Coordinate3,
+        underneath: Material | None = None,
+        cmplx: bool = False,
+        _aggregate: NativeMaterial | None = None,
+    ) -> NativeMaterial:
         if cmplx:
             raise ValueError("Dm2 class supports real fields only")
         else:
             pw_obj = _aggregate if _aggregate is not None else Dm2HyReal()
-            pw_param = Dm2MagneticParamReal()
+            pw_param = cast(Any, Dm2MagneticParamReal())
 
         if underneath is None:
             pw_param.mu_inf = self.mu_inf
@@ -2299,13 +2662,18 @@ class Dm2(Dielectric):
         return pw_obj
 
     def get_pw_material_hz(
-        self, idx, coords, underneath=None, cmplx=False, _aggregate=None
-    ):
+        self,
+        idx: Index3,
+        coords: Coordinate3,
+        underneath: Material | None = None,
+        cmplx: bool = False,
+        _aggregate: NativeMaterial | None = None,
+    ) -> NativeMaterial:
         if cmplx:
             raise ValueError("Dm2 class supports real fields only")
         else:
             pw_obj = _aggregate if _aggregate is not None else Dm2HzReal()
-            pw_param = Dm2MagneticParamReal()
+            pw_param = cast(Any, Dm2MagneticParamReal())
 
         if underneath is None:
             pw_param.mu_inf = self.mu_inf
@@ -2335,7 +2703,9 @@ for _material_type in _BUILTIN_MATERIAL_TYPES:
     setattr(_material_type, _NATIVE_DESCRIPTOR_ATTRIBUTE, _material_type)
 
 
-def _native_material_descriptor(material, getter_name):
+def _native_material_descriptor(
+    material: Material, getter_name: str
+) -> type[Material] | None:
     """Return the inherited native aggregate descriptor, when compatible."""
     descriptor = getattr(material, _NATIVE_DESCRIPTOR_ATTRIBUTE, None)
     if descriptor not in _BUILTIN_MATERIAL_TYPES or not isinstance(
@@ -2352,4 +2722,4 @@ def _native_material_descriptor(material, getter_name):
     )
     if not getter_is_inherited and not descriptor_is_explicit:
         return None
-    return descriptor
+    return cast(type[Material], descriptor)

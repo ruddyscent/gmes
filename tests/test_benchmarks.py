@@ -755,10 +755,10 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
     def test_trace_summary_counts_raw_allocator_events(self):
         trace = {
             "traceEvents": [
-                {"name": "[memory]", "args": {"Bytes": 32}},
-                {"name": "[memory]", "args": {"Bytes": 16}},
-                {"name": "[memory]", "args": {"Bytes": 32}},
-                {"name": "[memory]", "args": {"Bytes": -80}},
+                {"name": "[memory]", "args": {"Bytes": 32, "Total Allocated": 1032}},
+                {"name": "[memory]", "args": {"Bytes": 16, "Total Allocated": 1048}},
+                {"name": "[memory]", "args": {"Bytes": 32, "Total Allocated": 1080}},
+                {"name": "[memory]", "args": {"Bytes": -80, "Total Allocated": 1000}},
                 {
                     "name": "Torch-Compiled Region: 0/0",
                     "ph": "X",
@@ -811,6 +811,11 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
         self.assertEqual(result["allocation_net_bytes"], 0)
         self.assertEqual(result["max_allocation_bytes"], 32)
         self.assertEqual(result["allocation_size_histogram"], {"16": 1, "32": 2})
+        self.assertEqual(result["live_allocation_baseline_bytes"], 1000)
+        self.assertEqual(result["peak_live_allocated_bytes"], 1080)
+        self.assertEqual(result["final_live_allocated_bytes"], 1000)
+        self.assertEqual(result["live_allocation_growth_bytes"], 0)
+        self.assertTrue(result["live_allocation_metrics_complete"])
         self.assertEqual(result["compiled_region_events"], 2)
         self.assertEqual(
             result["compiled_region_names"],
@@ -826,41 +831,443 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             {"aten::index_add_": 1, "aten::index_put_": 1},
         )
 
-    def test_cpu_allocation_gate_requires_every_profiler_metric_to_be_zero(self):
-        clean = {
+    def test_trace_summary_reports_complete_zero_live_metrics_without_events(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "trace.json"
+            path.write_text(json.dumps({"traceEvents": []}))
+            result = self.benchmark._trace_summary(path)
+
+        self.assertEqual(result["live_allocation_baseline_bytes"], 0)
+        self.assertEqual(result["peak_live_allocated_bytes"], 0)
+        self.assertEqual(result["final_live_allocated_bytes"], 0)
+        self.assertEqual(result["live_allocation_growth_bytes"], 0)
+        self.assertTrue(result["live_allocation_metrics_complete"])
+
+    def test_trace_summary_marks_missing_total_allocated_incomplete(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "trace.json"
+            path.write_text(
+                json.dumps(
+                    {"traceEvents": [{"name": "[memory]", "args": {"Bytes": 16}}]}
+                )
+            )
+            result = self.benchmark._trace_summary(path)
+
+        self.assertFalse(result["live_allocation_metrics_complete"])
+        self.assertIsNone(result["live_allocation_growth_bytes"])
+
+    def test_trace_summary_rejects_discontinuous_live_allocation_totals(self):
+        trace = {
+            "traceEvents": [
+                {
+                    "name": "[memory]",
+                    "args": {"Bytes": 16, "Total Allocated": 1016},
+                },
+                {
+                    "name": "[memory]",
+                    "args": {"Bytes": 16, "Total Allocated": 1020},
+                },
+                {
+                    "name": "[memory]",
+                    "args": {"Bytes": -20, "Total Allocated": 1000},
+                },
+            ]
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "trace.json"
+            path.write_text(json.dumps(trace))
+            result = self.benchmark._trace_summary(path)
+
+        self.assertFalse(result["live_allocation_metrics_complete"])
+        self.assertIsNone(result["live_allocation_baseline_bytes"])
+        self.assertIsNone(result["final_live_allocated_bytes"])
+
+    def test_trace_summary_rejects_negative_live_allocation_values(self):
+        trace = {
+            "traceEvents": [
+                {
+                    "name": "[memory]",
+                    "args": {"Bytes": 16, "Total Allocated": 8},
+                }
+            ]
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "trace.json"
+            path.write_text(json.dumps(trace))
+            result = self.benchmark._trace_summary(path)
+
+        self.assertFalse(result["live_allocation_metrics_complete"])
+        self.assertIsNone(result["peak_live_allocated_bytes"])
+
+    def _allocation_profiler(self):
+        return {
+            "positive_allocation_events": 15,
+            "allocated_bytes": 320,
+            "freed_bytes": 320,
+            "allocation_net_bytes": 0,
+            "allocation_size_histogram": {"16": 10, "32": 5},
+            "profile_steps": 5,
+            "positive_allocation_operations": 3,
+            "live_allocation_baseline_bytes": 4096,
+            "peak_live_allocated_bytes": 4128,
+            "final_live_allocated_bytes": 4096,
+            "live_allocation_growth_bytes": 0,
+            "live_allocation_metrics_complete": True,
+            "chrome_trace_sha256": "trace-sha256",
+            "field_buffer_sizes_bytes": {
+                "state.Ex": 6400,
+                "state.Ey": 6528,
+                "state.Ez": 6656,
+                "state.Hx": 6784,
+                "state.Hy": 6912,
+                "state.Hz": 7040,
+            },
+        }
+
+    def _allocation_provenance(self, source_path):
+        source_sha256 = hashlib.sha256(source_path.read_bytes()).hexdigest()
+        return {
+            "method": self.benchmark.ALLOCATION_PROVENANCE_METHOD,
+            "reviewed": True,
+            "trace_sha256": "trace-sha256",
+            "compile_cache_key": "compile-key",
+            "profile_steps": 5,
+            "allocation_size_histogram": {"16": 10, "32": 5},
+            "full_field_or_domain_clone_events": 0,
+            "upstream_issue_urls": ["https://github.com/pytorch/pytorch/issues/195330"],
+            "allocations": [
+                {
+                    "size_bytes": 16,
+                    "events_per_step": 2,
+                    "classification": "allowed-plan-bounded-temporary",
+                    "generated_operation": "allocate buf0 for indexed update",
+                },
+                {
+                    "size_bytes": 32,
+                    "events_per_step": 1,
+                    "classification": "allowed-plan-bounded-temporary",
+                    "generated_operation": "allocate buf1 for coefficient gather",
+                },
+            ],
+            "generated_sources": [{"path": str(source_path), "sha256": source_sha256}],
+        }
+
+    def _allocation_contract(self, profiler, provenance=None):
+        return self.benchmark._fixed_temporary_allocation_contract(
+            self.benchmark.torch.device("cpu"),
+            profiler,
+            compile_cache_key="compile-key",
+            allocation_provenance=provenance,
+        )
+
+    def test_cpu_zero_allocation_passes_without_provenance(self):
+        profiler = {
             "positive_allocation_events": 0,
             "allocated_bytes": 0,
+            "freed_bytes": 0,
+            "allocation_net_bytes": 0,
+            "allocation_size_histogram": {},
+            "profile_steps": 5,
             "positive_allocation_operations": 0,
+            "live_allocation_baseline_bytes": 0,
+            "peak_live_allocated_bytes": 0,
+            "final_live_allocated_bytes": 0,
+            "live_allocation_growth_bytes": 0,
+            "live_allocation_metrics_complete": True,
         }
-        self.assertTrue(
-            self.benchmark._recurring_allocations_zero(
-                self.benchmark.torch.device("cpu"), clean
-            )
-        )
-        for key in clean:
-            with self.subTest(nonzero=key):
-                profiler = dict(clean)
-                profiler[key] = 1
-                self.assertFalse(
-                    self.benchmark._recurring_allocations_zero(
-                        self.benchmark.torch.device("cpu"), profiler
-                    )
-                )
-            with self.subTest(missing=key):
-                profiler = dict(clean)
-                del profiler[key]
-                self.assertFalse(
-                    self.benchmark._recurring_allocations_zero(
-                        self.benchmark.torch.device("cpu"), profiler
-                    )
-                )
+        contract = self._allocation_contract(profiler)
+        self.assertTrue(contract["satisfied"])
+        self.assertEqual(contract["status"], "zero-allocation")
 
-    def test_non_cpu_allocation_gate_is_not_applied(self):
-        self.assertTrue(
-            self.benchmark._recurring_allocations_zero(
-                self.benchmark.torch.device("cuda"), {}
+    def test_cpu_nonzero_allocation_passes_with_bound_reviewed_provenance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source_path = Path(directory) / "generated.cpp"
+            source_path.write_text("// generated indexed-update kernel\n")
+            contract = self._allocation_contract(
+                self._allocation_profiler(),
+                self._allocation_provenance(source_path),
             )
+        self.assertTrue(contract["satisfied"])
+        self.assertEqual(contract["status"], "reviewed-fixed-temporary")
+        self.assertTrue(contract["checks"]["generated_sources_verified"])
+        self.assertEqual(len(contract["verified_generated_sources"]), 1)
+
+    def test_cpu_nonzero_allocation_requires_canonical_public_issue_urls(self):
+        valid_url = "https://github.com/pytorch/pytorch/issues/195330"
+        invalid_values = (
+            None,
+            [],
+            [valid_url, valid_url],
+            ["https://github.com/pytorch/pytorch/issues/195330?query=1"],
+            ["https://github.com/pytorch/pytorch/pull/195330"],
+            ["https://github.com/pytorch/pytorch/issues/0"],
+            [{"issue": 195330}],
         )
+        with tempfile.TemporaryDirectory() as directory:
+            source_path = Path(directory) / "generated.cpp"
+            source_path.write_text("// generated indexed-update kernel\n")
+            for value in invalid_values:
+                with self.subTest(value=value):
+                    provenance = self._allocation_provenance(source_path)
+                    if value is None:
+                        del provenance["upstream_issue_urls"]
+                    else:
+                        provenance["upstream_issue_urls"] = value
+                    contract = self._allocation_contract(
+                        self._allocation_profiler(), provenance
+                    )
+                    self.assertFalse(contract["satisfied"])
+                    self.assertFalse(contract["checks"]["public_upstream_issues_valid"])
+
+    def test_cpu_allocation_rejects_full_field_or_domain_clones(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source_path = Path(directory) / "generated.cpp"
+            source_path.write_text("// generated indexed-update kernel\n")
+            profiler = self._allocation_profiler()
+            profiler["field_buffer_sizes_bytes"]["state.Ex"] = 32
+            field_sized = self._allocation_contract(
+                profiler, self._allocation_provenance(source_path)
+            )
+            self.assertFalse(field_sized["satisfied"])
+            self.assertFalse(field_sized["checks"]["no_field_buffer_sized_allocations"])
+            provenance = self._allocation_provenance(source_path)
+            provenance["full_field_or_domain_clone_events"] = 1
+            clone = self._allocation_contract(self._allocation_profiler(), provenance)
+            self.assertFalse(clone["satisfied"])
+            self.assertFalse(clone["checks"]["full_field_or_domain_clone_events_zero"])
+
+    def test_cpu_allocation_rejects_imbalance_and_final_live_growth(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source_path = Path(directory) / "generated.cpp"
+            source_path.write_text("// generated indexed-update kernel\n")
+            profiler = self._allocation_profiler()
+            profiler["freed_bytes"] = 319
+            profiler["allocation_net_bytes"] = 1
+            imbalance = self._allocation_contract(
+                profiler, self._allocation_provenance(source_path)
+            )
+            self.assertFalse(imbalance["satisfied"])
+            self.assertFalse(imbalance["checks"]["allocation_bytes_balanced"])
+            profiler = self._allocation_profiler()
+            profiler["final_live_allocated_bytes"] = 4097
+            profiler["live_allocation_growth_bytes"] = 1
+            growth = self._allocation_contract(
+                profiler, self._allocation_provenance(source_path)
+            )
+            self.assertFalse(growth["satisfied"])
+            self.assertFalse(growth["checks"]["live_allocation_growth_zero"])
+
+    def test_cpu_allocation_missing_or_unaccounted_provenance_fails_closed(self):
+        missing = self._allocation_contract(self._allocation_profiler())
+        self.assertFalse(missing["satisfied"])
+        self.assertFalse(missing["checks"]["reviewed_provenance_present"])
+        with tempfile.TemporaryDirectory() as directory:
+            source_path = Path(directory) / "generated.cpp"
+            source_path.write_text("// generated indexed-update kernel\n")
+            provenance = self._allocation_provenance(source_path)
+            provenance["allocations"][0]["events_per_step"] = 1
+            unaccounted = self._allocation_contract(
+                self._allocation_profiler(), provenance
+            )
+        self.assertFalse(unaccounted["satisfied"])
+        self.assertFalse(
+            unaccounted["checks"]["provenance_allocations_fully_accounted"]
+        )
+
+    def test_cpu_allocation_requires_generated_source_hash_match(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source_path = Path(directory) / "generated.cpp"
+            source_path.write_text("// generated indexed-update kernel\n")
+            provenance = self._allocation_provenance(source_path)
+            provenance["generated_sources"][0]["sha256"] = "0" * 64
+            contract = self._allocation_contract(
+                self._allocation_profiler(), provenance
+            )
+        self.assertFalse(contract["satisfied"])
+        self.assertFalse(contract["checks"]["generated_sources_verified"])
+        self.assertFalse(
+            contract["verified_generated_sources"][0]["matches_provenance"]
+        )
+
+    def test_non_cpu_allocation_contract_is_not_applied(self):
+        contract = self.benchmark._fixed_temporary_allocation_contract(
+            self.benchmark.torch.device("cuda"),
+            {},
+            compile_cache_key="compile-key",
+        )
+        self.assertTrue(contract["satisfied"])
+        self.assertFalse(contract["applied"])
+        self.assertEqual(contract["status"], "not-applied")
+
+    def test_allocation_provenance_loader_selects_one_exact_record(self):
+        record = {
+            "workload": "cpu-crossover-2d",
+            "device": "cpu",
+            "precision": "float64",
+            "compile_mode": "default",
+            "execution_policy": "auto",
+            "threads": 1,
+            "method": self.benchmark.ALLOCATION_PROVENANCE_METHOD,
+        }
+        document = {
+            "schema_version": 1,
+            "kind": self.benchmark.ALLOCATION_PROVENANCE_KIND,
+            "method": self.benchmark.ALLOCATION_PROVENANCE_METHOD,
+            "records": [record],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "allocation.json"
+            path.write_text(json.dumps(document))
+            loaded = self.benchmark._load_allocation_provenance(path)
+            selected = self.benchmark._select_allocation_provenance(
+                loaded,
+                workload="cpu-crossover-2d",
+                device="cpu",
+                precision="float64",
+                compile_mode="default",
+                execution_policy="auto",
+                threads=1,
+            )
+            self.assertEqual(
+                loaded["source_artifact"]["sha256"],
+                hashlib.sha256(path.read_bytes()).hexdigest(),
+            )
+            document["records"].append(dict(record))
+            path.write_text(json.dumps(document))
+            with self.assertRaisesRegex(ValueError, "duplicate selector"):
+                self.benchmark._load_allocation_provenance(path)
+        self.assertEqual(selected, record)
+
+    def test_saved_slice_allocation_can_be_reviewed_without_rerunning(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            trace_path = root / "trace.json"
+            live = 1000
+            trace_events = []
+            for _step in range(5):
+                live += 16
+                trace_events.append(
+                    {
+                        "name": "[memory]",
+                        "args": {"Bytes": 16, "Total Allocated": live},
+                    }
+                )
+                live -= 16
+                trace_events.append(
+                    {
+                        "name": "[memory]",
+                        "args": {"Bytes": -16, "Total Allocated": live},
+                    }
+                )
+            trace_path.write_text(json.dumps({"traceEvents": trace_events}))
+            profiler = self.benchmark._trace_summary(trace_path)
+            profiler.update(
+                {
+                    "profile_steps": 5,
+                    "positive_allocation_operations": 1,
+                    "field_buffer_sizes_bytes": {"state.Ex": 6400},
+                }
+            )
+            generated_source = root / "generated.cpp"
+            generated_source.write_text("// generated bounded temporary\n")
+            record = {
+                "workload": "cpu-crossover-2d",
+                "device": "cpu",
+                "precision": "float64",
+                "compile_mode": "default",
+                "execution_policy": "auto",
+                "threads": 1,
+                "method": self.benchmark.ALLOCATION_PROVENANCE_METHOD,
+                "reviewed": True,
+                "trace_sha256": profiler["chrome_trace_sha256"],
+                "compile_cache_key": "compile-key",
+                "profile_steps": 5,
+                "allocation_size_histogram": {"16": 5},
+                "full_field_or_domain_clone_events": 0,
+                "upstream_issue_urls": [
+                    "https://github.com/pytorch/pytorch/issues/195330"
+                ],
+                "allocations": [
+                    {
+                        "size_bytes": 16,
+                        "events_per_step": 1,
+                        "classification": "allowed-plan-bounded-temporary",
+                        "generated_operation": "allocate bounded update temporary",
+                    }
+                ],
+                "generated_sources": [
+                    {
+                        "path": str(generated_source),
+                        "sha256": hashlib.sha256(
+                            generated_source.read_bytes()
+                        ).hexdigest(),
+                    }
+                ],
+            }
+            sidecar_path = root / "allocation.json"
+            sidecar_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "kind": self.benchmark.ALLOCATION_PROVENANCE_KIND,
+                        "method": self.benchmark.ALLOCATION_PROVENANCE_METHOD,
+                        "records": [record],
+                    }
+                )
+            )
+            document = self.benchmark._load_allocation_provenance(sidecar_path)
+            draft = self.benchmark._fixed_temporary_allocation_contract(
+                self.benchmark.torch.device("cpu"),
+                profiler,
+                compile_cache_key="compile-key",
+            )
+            acceptance = {name: True for name in self.benchmark.RUNTIME_ACCEPTANCE_KEYS}
+            acceptance["fixed_temporary_contract_satisfied"] = False
+            acceptance["passed"] = False
+            candidate = {
+                "workload": {"name": "cpu-crossover-2d"},
+                "runtime": {
+                    "device": "cpu",
+                    "precision": "float64",
+                    "compile_mode": "default",
+                    "execution_policy": "auto",
+                    "threads": 1,
+                    "compile_cache_key": "compile-key",
+                },
+                "profiler": profiler,
+                "allocation_contract": draft,
+                "acceptance": acceptance,
+            }
+            recomputed, errors = self.benchmark._recompute_cpu_allocation_contract(
+                candidate,
+                document,
+                self.benchmark.ALLOCATION_PROVENANCE_METHOD,
+            )
+            self.assertEqual(errors, [])
+            self.assertTrue(recomputed["satisfied"])
+            self.assertEqual(recomputed["status"], "reviewed-fixed-temporary")
+            missing, missing_errors = self.benchmark._recompute_cpu_allocation_contract(
+                candidate,
+                None,
+                self.benchmark.ALLOCATION_PROVENANCE_METHOD,
+            )
+            self.assertFalse(missing["satisfied"])
+            self.assertTrue(missing_errors)
+            other_failure = json.loads(json.dumps(candidate))
+            other_failure["acceptance"]["compiler_clean"] = False
+            _result, other_errors = self.benchmark._recompute_cpu_allocation_contract(
+                other_failure,
+                document,
+                self.benchmark.ALLOCATION_PROVENANCE_METHOD,
+            )
+            self.assertIn("non-allocation gate failure", " ".join(other_errors))
+            trace_path.write_text(json.dumps({"traceEvents": []}))
+            _result, trace_errors = self.benchmark._recompute_cpu_allocation_contract(
+                candidate,
+                document,
+                self.benchmark.ALLOCATION_PROVENANCE_METHOD,
+            )
+            self.assertIn("does not match", " ".join(trace_errors))
 
     def test_source_and_compiled_region_contracts_recurse_auxiliaries(self):
         target = SimpleNamespace(numel=lambda: 1)
@@ -1094,14 +1501,18 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
                 "comparison_valid": True,
                 "reference_raw_seconds_per_step": [1.0] * 15,
                 "candidate_raw_seconds_per_step": [candidate] * 15,
-                "torch_to_native_ratio": candidate,
+                "candidate_to_torch_baseline_ratio": candidate,
             }
 
         equal = self.benchmark._bootstrap_geomean_regression(
-            [gate(1.0), gate(1.0)], statistics
+            [gate(1.0), gate(1.0)],
+            statistics,
+            ratio_key="candidate_to_torch_baseline_ratio",
         )
         slower = self.benchmark._bootstrap_geomean_regression(
-            [gate(1.02), gate(1.02)], statistics
+            [gate(1.02), gate(1.02)],
+            statistics,
+            ratio_key="candidate_to_torch_baseline_ratio",
         )
         self.assertTrue(equal["evaluated"])
         self.assertFalse(equal["significant_regression"])
@@ -1112,7 +1523,9 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
     def test_bootstrap_geomean_fails_closed_for_invalid_evidence(self):
         statistics = self.manifest["performance_gates"]["cpu_acceptance"]["statistics"]
         result = self.benchmark._bootstrap_geomean_regression(
-            [{"comparison_valid": False}], statistics
+            [{"comparison_valid": False}],
+            statistics,
+            ratio_key="candidate_to_torch_baseline_ratio",
         )
         self.assertFalse(result["evaluated"])
         self.assertIsNone(result["geometric_mean_ratio"])
@@ -1129,7 +1542,7 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
                 "comparison_valid": True,
                 "reference_raw_seconds_per_step": [1.0] * 15,
                 "candidate_raw_seconds_per_step": [candidate] * 15,
-                "torch_to_native_ratio": ratio,
+                "candidate_to_torch_baseline_ratio": ratio,
             }
 
         for malformed in (
@@ -1141,7 +1554,9 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
         ):
             with self.subTest(malformed=malformed):
                 result = self.benchmark._bootstrap_geomean_regression(
-                    [malformed], statistics
+                    [malformed],
+                    statistics,
+                    ratio_key="candidate_to_torch_baseline_ratio",
                 )
                 self.assertFalse(result["evaluated"])
                 self.assertFalse(result["passed"])
@@ -1176,7 +1591,7 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
         manifest["performance_gates"]["cpu_acceptance"]["statistics"]["resamples"] = 100
         cases = manifest["performance_gates"]["cpu_acceptance"]["cases"]
         evidence = {
-            "evidence_contract_id": "torch-cpu-acceptance-v7",
+            "evidence_contract_id": "torch-cpu-acceptance-v8",
             "cpu_contract_id": manifest["performance_gates"]["cpu_acceptance"][
                 "contract_id"
             ],
@@ -1187,71 +1602,336 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             "candidate_git_commit": "commit",
             "candidate_git_status": "",
         }
-        gate = {
+        native_gate = {
+            "comparison_role": "informational",
             "comparison_valid": True,
-            "within_five_percent": True,
+            "contract_errors": [],
+            "reference_raw_seconds_per_step": [1.0] * 15,
+            "candidate_raw_seconds_per_step": [50.0] * 15,
+            "torch_to_native_ratio": 50.0,
+        }
+        baseline_gate = {
+            "comparison_valid": True,
+            "contract_errors": [],
             "reference_raw_seconds_per_step": [1.0] * 15,
             "candidate_raw_seconds_per_step": [1.0] * 15,
-            "torch_to_native_ratio": 1.0,
+            "candidate_to_torch_baseline_ratio": 1.0,
+            "within_five_percent": True,
         }
 
-        def artifact(threads):
-            return {
-                "schema_version": 3,
-                "kind": "cpu-acceptance-thread-slice",
-                "evidence": dict(evidence),
-                "environment": {
-                    "hostname": "host",
-                    "platform": "platform",
-                    "python": "3.14",
-                    "torch": "2.13",
+        def environment(threads=None):
+            result = {
+                "hostname": "host",
+                "platform": "platform",
+                "python": "3.14",
+                "torch": "2.13",
+                "cpu_affinity": [0, 1, 2, 3],
+                "cpu_count_physical_affinity": 4,
+                "cpu_topology": "topology",
+                "cpu_model": "model",
+            }
+            if threads is not None:
+                result["thread_environment"] = {
+                    name: str(threads)
+                    for name in (
+                        "OMP_NUM_THREADS",
+                        "MKL_NUM_THREADS",
+                        "OPENBLAS_NUM_THREADS",
+                    )
+                }
+            return result
+
+        zero_profiler = {
+            "chrome_trace": "/tmp/trace.json",
+            "chrome_trace_size_bytes": 1,
+            "chrome_trace_sha256": "trace",
+            "positive_allocation_events": 0,
+            "allocated_bytes": 0,
+            "freed_bytes": 0,
+            "allocation_net_bytes": 0,
+            "max_allocation_bytes": 0,
+            "allocation_size_histogram": {},
+            "profile_steps": 5,
+            "positive_allocation_operations": 0,
+            "live_allocation_baseline_bytes": 0,
+            "peak_live_allocated_bytes": 0,
+            "final_live_allocated_bytes": 0,
+            "live_allocation_growth_bytes": 0,
+            "live_allocation_metrics_complete": True,
+            "compiled_region_events": 10,
+            "compiled_region_names": {
+                "torch-compiled region:electric": 5,
+                "torch-compiled region:magnetic": 5,
+            },
+            "host_to_device_events": 0,
+            "device_to_host_events": 0,
+            "indexed_write_operations_outside_compiled_regions": 0,
+            "indexed_write_names_outside_compiled_regions": {},
+            "expected_source_indexed_write_names_outside_compiled_regions": {},
+        }
+        zero_contract = self.benchmark._fixed_temporary_allocation_contract(
+            self.benchmark.torch.device("cpu"),
+            zero_profiler,
+            compile_cache_key="compile-key",
+        )
+
+        torch_baseline = {
+            "kind": "torch-cpu-baseline",
+            "cpu_acceptance_contract_id": "cpu-acceptance-v2",
+            "timing_reference": {"root_commit": "baseline"},
+            "environment": environment(),
+            "source_artifacts": [
+                {
+                    "path": f"/{threads}.json",
+                    "sha256": str(threads) * 64,
+                    "thread_mode": "one" if threads == 1 else "physical",
+                    "threads": threads,
+                    "thread_environment": environment(threads)["thread_environment"],
+                    "root_commit": "baseline",
+                }
+                for threads in (1, 4)
+            ],
+        }
+
+        def artifact(
+            threads,
+            embedded_native=native_gate,
+            embedded_baseline=baseline_gate,
+        ):
+            benchmark_contract = {
+                "initializer": self.benchmark.FIELD_INITIALIZER,
+                "seed": manifest["reference"]["seed"],
+                "field_scale": manifest["reference"]["field_scale"],
+                "warmup_steps": 5,
+                "steps_per_repeat": 100,
+                "repetitions": 15,
+                "profile_steps": 5,
+                "timer": "time.perf_counter",
+                "sample_start": "independently-restored-pre-warmup-state",
+            }
+            counters = {name: 0 for name in self.benchmark.COUNTER_FIELDS}
+            addresses = {"state.ex": 4096, "state.ey": 8192}
+            rss_samples = [
+                {"before_bytes": 1000, "after_bytes": 1000}
+                for _ in range(
+                    self.benchmark.CPU_RSS_STABILIZATION_WINDOWS
+                    + self.benchmark.CPU_RSS_EVALUATION_BLOCK_WINDOWS
+                    * self.benchmark.CPU_RSS_EVALUATION_BLOCKS
+                )
+            ]
+            plateau = self.benchmark._evaluate_cpu_rss_plateau(rss_samples)
+            plateau["probe_steps_per_window"] = 5
+            plateau["measurement_provider"] = {
+                "name": "proc-self-statm",
+                "units": "bytes",
+                "validated": True,
+            }
+
+            def raw_case(name):
+                workload = self.benchmark.find_case(manifest, name)
+                requirements = self.benchmark._cpu_case_material_state_requirements(
+                    workload
+                )
+                changed = set(self.benchmark.STATE_FIELD_NAMES)
+                if requirements["pml"]:
+                    changed.add("pml_ex_0_state")
+                if requirements["dispersive"]:
+                    changed.add("bucket_ex_0_state")
+                if requirements["dm2"]:
+                    changed.add("dm2_buckets.0.u")
+                runtime = {
+                    "device": "cpu",
+                    "precision": "float64",
+                    "compile_policy": "compile",
+                    "compile_mode": "default",
+                    "explicit_cuda_graphs": False,
+                    "execution_policy": "auto",
+                    "experimental_dispersive_grouping": False,
+                    "experimental_dispersive_grouping_scope": "combined",
+                    "threads": threads,
+                    "interop_threads": 1,
+                    "compile_cache_key": "compile-key",
                     "cpu_affinity": [0, 1, 2, 3],
                     "cpu_count_physical_affinity": 4,
                     "cpu_topology": "topology",
-                    "cpu_model": "model",
-                },
-                "cases": [
-                    {
-                        "workload": self.benchmark.find_case(manifest, name),
-                        "runtime": {
-                            "device": "cpu",
-                            "precision": "float64",
-                            "compile_policy": "compile",
-                            "compile_mode": "default",
-                            "explicit_cuda_graphs": False,
-                            "execution_policy": "auto",
-                            "experimental_dispersive_grouping": False,
-                            "threads": threads,
-                            "interop_threads": 1,
-                            "cpu_affinity": [0, 1, 2, 3],
-                            "cpu_count_physical_affinity": 4,
-                            "cpu_topology": "topology",
+                }
+                request = self.benchmark._cpu_rss_request(
+                    name,
+                    precision="float64",
+                    compile_mode="default",
+                    execution_policy="auto",
+                    experimental_dispersive_grouping=False,
+                    experimental_dispersive_grouping_scope="combined",
+                    threads=threads,
+                    interop_threads=1,
+                    warmup=5,
+                    profile_steps=5,
+                )
+                fresh_process = {
+                    "schema_version": 1,
+                    "kind": "cpu-rss-fresh-process",
+                    "pid": 101,
+                    "parent_pid": 100,
+                    "request": request,
+                    "evidence": dict(evidence),
+                    "compile_cache_key": "compile-key",
+                    "counter_growth": dict(counters),
+                    "compiler_clean": True,
+                    "storage_addresses_before": dict(addresses),
+                    "storage_addresses_after": dict(addresses),
+                    "storage_addresses_stable": True,
+                    "plateau": json.loads(json.dumps(plateau)),
+                }
+                return {
+                    "workload": workload,
+                    "benchmark_contract": dict(benchmark_contract),
+                    "runtime": runtime,
+                    "compiler": {
+                        "after_cold": dict(counters),
+                        "after_warmup": dict(counters),
+                        "after_steady": dict(counters),
+                        "steady_state_delta": dict(counters),
+                        "fullgraph_clean": True,
+                    },
+                    "memory": {
+                        "peak_rss_bytes": 1000,
+                        "cpu_rss_probe_steps": 5,
+                        "cpu_rss_before_bytes": 1000,
+                        "cpu_rss_after_bytes": 1000,
+                        "cpu_rss_growth_bytes": 0,
+                        "cpu_rss_fresh_process": fresh_process,
+                        "cuda_allocated_before_bytes": None,
+                        "cuda_allocated_after_bytes": None,
+                        "cuda_allocated_growth_bytes": None,
+                        "cuda_peak_allocated_bytes": None,
+                        "cuda_peak_reserved_bytes": None,
+                        "storage_addresses_before": dict(addresses),
+                        "storage_addresses_after": dict(addresses),
+                        "storage_addresses_stable": True,
+                        "bounded": True,
+                    },
+                    "profiler": dict(zero_profiler),
+                    "diagnostics": {
+                        "sources": {
+                            "execution_representation": (
+                                self.benchmark.gmes.torch_fdtd.FUSED_SOURCE_REPRESENTATION
+                            )
                         },
-                        "acceptance": {
-                            name: True
-                            for name in self.benchmark.RUNTIME_ACCEPTANCE_KEYS
+                        "pml": {"active_cells": 1 if requirements["pml"] else 0},
+                        "dispersive": {
+                            "active_cells": 1 if requirements["dispersive"] else 0
                         },
-                        "native_gate": dict(gate),
-                    }
-                    for name in cases
-                ],
+                        "dm2": [{}] if requirements["dm2"] else [],
+                    },
+                    "state_progress": {
+                        "initial_checksum": 1.0,
+                        "post_warmup_checksum": 2.0,
+                        "post_one_step_checksum": 3.0,
+                        "final_checksum": 4.0,
+                        "changed_after_first_timed_step": True,
+                        "one_step_count": 6,
+                        "expected_one_step_count": 6,
+                        "timed_step_count": 105,
+                        "expected_timed_step_count": 105,
+                        "profiler_step_count": 10,
+                        "expected_profiler_step_count": 10,
+                        "changed_buffers": sorted(changed),
+                        "fields_changed": sorted(
+                            changed & self.benchmark.STATE_FIELD_NAMES
+                        ),
+                        "all_fields_changed": True,
+                        "pml_state_changed": requirements["pml"],
+                        "dispersive_state_changed": requirements["dispersive"],
+                        "dm2_state_changed": requirements["dm2"],
+                    },
+                    "acceptance": {
+                        key: True for key in self.benchmark.RUNTIME_ACCEPTANCE_KEYS
+                    },
+                    "allocation_contract": json.loads(json.dumps(zero_contract)),
+                    "native_gate": dict(embedded_native),
+                    "torch_baseline_gate": dict(embedded_baseline),
+                }
+
+            return {
+                "schema_version": 4,
+                "kind": "cpu-acceptance-thread-slice",
+                "evidence": dict(evidence),
+                "environment": environment(threads),
+                "torch_baseline": self.benchmark._torch_baseline_provenance(
+                    torch_baseline
+                ),
+                "cases": [raw_case(name) for name in cases],
             }
 
         one = artifact(1)
         physical = artifact(4)
-        with patch.object(self.benchmark, "_native_gate", return_value=gate):
+        physical["environment"]["cpu_model"] = "model\nCPU(s) scaling MHz: 87%"
+        with (
+            patch.object(self.benchmark, "_native_gate", return_value=native_gate),
+            patch.object(
+                self.benchmark,
+                "compare_candidate_to_baseline",
+                return_value=baseline_gate,
+            ),
+            patch.object(self.benchmark, "_profiler_trace_matches", return_value=True),
+        ):
             result = self.benchmark._aggregate_cpu_slice_outputs(
                 [one, physical],
                 manifest,
                 Path("native.json"),
+                torch_baseline,
+                None,
                 evidence,
             )
             self.assertTrue(result["suite_acceptance"]["passed"])
+            self.assertEqual(result["acceptance_scope"], "cpu-performance-only")
+            self.assertFalse(result["issue_completion_satisfied"])
+            self.assertEqual(
+                result["issue_completion_blockers"],
+                ["complete-field-and-persistent-state-correctness-not-bound"],
+            )
+            self.assertEqual(result["suite_acceptance"]["cpu_evaluated_cell_count"], 12)
+            self.assertTrue(
+                result["suite_acceptance"]["torch_baseline_geomean_statistics"][
+                    "evaluated"
+                ]
+            )
+            self.assertEqual(
+                result["suite_acceptance"]["native_comparison_role"],
+                "informational",
+            )
+            self.assertFalse(
+                result["suite_acceptance"]["native_geomean_statistics"]["passed"]
+            )
+            tampered_baseline = artifact(4)
+            tampered_baseline["torch_baseline"]["kind"] = "tampered"
+            tampered_baseline_result = self.benchmark._aggregate_cpu_slice_outputs(
+                [artifact(1), tampered_baseline],
+                manifest,
+                Path("native.json"),
+                torch_baseline,
+                None,
+                evidence,
+            )
+            invalid_allocation = artifact(4)
+            invalid_allocation["cases"][0]["allocation_contract"][
+                "status"
+            ] = "reviewed-fixed-temporary"
+            invalid_allocation_result = self.benchmark._aggregate_cpu_slice_outputs(
+                [artifact(1), invalid_allocation],
+                manifest,
+                Path("native.json"),
+                torch_baseline,
+                None,
+                evidence,
+            )
             del physical["cases"][0]["acceptance"]["state_progressed"]
             incomplete = self.benchmark._aggregate_cpu_slice_outputs(
                 [one, physical],
                 manifest,
                 Path("native.json"),
+                torch_baseline,
+                None,
                 evidence,
             )
             self.assertFalse(incomplete["suite_acceptance"]["passed"])
@@ -1261,6 +1941,8 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
                 [one, physical],
                 manifest,
                 Path("native.json"),
+                torch_baseline,
+                None,
                 evidence,
             )
             experimental = artifact(4)
@@ -1270,13 +1952,176 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
                 [one, experimental],
                 manifest,
                 Path("native.json"),
+                torch_baseline,
+                None,
                 evidence,
             )
+            slow_baseline = {
+                **baseline_gate,
+                "candidate_raw_seconds_per_step": [1.06] * 15,
+                "candidate_to_torch_baseline_ratio": 1.06,
+                "within_five_percent": False,
+            }
+            slow_one = artifact(1, embedded_baseline=slow_baseline)
+            slow_physical = artifact(4, embedded_baseline=slow_baseline)
+            with patch.object(
+                self.benchmark,
+                "compare_candidate_to_baseline",
+                return_value=slow_baseline,
+            ):
+                slow = self.benchmark._aggregate_cpu_slice_outputs(
+                    [slow_one, slow_physical],
+                    manifest,
+                    Path("native.json"),
+                    torch_baseline,
+                    None,
+                    evidence,
+                )
+            bootstrap_regression = {
+                **baseline_gate,
+                "candidate_raw_seconds_per_step": [1.02] * 15,
+                "candidate_to_torch_baseline_ratio": 1.02,
+            }
+            with patch.object(
+                self.benchmark,
+                "compare_candidate_to_baseline",
+                return_value=bootstrap_regression,
+            ):
+                bootstrap_failure = self.benchmark._aggregate_cpu_slice_outputs(
+                    [
+                        artifact(1, embedded_baseline=bootstrap_regression),
+                        artifact(4, embedded_baseline=bootstrap_regression),
+                    ],
+                    manifest,
+                    Path("native.json"),
+                    torch_baseline,
+                    None,
+                    evidence,
+                )
+            invalid_native = {**native_gate, "comparison_valid": False}
+            with patch.object(
+                self.benchmark,
+                "_native_gate",
+                return_value=invalid_native,
+            ):
+                invalid_native_result = self.benchmark._aggregate_cpu_slice_outputs(
+                    [
+                        artifact(1, embedded_native=invalid_native),
+                        artifact(4, embedded_native=invalid_native),
+                    ],
+                    manifest,
+                    Path("native.json"),
+                    torch_baseline,
+                    None,
+                    evidence,
+                )
+            thread_environment_mismatch = artifact(4)
+            thread_environment_mismatch["environment"]["thread_environment"][
+                "OPENBLAS_NUM_THREADS"
+            ] = "1"
+            thread_environment_result = self.benchmark._aggregate_cpu_slice_outputs(
+                [artifact(1), thread_environment_mismatch],
+                manifest,
+                Path("native.json"),
+                torch_baseline,
+                None,
+                evidence,
+            )
+            raw_evidence_mutations = {
+                "compiler graph break": lambda case: case["compiler"][
+                    "after_steady"
+                ].__setitem__("graph_breaks", 1),
+                "compiled region count": lambda case: case["profiler"].__setitem__(
+                    "compiled_region_events", 9
+                ),
+                "steady transfer": lambda case: case["profiler"].__setitem__(
+                    "host_to_device_events", 1
+                ),
+                "external indexed write": lambda case: (
+                    case["profiler"].__setitem__(
+                        "indexed_write_operations_outside_compiled_regions", 1
+                    ),
+                    case["profiler"].__setitem__(
+                        "indexed_write_names_outside_compiled_regions",
+                        {"aten::index_add_": 1},
+                    ),
+                ),
+                "parent storage address": lambda case: case["memory"][
+                    "storage_addresses_after"
+                ].__setitem__("state.ex", 4097),
+                "child RSS raw window": lambda case: case["memory"][
+                    "cpu_rss_fresh_process"
+                ]["plateau"]["after_bytes"].__setitem__(-1, 2 * 1024 * 1024),
+                "child compile cache": lambda case: case["memory"][
+                    "cpu_rss_fresh_process"
+                ].__setitem__("compile_cache_key", "tampered"),
+                "child RSS request": lambda case: case["memory"][
+                    "cpu_rss_fresh_process"
+                ]["request"].__setitem__("threads", 2),
+                "child RSS checkout evidence": lambda case: case["memory"][
+                    "cpu_rss_fresh_process"
+                ]["evidence"].__setitem__("candidate_git_commit", "tampered"),
+                "child compiler counter": lambda case: case["memory"][
+                    "cpu_rss_fresh_process"
+                ]["counter_growth"].__setitem__("unique_graphs", 1),
+                "child storage address": lambda case: case["memory"][
+                    "cpu_rss_fresh_process"
+                ]["storage_addresses_after"].__setitem__("state.ex", 4097),
+                "measurement contract": lambda case: case[
+                    "benchmark_contract"
+                ].__setitem__("warmup_steps", 6),
+                "changed field": lambda case: case["state_progress"][
+                    "changed_buffers"
+                ].remove("ex"),
+                "state step count": lambda case: case["state_progress"].__setitem__(
+                    "timed_step_count", 106
+                ),
+                "material diagnostics": lambda case: case["diagnostics"][
+                    "pml"
+                ].__setitem__("active_cells", 0),
+            }
+            raw_evidence_results = {}
+            for label, mutate in raw_evidence_mutations.items():
+                tampered = artifact(4)
+                mutate(tampered["cases"][0])
+                raw_evidence_results[label] = (
+                    self.benchmark._aggregate_cpu_slice_outputs(
+                        [artifact(1), tampered],
+                        manifest,
+                        Path("native.json"),
+                        torch_baseline,
+                        None,
+                        evidence,
+                    )
+                )
         self.assertFalse(invalid["suite_acceptance"]["passed"])
         self.assertFalse(experimental_result["suite_acceptance"]["passed"])
+        self.assertFalse(slow["suite_acceptance"]["passed"])
+        self.assertFalse(tampered_baseline_result["suite_acceptance"]["passed"])
+        self.assertFalse(invalid_allocation_result["suite_acceptance"]["passed"])
+        self.assertTrue(
+            bootstrap_failure["suite_acceptance"][
+                "torch_baseline_individual_within_five_percent"
+            ]
+        )
+        self.assertFalse(
+            bootstrap_failure["suite_acceptance"]["torch_baseline_geomean_statistics"][
+                "passed"
+            ]
+        )
+        self.assertFalse(bootstrap_failure["suite_acceptance"]["passed"])
+        self.assertFalse(invalid_native_result["suite_acceptance"]["passed"])
+        self.assertFalse(thread_environment_result["suite_acceptance"]["passed"])
+        for label, raw_evidence_result in raw_evidence_results.items():
+            with self.subTest(raw_evidence=label):
+                self.assertFalse(raw_evidence_result["suite_acceptance"]["passed"])
+                self.assertIn(
+                    "CPU runtime evidence",
+                    " ".join(raw_evidence_result["suite_acceptance"]["errors"]),
+                )
 
     def test_cpu_slice_aggregator_rejects_mixed_candidate_provenance(self):
-        output = {"schema_version": 3, "kind": "cpu-acceptance-thread-slice"}
+        output = {"schema_version": 4, "kind": "cpu-acceptance-thread-slice"}
         result = self.benchmark._evaluate_cpu_slice(
             output,
             self.manifest,
@@ -1330,6 +2175,9 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             profile_steps=1,
             trace_directory=Path("/tmp"),
             native_summary=None,
+            torch_baseline_slice_artifacts=None,
+            allocation_provenance=None,
+            cpu_slice_artifacts=None,
             output=None,
             enforce=True,
         )
@@ -1342,6 +2190,107 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             ),
             patch.object(self.benchmark, "run_case", return_value=sample),
             patch.object(self.benchmark, "_environment", return_value={}),
+            patch("builtins.print"),
+        ):
+            status = self.benchmark.main()
+        self.assertEqual(status, 2)
+
+    def test_cpu_slice_aggregation_forwards_allocation_document(self):
+        args = SimpleNamespace(
+            case="cpu-gates",
+            native_summary=Path("native.json"),
+            torch_baseline_slice_artifacts=(
+                Path("baseline-one.json"),
+                Path("baseline-physical.json"),
+            ),
+            allocation_provenance=Path("allocation.json"),
+            cpu_slice_artifacts=(
+                Path("candidate-one.json"),
+                Path("candidate-physical.json"),
+            ),
+            output=None,
+            enforce=True,
+        )
+        document = {
+            "source_artifact": {
+                "path": "/allocation.json",
+                "sha256": "a" * 64,
+            },
+            "records": [],
+        }
+        aggregate = {
+            "suite_acceptance": {"passed": True},
+            "issue_completion_satisfied": False,
+        }
+        with (
+            patch.object(
+                self.benchmark,
+                "_arguments",
+                return_value=(args, self.manifest),
+            ),
+            patch.object(
+                self.benchmark,
+                "_load_allocation_provenance",
+                return_value=document,
+            ),
+            patch.object(
+                self.benchmark,
+                "_aggregate_cpu_slice_files",
+                return_value=aggregate,
+            ) as aggregate_mock,
+            patch("builtins.print"),
+        ):
+            status = self.benchmark.main()
+        aggregate_mock.assert_called_once_with(
+            args.cpu_slice_artifacts,
+            self.manifest,
+            args.native_summary,
+            args.torch_baseline_slice_artifacts,
+            document,
+        )
+        self.assertEqual(status, 2)
+
+    def test_enforced_cpu_gate_requires_a_torch_baseline_comparison(self):
+        args = SimpleNamespace(
+            case="cpu-crossover-2d",
+            device="cpu",
+            precision="float64",
+            compile_mode="default",
+            policy="auto",
+            capture_graphs=False,
+            threads=1,
+            interop_threads=1,
+            warmup=5,
+            steps=100,
+            repeats=15,
+            profile_steps=5,
+            trace_directory=Path("/tmp"),
+            native_summary=Path("native.json"),
+            torch_baseline_slice_artifacts=None,
+            allocation_provenance=None,
+            cpu_slice_artifacts=None,
+            output=None,
+            enforce=True,
+        )
+        sample = {"acceptance": {"passed": True}}
+        native_gate = {
+            "comparison_role": "informational",
+            "comparison_valid": True,
+            "torch_to_native_ratio": 100.0,
+        }
+        with (
+            patch.object(
+                self.benchmark,
+                "_arguments",
+                return_value=(args, self.manifest),
+            ),
+            patch.object(self.benchmark, "run_case", return_value=sample),
+            patch.object(self.benchmark, "_native_gate", return_value=native_gate),
+            patch.object(
+                self.benchmark,
+                "_environment",
+                return_value={"cpu_count_physical_affinity": 4},
+            ),
             patch("builtins.print"),
         ):
             status = self.benchmark.main()
@@ -1363,18 +2312,46 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             profile_steps=5,
             trace_directory=Path("/tmp"),
             native_summary=Path("native.json"),
+            torch_baseline_slice_artifacts=(Path("one.json"), Path("four.json")),
+            allocation_provenance=None,
             cpu_slice_artifacts=None,
             output=None,
             enforce=True,
         )
         sample = {"acceptance": {"passed": True}}
         native_gate = {
+            "comparison_role": "informational",
             "comparison_valid": True,
+            "torch_to_native_ratio": 100.0,
+        }
+        baseline_gate = {
+            "comparison_valid": True,
+            "candidate_to_torch_baseline_ratio": 1.0,
             "within_five_percent": True,
-            "torch_to_native_ratio": 1.0,
         }
         environment = {
             "cpu_count_physical_affinity": 4,
+            "thread_environment": {
+                "OMP_NUM_THREADS": "1",
+                "MKL_NUM_THREADS": "1",
+                "OPENBLAS_NUM_THREADS": "1",
+            },
+        }
+        torch_baseline = {
+            "kind": "torch-cpu-baseline",
+            "cpu_acceptance_contract_id": "cpu-acceptance-v2",
+            "timing_reference": {"root_commit": "baseline"},
+            "environment": {"cpu_count_physical_affinity": 4},
+            "source_artifacts": [
+                {
+                    "path": "/one.json",
+                    "sha256": "1" * 64,
+                    "thread_mode": "one",
+                    "threads": 1,
+                    "thread_environment": dict(environment["thread_environment"]),
+                    "root_commit": "baseline",
+                }
+            ],
         }
         with (
             patch.object(
@@ -1384,6 +2361,16 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             ),
             patch.object(self.benchmark, "run_case", return_value=sample),
             patch.object(self.benchmark, "_native_gate", return_value=native_gate),
+            patch.object(
+                self.benchmark,
+                "load_torch_cpu_baseline",
+                return_value=torch_baseline,
+            ),
+            patch.object(
+                self.benchmark,
+                "compare_candidate_to_baseline",
+                return_value=baseline_gate,
+            ),
             patch.object(self.benchmark, "_environment", return_value=environment),
             patch("builtins.print") as rendered,
         ):
@@ -1393,6 +2380,13 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
         self.assertFalse(output["suite_acceptance"]["passed"])
         self.assertEqual(
             output["suite_acceptance"]["cpu_suite_status"], "diagnostic-only"
+        )
+        self.assertEqual(
+            output["suite_acceptance"]["native_comparison_role"],
+            "informational",
+        )
+        self.assertTrue(
+            output["suite_acceptance"]["torch_baseline_individual_within_five_percent"]
         )
         self.assertEqual(status, 2)
 

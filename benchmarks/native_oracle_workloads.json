@@ -79,13 +79,50 @@
   ],
   "performance_gates": {
     "cpu_crossover": {"cases": ["cpu-crossover-2d", "cpu-crossover-3d"], "sizes": [[16, 16, 0], [16, 16, 16]], "resolutions": [10, 4], "repeats": 15, "threads": [1, "physical"]},
-    "cpu_large": {"cases": ["cpu-large-2d", "cpu-large-3d"], "sizes": [[64, 64, 0], [32, 32, 32]], "resolutions": [10, 4], "repeats": 15, "threads": [1, "physical"], "max_individual_regression_percent": 5, "geomean_regression": "not-statistically-meaningful"},
+    "cpu_large": {"cases": ["cpu-large-2d", "cpu-large-3d"], "sizes": [[64, 64, 0], [32, 32, 32]], "resolutions": [10, 4], "repeats": 15, "threads": [1, "physical"]},
     "cpu_acceptance": {
-      "contract_id": "cpu-acceptance-v1",
+      "contract_id": "cpu-acceptance-v2",
+      "timing_reference": {
+        "backend": "torch",
+        "root_commit": "821c075b9328e02c3f3e5d16488a44b64ff08c04",
+        "slice_artifacts": [
+          {
+            "thread_mode": "one",
+            "threads": 1,
+            "sha256": "e6e765fcd0b0ff1fff1919ff06f95c155beed6ce2c51c3c58cf8dccfcca3387f"
+          },
+          {
+            "thread_mode": "physical",
+            "threads": 4,
+            "sha256": "27bc2f3f0a880b0faf25480d926f8b3885c33b7571f14bb47130880f2105fa9a"
+          }
+        ],
+        "legacy_evidence": {
+          "evidence_contract_id": "torch-cpu-acceptance-v7",
+          "cpu_contract_id": "cpu-acceptance-v1",
+          "manifest_sha256": "6d7fe084c558cf69771f0c3928bc9be96fc6bb5b55ba777d674151fbbe6cbe19",
+          "runner_sha256": "fee6d418bb50729ddb26ff14e931a4f51bb8d2a92cb0ad537c2757846247a770",
+          "solver_sha256": "9cd8decc801a6f9d93551c6e6f427afeff1c65e3092e54b03e5abe0a3e9192d5",
+          "solver_abi": "torch-fdtd-regions-v8"
+        }
+      },
       "cases": ["cpu-crossover-2d", "cpu-crossover-3d", "cpu-large-2d", "cpu-large-3d", "bloch-2d", "bloch-3d"],
       "thread_modes": ["one", "physical"],
       "precision": "float64",
       "max_individual_ratio": 1.05,
+      "native_comparison": "informational",
+      "allocation_contract": {
+        "method": "reviewed-fixed-temporary-provenance-v1",
+        "fixed_temporaries": {
+          "allowed": true,
+          "reviewed_provenance_required": true
+        },
+        "max_net_live_growth_bytes": 0,
+        "max_final_live_growth_bytes": 0,
+        "rss_growth": "bounded",
+        "max_full_field_or_domain_clones": 0,
+        "public_upstream_issue_required": true
+      },
       "statistics": {
         "method": "independent-stratified-bootstrap-log-geomean-v1",
         "resamples": 20000,

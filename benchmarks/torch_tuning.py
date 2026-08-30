@@ -13,6 +13,7 @@ import json
 import math
 import os
 import platform
+import re
 import resource
 import subprocess
 import sys
@@ -36,6 +37,10 @@ from benchmarks.native_oracle import (
     initial_field_values,
     load_manifest,
     material_from_name,
+)
+from benchmarks.torch_cpu_baseline import (
+    compare_candidate_to_baseline,
+    load_torch_cpu_baseline,
 )
 from benchmarks.torch_dm2 import build_case as build_dm2_case
 
@@ -66,7 +71,12 @@ COMPILE_VARIANTS = (
     ("reduce-overhead", "reduce-overhead", False),
     ("max-autotune", "max-autotune", False),
 )
-EVIDENCE_CONTRACT_ID = "torch-cpu-acceptance-v7"
+EVIDENCE_CONTRACT_ID = "torch-cpu-acceptance-v8"
+ALLOCATION_PROVENANCE_METHOD = "reviewed-fixed-temporary-provenance-v1"
+ALLOCATION_PROVENANCE_KIND = "torch-cpu-allocation-provenance"
+PYTORCH_ISSUE_URL = re.compile(
+    r"https://github\.com/pytorch/pytorch/issues/[1-9][0-9]*\Z"
+)
 CPU_RSS_LIMIT_BYTES = 1024 * 1024
 CPU_RSS_STABILIZATION_WINDOWS = 16
 CPU_RSS_EVALUATION_BLOCK_WINDOWS = 6
@@ -78,13 +88,24 @@ RUNTIME_ACCEPTANCE_KEYS = (
     "steady_state_transfers_zero",
     "storage_stable",
     "memory_bounded",
-    "recurring_allocations_zero",
+    "fixed_temporary_contract_satisfied",
     "measurement_contract_matches_manifest",
     "state_progressed",
     "passed",
 )
+COUNTER_FIELDS = (
+    "graph_breaks",
+    "unique_graphs",
+    "calls_captured",
+    "frames_total",
+    "frames_ok",
+    "fxgraph_cache_hit",
+    "fxgraph_cache_miss",
+)
+STATE_FIELD_NAMES = frozenset(("ex", "ey", "ez", "hx", "hy", "hz"))
 RUNNER_INPUTS = (
     "benchmarks/native_oracle.py",
+    "benchmarks/torch_cpu_baseline.py",
     "benchmarks/torch_dm2.py",
     "benchmarks/torch_tuning.py",
 )
@@ -448,7 +469,8 @@ def _run_cpu_rss_child(request, manifest):
     plateau = _cpu_memory_plateau_probe(simulation, request["profile_steps"])
     counters_after = _counter_snapshot()
     counter_growth = _counter_delta(counters_before, counters_after)
-    storage_stable = addresses == simulation.buffer_addresses()
+    final_addresses = simulation.buffer_addresses()
+    storage_stable = addresses == final_addresses
     compiler_clean = (
         counter_growth["unique_graphs"] == 0
         and counter_growth["frames_total"] == 0
@@ -467,6 +489,8 @@ def _run_cpu_rss_child(request, manifest):
         "compile_cache_key": simulation.compile_cache_key,
         "counter_growth": counter_growth,
         "compiler_clean": compiler_clean,
+        "storage_addresses_before": addresses,
+        "storage_addresses_after": final_addresses,
         "storage_addresses_stable": storage_stable,
         "plateau": plateau,
     }
@@ -607,6 +631,161 @@ def _current_evidence(manifest):
             "git", "status", "--short", "--untracked-files=normal"
         ),
     }
+
+
+def _load_allocation_provenance(path):
+    """Load one reviewed provenance collection and reject ambiguous selectors."""
+    raw = path.read_bytes()
+    try:
+        data = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("allocation provenance is not valid JSON") from error
+    required_top_level = {"schema_version", "kind", "method", "records"}
+    if not isinstance(data, dict) or set(data) != required_top_level:
+        raise ValueError("allocation provenance has an invalid top-level schema")
+    if (
+        data["schema_version"] != 1
+        or data["kind"] != ALLOCATION_PROVENANCE_KIND
+        or data["method"] != ALLOCATION_PROVENANCE_METHOD
+        or not isinstance(data["records"], list)
+    ):
+        raise ValueError("allocation provenance contract does not match the runner")
+    selector_names = (
+        "workload",
+        "device",
+        "precision",
+        "compile_mode",
+        "execution_policy",
+        "threads",
+    )
+    selectors = set()
+    records = []
+    for record in data["records"]:
+        if not isinstance(record, dict):
+            raise ValueError("allocation provenance records must be objects")
+        selector = tuple(record.get(name) for name in selector_names)
+        if (
+            any(not isinstance(value, str) or not value for value in selector[:-1])
+            or type(selector[-1]) is not int
+            or selector[-1] < 1
+        ):
+            raise ValueError("allocation provenance record selector is malformed")
+        if record.get("method") != ALLOCATION_PROVENANCE_METHOD:
+            raise ValueError("allocation provenance record method is invalid")
+        if selector in selectors:
+            raise ValueError("allocation provenance contains a duplicate selector")
+        selectors.add(selector)
+        records.append(record)
+    return {
+        "schema_version": data["schema_version"],
+        "kind": data["kind"],
+        "method": data["method"],
+        "source_artifact": {
+            "path": str(path.resolve()),
+            "sha256": hashlib.sha256(raw).hexdigest(),
+        },
+        "records": records,
+    }
+
+
+def _select_allocation_provenance(
+    document,
+    *,
+    workload,
+    device,
+    precision,
+    compile_mode,
+    execution_policy,
+    threads,
+):
+    if document is None:
+        return None
+    selector = (
+        workload,
+        device,
+        precision,
+        compile_mode,
+        execution_policy,
+        threads,
+    )
+    matches = [
+        record
+        for record in document["records"]
+        if tuple(
+            record[name]
+            for name in (
+                "workload",
+                "device",
+                "precision",
+                "compile_mode",
+                "execution_policy",
+                "threads",
+            )
+        )
+        == selector
+    ]
+    if len(matches) > 1:
+        raise ValueError("allocation provenance selector is ambiguous")
+    return matches[0] if matches else None
+
+
+def _torch_baseline_provenance(baseline):
+    if baseline is None:
+        return None
+    return {
+        "kind": baseline.get("kind"),
+        "cpu_acceptance_contract_id": baseline.get("cpu_acceptance_contract_id"),
+        "timing_reference": baseline.get("timing_reference"),
+        "source_artifacts": [
+            {
+                name: source.get(name)
+                for name in (
+                    "path",
+                    "sha256",
+                    "thread_mode",
+                    "threads",
+                    "thread_environment",
+                    "root_commit",
+                )
+            }
+            for source in baseline.get("source_artifacts", ())
+        ],
+    }
+
+
+def _normalized_cpu_model_identity(value):
+    if not isinstance(value, str):
+        return value
+    return "\n".join(
+        line
+        for line in value.splitlines()
+        if not line.lstrip().startswith("CPU(s) scaling MHz:")
+    )
+
+
+def _torch_baseline_environment_matches(baseline, environment):
+    reference = baseline.get("environment") if isinstance(baseline, dict) else None
+    if not isinstance(reference, dict) or not isinstance(environment, dict):
+        return False
+    candidate = {name: environment.get(name) for name in reference}
+    if "cpu_model" in candidate:
+        candidate["cpu_model"] = _normalized_cpu_model_identity(candidate["cpu_model"])
+    return candidate == reference
+
+
+def _torch_baseline_thread_environment_matches(baseline, environment, threads):
+    if not isinstance(baseline, dict) or not isinstance(environment, dict):
+        return False
+    matches = [
+        source
+        for source in baseline.get("source_artifacts", ())
+        if isinstance(source, dict) and source.get("threads") == threads
+    ]
+    return (
+        len(matches) == 1
+        and isinstance(environment.get("thread_environment"), dict)
+        and environment["thread_environment"] == matches[0].get("thread_environment")
+    )
 
 
 def _command_text(*command):
@@ -875,12 +1054,41 @@ def _trace_summary(path):
     freed_bytes = 0
     max_allocation_bytes = 0
     allocation_size_histogram = Counter()
+    memory_events = 0
+    live_allocation_metrics_complete = True
+    live_allocation_baseline_bytes = None
+    live_allocation_totals = []
     compiled_regions = Counter()
     compiled_intervals = []
     cuda_graph_launches = 0
     for event in events:
         if event.get("name") == "[memory]":
-            size = int(event.get("args", {}).get("Bytes", 0))
+            memory_events += 1
+            args = event.get("args", {})
+            try:
+                size = int(args["Bytes"])
+                total_allocated = int(args["Total Allocated"])
+            except KeyError, TypeError, ValueError:
+                live_allocation_metrics_complete = False
+                try:
+                    size = int(args.get("Bytes", 0))
+                except TypeError, ValueError:
+                    size = 0
+            else:
+                if live_allocation_baseline_bytes is None:
+                    live_allocation_baseline_bytes = total_allocated - size
+                previous_live = (
+                    live_allocation_totals[-1]
+                    if live_allocation_totals
+                    else live_allocation_baseline_bytes
+                )
+                if (
+                    live_allocation_baseline_bytes < 0
+                    or total_allocated < 0
+                    or total_allocated != previous_live + size
+                ):
+                    live_allocation_metrics_complete = False
+                live_allocation_totals.append(total_allocated)
             if size > 0:
                 allocation_events += 1
                 allocated_bytes += size
@@ -930,8 +1138,26 @@ def _trace_summary(path):
         )
         if not inside:
             indexed_writes_outside_regions[event["name"]] += 1
+    if memory_events == 0:
+        live_allocation_baseline_bytes = 0
+        peak_live_allocated_bytes = 0
+        final_live_allocated_bytes = 0
+        live_allocation_growth_bytes = 0
+    elif live_allocation_metrics_complete:
+        peak_live_allocated_bytes = max(
+            live_allocation_baseline_bytes, *live_allocation_totals
+        )
+        final_live_allocated_bytes = live_allocation_totals[-1]
+        live_allocation_growth_bytes = (
+            final_live_allocated_bytes - live_allocation_baseline_bytes
+        )
+    else:
+        live_allocation_baseline_bytes = None
+        peak_live_allocated_bytes = None
+        final_live_allocated_bytes = None
+        live_allocation_growth_bytes = None
     return {
-        "chrome_trace": str(path),
+        "chrome_trace": str(path.resolve()),
         "chrome_trace_size_bytes": len(trace_bytes),
         "chrome_trace_sha256": hashlib.sha256(trace_bytes).hexdigest(),
         "kernel_launches": kernels,
@@ -947,6 +1173,11 @@ def _trace_summary(path):
             str(size): count
             for size, count in sorted(allocation_size_histogram.items())
         },
+        "live_allocation_baseline_bytes": live_allocation_baseline_bytes,
+        "peak_live_allocated_bytes": peak_live_allocated_bytes,
+        "final_live_allocated_bytes": final_live_allocated_bytes,
+        "live_allocation_growth_bytes": live_allocation_growth_bytes,
+        "live_allocation_metrics_complete": live_allocation_metrics_complete,
         "compiled_region_events": sum(compiled_regions.values()),
         "compiled_region_names": dict(sorted(compiled_regions.items())),
         "cuda_graph_launches": cuda_graph_launches,
@@ -959,17 +1190,994 @@ def _trace_summary(path):
     }
 
 
-def _recurring_allocations_zero(device, profiler):
+def _profiler_trace_matches(profiler):
+    """Re-read a saved trace and bind every trace-derived profiler field."""
+    if not isinstance(profiler, dict) or not isinstance(
+        profiler.get("chrome_trace"), str
+    ):
+        return False
+    try:
+        summary = _trace_summary(Path(profiler["chrome_trace"]))
+    except OSError, TypeError, ValueError, json.JSONDecodeError:
+        return False
+    return all(profiler.get(name) == value for name, value in summary.items())
+
+
+def _fixed_temporary_allocation_contract(
+    device,
+    profiler,
+    *,
+    compile_cache_key,
+    allocation_provenance=None,
+    public_upstream_issue_required=True,
+):
+    result = {
+        "method": ALLOCATION_PROVENANCE_METHOD,
+        "applied": device.type == "cpu",
+        "satisfied": False,
+        "status": "failed",
+        "zero_allocation": False,
+        "checks": {},
+        "errors": [],
+        "provenance": allocation_provenance,
+        "verified_generated_sources": [],
+    }
     if device.type != "cpu":
-        return True
-    return all(
-        profiler.get(key) == 0
+        result.update(satisfied=True, status="not-applied")
+        return result
+
+    def check(name, condition, message):
+        result["checks"][name] = bool(condition)
+        if not condition:
+            result["errors"].append(message)
+
+    required_metrics = (
+        "positive_allocation_events",
+        "allocated_bytes",
+        "freed_bytes",
+        "allocation_net_bytes",
+        "allocation_size_histogram",
+        "profile_steps",
+        "positive_allocation_operations",
+        "live_allocation_baseline_bytes",
+        "peak_live_allocated_bytes",
+        "final_live_allocated_bytes",
+        "live_allocation_growth_bytes",
+        "live_allocation_metrics_complete",
+    )
+    missing_metrics = [key for key in required_metrics if key not in profiler]
+    check(
+        "profiler_metrics_present",
+        not missing_metrics,
+        f"missing profiler allocation metrics: {missing_metrics}",
+    )
+    if missing_metrics:
+        return result
+
+    histogram = profiler["allocation_size_histogram"]
+    histogram_valid = isinstance(histogram, dict) and all(
+        isinstance(size, str)
+        and size.isdecimal()
+        and int(size) > 0
+        and type(count) is int
+        and count > 0
+        for size, count in histogram.items()
+    )
+    check(
+        "allocation_histogram_valid",
+        histogram_valid,
+        "allocation histogram must contain positive decimal byte sizes and counts",
+    )
+    integer_metrics = (
+        "positive_allocation_events",
+        "allocated_bytes",
+        "freed_bytes",
+        "allocation_net_bytes",
+        "profile_steps",
+        "positive_allocation_operations",
+    )
+    integer_metrics_valid = all(
+        type(profiler[key]) is int for key in integer_metrics
+    ) and all(
+        profiler[key] >= 0
         for key in (
             "positive_allocation_events",
             "allocated_bytes",
+            "freed_bytes",
             "positive_allocation_operations",
         )
     )
+    check(
+        "integer_metrics_valid",
+        integer_metrics_valid,
+        "allocation counts, bytes, and profile steps must be integers",
+    )
+    if not histogram_valid or not integer_metrics_valid:
+        return result
+
+    profile_steps = profiler["profile_steps"]
+    check(
+        "profile_steps_positive",
+        profile_steps > 0,
+        "profile_steps must be positive",
+    )
+    if profile_steps <= 0:
+        return result
+
+    observed_events = sum(histogram.values())
+    observed_bytes = sum(int(size) * count for size, count in histogram.items())
+    trace_integrity = (
+        profiler["positive_allocation_events"] == observed_events
+        and profiler["allocated_bytes"] == observed_bytes
+        and profiler["allocation_net_bytes"]
+        == profiler["allocated_bytes"] - profiler["freed_bytes"]
+        and (
+            (profiler["positive_allocation_events"] == 0)
+            == (profiler["positive_allocation_operations"] == 0)
+        )
+    )
+    check(
+        "trace_allocation_integrity",
+        trace_integrity,
+        "profiler allocation totals do not match the raw event histogram",
+    )
+
+    zero_allocation = (
+        profiler["positive_allocation_events"] == 0
+        and profiler["allocated_bytes"] == 0
+        and profiler["freed_bytes"] == 0
+        and profiler["allocation_net_bytes"] == 0
+        and profiler["positive_allocation_operations"] == 0
+        and not histogram
+    )
+    result["zero_allocation"] = zero_allocation
+    if zero_allocation:
+        live_zero = (
+            profiler["live_allocation_metrics_complete"] is True
+            and profiler["live_allocation_baseline_bytes"] == 0
+            and profiler["peak_live_allocated_bytes"] == 0
+            and profiler["final_live_allocated_bytes"] == 0
+            and profiler["live_allocation_growth_bytes"] == 0
+        )
+        check(
+            "zero_allocation_live_metrics",
+            live_zero,
+            "zero-allocation traces must report complete zero live metrics",
+        )
+        result["satisfied"] = all(result["checks"].values())
+        result["status"] = "zero-allocation" if result["satisfied"] else "failed"
+        return result
+
+    balanced = (
+        profiler["allocation_net_bytes"] == 0
+        and profiler["allocated_bytes"] == profiler["freed_bytes"]
+    )
+    check(
+        "allocation_bytes_balanced",
+        balanced,
+        "fixed temporary allocations must be completely freed in the trace",
+    )
+    live_metric_names = (
+        "live_allocation_baseline_bytes",
+        "peak_live_allocated_bytes",
+        "final_live_allocated_bytes",
+        "live_allocation_growth_bytes",
+    )
+    live_metrics_complete = (
+        profiler["live_allocation_metrics_complete"] is True
+        and all(type(profiler[key]) is int for key in live_metric_names)
+        and profiler["peak_live_allocated_bytes"]
+        >= max(
+            profiler["live_allocation_baseline_bytes"],
+            profiler["final_live_allocated_bytes"],
+        )
+    )
+    check(
+        "live_allocation_metrics_complete",
+        live_metrics_complete,
+        "every memory event must contain Bytes and Total Allocated",
+    )
+    live_growth_zero = (
+        live_metrics_complete
+        and profiler["live_allocation_growth_bytes"] == 0
+        and profiler["final_live_allocated_bytes"]
+        == profiler["live_allocation_baseline_bytes"]
+    )
+    check(
+        "live_allocation_growth_zero",
+        live_growth_zero,
+        "final live allocation must equal the pre-trace baseline",
+    )
+    histogram_step_stable = all(
+        count % profile_steps == 0 for count in histogram.values()
+    )
+    check(
+        "allocation_histogram_step_stable",
+        histogram_step_stable,
+        "every allocation-size count must be divisible by profile_steps",
+    )
+
+    field_buffer_sizes = profiler.get("field_buffer_sizes_bytes")
+    field_buffer_sizes_valid = (
+        isinstance(field_buffer_sizes, dict)
+        and bool(field_buffer_sizes)
+        and all(
+            isinstance(name, str) and name and type(size) is int and size > 0
+            for name, size in field_buffer_sizes.items()
+        )
+    )
+    check(
+        "field_buffer_sizes_present",
+        field_buffer_sizes_valid,
+        "nonzero allocation traces require the measured field buffer byte sizes",
+    )
+    histogram_sizes = {int(size) for size in histogram}
+    no_field_sized_allocations = (
+        field_buffer_sizes_valid
+        and histogram_sizes.isdisjoint(field_buffer_sizes.values())
+    )
+    check(
+        "no_field_buffer_sized_allocations",
+        no_field_sized_allocations,
+        "an allocation size matches a live field buffer size",
+    )
+
+    provenance_present = isinstance(allocation_provenance, dict)
+    check(
+        "reviewed_provenance_present",
+        provenance_present,
+        "nonzero CPU allocations require an explicit reviewed provenance record",
+    )
+    if not provenance_present:
+        return result
+
+    binding_checks = {
+        "provenance_method_matches": (
+            allocation_provenance.get("method") == ALLOCATION_PROVENANCE_METHOD
+        ),
+        "provenance_reviewed": allocation_provenance.get("reviewed") is True,
+        "provenance_trace_matches": (
+            isinstance(profiler.get("chrome_trace_sha256"), str)
+            and bool(profiler["chrome_trace_sha256"])
+            and allocation_provenance.get("trace_sha256")
+            == profiler["chrome_trace_sha256"]
+        ),
+        "provenance_compile_cache_matches": (
+            isinstance(compile_cache_key, str)
+            and bool(compile_cache_key)
+            and allocation_provenance.get("compile_cache_key") == compile_cache_key
+        ),
+        "provenance_profile_steps_match": (
+            allocation_provenance.get("profile_steps") == profile_steps
+        ),
+        "provenance_histogram_matches": (
+            allocation_provenance.get("allocation_size_histogram") == histogram
+        ),
+        "full_field_or_domain_clone_events_zero": (
+            type(allocation_provenance.get("full_field_or_domain_clone_events")) is int
+            and allocation_provenance["full_field_or_domain_clone_events"] == 0
+        ),
+    }
+    for name, condition in binding_checks.items():
+        check(name, condition, f"allocation provenance check failed: {name}")
+
+    upstream_issue_urls = allocation_provenance.get("upstream_issue_urls")
+    upstream_issues_valid = (
+        isinstance(upstream_issue_urls, list)
+        and bool(upstream_issue_urls)
+        and all(
+            isinstance(url, str) and PYTORCH_ISSUE_URL.fullmatch(url) is not None
+            for url in upstream_issue_urls
+        )
+        and len(upstream_issue_urls) == len(set(upstream_issue_urls))
+    )
+    check(
+        "public_upstream_issues_valid",
+        not public_upstream_issue_required or upstream_issues_valid,
+        "nonzero reviewed allocations require unique canonical public PyTorch "
+        "issue URLs",
+    )
+
+    allocations = allocation_provenance.get("allocations")
+    allocations_valid = isinstance(allocations, list) and bool(allocations)
+    accounted_per_step = Counter()
+    if allocations_valid:
+        for item in allocations:
+            item_valid = (
+                isinstance(item, dict)
+                and type(item.get("size_bytes")) is int
+                and item["size_bytes"] > 0
+                and type(item.get("events_per_step")) is int
+                and item["events_per_step"] > 0
+                and item.get("classification") == "allowed-plan-bounded-temporary"
+                and isinstance(item.get("generated_operation"), str)
+                and bool(item["generated_operation"].strip())
+            )
+            if not item_valid:
+                allocations_valid = False
+                break
+            accounted_per_step[item["size_bytes"]] += item["events_per_step"]
+    check(
+        "provenance_allocations_valid",
+        allocations_valid,
+        "every provenance allocation needs size, per-step count, allowed "
+        "classification, and generated operation",
+    )
+    observed_per_step = Counter(
+        {int(size): count // profile_steps for size, count in histogram.items()}
+    )
+    check(
+        "provenance_allocations_fully_accounted",
+        allocations_valid and accounted_per_step == observed_per_step,
+        "provenance allocations do not exactly account for every per-size event",
+    )
+
+    generated_sources = allocation_provenance.get("generated_sources")
+    sources_valid = isinstance(generated_sources, list) and bool(generated_sources)
+    if sources_valid:
+        for item in generated_sources:
+            if not (
+                isinstance(item, dict)
+                and isinstance(item.get("path"), str)
+                and bool(item["path"])
+                and isinstance(item.get("sha256"), str)
+                and bool(item["sha256"])
+            ):
+                sources_valid = False
+                continue
+            source_path = Path(item["path"])
+            if not source_path.is_absolute():
+                source_path = ROOT / source_path
+            try:
+                source_bytes = source_path.read_bytes()
+            except OSError:
+                sources_valid = False
+                continue
+            actual_sha256 = hashlib.sha256(source_bytes).hexdigest()
+            source_valid = actual_sha256 == item["sha256"]
+            sources_valid = sources_valid and source_valid
+            result["verified_generated_sources"].append(
+                {
+                    "path": str(source_path),
+                    "sha256": actual_sha256,
+                    "matches_provenance": source_valid,
+                }
+            )
+    check(
+        "generated_sources_verified",
+        sources_valid,
+        "at least one generated source must exist and match its recorded SHA-256",
+    )
+
+    result["satisfied"] = all(result["checks"].values())
+    if result["satisfied"]:
+        result["status"] = "reviewed-fixed-temporary"
+    return result
+
+
+def _json_contract_equal(first, second):
+    try:
+        return json.dumps(
+            first, sort_keys=True, separators=(",", ":"), allow_nan=False
+        ) == json.dumps(second, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    except TypeError, ValueError:
+        return False
+
+
+def _counter_record_valid(record):
+    return (
+        isinstance(record, dict)
+        and set(record) == set(COUNTER_FIELDS)
+        and all(
+            type(record[name]) is int and record[name] >= 0 for name in COUNTER_FIELDS
+        )
+    )
+
+
+def _storage_address_record_valid(record):
+    return (
+        isinstance(record, dict)
+        and bool(record)
+        and all(
+            isinstance(name, str)
+            and bool(name)
+            and type(address) is int
+            and address >= 0
+            for name, address in record.items()
+        )
+    )
+
+
+def _rss_provider_valid(provider):
+    if not isinstance(provider, dict):
+        return False
+    common = provider.get("units") == "bytes" and provider.get("validated") is True
+    if provider.get("name") == "proc-self-statm":
+        return common and set(provider) == {"name", "units", "validated"}
+    if provider.get("name") != "proc-pid-rusage-v0" or not common:
+        return False
+    validation = provider.get("validation")
+    if not isinstance(validation, dict) or set(validation) != {
+        "reference_provider",
+        "direct_before_bytes",
+        "reference_bytes",
+        "direct_after_bytes",
+        "tolerance_bytes",
+    }:
+        return False
+    values = tuple(
+        validation.get(name)
+        for name in (
+            "direct_before_bytes",
+            "reference_bytes",
+            "direct_after_bytes",
+        )
+    )
+    if (
+        validation.get("reference_provider") != "ps-rss"
+        or validation.get("tolerance_bytes") != CPU_RSS_LIMIT_BYTES
+        or any(type(value) is not int or value < 0 for value in values)
+    ):
+        return False
+    direct_before, reference, direct_after = values
+    return (
+        min(direct_before, direct_after) - CPU_RSS_LIMIT_BYTES
+        <= reference
+        <= max(direct_before, direct_after) + CPU_RSS_LIMIT_BYTES
+    )
+
+
+def _cpu_case_material_state_requirements(workload):
+    recipe = workload.get("recipe")
+    material = workload.get("material")
+    pml = material in {"upml", "cpml"}
+    dispersive = isinstance(material, str) and material.startswith(
+        ("drude-", "lorentz-", "dcp-")
+    )
+    dm2 = isinstance(material, str) and material.startswith("dm2-")
+    if recipe == "coverage":
+        families = workload.get(
+            "families",
+            ["drude-1", "lorentz-1", "dcp-ade", "dcp-plrc", "dcp-rc", "dm2-1"],
+        )
+        size = workload.get("size", ())
+        try:
+            is_3d = len(size) == 3 and float(size[2]) > 0
+        except TypeError, ValueError:
+            is_3d = False
+        if is_3d:
+            families = [name for name in families if not name.startswith("dm2-")]
+        pml = workload.get("include_pml", True) is True
+        dispersive = any(
+            isinstance(name, str) and name.startswith(("drude-", "lorentz-", "dcp-"))
+            for name in families
+        )
+        dm2 = any(
+            isinstance(name, str) and name.startswith("dm2-") for name in families
+        )
+    return {"pml": pml, "dispersive": dispersive, "dm2": dm2}
+
+
+def _cpu_rss_memory_gate(candidate, manifest, expected_evidence):
+    errors = []
+    memory = candidate.get("memory")
+    runtime = candidate.get("runtime")
+    contract = candidate.get("benchmark_contract")
+    workload = candidate.get("workload")
+    if not all(
+        isinstance(value, dict) for value in (memory, runtime, contract, workload)
+    ):
+        return False, ["CPU RSS evidence records are missing"]
+    fresh = memory.get("cpu_rss_fresh_process")
+    if not isinstance(fresh, dict):
+        return False, ["fresh-process CPU RSS evidence is missing"]
+    required_fresh_keys = {
+        "schema_version",
+        "kind",
+        "pid",
+        "parent_pid",
+        "request",
+        "evidence",
+        "compile_cache_key",
+        "counter_growth",
+        "compiler_clean",
+        "storage_addresses_before",
+        "storage_addresses_after",
+        "storage_addresses_stable",
+        "plateau",
+    }
+    if set(fresh) != required_fresh_keys:
+        errors.append("fresh-process CPU RSS schema is not exact")
+    if (
+        type(fresh.get("schema_version")) is not int
+        or fresh["schema_version"] != 1
+        or fresh.get("kind") != "cpu-rss-fresh-process"
+    ):
+        errors.append("fresh-process CPU RSS identity is invalid")
+    expected_request = _cpu_rss_request(
+        workload.get("name"),
+        precision=runtime.get("precision"),
+        compile_mode=runtime.get("compile_mode"),
+        execution_policy=runtime.get("execution_policy"),
+        experimental_dispersive_grouping=runtime.get(
+            "experimental_dispersive_grouping", False
+        ),
+        experimental_dispersive_grouping_scope=runtime.get(
+            "experimental_dispersive_grouping_scope"
+        ),
+        threads=runtime.get("threads"),
+        interop_threads=runtime.get("interop_threads"),
+        warmup=contract.get("warmup_steps"),
+        profile_steps=contract.get("profile_steps"),
+    )
+    if not _json_contract_equal(fresh.get("request"), expected_request):
+        errors.append("fresh-process CPU RSS request is not exact")
+    if not _json_contract_equal(fresh.get("evidence"), expected_evidence):
+        errors.append("fresh-process CPU RSS checkout evidence is not exact")
+    if fresh.get("compile_cache_key") != runtime.get("compile_cache_key"):
+        errors.append("fresh-process CPU RSS compile cache key is not exact")
+    if not (
+        type(fresh.get("pid")) is int
+        and fresh["pid"] > 0
+        and type(fresh.get("parent_pid")) is int
+        and fresh["parent_pid"] > 0
+        and fresh["pid"] != fresh["parent_pid"]
+    ):
+        errors.append("fresh-process CPU RSS process identity is malformed")
+
+    child_counters = fresh.get("counter_growth")
+    child_counters_valid = _counter_record_valid(child_counters)
+    child_compiler_clean = child_counters_valid and all(
+        child_counters[name] == 0
+        for name in ("graph_breaks", "unique_graphs", "frames_total")
+    )
+    if not child_counters_valid:
+        errors.append("fresh-process CPU RSS compiler counters are malformed")
+    if fresh.get("compiler_clean") is not child_compiler_clean:
+        errors.append("fresh-process CPU RSS compiler result is not exact")
+
+    child_addresses_before = fresh.get("storage_addresses_before")
+    child_addresses_after = fresh.get("storage_addresses_after")
+    child_storage_stable = (
+        _storage_address_record_valid(child_addresses_before)
+        and _storage_address_record_valid(child_addresses_after)
+        and child_addresses_before == child_addresses_after
+    )
+    if fresh.get("storage_addresses_stable") is not child_storage_stable:
+        errors.append("fresh-process CPU RSS storage result is not exact")
+
+    plateau = fresh.get("plateau")
+    plateau_exact = False
+    recomputed_bounded = False
+    if isinstance(plateau, dict):
+        before = plateau.get("before_bytes")
+        after = plateau.get("after_bytes")
+        if isinstance(before, (list, tuple)) and isinstance(after, (list, tuple)):
+            samples = [
+                {"before_bytes": first, "after_bytes": second}
+                for first, second in zip(before, after, strict=False)
+            ]
+            recomputed_plateau = _evaluate_cpu_rss_plateau(samples)
+            recomputed_plateau["probe_steps_per_window"] = contract.get("profile_steps")
+            recomputed_plateau["measurement_provider"] = plateau.get(
+                "measurement_provider"
+            )
+            recomputed_plateau["bounded"] = bool(
+                recomputed_plateau.get("bounded")
+                and child_compiler_clean
+                and child_storage_stable
+            )
+            plateau_exact = _json_contract_equal(plateau, recomputed_plateau)
+            recomputed_bounded = recomputed_plateau["bounded"]
+        if not _rss_provider_valid(plateau.get("measurement_provider")):
+            errors.append("fresh-process CPU RSS provider is not validated")
+    if not plateau_exact:
+        errors.append("fresh-process CPU RSS plateau does not match its raw windows")
+
+    addresses_before = memory.get("storage_addresses_before")
+    addresses_after = memory.get("storage_addresses_after")
+    storage_stable = (
+        _storage_address_record_valid(addresses_before)
+        and _storage_address_record_valid(addresses_after)
+        and addresses_before == addresses_after
+    )
+    if memory.get("storage_addresses_stable") is not storage_stable:
+        errors.append("parent CPU storage result is not exact")
+    before_values = plateau.get("before_bytes", ()) if isinstance(plateau, dict) else ()
+    after_values = plateau.get("after_bytes", ()) if isinstance(plateau, dict) else ()
+    first_before = before_values[0] if before_values else None
+    final_after = after_values[-1] if after_values else None
+    growth = (
+        final_after - first_before
+        if type(first_before) is int and type(final_after) is int
+        else None
+    )
+    parent_summary = (
+        memory.get("cpu_rss_probe_steps"),
+        memory.get("cpu_rss_before_bytes"),
+        memory.get("cpu_rss_after_bytes"),
+        memory.get("cpu_rss_growth_bytes"),
+    )
+    expected_parent_summary = (
+        contract.get("profile_steps"),
+        first_before,
+        final_after,
+        growth,
+    )
+    if (
+        any(type(value) is not int for value in parent_summary)
+        or parent_summary != expected_parent_summary
+    ):
+        errors.append("parent CPU RSS summary does not match the child raw windows")
+    if memory.get("bounded") is not recomputed_bounded:
+        errors.append("parent CPU RSS bounded result is not exact")
+    if any(
+        memory.get(name) is not None
+        for name in (
+            "cuda_allocated_before_bytes",
+            "cuda_allocated_after_bytes",
+            "cuda_allocated_growth_bytes",
+            "cuda_peak_allocated_bytes",
+            "cuda_peak_reserved_bytes",
+        )
+    ):
+        errors.append("CPU memory evidence contains CUDA allocation values")
+    return not errors and recomputed_bounded and storage_stable, errors
+
+
+def _recompute_cpu_runtime_acceptance(candidate, manifest, expected_evidence):
+    """Recompute every non-allocation CPU runtime gate from raw evidence."""
+    errors = []
+    compiler = candidate.get("compiler")
+    profiler = candidate.get("profiler")
+    memory = candidate.get("memory")
+    state = candidate.get("state_progress")
+    diagnostics = candidate.get("diagnostics")
+    contract = candidate.get("benchmark_contract")
+    workload = candidate.get("workload")
+    records = (compiler, profiler, memory, state, diagnostics, contract, workload)
+    if not all(isinstance(value, dict) for value in records):
+        return {}, ["CPU runtime raw evidence records are missing"]
+
+    expected_contract = {
+        "initializer": FIELD_INITIALIZER,
+        "seed": manifest["reference"]["seed"],
+        "field_scale": manifest["reference"]["field_scale"],
+        "warmup_steps": manifest["reference"]["performance_warmup_steps"],
+        "steps_per_repeat": manifest["reference"]["performance_steps_per_repeat"],
+        "repetitions": manifest["reference"]["performance_repetitions"],
+        "profile_steps": manifest["reference"]["performance_profile_steps"],
+        "timer": "time.perf_counter",
+        "sample_start": "independently-restored-pre-warmup-state",
+    }
+    measurement_contract_matches = _json_contract_equal(contract, expected_contract)
+
+    expected_compiler_keys = {
+        "after_cold",
+        "after_warmup",
+        "after_steady",
+        "steady_state_delta",
+        "fullgraph_clean",
+    }
+    snapshots_valid = set(compiler) == expected_compiler_keys and all(
+        _counter_record_valid(compiler.get(name))
+        for name in ("after_cold", "after_warmup", "after_steady")
+    )
+    compiler_clean = False
+    if snapshots_valid:
+        expected_delta = _counter_delta(
+            compiler["after_warmup"], compiler["after_steady"]
+        )
+        monotonic = all(value >= 0 for value in expected_delta.values()) and all(
+            compiler["after_warmup"][name] >= compiler["after_cold"][name]
+            for name in COUNTER_FIELDS
+        )
+        if compiler.get("steady_state_delta") != expected_delta or not monotonic:
+            errors.append("CPU compiler snapshots and steady delta are inconsistent")
+        compiler_clean = (
+            monotonic
+            and compiler["after_steady"]["graph_breaks"] == 0
+            and expected_delta["unique_graphs"] == 0
+            and expected_delta["frames_total"] == 0
+        )
+    else:
+        errors.append("CPU compiler counter schema is malformed")
+    if compiler.get("fullgraph_clean") is not compiler_clean:
+        errors.append("CPU compiler embedded gate is not exact")
+
+    profile_steps = contract.get("profile_steps")
+    compiled_names = profiler.get("compiled_region_names")
+    compiled_hot_path_complete = (
+        type(profile_steps) is int
+        and profile_steps > 0
+        and profiler.get("profile_steps") == profile_steps
+        and type(profiler.get("compiled_region_events")) is int
+        and profiler["compiled_region_events"] == 2 * profile_steps
+        and isinstance(compiled_names, dict)
+        and len(compiled_names) == 2
+        and all(
+            isinstance(name, str)
+            and bool(name)
+            and type(count) is int
+            and count == profile_steps
+            for name, count in compiled_names.items()
+        )
+    )
+    transfer_counts = (
+        profiler.get("host_to_device_events"),
+        profiler.get("device_to_host_events"),
+    )
+    transfers_zero = all(type(value) is int and value == 0 for value in transfer_counts)
+    source_diagnostics = diagnostics.get("sources")
+    expected_external_writes = {}
+    external_indexed_writes_clean = (
+        isinstance(source_diagnostics, dict)
+        and source_diagnostics.get("execution_representation")
+        == gmes.torch_fdtd.FUSED_SOURCE_REPRESENTATION
+        and profiler.get("expected_source_indexed_write_names_outside_compiled_regions")
+        == expected_external_writes
+        and profiler.get("indexed_write_names_outside_compiled_regions")
+        == expected_external_writes
+        and type(profiler.get("indexed_write_operations_outside_compiled_regions"))
+        is int
+        and profiler["indexed_write_operations_outside_compiled_regions"] == 0
+    )
+
+    memory_bounded, memory_errors = _cpu_rss_memory_gate(
+        candidate, manifest, expected_evidence
+    )
+    errors.extend(memory_errors)
+    storage_stable = (
+        _storage_address_record_valid(memory.get("storage_addresses_before"))
+        and memory.get("storage_addresses_before")
+        == memory.get("storage_addresses_after")
+        and memory.get("storage_addresses_stable") is True
+    )
+
+    changed_buffers = state.get("changed_buffers")
+    changed_buffers_valid = (
+        isinstance(changed_buffers, list)
+        and all(isinstance(name, str) and bool(name) for name in changed_buffers)
+        and changed_buffers == sorted(set(changed_buffers))
+    )
+    changed = set(changed_buffers) if changed_buffers_valid else set()
+    fields_changed = sorted(changed & STATE_FIELD_NAMES)
+    derived_state = {
+        "fields_changed": fields_changed,
+        "all_fields_changed": STATE_FIELD_NAMES <= changed,
+        "pml_state_changed": any(name.startswith("pml_") for name in changed),
+        "dispersive_state_changed": any(name.startswith("bucket_") for name in changed),
+        "dm2_state_changed": any(name.startswith("dm2_buckets.") for name in changed),
+    }
+    if not changed_buffers_valid or any(
+        state.get(name) != value for name, value in derived_state.items()
+    ):
+        errors.append("CPU state changed-buffer summaries are inconsistent")
+    requirements = _cpu_case_material_state_requirements(workload)
+    pml_diagnostics = diagnostics.get("pml")
+    dispersive_diagnostics = diagnostics.get("dispersive")
+    diagnostic_material_flags = {
+        "pml": (
+            isinstance(pml_diagnostics, dict)
+            and type(pml_diagnostics.get("active_cells")) is int
+            and pml_diagnostics["active_cells"] > 0
+        ),
+        "dispersive": (
+            isinstance(dispersive_diagnostics, dict)
+            and type(dispersive_diagnostics.get("active_cells")) is int
+            and dispersive_diagnostics["active_cells"] > 0
+        ),
+        "dm2": isinstance(diagnostics.get("dm2"), (list, tuple))
+        and bool(diagnostics["dm2"]),
+    }
+    if diagnostic_material_flags != requirements:
+        errors.append("CPU material diagnostics differ from the manifest workload")
+
+    numeric_checksums = all(
+        not isinstance(state.get(name), bool)
+        and isinstance(state.get(name), (int, float))
+        and math.isfinite(float(state[name]))
+        and float(state[name]) >= 0
+        for name in (
+            "initial_checksum",
+            "post_warmup_checksum",
+            "post_one_step_checksum",
+            "final_checksum",
+        )
+    )
+    changed_after_first = (
+        numeric_checksums and state["post_one_step_checksum"] != state["final_checksum"]
+    )
+    if state.get("changed_after_first_timed_step") is not changed_after_first:
+        errors.append("CPU state checksum-change summary is inconsistent")
+    if not numeric_checksums:
+        errors.append("CPU state checksums are malformed")
+    expected_counts = {
+        "expected_one_step_count": expected_contract["warmup_steps"] + 1,
+        "expected_timed_step_count": expected_contract["warmup_steps"]
+        + expected_contract["steps_per_repeat"],
+        "expected_profiler_step_count": expected_contract["warmup_steps"]
+        + expected_contract["profile_steps"],
+    }
+    counts_valid = all(
+        type(state.get(name)) is int
+        for name in (
+            "one_step_count",
+            "expected_one_step_count",
+            "timed_step_count",
+            "expected_timed_step_count",
+            "profiler_step_count",
+            "expected_profiler_step_count",
+        )
+    ) and all(state.get(name) == value for name, value in expected_counts.items())
+    counts_match = counts_valid and all(
+        state[actual] == state[expected]
+        for actual, expected in (
+            ("one_step_count", "expected_one_step_count"),
+            ("timed_step_count", "expected_timed_step_count"),
+            ("profiler_step_count", "expected_profiler_step_count"),
+        )
+    )
+    if not counts_match:
+        errors.append("CPU state step counts are inconsistent")
+    material_progressed = all(
+        not required or derived_state[f"{name}_state_changed"]
+        for name, required in requirements.items()
+    )
+    state_progressed = (
+        changed_buffers_valid
+        and numeric_checksums
+        and derived_state["all_fields_changed"]
+        and material_progressed
+        and counts_match
+    )
+
+    recomputed = {
+        "compiler_clean": compiler_clean,
+        "compiled_hot_path_complete": compiled_hot_path_complete,
+        "external_indexed_writes_only_sources": external_indexed_writes_clean,
+        "steady_state_transfers_zero": transfers_zero,
+        "storage_stable": storage_stable,
+        "memory_bounded": memory_bounded,
+        "measurement_contract_matches_manifest": measurement_contract_matches,
+        "state_progressed": state_progressed,
+    }
+    recorded = candidate.get("acceptance")
+    if not isinstance(recorded, dict):
+        errors.append("CPU runtime acceptance record is missing")
+    else:
+        for name, value in recomputed.items():
+            if recorded.get(name) is not value:
+                errors.append(f"CPU runtime acceptance {name!r} is not exact")
+            if value is not True:
+                errors.append(f"CPU runtime gate {name!r} failed")
+    return recomputed, errors
+
+
+def _recompute_cpu_allocation_contract(
+    candidate,
+    allocation_document,
+    expected_method,
+    public_upstream_issue_required=True,
+):
+    """Re-evaluate only allocation acceptance from a saved candidate trace."""
+    errors = []
+    runtime = candidate.get("runtime")
+    profiler = candidate.get("profiler")
+    recorded_acceptance = candidate.get("acceptance")
+    embedded_contract = candidate.get("allocation_contract")
+    if not isinstance(runtime, dict):
+        errors.append("CPU allocation runtime is missing")
+        runtime = {}
+    if (
+        not isinstance(recorded_acceptance, dict)
+        or set(recorded_acceptance) != set(RUNTIME_ACCEPTANCE_KEYS)
+        or any(type(value) is not bool for value in recorded_acceptance.values())
+    ):
+        errors.append("CPU runtime acceptance record is malformed")
+        recorded_acceptance = {}
+    else:
+        recorded_passed = all(
+            recorded_acceptance[name]
+            for name in RUNTIME_ACCEPTANCE_KEYS
+            if name != "passed"
+        )
+        if recorded_acceptance["passed"] is not recorded_passed:
+            errors.append("CPU runtime aggregate acceptance is inconsistent")
+        if any(
+            recorded_acceptance[name] is not True
+            for name in RUNTIME_ACCEPTANCE_KEYS
+            if name not in {"fixed_temporary_contract_satisfied", "passed"}
+        ):
+            errors.append("CPU runtime contains a non-allocation gate failure")
+    if not _profiler_trace_matches(profiler):
+        errors.append("saved CPU profiler trace does not match its embedded summary")
+    try:
+        provenance = _select_allocation_provenance(
+            allocation_document,
+            workload=candidate.get("workload", {}).get("name"),
+            device=runtime.get("device"),
+            precision=runtime.get("precision"),
+            compile_mode=runtime.get("compile_mode"),
+            execution_policy=runtime.get("execution_policy"),
+            threads=runtime.get("threads"),
+        )
+        device = torch.device(runtime.get("device"))
+    except (KeyError, TypeError, ValueError) as error:
+        errors.append(f"CPU allocation provenance selection failed: {error}")
+        provenance = None
+        device = torch.device("cpu")
+    recomputed = _fixed_temporary_allocation_contract(
+        device,
+        profiler if isinstance(profiler, dict) else {},
+        compile_cache_key=runtime.get("compile_cache_key"),
+        allocation_provenance=provenance,
+        public_upstream_issue_required=public_upstream_issue_required,
+    )
+    original_recomputed = _fixed_temporary_allocation_contract(
+        device,
+        profiler if isinstance(profiler, dict) else {},
+        compile_cache_key=runtime.get("compile_cache_key"),
+        allocation_provenance=(
+            embedded_contract.get("provenance")
+            if isinstance(embedded_contract, dict)
+            else None
+        ),
+        public_upstream_issue_required=public_upstream_issue_required,
+    )
+    if recomputed.get("method") != expected_method:
+        errors.append("recomputed CPU allocation method differs from the manifest")
+    if recomputed.get("applied") is not True or recomputed.get("satisfied") is not True:
+        errors.append("recomputed CPU allocation contract failed")
+    if not isinstance(embedded_contract, dict):
+        errors.append("embedded CPU allocation contract is missing")
+    elif embedded_contract != original_recomputed:
+        errors.append("embedded CPU allocation contract was not originally exact")
+    elif embedded_contract.get("satisfied") is True:
+        if embedded_contract != recomputed:
+            errors.append("embedded successful allocation contract is not exact")
+        if recorded_acceptance.get("fixed_temporary_contract_satisfied") is not True:
+            errors.append("embedded allocation acceptance is inconsistent")
+    elif not (
+        embedded_contract.get("method") == expected_method
+        and embedded_contract.get("applied") is True
+        and embedded_contract.get("satisfied") is False
+        and embedded_contract.get("status") == "failed"
+        and recorded_acceptance.get("fixed_temporary_contract_satisfied") is False
+        and recorded_acceptance.get("passed") is False
+    ):
+        errors.append("embedded failed allocation draft is malformed")
+    return recomputed, errors
+
+
+def _field_buffer_sizes_bytes(simulation):
+    result = {}
+
+    def visit(item, prefix):
+        fields = item.state.fields()
+        for name, tensor in fields.items():
+            result[f"{prefix}state.{name}"] = tensor.numel() * tensor.element_size()
+        groups = {
+            "all-fields": tuple(fields.values()),
+            "state-domain": tuple(item.state.buffers()),
+            "plan-domain": tuple(item.plan.buffers()),
+            "source-domain": tuple(item.sources.buffers()),
+            "probe-domain": tuple(item.probes.buffers()),
+        }
+        live_domain_bytes = 0
+        for name, tensors in groups.items():
+            size = sum(tensor.numel() * tensor.element_size() for tensor in tensors)
+            if size > 0:
+                result[f"{prefix}aggregate.{name}"] = size
+                if name != "all-fields":
+                    live_domain_bytes += size
+        if live_domain_bytes > 0:
+            result[f"{prefix}aggregate.live-domain"] = live_domain_bytes
+        for index, auxiliary in enumerate(item.sources.auxiliaries):
+            visit(auxiliary, f"{prefix}sources.auxiliaries[{index}].")
+
+    visit(simulation, "")
+    return result
 
 
 def _source_index_operations_per_step(simulation):
@@ -1057,6 +2265,7 @@ def _native_gate(reference, name, threads, candidate, manifest):
     errors = []
     if not matches:
         return {
+            "comparison_role": "informational",
             "comparison_valid": False,
             "contract_errors": [
                 f"native summary has no {name!r} sample at {threads} thread(s)"
@@ -1066,7 +2275,6 @@ def _native_gate(reference, name, threads, candidate, manifest):
                 "seconds_per_step"
             ],
             "torch_to_native_ratio": None,
-            "within_five_percent": False,
         }
     if len(matches) != 1:
         errors.append("native summary has duplicate workload/thread samples")
@@ -1258,6 +2466,7 @@ def _native_gate(reference, name, threads, candidate, manifest):
         else None
     )
     return {
+        "comparison_role": "informational",
         "reference_observer_tag": data["observer_tag"],
         "reference_observer_commit": data["observer_commit"],
         "reference_precision": acceptance["precision"],
@@ -1275,19 +2484,14 @@ def _native_gate(reference, name, threads, candidate, manifest):
         "torch_to_native_ratio": ratio,
         "comparison_valid": not errors,
         "contract_errors": errors,
-        "individual_ratio_limit": acceptance["max_individual_ratio"],
-        "within_five_percent": (
-            not errors
-            and ratio is not None
-            and ratio <= acceptance["max_individual_ratio"]
-        ),
     }
 
 
-def _bootstrap_geomean_regression(gates, statistics):
-    """Test a same-thread case slice without accepting malformed evidence."""
+def _bootstrap_geomean_regression(gates, statistics, *, ratio_key):
+    """Bootstrap a case collection without accepting malformed evidence."""
     invalid = {
         "method": statistics["method"],
+        "ratio_key": ratio_key,
         "evaluated": False,
         "geometric_mean_ratio": None,
         "one_sided_lower_bound": None,
@@ -1300,27 +2504,27 @@ def _bootstrap_geomean_regression(gates, statistics):
     validated = []
     for gate in gates:
         try:
-            native_values = gate["reference_raw_seconds_per_step"]
+            reference_values = gate["reference_raw_seconds_per_step"]
             candidate_values = gate["candidate_raw_seconds_per_step"]
             if any(
                 isinstance(value, bool)
-                for value in tuple(native_values) + tuple(candidate_values)
+                for value in tuple(reference_values) + tuple(candidate_values)
             ):
                 return invalid
-            native = np.asarray(native_values, dtype=np.float64)
+            reference = np.asarray(reference_values, dtype=np.float64)
             candidate = np.asarray(candidate_values, dtype=np.float64)
-            if isinstance(gate["torch_to_native_ratio"], bool):
+            if isinstance(gate[ratio_key], bool):
                 return invalid
-            point_ratio = float(gate["torch_to_native_ratio"])
+            point_ratio = float(gate[ratio_key])
         except KeyError, TypeError, ValueError:
             return invalid
         if (
-            native.ndim != 1
+            reference.ndim != 1
             or candidate.ndim != 1
-            or native.size == 0
-            or candidate.size != native.size
-            or not np.all(np.isfinite(native))
-            or not np.all(native > 0)
+            or reference.size == 0
+            or candidate.size != reference.size
+            or not np.all(np.isfinite(reference))
+            or not np.all(reference > 0)
             or not np.all(np.isfinite(candidate))
             or not np.all(candidate > 0)
             or not math.isfinite(point_ratio)
@@ -1328,13 +2532,13 @@ def _bootstrap_geomean_regression(gates, statistics):
         ):
             return invalid
         if repetitions is None:
-            repetitions = native.size
-        elif native.size != repetitions:
+            repetitions = reference.size
+        elif reference.size != repetitions:
             return invalid
-        computed_ratio = float(np.median(candidate) / np.median(native))
+        computed_ratio = float(np.median(candidate) / np.median(reference))
         if not math.isclose(point_ratio, computed_ratio, rel_tol=1e-12):
             return invalid
-        validated.append((native, candidate, point_ratio))
+        validated.append((reference, candidate, point_ratio))
     try:
         resamples = int(statistics["resamples"])
         seed = int(statistics["seed"])
@@ -1352,14 +2556,16 @@ def _bootstrap_geomean_regression(gates, statistics):
     rng = np.random.default_rng(seed)
     log_ratios = []
     point_ratios = []
-    for native, candidate, point_ratio in validated:
-        native_indices = rng.integers(0, len(native), size=(resamples, len(native)))
+    for reference, candidate, point_ratio in validated:
+        reference_indices = rng.integers(
+            0, len(reference), size=(resamples, len(reference))
+        )
         candidate_indices = rng.integers(
             0, len(candidate), size=(resamples, len(candidate))
         )
-        native_medians = np.median(native[native_indices], axis=1)
+        reference_medians = np.median(reference[reference_indices], axis=1)
         candidate_medians = np.median(candidate[candidate_indices], axis=1)
-        log_ratios.append(np.log(candidate_medians / native_medians))
+        log_ratios.append(np.log(candidate_medians / reference_medians))
         point_ratios.append(point_ratio)
     distribution = np.exp(np.mean(np.stack(log_ratios), axis=0))
     if not np.all(np.isfinite(distribution)):
@@ -1368,6 +2574,7 @@ def _bootstrap_geomean_regression(gates, statistics):
     significant_regression = lower_bound > regression_ratio
     return {
         "method": statistics["method"],
+        "ratio_key": ratio_key,
         "resamples": resamples,
         "seed": seed,
         "one_sided_confidence": confidence,
@@ -1382,50 +2589,99 @@ def _bootstrap_geomean_regression(gates, statistics):
     }
 
 
-def _evaluate_cpu_slice(output, manifest, native_summary=None, expected_evidence=None):
-    """Recompute one CPU slice from raw measurements and pinned provenance."""
+def _evaluate_cpu_slice(
+    output,
+    manifest,
+    native_summary=None,
+    torch_baseline=None,
+    allocation_document=None,
+    expected_evidence=None,
+):
+    """Recompute one CPU slice from raw measurements and pinned references."""
     acceptance = manifest["performance_gates"]["cpu_acceptance"]
     expected_cases = tuple(acceptance["cases"])
     expected_evidence = expected_evidence or _current_evidence(manifest)
     errors = []
+    if not isinstance(output, dict):
+        output = {}
+        errors.append("CPU slice root must be an object")
     results = output.get("cases", ())
     if not isinstance(results, (list, tuple)):
         results = ()
         errors.append("CPU slice cases must be a sequence")
+    elif any(not isinstance(result, dict) for result in results):
+        results = ()
+        errors.append("CPU slice cases must contain objects")
     names = tuple(result.get("workload", {}).get("name") for result in results)
-    if output.get("schema_version") != 3:
-        errors.append("CPU slice schema must be version 3")
+    if output.get("schema_version") != 4:
+        errors.append("CPU slice schema must be version 4")
     if output.get("kind") != "cpu-acceptance-thread-slice":
         errors.append("CPU slice kind does not match the evidence contract")
     evidence = output.get("evidence")
-    if evidence != expected_evidence:
+    if not _json_contract_equal(evidence, expected_evidence):
         errors.append("CPU slice provenance does not match the current checkout")
     if not isinstance(evidence, dict) or evidence.get("candidate_git_status") != "":
         errors.append("CPU slice candidate checkout was not clean")
+    if not _json_contract_equal(
+        output.get("torch_baseline"), _torch_baseline_provenance(torch_baseline)
+    ):
+        errors.append("CPU slice Torch baseline provenance is not exact")
     if names != expected_cases:
         errors.append("CPU slice cases do not match the ordered manifest contract")
     else:
         for result, name in zip(results, expected_cases, strict=True):
-            if result.get("workload") != find_case(manifest, name):
+            if not _json_contract_equal(
+                result.get("workload"), find_case(manifest, name)
+            ):
                 errors.append(f"CPU slice workload {name!r} differs from the manifest")
     runtimes = [result.get("runtime", {}) for result in results]
+    if any(not isinstance(runtime, dict) for runtime in runtimes):
+        errors.append("CPU slice runtimes must be objects")
+        runtimes = [
+            runtime if isinstance(runtime, dict) else {} for runtime in runtimes
+        ]
     threads = {runtime.get("threads") for runtime in runtimes}
     interop_threads = {runtime.get("interop_threads") for runtime in runtimes}
     precisions = {runtime.get("precision") for runtime in runtimes}
     devices = {runtime.get("device") for runtime in runtimes}
     environment = output.get("environment", {})
+    if not isinstance(environment, dict):
+        environment = {}
+        errors.append("CPU slice environment must be an object")
     physical = environment.get("cpu_count_physical_affinity")
-    if threads == {1}:
+    thread_counts_valid = bool(runtimes) and all(
+        type(runtime.get("threads")) is int and runtime["threads"] > 0
+        for runtime in runtimes
+    )
+    if not thread_counts_valid:
+        errors.append("CPU slice intra-op thread counts are malformed")
+    if thread_counts_valid and threads == {1}:
         mode = "one"
-    elif physical is not None and threads == {physical}:
+    elif (
+        thread_counts_valid
+        and type(physical) is int
+        and physical > 0
+        and threads == {physical}
+    ):
         mode = "physical"
     else:
         mode = None
         errors.append("CPU slice thread count is neither one nor physical cores")
-    if interop_threads != {1}:
+    thread_value = next(iter(threads)) if len(threads) == 1 else None
+    if interop_threads != {1} or any(
+        type(runtime.get("interop_threads")) is not int for runtime in runtimes
+    ):
         errors.append("CPU slice must use exactly one inter-op thread")
     if precisions != {acceptance["precision"]} or devices != {"cpu"}:
         errors.append("CPU slice device or precision differs from the manifest")
+    if torch_baseline is not None and not _torch_baseline_environment_matches(
+        torch_baseline, environment
+    ):
+        errors.append("CPU slice host identity differs from the Torch baseline")
+    if torch_baseline is not None and not _torch_baseline_thread_environment_matches(
+        torch_baseline, environment, thread_value
+    ):
+        errors.append("CPU slice thread environment differs from the Torch baseline")
     for runtime in runtimes:
         if (
             runtime.get("compile_policy") != "compile"
@@ -1441,20 +2697,31 @@ def _evaluate_cpu_slice(output, manifest, native_summary=None, expected_evidence
     for name in ("cpu_affinity", "cpu_count_physical_affinity", "cpu_topology"):
         if any(runtime.get(name) != environment.get(name) for runtime in runtimes):
             errors.append(f"CPU slice runtime {name} differs from root metadata")
-    if any(
-        not isinstance(result.get("acceptance"), dict)
-        or set(result["acceptance"]) != set(RUNTIME_ACCEPTANCE_KEYS)
-        or any(
-            result["acceptance"].get(name) is not True
-            for name in RUNTIME_ACCEPTANCE_KEYS
+    runtime_acceptance = []
+    for result in results:
+        recomputed, runtime_errors = _recompute_cpu_runtime_acceptance(
+            result, manifest, expected_evidence
         )
-        for result in results
-    ):
-        errors.append("CPU slice contains a failing or malformed runtime record")
+        runtime_acceptance.append(recomputed)
+        errors.extend(f"CPU runtime evidence: {message}" for message in runtime_errors)
+    allocation_definition = acceptance["allocation_contract"]
+    allocation_method = allocation_definition["method"]
+    allocation_contracts = []
+    for result in results:
+        recomputed, allocation_errors = _recompute_cpu_allocation_contract(
+            result,
+            allocation_document,
+            allocation_method,
+            allocation_definition["public_upstream_issue_required"],
+        )
+        allocation_contracts.append(recomputed)
+        errors.extend(
+            f"CPU allocation evidence: {message}" for message in allocation_errors
+        )
     native_gates = []
-    thread_value = next(iter(threads)) if len(threads) == 1 else None
+    baseline_gates = []
     if native_summary is None:
-        errors.append("CPU slice aggregation requires the pinned native summary")
+        errors.append("CPU slice requires the pinned native summary")
     elif thread_value is None:
         errors.append("CPU native comparison requires one consistent thread count")
     else:
@@ -1472,37 +2739,88 @@ def _evaluate_cpu_slice(output, manifest, native_summary=None, expected_evidence
                     f"CPU slice embedded native comparison for {name!r} was not exact"
                 )
     if len(native_gates) != len(expected_cases) or any(
+        gate.get("comparison_valid") is not True for gate in native_gates
+    ):
+        errors.append("CPU slice contains an invalid native comparison")
+    if torch_baseline is None:
+        errors.append("CPU slice requires the pinned Torch baseline artifacts")
+    elif thread_value is None:
+        errors.append("Torch baseline comparison requires one thread count")
+    else:
+        for result, name in zip(results, expected_cases):
+            try:
+                gate = compare_candidate_to_baseline(
+                    torch_baseline,
+                    result,
+                    name=name,
+                    threads=thread_value,
+                )
+            except (KeyError, TypeError, ValueError) as error:
+                errors.append(
+                    f"Torch baseline comparison could not be recomputed: {error}"
+                )
+                continue
+            baseline_gates.append(gate)
+            if result.get("torch_baseline_gate") != gate:
+                errors.append(
+                    "CPU slice embedded Torch baseline comparison for "
+                    f"{name!r} was not exact"
+                )
+    if len(baseline_gates) != len(expected_cases) or any(
         gate.get("comparison_valid") is not True
         or gate.get("within_five_percent") is not True
-        for gate in native_gates
+        for gate in baseline_gates
     ):
-        errors.append("CPU slice contains an invalid or failing native comparison")
-    statistics = _bootstrap_geomean_regression(native_gates, acceptance["statistics"])
-    if statistics["passed"] is not True:
-        errors.append("CPU slice geometric-mean regression gate failed")
+        errors.append(
+            "CPU slice contains an invalid or failing Torch baseline comparison"
+        )
     return {
         "thread_mode": mode,
         "threads": next(iter(threads)) if len(threads) == 1 else None,
-        "native_geomean_statistics": statistics,
+        "native_comparison_role": "informational",
+        "native_comparisons": native_gates,
+        "torch_baseline_comparisons": baseline_gates,
+        "recomputed_runtime_acceptance": runtime_acceptance,
+        "recomputed_allocation_contracts": allocation_contracts,
         "errors": errors,
         "passed": not errors,
     }
 
 
 def _aggregate_cpu_slice_outputs(
-    outputs, manifest, native_summary=None, expected_evidence=None
+    outputs,
+    manifest,
+    native_summary=None,
+    torch_baseline=None,
+    allocation_document=None,
+    expected_evidence=None,
 ):
-    """Accept only two complete slices from one clean candidate checkout."""
+    """Accept two complete slices after a twelve-cell baseline bootstrap."""
     expected_evidence = expected_evidence or _current_evidence(manifest)
     slices = [
-        _evaluate_cpu_slice(output, manifest, native_summary, expected_evidence)
+        _evaluate_cpu_slice(
+            output,
+            manifest,
+            native_summary,
+            torch_baseline,
+            allocation_document,
+            expected_evidence,
+        )
         for output in outputs
     ]
     errors = []
     if len(outputs) != 2:
         errors.append("exactly two CPU slice artifacts are required")
+    for index, item in enumerate(slices):
+        errors.extend(
+            f"CPU slice {index}: {message}" for message in item.get("errors", ())
+        )
     modes = [item["thread_mode"] for item in slices]
-    if sorted(mode for mode in modes if mode is not None) != ["one", "physical"]:
+    modes_complete = sorted(mode for mode in modes if mode is not None) == [
+        "one",
+        "physical",
+    ]
+    if not modes_complete:
         errors.append("CPU artifacts must contain one and physical thread modes")
     identity_names = (
         "hostname",
@@ -1514,10 +2832,16 @@ def _aggregate_cpu_slice_outputs(
         "cpu_topology",
         "cpu_model",
     )
-    identities = [
-        tuple(output.get("environment", {}).get(name) for name in identity_names)
-        for output in outputs
-    ]
+    identities = []
+    for output in outputs:
+        environment = output.get("environment", {})
+        identity = []
+        for name in identity_names:
+            value = environment.get(name)
+            if name == "cpu_model":
+                value = _normalized_cpu_model_identity(value)
+            identity.append(value)
+        identities.append(tuple(identity))
     if any(value is None for identity in identities for value in identity):
         errors.append("CPU slice host identity metadata is incomplete")
     if identities and any(identity != identities[0] for identity in identities[1:]):
@@ -1527,17 +2851,62 @@ def _aggregate_cpu_slice_outputs(
         errors.append("CPU slices were not produced from the same candidate")
     if any(item["passed"] is not True for item in slices):
         errors.append("at least one CPU thread slice failed")
+    baseline_gates = [
+        gate for item in slices for gate in item["torch_baseline_comparisons"]
+    ]
+    expected_cell_count = 2 * len(_cpu_gate_cases(manifest))
+    native_gates = [gate for item in slices for gate in item["native_comparisons"]]
+    native_comparisons_valid = len(native_gates) == expected_cell_count and all(
+        gate.get("comparison_valid") is True for gate in native_gates
+    )
+    native_statistics = _bootstrap_geomean_regression(
+        native_gates,
+        manifest["performance_gates"]["cpu_acceptance"]["statistics"],
+        ratio_key="torch_to_native_ratio",
+    )
+    individual_comparisons_passed = len(baseline_gates) == expected_cell_count and all(
+        gate.get("comparison_valid") is True and gate.get("within_five_percent") is True
+        for gate in baseline_gates
+    )
+    if not individual_comparisons_passed:
+        errors.append("the twelve Torch baseline comparisons are incomplete or failing")
+    statistics = _bootstrap_geomean_regression(
+        baseline_gates,
+        manifest["performance_gates"]["cpu_acceptance"]["statistics"],
+        ratio_key="candidate_to_torch_baseline_ratio",
+    )
+    if len(baseline_gates) != expected_cell_count or statistics["passed"] is not True:
+        errors.append("the twelve-cell Torch baseline bootstrap gate failed")
     return {
-        "schema_version": 3,
+        "schema_version": 4,
         "kind": "cpu-acceptance-aggregate",
+        "acceptance_scope": "cpu-performance-only",
+        "issue_completion_satisfied": False,
+        "issue_completion_blockers": [
+            "complete-field-and-persistent-state-correctness-not-bound"
+        ],
         "evidence": expected_evidence,
         "environment": outputs[0].get("environment", {}) if outputs else {},
+        "torch_baseline": _torch_baseline_provenance(torch_baseline),
+        "allocation_provenance_artifact": (
+            allocation_document["source_artifact"]
+            if allocation_document is not None
+            else None
+        ),
         "cpu_slices": slices,
         "suite_acceptance": {
             "cpu_contract_id": _cpu_contract_id(manifest),
             "cpu_required_cases": list(_cpu_gate_cases(manifest)),
             "cpu_required_thread_modes": ["one", "physical"],
-            "cpu_all_thread_modes_complete": not errors,
+            "cpu_all_thread_modes_complete": modes_complete,
+            "cpu_evaluated_cell_count": len(baseline_gates),
+            "native_comparison_role": "informational",
+            "native_comparisons_valid": native_comparisons_valid,
+            "native_geomean_statistics": native_statistics,
+            "torch_baseline_individual_within_five_percent": (
+                individual_comparisons_passed
+            ),
+            "torch_baseline_geomean_statistics": statistics,
             "errors": errors,
             "passed": not errors,
         },
@@ -1548,7 +2917,13 @@ def _cpu_contract_id(manifest):
     return manifest["performance_gates"]["cpu_acceptance"]["contract_id"]
 
 
-def _aggregate_cpu_slice_files(paths, manifest, native_summary):
+def _aggregate_cpu_slice_files(
+    paths,
+    manifest,
+    native_summary,
+    torch_baseline_artifacts,
+    allocation_document=None,
+):
     artifacts = []
     outputs = []
     for path in paths:
@@ -1557,8 +2932,15 @@ def _aggregate_cpu_slice_files(paths, manifest, native_summary):
             {"path": str(path), "sha256": hashlib.sha256(content).hexdigest()}
         )
         outputs.append(json.loads(content))
-    result = _aggregate_cpu_slice_outputs(outputs, manifest, native_summary)
-    result["artifacts"] = artifacts
+    torch_baseline = load_torch_cpu_baseline(torch_baseline_artifacts, manifest)
+    result = _aggregate_cpu_slice_outputs(
+        outputs,
+        manifest,
+        native_summary,
+        torch_baseline,
+        allocation_document,
+    )
+    result["candidate_slice_artifacts"] = artifacts
     return result
 
 
@@ -1580,6 +2962,7 @@ def run_case(
     profile_steps,
     trace_directory,
     manifest,
+    allocation_provenance=None,
 ):
     torch._dynamo.reset()
     torch._dynamo.utils.counters.clear()
@@ -1709,6 +3092,7 @@ def run_case(
         experimental_dispersive_grouping_scope=(experimental_dispersive_grouping_scope),
     )
     profiler = _profile(simulation, profile_steps, trace_path)
+    profiler["field_buffer_sizes_bytes"] = _field_buffer_sizes_bytes(simulation)
     after_steady = _counter_snapshot()
     if simulation.device.type == "cpu":
         rss_request = _cpu_rss_request(
@@ -1746,7 +3130,8 @@ def run_case(
             "fresh_process": rss_artifact,
         }
     counter_growth = _counter_delta(after_warmup, after_steady)
-    storage_stable = addresses == simulation.buffer_addresses()
+    final_addresses = simulation.buffer_addresses()
+    storage_stable = addresses == final_addresses
     memory_growth = (
         allocated_after - allocated_before if allocated_before is not None else None
     )
@@ -1759,7 +3144,15 @@ def run_case(
         profiler["host_to_device_events"] == 0
         and profiler["device_to_host_events"] == 0
     )
-    allocations_clean = _recurring_allocations_zero(simulation.device, profiler)
+    allocation_contract = _fixed_temporary_allocation_contract(
+        simulation.device,
+        profiler,
+        compile_cache_key=simulation.compile_cache_key,
+        allocation_provenance=allocation_provenance,
+        public_upstream_issue_required=manifest["performance_gates"]["cpu_acceptance"][
+            "allocation_contract"
+        ]["public_upstream_issue_required"],
+    )
     memory_bounded = (
         cpu_memory["fresh_process"].get("plateau", {}).get("bounded") is True
         if simulation.device.type == "cpu"
@@ -1886,10 +3279,13 @@ def run_case(
                 if simulation.device.type == "cuda"
                 else None
             ),
+            "storage_addresses_before": addresses,
+            "storage_addresses_after": final_addresses,
             "storage_addresses_stable": storage_stable,
             "bounded": memory_bounded,
         },
         "profiler": profiler,
+        "allocation_contract": allocation_contract,
         "state_progress": {
             "initial_checksum": initial_checksum,
             "post_warmup_checksum": warm_checksum,
@@ -1912,7 +3308,7 @@ def run_case(
             "steady_state_transfers_zero": transfers_clean,
             "storage_stable": storage_stable,
             "memory_bounded": memory_bounded,
-            "recurring_allocations_zero": allocations_clean,
+            "fixed_temporary_contract_satisfied": allocation_contract["satisfied"],
             "measurement_contract_matches_manifest": contract_matches_manifest,
             "state_progressed": (
                 state_changes["all_fields_changed"]
@@ -1928,7 +3324,21 @@ def run_case(
     return result
 
 
-def _variant_matrix(args, name, manifest):
+def _allocation_provenance_for_run(
+    document, args, name, *, compile_mode=None, execution_policy=None
+):
+    return _select_allocation_provenance(
+        document,
+        workload=name,
+        device=str(torch.device(args.device)),
+        precision=args.precision,
+        compile_mode=compile_mode or args.compile_mode,
+        execution_policy=execution_policy or args.policy,
+        threads=args.threads,
+    )
+
+
+def _variant_matrix(args, name, manifest, allocation_document=None):
     results = {}
     for variant, compile_mode, capture_graphs in COMPILE_VARIANTS:
         results[variant] = run_case(
@@ -1952,6 +3362,12 @@ def _variant_matrix(args, name, manifest):
             profile_steps=args.profile_steps,
             trace_directory=args.trace_directory,
             manifest=manifest,
+            allocation_provenance=_allocation_provenance_for_run(
+                allocation_document,
+                args,
+                name,
+                compile_mode=compile_mode,
+            ),
         )
     fastest = min(
         results,
@@ -1965,7 +3381,7 @@ def _variant_matrix(args, name, manifest):
     }
 
 
-def _policy_matrix(args, name, manifest):
+def _policy_matrix(args, name, manifest, allocation_document=None):
     results = {}
     for policy in ("auto", "dense", "compact", "tiled"):
         results[policy] = run_case(
@@ -1989,6 +3405,12 @@ def _policy_matrix(args, name, manifest):
             profile_steps=args.profile_steps,
             trace_directory=args.trace_directory,
             manifest=manifest,
+            allocation_provenance=_allocation_provenance_for_run(
+                allocation_document,
+                args,
+                name,
+                execution_policy=policy,
+            ),
         )
     return {
         "case": name,
@@ -2067,6 +3489,13 @@ def _arguments():
     )
     parser.add_argument("--native-summary", type=Path)
     parser.add_argument(
+        "--torch-baseline-slice-artifacts",
+        type=Path,
+        nargs=2,
+        metavar=("ONE_THREAD_JSON", "PHYSICAL_THREAD_JSON"),
+    )
+    parser.add_argument("--allocation-provenance", type=Path)
+    parser.add_argument(
         "--cpu-slice-artifacts",
         type=Path,
         nargs=2,
@@ -2104,20 +3533,37 @@ def main():
         # An adverse but structurally valid plateau is evidence, not a child crash.
         return 0
     cpu_slice_artifacts = getattr(args, "cpu_slice_artifacts", None)
+    torch_baseline_artifacts = getattr(args, "torch_baseline_slice_artifacts", None)
+    allocation_document = (
+        _load_allocation_provenance(args.allocation_provenance)
+        if getattr(args, "allocation_provenance", None) is not None
+        else None
+    )
     if cpu_slice_artifacts is not None:
         if args.case != "cpu-gates":
             raise ValueError("--cpu-slice-artifacts requires --case cpu-gates")
         if args.native_summary is None:
             raise ValueError("--cpu-slice-artifacts requires --native-summary")
+        if torch_baseline_artifacts is None:
+            raise ValueError(
+                "--cpu-slice-artifacts requires " "--torch-baseline-slice-artifacts"
+            )
         output = _aggregate_cpu_slice_files(
-            cpu_slice_artifacts, manifest, args.native_summary
+            cpu_slice_artifacts,
+            manifest,
+            args.native_summary,
+            torch_baseline_artifacts,
+            allocation_document,
         )
         rendered = json.dumps(output, indent=2, sort_keys=True) + "\n"
         if args.output is not None:
             args.output.parent.mkdir(parents=True, exist_ok=True)
             args.output.write_text(rendered)
         print(rendered, end="")
-        passed = output["suite_acceptance"]["passed"]
+        passed = (
+            output["suite_acceptance"]["passed"]
+            and output.get("issue_completion_satisfied") is True
+        )
         return 0 if not args.enforce or passed else 2
     if (
         min(
@@ -2137,6 +3583,12 @@ def main():
         raise ValueError("compile mode matrix requires CUDA")
     if args.compile_mode == "matrix" and args.policy == "matrix":
         raise ValueError("run compile mode and planner policy matrices separately")
+
+    torch_baseline = (
+        load_torch_cpu_baseline(torch_baseline_artifacts, manifest)
+        if torch_baseline_artifacts is not None
+        else None
+    )
 
     torch.set_num_threads(args.threads)
     if torch.get_num_interop_threads() != args.interop_threads:
@@ -2160,9 +3612,9 @@ def main():
     results = []
     for name in cases:
         if args.compile_mode == "matrix":
-            result = _variant_matrix(args, name, manifest)
+            result = _variant_matrix(args, name, manifest, allocation_document)
         elif args.policy == "matrix":
-            result = _policy_matrix(args, name, manifest)
+            result = _policy_matrix(args, name, manifest, allocation_document)
         else:
             result = run_case(
                 name,
@@ -2185,6 +3637,11 @@ def main():
                 profile_steps=args.profile_steps,
                 trace_directory=args.trace_directory,
                 manifest=manifest,
+                allocation_provenance=_allocation_provenance_for_run(
+                    allocation_document,
+                    args,
+                    name,
+                ),
             )
         if (
             args.native_summary is not None
@@ -2197,6 +3654,19 @@ def main():
                 args.threads,
                 result,
                 manifest,
+            )
+        if (
+            torch_baseline is not None
+            and torch.device(args.device).type == "cpu"
+            and name in cpu_gate_cases
+            and args.compile_mode != "matrix"
+            and args.policy != "matrix"
+        ):
+            result["torch_baseline_gate"] = compare_candidate_to_baseline(
+                torch_baseline,
+                result,
+                name=name,
+                threads=args.threads,
             )
         results.append(result)
 
@@ -2212,13 +3682,27 @@ def main():
         and len(native_gates) == len(cases)
         and len(valid_native_gates) == len(cases)
     )
+    baseline_gates = [
+        result.get("torch_baseline_gate")
+        for result in results
+        if result.get("torch_baseline_gate") is not None
+    ]
+    valid_baseline_gates = [
+        item for item in baseline_gates if item.get("comparison_valid") is True
+    ]
+    baseline_comparisons_present = bool(baseline_gates)
+    complete_baseline_slice = (
+        baseline_comparisons_present
+        and len(baseline_gates) == len(cases)
+        and len(valid_baseline_gates) == len(cases)
+    )
     cpu_full_suite_requested = args.case == "cpu-gates"
     statistics = manifest["performance_gates"]["cpu_acceptance"]["statistics"]
-    native_statistics = _bootstrap_geomean_regression(
-        native_gates if complete_native_slice and cpu_full_suite_requested else (),
+    baseline_statistics = _bootstrap_geomean_regression(
+        (),
         statistics,
+        ratio_key="candidate_to_torch_baseline_ratio",
     )
-    geometric_ratio = native_statistics["geometric_mean_ratio"]
     runtime_passed = all(
         result.get("passed", result.get("acceptance", {}).get("passed", False))
         for result in results
@@ -2229,8 +3713,9 @@ def main():
             diagnostic_passed
             and native_comparisons_present
             and complete_native_slice
-            and all(item["within_five_percent"] for item in native_gates)
-            and (not cpu_full_suite_requested or native_statistics["passed"])
+            and baseline_comparisons_present
+            and complete_baseline_slice
+            and all(item.get("within_five_percent") is True for item in baseline_gates)
         )
     elif args.native_summary is not None:
         diagnostic_passed = (
@@ -2240,6 +3725,16 @@ def main():
         )
     cpu_thread_modes = manifest["performance_gates"]["cpu_acceptance"]["thread_modes"]
     environment = _environment()
+    baseline_host_matches = (
+        _torch_baseline_environment_matches(torch_baseline, environment)
+        and _torch_baseline_thread_environment_matches(
+            torch_baseline, environment, args.threads
+        )
+        if torch_baseline is not None
+        else False
+    )
+    if native_comparisons_expected and not baseline_host_matches:
+        diagnostic_passed = False
     physical_threads = environment.get("cpu_count_physical_affinity")
     if args.threads == 1:
         evaluated_thread_mode = "one"
@@ -2256,7 +3751,7 @@ def main():
     suite_passed = False
     evidence = _current_evidence(manifest)
     output = {
-        "schema_version": 3,
+        "schema_version": 4,
         "kind": (
             "cpu-acceptance-thread-slice"
             if cpu_full_suite_requested
@@ -2264,6 +3759,12 @@ def main():
         ),
         "evidence": evidence,
         "environment": environment,
+        "torch_baseline": _torch_baseline_provenance(torch_baseline),
+        "allocation_provenance_artifact": (
+            allocation_document["source_artifact"]
+            if allocation_document is not None
+            else None
+        ),
         "cases": results,
         "diagnostic_acceptance": {
             "scope": (
@@ -2272,7 +3773,7 @@ def main():
             "passed": diagnostic_passed,
         },
         "suite_acceptance": {
-            "native_geometric_mean_ratio": geometric_ratio,
+            "native_comparison_role": "informational",
             "native_comparisons_expected": native_comparisons_expected,
             "native_comparisons_present": native_comparisons_present,
             "native_comparisons_valid": (
@@ -2280,12 +3781,22 @@ def main():
                 if native_comparisons_expected or args.native_summary is not None
                 else None
             ),
-            "native_individual_within_five_percent": (
-                all(item["within_five_percent"] for item in native_gates)
-                if native_gates
+            "torch_baseline_comparisons_expected": native_comparisons_expected,
+            "torch_baseline_comparisons_present": baseline_comparisons_present,
+            "torch_baseline_comparisons_valid": (
+                complete_baseline_slice
+                if native_comparisons_expected or torch_baseline is not None
                 else None
             ),
-            "native_geomean_statistics": native_statistics,
+            "torch_baseline_host_matches": (
+                baseline_host_matches if torch_baseline is not None else None
+            ),
+            "torch_baseline_individual_within_five_percent": (
+                all(item.get("within_five_percent") is True for item in baseline_gates)
+                if baseline_gates
+                else None
+            ),
+            "torch_baseline_geomean_statistics": baseline_statistics,
             "cpu_contract_id": manifest["performance_gates"]["cpu_acceptance"][
                 "contract_id"
             ],
@@ -2317,7 +3828,12 @@ def main():
     }
     if cpu_full_suite_requested:
         slice_evaluation = _evaluate_cpu_slice(
-            output, manifest, args.native_summary, evidence
+            output,
+            manifest,
+            args.native_summary,
+            torch_baseline,
+            allocation_document,
+            evidence,
         )
         output["cpu_slice_evaluation"] = slice_evaluation
         output["diagnostic_acceptance"]["passed"] = slice_evaluation["passed"]

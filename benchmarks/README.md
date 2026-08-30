@@ -46,15 +46,27 @@ uv run --no-sync python benchmarks/run_isolated_oracle.py \
   --output /tmp/gmes-oracle/reference-mixed-3d.npz
 ```
 
-Repeat the command with a separately built candidate checkout and output
-path.  Compare every field, map, time value, source/auxiliary state, and
-persistent material state with:
+`native_oracle.py capture` always constructs the legacy native `gmes.FDTD`
+solver. Repeating this command from another checkout is useful only as a
+native-to-native runner smoke test; it is not Torch correctness evidence. A
+Torch candidate producer must load the archived `step/0`, emit archive schema
+2 with `backend: "torch"`, and map every complete field, map, source/auxiliary
+state, and persistent material state to the same required keys before #123 can
+complete. That producer is not implemented yet. Once it exists, compare the
+reference and candidate with:
 
 ```sh
 uv run --no-sync python benchmarks/native_oracle.py compare \
   --reference /tmp/gmes-oracle/reference-mixed-3d.npz \
   --candidate /tmp/gmes-oracle/candidate-mixed-3d.npz
 ```
+
+The comparator validates both archives independently before comparing values.
+It rejects dirty or malformed provenance, a reference checkout other than the
+manifest's observer commit, unknown backends, workload/capture-contract drift,
+missing or extra arrays, reshaped maps, inconsistent physical summaries, and
+incorrect byte accounting. A native archive compared with itself is only a
+validator smoke test and does not satisfy the Torch evidence requirement.
 
 Each archive includes a `step/0` canonical input checkpoint.  It contains
 the fixed-seed nonzero fields and the complete state after the manifest's
@@ -85,6 +97,32 @@ uv run --no-sync python benchmarks/native_oracle.py benchmark \
   > /tmp/gmes-oracle/native-cpu-crossover-2d-t1.json
 ```
 
+Capture all six CPU acceptance cases at one and four threads into a directory
+containing only those 12 cell JSON files. Assemble them without sanitizing or
+rewriting the source bytes:
+
+```sh
+uv run --no-sync python benchmarks/native_summary.py \
+  --output /tmp/gmes-oracle/native-summary.json \
+  /tmp/gmes-oracle/cells/*.json
+# Linux
+sha256sum /tmp/gmes-oracle/native-summary.json
+# macOS
+shasum -a 256 /tmp/gmes-oracle/native-summary.json
+```
+
+The assembler requires the exact six-case × two-thread matrix, the frozen
+benchmark contract and 1/4-thread pins, clean observer commit, one normalized
+host/toolchain identity, internally consistent raw statistics, updater/memory
+accounting, and source-file SHA-256 provenance. It rejects ANSI-bearing input
+rather than silently changing bytes and writes a deterministic case/thread
+order. It does not update the manifest pin. A new required informational
+summary must first be generated from a separately frozen observer-only commit,
+published, and then have both that commit and the exact summary digest reviewed
+and pinned.
+Until that happens, the currently pinned four-cell v4 summary remains
+insufficient for the required 12 native informational comparisons.
+
 Run each CPU gate once with one thread and once with the physical-core count
 reported in `environment.cpu_count_physical`.  Raw construction, geometry
 mapping, native plan initialization, one-step, and batched timings are kept
@@ -98,14 +136,15 @@ locked-environment hash.
 
 Schema 2 also records the initializer, seed and scale, warm-up count, timed
 steps, replicate count, timer, and sample-start semantics as an explicit
-`benchmark_contract`. Native/Torch hard-gate comparisons must reject a
+`benchmark_contract`. Native/Torch comparisons must reject a
 mismatched contract and must authenticate the frozen observer commit.
 The legacy v4 summary predates the embedded field; it is accepted only with
 its exact clean observer commit and the SHA-256 of the ANSI-sanitized JSON
 artifact published in #115. A same-commit rerun with different warm-up or
 sample semantics is rejected. Every replacement summary, including one with an
 embedded contract, requires a separately frozen observer commit and exact
-content digest in the manifest before it can participate in a hard gate.
+content digest in the manifest before it can serve as required comparison
+evidence.
 
 The single- and two-GPU sizes in the manifest are frozen now but are executed
 by the Torch runner introduced by later issues.  That runner must preserve
@@ -116,26 +155,47 @@ one process per GPU for the two-GPU cases and record link topology.
 
 ## Torch compiler and runtime tuning
 
-`torch_tuning.py` consumes the frozen manifest and native summary. Authoritative
-native ratios use an explicit `time.perf_counter` plus device synchronization
-loop so Torch does not receive `Timer.timeit()`'s two hidden statement warmups.
+`torch_tuning.py` consumes the frozen manifest, the informational native
+summary, and the two corrected-runner Torch baseline slices rooted at commit
+`821c075b9328e02c3f3e5d16488a44b64ff08c04`. Authoritative timings use an
+explicit `time.perf_counter` plus device synchronization loop so Torch does not
+receive `Timer.timeit()`'s two hidden statement warmups.
 Every authoritative replicate restores the seeded pre-warm-up checkpoint and
 executes the real manifest warm-up before timing, matching the native repeat
-contract. Repeated `torch.utils.benchmark.Timer` samples are retained in a separate,
-exploratory record and never feed the native gate. The runner records
+contract. Repeated `torch.utils.benchmark.Timer` samples are retained in a
+separate, exploratory record and never feed an acceptance timing comparison.
+The runner records
 construction, H2D, cold and cached compilation, one-step latency, batched
 throughput, compiler counters, raw samples, buffer addresses, memory growth,
-topology, and a Chrome profiler trace. The strict acceptance summary rejects graph breaks,
-recompilation after warm-up, host-device transfers, storage changes, or unbounded
-device-memory growth. CPU hard-gate evidence covers crossover, large mixed, and
-paired-real Bloch cases in both 2-D and 3-D at one thread and at the physical-core
-thread count. Each isolated thread slice must contain all six cases; both slices
-are required before epic acceptance. Schema 3 binds each CPU slice to the exact manifest, runner inputs, solver
-inputs and ABI, clean candidate commit, and host identity. Aggregation requires
-`--native-summary`, reopens the exact SHA-pinned artifact, and recomputes every
-native comparison instead of trusting embedded booleans. Raw samples are also checked for positivity,
-replicate count, relative MAD, the 5% individual limit, and a deterministic
-one-sided bootstrap test of the log-geometric-mean ratio.
+topology, and a Chrome profiler trace. The strict acceptance summary rejects
+graph breaks, recompilation after warm-up, host-device transfers, storage
+changes, or unbounded device-memory growth. CPU performance evidence covers
+crossover, large mixed, and paired-real Bloch cases in both 2-D and 3-D at one
+thread and at the physical-core thread count. Each isolated thread slice must
+contain all six cases; both slices are required for the CPU performance
+subgate. Complete field and persistent-state correctness remains a separate
+required artifact before #123 can complete. Schema 4 binds each CPU slice to
+the exact manifest, runner inputs, solver inputs and ABI, clean candidate
+commit, host identity, and byte hashes of its Torch baseline inputs.
+
+Native comparisons remain required, recomputed, and published for all 12
+workload/thread cells, but their timing ratios are informational. The blocking
+timing checks compare the candidate with the matching same-host Torch baseline:
+no individual cell may exceed `1.05x`, and the deterministic one-sided bootstrap
+of the 12-cell log-geometric-mean ratio must find no significant regression.
+Both reference and candidate raw samples are checked for positivity, replicate
+count, reported-summary consistency, and relative MAD before comparison.
+
+The baseline JSON bytes are part of the frozen contract, not merely examples.
+The one-thread slice SHA-256 is
+`e6e765fcd0b0ff1fff1919ff06f95c155beed6ce2c51c3c58cf8dccfcca3387f`;
+the four-physical-core slice SHA-256 is
+`27bc2f3f0a880b0faf25480d926f8b3885c33b7571f14bb47130880f2105fa9a`.
+Publish those exact files with #123 or its qualifying pull request before
+merging this contract; a same-schema replacement is rejected. The legacy
+artifacts are timing references only. Their recurring allocations remain
+reported, but the revised fixed-temporary and full-field-clone rules apply to
+the candidate, not retroactively to the baseline.
 
 CPU RSS acceptance uses 28 consecutive five-step windows in a fresh process.
 The first 16 windows are a fixed stabilization phase. The remaining 12 windows
@@ -155,9 +215,11 @@ policy gate. That gate can be enabled only after the forced policies select
 distinct executable representations.
 
 ```sh
+OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 \
 uv run --no-sync python -m benchmarks.torch_tuning \
   --case cpu-crossover-2d --device cpu --precision float64 \
   --threads 1 --interop-threads 1 --native-summary native-summary.json \
+  --torch-baseline-slice-artifacts baseline-one.json baseline-physical.json \
   --trace-directory /tmp/gmes-tuning-traces --output /tmp/gmes-tuning.json
 
 uv run --no-sync python -m benchmarks.torch_tuning \
@@ -171,21 +233,98 @@ Use `--policy matrix` for the forced dense/compact/tiled comparison and
 `/tmp`; the files contain the complete environment metadata and can be large.
 Run the six-case `cpu-gates` command in separate processes for `--threads 1`
 and the affinity-aware physical-core count, then aggregate them. A single case
-or thread slice is diagnostic-only and cannot report epic CPU suite success:
+or thread slice is diagnostic-only and cannot report CPU performance
+acceptance:
 
 ```sh
+OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 \
 uv run --no-sync python -m benchmarks.torch_tuning \
   --case cpu-gates --device cpu --threads 1 --interop-threads 1 \
-  --native-summary native-summary.json --output /tmp/cpu-one.json
+  --native-summary native-summary.json \
+  --torch-baseline-slice-artifacts baseline-one.json baseline-physical.json \
+  --output /tmp/cpu-one.json
 
+OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4 \
 uv run --no-sync python -m benchmarks.torch_tuning \
   --case cpu-gates --device cpu --threads 4 --interop-threads 1 \
-  --native-summary native-summary.json --output /tmp/cpu-physical.json
+  --native-summary native-summary.json \
+  --torch-baseline-slice-artifacts baseline-one.json baseline-physical.json \
+  --output /tmp/cpu-physical.json
 
 uv run --no-sync python -m benchmarks.torch_tuning \
   --case cpu-gates --native-summary native-summary.json \
+  --torch-baseline-slice-artifacts baseline-one.json baseline-physical.json \
   --cpu-slice-artifacts /tmp/cpu-one.json /tmp/cpu-physical.json \
-  --output /tmp/cpu-acceptance.json --enforce
+  --allocation-provenance allocation-provenance.json \
+  --output /tmp/cpu-acceptance.json
+```
+
+For a nonzero allocation trace, the sidecar is necessarily a second-stage
+review. First create and preserve the slice JSON, Chrome trace, and generated
+source without a provenance input. Then review those exact bytes, write the
+sidecar with their hashes and selector, and pass it while aggregating the saved
+slices. Do not rerun the slice to apply the sidecar: a new profiler trace has a
+different digest. Aggregation reopens and hashes the saved trace, reconstructs
+all trace-derived allocation metrics, verifies the generated source and compile
+cache key, and replaces only the originally failed allocation decision. Any
+other runtime failure remains blocking.
+
+The aggregate reports `acceptance_scope: "cpu-performance-only"` and keeps
+`issue_completion_satisfied` false until complete field and persistent-state
+correctness evidence is bound. Consequently `--enforce` deliberately returns
+nonzero at this stage even when the CPU performance subgate itself passes.
+
+Zero-allocation CPU traces need no provenance record. A nonzero trace passes
+only when every fixed-shape temporary is accounted for in a reviewed record
+selected by workload, device, precision, compile mode, execution policy, and
+thread count. The JSON document has schema 1 and kind
+`torch-cpu-allocation-provenance`; each record binds the Chrome-trace SHA-256,
+compile-cache key, profile-step count, exact allocation-size histogram,
+per-step counts and generated operation, and at least one generated-source path
+and SHA-256. Every nonzero reviewed record also names at least one public
+`https://github.com/pytorch/pytorch/issues/<number>` URL; the current indexed
+workspace allocation is tracked by pytorch/pytorch#195330. The trace must have
+zero final live growth and bounded repeated RSS, and any recurring allocation
+matching a full field/domain buffer fails even if the record labels it as
+allowed.
+
+```json
+{
+  "schema_version": 1,
+  "kind": "torch-cpu-allocation-provenance",
+  "method": "reviewed-fixed-temporary-provenance-v1",
+  "records": [
+    {
+      "workload": "cpu-crossover-2d",
+      "device": "cpu",
+      "precision": "float64",
+      "compile_mode": "default",
+      "execution_policy": "auto",
+      "threads": 1,
+      "method": "reviewed-fixed-temporary-provenance-v1",
+      "reviewed": true,
+      "trace_sha256": "<64 lowercase hex characters>",
+      "compile_cache_key": "<reported compile cache key>",
+      "profile_steps": 5,
+      "allocation_size_histogram": {"792": 5},
+      "full_field_or_domain_clone_events": 0,
+      "upstream_issue_urls": [
+        "https://github.com/pytorch/pytorch/issues/195330"
+      ],
+      "allocations": [
+        {
+          "size_bytes": 792,
+          "events_per_step": 1,
+          "classification": "allowed-plan-bounded-temporary",
+          "generated_operation": "allocate indexed-update values buffer"
+        }
+      ],
+      "generated_sources": [
+        {"path": "/tmp/torchinductor/generated.cpp", "sha256": "<SHA-256>"}
+      ]
+    }
+  ]
+}
 ```
 
 ### Inductor allocation reproducers

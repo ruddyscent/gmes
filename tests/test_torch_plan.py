@@ -18,6 +18,8 @@ def _host_plans(
     size=(4, 4, 4),
     resolution=2,
     tile_size=16,
+    cpml_sparse_residual=False,
+    precision="float64",
 ):
     space = gmes.Cartesian(size, resolution)
     space.dt = 0.05
@@ -29,11 +31,12 @@ def _host_plans(
         geom_tree=tree,
         space=space,
         shapes=shapes,
-        precision="float64",
+        precision=precision,
         device_type="cpu",
         policy=policy,
         material_tile_size=31,
         execution_tile_size=tile_size,
+        cpml_sparse_residual=cpml_sparse_residual,
     ).build()
     return space, tree, {plan.name: plan for plan in plans}
 
@@ -172,6 +175,96 @@ class ComponentPlanTest(unittest.TestCase):
             )
             self.assertEqual(cpml.selected_policy, "compact")
             self.assertEqual(len(cpml.tile_origins), 0)
+
+    def test_cpml_sparse_residual_maps_dense_base_and_active_axes(self):
+        geometry = [
+            gmes.DefaultMedium(gmes.Dielectric(eps_inf=2.5, mu_inf=1.2)),
+            gmes.Shell(material=gmes.Cpml(kappa_max=3.0), thickness=0.5),
+        ]
+        _, _, plans = _host_plans(geometry, policy="compact", cpml_sparse_residual=True)
+        for component_name, plan in plans.items():
+            with self.subTest(component=component_name):
+                bucket = next(
+                    bucket
+                    for bucket in plan.buckets
+                    if bucket.signature.model == "cpml"
+                )
+                self.assertEqual(len(bucket.cpml_residual_axes), 2)
+                np.testing.assert_array_equal(
+                    plan.dense_inverse.reshape(-1)[bucket.targets],
+                    bucket.cell_coefficients[:, 0],
+                )
+                active_states = 0
+                for axis, residual in enumerate(bucket.cpml_residual_axes):
+                    b_column, c_column, kappa_column = (
+                        (1, 2, 3) if axis == 0 else (4, 5, 6)
+                    )
+                    expected_positions = np.flatnonzero(
+                        np.logical_or(
+                            bucket.cell_coefficients[:, c_column] != 0.0,
+                            bucket.cell_coefficients[:, kappa_column] != 1.0,
+                        )
+                    )
+                    np.testing.assert_array_equal(
+                        residual.positions, expected_positions
+                    )
+                    np.testing.assert_array_equal(
+                        residual.targets, bucket.targets[expected_positions]
+                    )
+                    np.testing.assert_array_equal(
+                        residual.stencil_indices,
+                        bucket.stencil_indices[
+                            expected_positions, 2 * axis : 2 * axis + 2
+                        ],
+                    )
+                    np.testing.assert_allclose(
+                        residual.parameters,
+                        np.column_stack(
+                            (
+                                bucket.cell_coefficients[expected_positions, 0],
+                                bucket.cell_coefficients[expected_positions, b_column],
+                                bucket.cell_coefficients[expected_positions, c_column],
+                                1.0
+                                / bucket.cell_coefficients[
+                                    expected_positions, kappa_column
+                                ]
+                                - 1.0,
+                            )
+                        ),
+                        rtol=0.0,
+                        atol=0.0,
+                    )
+                    active_states += len(residual.targets)
+                self.assertLess(active_states, 2 * bucket.target_count)
+                self.assertEqual(
+                    bucket.launch_count,
+                    sum(bool(len(axis.targets)) for axis in bucket.cpml_residual_axes),
+                )
+
+    def test_float32_cpml_falls_back_when_residual_cancellation_is_unstable(self):
+        geometry = [
+            gmes.DefaultMedium(gmes.Dielectric(eps_inf=2.5, mu_inf=1.2)),
+            gmes.Shell(material=gmes.Cpml(kappa_max=1e8), thickness=0.5),
+        ]
+        _, _, plans = _host_plans(
+            geometry,
+            policy="compact",
+            cpml_sparse_residual=True,
+            precision="float32",
+        )
+        for component_name, plan in plans.items():
+            with self.subTest(component=component_name):
+                bucket = next(
+                    bucket
+                    for bucket in plan.buckets
+                    if bucket.signature.model == "cpml"
+                )
+                self.assertEqual(bucket.cpml_residual_axes, ())
+                np.testing.assert_array_equal(
+                    plan.dense_inverse.reshape(-1)[bucket.targets],
+                    0.0,
+                )
+                self.assertEqual(bucket.launch_count, 1)
 
 
 class ExecutionPolicyTest(unittest.TestCase):

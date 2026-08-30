@@ -19,10 +19,13 @@ except ImportError as error:  # pragma: no cover
 from .geometry import DefaultMedium, GeomBoxTree
 from .material import Dielectric
 from .torch_dispersive import (
+    DISPERSIVE_GROUPING_SCOPES,
     DISPERSIVE_MODELS,
+    DispersiveExecutionOverlay,
     register_plan_buffers,
     register_state_buffers,
     update_bucket,
+    update_execution_entry,
 )
 from .torch_dm2 import (
     DM2_ITERATIONS_PER_CHUNK,
@@ -61,6 +64,20 @@ class TorchConfigurationError(ValueError):
     """A requested Torch execution configuration cannot be honored."""
 
 
+COMPILE_MODES = ("default", "reduce-overhead", "max-autotune")
+TORCH_SOLVER_ABI = "torch-fdtd-regions-v8"
+DIRECT_VIEW_MUTATION_REPRESENTATION = "direct-nonoverlapping-as-strided-v1"
+DEFAULT_VIEW_MUTATION_REPRESENTATION = "slice-views-v1"
+PACKED_DM2_REPRESENTATION = "single-carry-packed-loop-v1"
+FUNCTIONAL_DM2_REPRESENTATION = "functional-multi-carry-loop-v1"
+FUSED_SOURCE_REPRESENTATION = "fused-half-step-v1"
+EXTERNAL_SOURCE_REPRESENTATION = "external-v1"
+SPARSE_CPML_REPRESENTATION = "dense-base-axis-sparse-residual-v1"
+DEFAULT_CPML_REPRESENTATION = "compact-two-axis-state-v1"
+EXACT_SCHEMA_DISPERSIVE_REPRESENTATION = "exact-schema-grouped-io-v1"
+BUCKET_DISPERSIVE_REPRESENTATION = "bucket-indexed-io-v1"
+
+
 @dataclass(frozen=True)
 class DistributedLaunch:
     """Process metadata reserved for later distributed execution."""
@@ -87,11 +104,15 @@ class TorchRuntimeConfig:
     device: str
     precision: str = "float64"
     compile_policy: str = "eager"
+    compile_mode: str = "default"
     cpu_threads: int | None = None
+    cpu_interop_threads: int | None = None
     launch: DistributedLaunch = field(default_factory=DistributedLaunch)
     autograd: bool = False
     execution_policy: str = "auto"
     planner_tile_size: int = 4096
+    experimental_dispersive_grouping: bool = False
+    experimental_dispersive_grouping_scope: str = "combined"
 
     def validate_static(self):
         """Reject invalid requests before tensors or compiler state are created."""
@@ -103,8 +124,22 @@ class TorchRuntimeConfig:
             raise TorchConfigurationError("precision must be 'float32' or 'float64'")
         if self.compile_policy not in {"eager", "compile"}:
             raise TorchConfigurationError("compile_policy must be 'eager' or 'compile'")
+        if self.compile_mode not in COMPILE_MODES:
+            raise TorchConfigurationError(
+                "compile_mode must be 'default', 'reduce-overhead', or 'max-autotune'"
+            )
+        if self.compile_policy == "eager" and self.compile_mode != "default":
+            raise TorchConfigurationError(
+                "compile_mode is meaningful only when compile_policy='compile'"
+            )
+        if self.device.startswith("cpu") and self.compile_mode != "default":
+            raise TorchConfigurationError(
+                "non-default compile modes are supported only on CUDA"
+            )
         if self.cpu_threads is not None and self.cpu_threads < 1:
             raise TorchConfigurationError("cpu_threads must be positive")
+        if self.cpu_interop_threads is not None and self.cpu_interop_threads < 1:
+            raise TorchConfigurationError("cpu_interop_threads must be positive")
         if self.autograd:
             raise TorchConfigurationError(
                 "autograd is unsupported; GMES field buffers are inference-only"
@@ -115,6 +150,18 @@ class TorchRuntimeConfig:
             )
         if self.planner_tile_size < 1:
             raise TorchConfigurationError("planner_tile_size must be positive")
+        if not isinstance(self.experimental_dispersive_grouping, bool):
+            raise TorchConfigurationError(
+                "experimental_dispersive_grouping must be a boolean"
+            )
+        if (
+            self.experimental_dispersive_grouping_scope
+            not in DISPERSIVE_GROUPING_SCOPES
+        ):
+            raise TorchConfigurationError(
+                "experimental_dispersive_grouping_scope must be 'combined', "
+                "'two-level', or 'dcp-convolution'"
+            )
         self.launch.validate()
 
     @property
@@ -165,6 +212,11 @@ def torch_runtime_diagnostics(config):
         "execution_policy": config.execution_policy,
         "requested_precision": config.precision,
         "compile_policy": config.compile_policy,
+        "compile_mode": config.compile_mode,
+        "experimental_dispersive_grouping": (config.experimental_dispersive_grouping),
+        "experimental_dispersive_grouping_scope": (
+            config.experimental_dispersive_grouping_scope
+        ),
         "cuda_build": torch.version.cuda,
         "cuda_available": torch.cuda.is_available(),
         "cuda_device_count": torch.cuda.device_count(),
@@ -176,6 +228,14 @@ def torch_runtime_diagnostics(config):
             result["device_name"] = torch.cuda.get_device_name(index)
             result["device_capability"] = torch.cuda.get_device_capability(index)
     return result
+
+
+def _compile_fullgraph(function, runtime, device, *, dynamic):
+    """Compile one fixed solver region under the explicit runtime policy."""
+    arguments = {"fullgraph": True, "dynamic": dynamic}
+    if device.type == "cuda":
+        arguments["mode"] = runtime.compile_mode
+    return torch.compile(function, **arguments)
 
 
 def _field_shapes(space):
@@ -190,6 +250,67 @@ def _field_shapes(space):
             "Hz": (nx + 1, ny + 1, nz),
         }
     )
+
+
+@dataclass(frozen=True)
+class CpmlResidualAxisMetadata:
+    """Final tensor names and curl geometry for one sparse CPML axis."""
+
+    component: str
+    bucket_index: int
+    axis: int
+    target_count: int
+    prefix: str
+    state_prefix: str
+    source_component: str
+    scale_axis: int
+    axis_sign: float
+
+
+@dataclass(frozen=True)
+class CpmlResidualBucketMetadata:
+    """Canonical logical CPML state backed by active per-axis buffers."""
+
+    component: str
+    bucket_index: int
+    target_count: int
+    state_name: str
+    axes: tuple
+
+
+def _cpml_state_dict_post_hook(module, state_dict, prefix, _local_metadata):
+    for metadata in module.plan.cpml_residual_buckets:
+        state_dict[f"{prefix}{metadata.state_name}"] = module._logical_cpml_state(
+            metadata
+        ).detach()
+
+
+def _cpml_load_state_dict_pre_hook(
+    module,
+    state_dict,
+    prefix,
+    _local_metadata,
+    _strict,
+    missing_keys,
+    _unexpected_keys,
+    error_msgs,
+):
+    for metadata in module.plan.cpml_residual_buckets:
+        name = f"{prefix}{metadata.state_name}"
+        if name not in state_dict:
+            missing_keys.append(name)
+            continue
+        value = state_dict.pop(name)
+        try:
+            module._validate_logical_cpml_state(
+                metadata,
+                value,
+                exact_dtype=False,
+            )
+        except ValueError as error:
+            error_msgs.append(str(error))
+            continue
+        module._restore_logical_cpml_state(metadata, value)
 
 
 class TorchSimulationPlan(nn.Module):
@@ -210,6 +331,8 @@ class TorchSimulationPlan(nn.Module):
         dm2_buckets = []
         dm2_status_offset = 0
         dispersive_buckets = []
+        cpml_residual_buckets = []
+        cpml_residual_axes = []
         for name in COMPONENTS:
             component = plans[name]
             family = "inv_eps" if name in ELECTRIC_COMPONENTS else "inv_mu"
@@ -265,7 +388,68 @@ class TorchSimulationPlan(nn.Module):
                     ),
                     ("coefficients", bucket.coefficient_table, dtype),
                 ]
-                if bucket.signature.model in {"upml", "cpml"}:
+                if bucket.cpml_residual_axes:
+                    terms = component.stencil
+                    if name not in ELECTRIC_COMPONENTS:
+                        terms = tuple(reversed(terms))
+                    axis_metadata = []
+                    for residual, term in zip(
+                        bucket.cpml_residual_axes, terms, strict=True
+                    ):
+                        axis_prefix = f"{prefix}_cpml_axis{residual.axis}"
+                        state_prefix = (
+                            f"_pml_{name.lower()}_{index}_axis{residual.axis}"
+                        )
+                        parameters = residual.parameters
+                        if self.bloch is not None:
+                            parameters = parameters[..., np.newaxis]
+                        arrays.extend(
+                            (
+                                (
+                                    f"cpml_axis{residual.axis}_positions",
+                                    residual.positions,
+                                    torch.int64,
+                                ),
+                                (
+                                    f"cpml_axis{residual.axis}_targets",
+                                    residual.targets,
+                                    torch.int64,
+                                ),
+                                (
+                                    f"cpml_axis{residual.axis}_stencil_indices",
+                                    residual.stencil_indices,
+                                    torch.int64,
+                                ),
+                                (
+                                    f"cpml_axis{residual.axis}_parameters",
+                                    parameters,
+                                    dtype,
+                                ),
+                            )
+                        )
+                        metadata = CpmlResidualAxisMetadata(
+                            component=name,
+                            bucket_index=index,
+                            axis=residual.axis,
+                            target_count=len(residual.targets),
+                            prefix=axis_prefix,
+                            state_prefix=state_prefix,
+                            source_component=term.source,
+                            scale_axis=term.scale_axis,
+                            axis_sign=1.0 if residual.axis == 0 else -1.0,
+                        )
+                        axis_metadata.append(metadata)
+                        cpml_residual_axes.append(metadata)
+                    cpml_residual_buckets.append(
+                        CpmlResidualBucketMetadata(
+                            component=name,
+                            bucket_index=index,
+                            target_count=bucket.target_count,
+                            state_name=f"pml_{name.lower()}_{index}_state",
+                            axes=tuple(axis_metadata),
+                        )
+                    )
+                elif bucket.signature.model in {"upml", "cpml"}:
                     cell_coefficients = bucket.cell_coefficients
                     if self.bloch is not None:
                         cell_coefficients = cell_coefficients[..., np.newaxis]
@@ -437,6 +621,9 @@ class TorchSimulationPlan(nn.Module):
         self.dm2_buckets = tuple(dm2_buckets)
         self.dm2_target_count = dm2_status_offset
         self.dispersive_buckets = tuple(dispersive_buckets)
+        self.cpml_residual_buckets = tuple(cpml_residual_buckets)
+        self.cpml_residual_axes = tuple(cpml_residual_axes)
+        self.cpml_sparse_residual = bool(cpml_residual_buckets)
         self._sealed_names = frozenset(self._buffers) | {
             "components",
             "shapes",
@@ -446,6 +633,9 @@ class TorchSimulationPlan(nn.Module):
             "dm2_buckets",
             "dm2_target_count",
             "dispersive_buckets",
+            "cpml_residual_buckets",
+            "cpml_residual_axes",
+            "cpml_sparse_residual",
         }
 
     def __setattr__(self, name, value):
@@ -484,7 +674,7 @@ class TorchSimulationPlan(nn.Module):
 class TorchSimulationState(nn.Module):
     """Device-resident fields, clocks, coefficients, and fixed scratch storage."""
 
-    def __init__(self, plan, *, paired_real, device, dtype):
+    def __init__(self, plan, *, paired_real, device, dtype, execution_overlay=None):
         super().__init__()
         self.plan = plan
         self.paired_real = bool(paired_real)
@@ -525,9 +715,15 @@ class TorchSimulationState(nn.Module):
             paired_real=paired_real,
             dtype=dtype,
             device=device,
+            execution_overlay=execution_overlay,
         )
         self.register_buffer(
             "step_count", torch.zeros((), device=device, dtype=torch.int64)
+        )
+        self.register_buffer(
+            "_step_increment",
+            torch.ones((), device=device, dtype=torch.int64),
+            persistent=False,
         )
         self.register_buffer("source_time", torch.zeros((), device=device, dtype=dtype))
         self.register_buffer(
@@ -557,9 +753,24 @@ class TorchSimulationState(nn.Module):
                 )
             )
         self.dm2_buckets = nn.ModuleList(dm2_states)
+        for metadata in plan.cpml_residual_axes:
+            state_shape = (metadata.target_count,) + plane
+            self.register_buffer(
+                f"{metadata.state_prefix}_state",
+                torch.zeros(state_shape, device=device, dtype=dtype),
+                persistent=False,
+            )
+            for scratch_index in range(2):
+                self.register_buffer(
+                    f"{metadata.state_prefix}_scratch{scratch_index}",
+                    torch.zeros(state_shape, device=device, dtype=dtype),
+                    persistent=False,
+                )
         for component_name, component in plan.components.items():
             for index, bucket in enumerate(component.buckets):
                 if bucket.signature.model not in {"upml", "cpml"}:
+                    continue
+                if bucket.cpml_residual_axes:
                     continue
                 prefix = f"pml_{component_name.lower()}_{index}"
                 state_shape = (bucket.target_count, bucket.state_width) + plane
@@ -574,7 +785,19 @@ class TorchSimulationState(nn.Module):
                         torch.zeros(scratch_shape, device=device, dtype=dtype),
                         persistent=False,
                     )
+        if plan.cpml_residual_buckets:
+            self.register_state_dict_post_hook(_cpml_state_dict_post_hook)
+            self.register_load_state_dict_pre_hook(_cpml_load_state_dict_pre_hook)
         self.requires_grad_(False)
+
+    def load_state_dict(self, state_dict, strict=True, assign=False):
+        """Restore grouped logical state without replacing its physical arena."""
+        if assign and hasattr(self, "_grouped_dispersive_state_names"):
+            raise ValueError(
+                "assign=True would detach grouped dispersive state from its fixed "
+                "execution arena; use assign=False"
+            )
+        return super().load_state_dict(state_dict, strict=strict, assign=assign)
 
     def field(self, component):
         """Return one live device field by component type or canonical name."""
@@ -596,19 +819,94 @@ class TorchSimulationState(nn.Module):
             name: value.detach().clone() for name, value in self.state_dict().items()
         }
 
+    def _logical_cpml_state(self, metadata):
+        first_state = getattr(self, f"{metadata.axes[0].state_prefix}_state")
+        plane = (2,) if self.paired_real else ()
+        logical = torch.zeros(
+            (metadata.target_count, 2) + plane,
+            dtype=first_state.dtype,
+            device=first_state.device,
+        )
+        for axis in metadata.axes:
+            positions = getattr(self.plan, f"{axis.prefix}_positions")
+            state = getattr(self, f"{axis.state_prefix}_state")
+            logical[:, axis.axis].index_copy_(0, positions, state)
+        return logical
+
+    def _validate_logical_cpml_state(self, metadata, value, *, exact_dtype):
+        reference = getattr(self, f"{metadata.axes[0].state_prefix}_state")
+        plane = (2,) if self.paired_real else ()
+        if (
+            not torch.is_tensor(value)
+            or value.shape != (metadata.target_count, 2) + plane
+            or (exact_dtype and value.dtype != reference.dtype)
+        ):
+            raise ValueError(
+                f"checkpoint tensor {metadata.state_name!r} has an "
+                "incompatible shape or dtype"
+            )
+        for axis in metadata.axes:
+            positions = getattr(self.plan, f"{axis.prefix}_positions").to(
+                device=value.device
+            )
+            inactive = torch.ones(
+                metadata.target_count, dtype=torch.bool, device=value.device
+            )
+            inactive[positions] = False
+            if torch.count_nonzero(value[:, axis.axis][inactive]):
+                raise ValueError(
+                    f"checkpoint tensor {metadata.state_name!r} contains "
+                    f"nonzero inactive CPML axis {axis.axis} state"
+                )
+
+    @torch.inference_mode()
+    def _restore_logical_cpml_state(self, metadata, value):
+        for axis in metadata.axes:
+            target = getattr(self, f"{axis.state_prefix}_state")
+            positions = getattr(self.plan, f"{axis.prefix}_positions")
+            source = value.to(
+                device=target.device,
+                dtype=target.dtype,
+            ).index_select(0, positions)
+            target.copy_(source[:, axis.axis])
+
     @torch.inference_mode()
     def load_checkpoint(self, checkpoint):
         """Restore a checkpoint without replacing any registered buffer."""
-        expected = set(self.state_dict())
+        logical_names = {
+            metadata.state_name for metadata in self.plan.cpml_residual_buckets
+        }
+        persistent = {
+            name: value
+            for name, value in self.state_dict().items()
+            if name not in logical_names
+        }
+        for name in getattr(self, "_grouped_dispersive_state_names", ()):
+            persistent[name] = getattr(self, name)
+        expected = set(persistent) | logical_names
         if set(checkpoint) != expected:
             raise ValueError("checkpoint keys do not match the simulation state")
-        for name, target in self.state_dict().items():
+        for name, target in persistent.items():
             value = checkpoint[name]
             if value.shape != target.shape or value.dtype != target.dtype:
                 raise ValueError(
                     f"checkpoint tensor {name!r} has an incompatible shape or dtype"
                 )
+        for metadata in self.plan.cpml_residual_buckets:
+            value = checkpoint[metadata.state_name]
+            self._validate_logical_cpml_state(
+                metadata,
+                value,
+                exact_dtype=True,
+            )
+        for name, target in persistent.items():
+            value = checkpoint[name]
             target.copy_(value.to(device=target.device))
+        for metadata in self.plan.cpml_residual_buckets:
+            self._restore_logical_cpml_state(
+                metadata,
+                checkpoint[metadata.state_name],
+            )
 
     @torch.inference_mode()
     def snapshot(self):
@@ -626,6 +924,11 @@ class TorchSimulationState(nn.Module):
             if self.paired_real and complex_state:
                 host = torch.complex(host[..., 0], host[..., 1])
             result[name] = host.numpy() if numpy else host
+        for metadata in self.plan.cpml_residual_buckets:
+            host = self._logical_cpml_state(metadata).to(device="cpu", copy=True)
+            if self.paired_real and complex_state:
+                host = torch.complex(host[..., 0], host[..., 1])
+            result[metadata.state_name] = host.numpy() if numpy else host
         return result
 
     @torch.inference_mode()
@@ -638,6 +941,25 @@ class TorchSimulationState(nn.Module):
                 host = torch.complex(host[..., 0], host[..., 1])
             result[name] = host.numpy() if numpy else host
         return result
+
+
+def _field_region(field, starts, trims):
+    # Solver fields are contiguous registered buffers with zero storage offset.
+    # A single non-overlapping view lets Inductor safely reinplace the mutation.
+    strides = field.stride()
+    size = tuple(
+        field.shape[axis] - starts[axis] - trims[axis] for axis in range(3)
+    ) + tuple(field.shape[3:])
+    offset = sum(starts[axis] * strides[axis] for axis in range(3))
+    return torch.as_strided(field, size=size, stride=strides, storage_offset=offset)
+
+
+def _boundary_plane(field, axis, index):
+    strides = field.stride()
+    size = tuple(field.shape[:axis]) + tuple(field.shape[axis + 1 :])
+    stride = tuple(strides[:axis]) + tuple(strides[axis + 1 :])
+    offset = (field.shape[axis] - 1 if index == -1 else index) * strides[axis]
+    return torch.as_strided(field, size=size, stride=stride, storage_offset=offset)
 
 
 def _electric_phase(
@@ -657,8 +979,13 @@ def _electric_phase(
     dx,
     dy,
     dz,
+    direct_view_mutations,
 ):
-    ex_target = ex[:, :-1, :-1]
+    ex_target = (
+        _field_region(ex, (0, 0, 0), (0, 1, 1))
+        if direct_view_mutations
+        else ex[:, :-1, :-1]
+    )
     scratch = scratch_ex
     torch.sub(hz[1:, 1:, :], hz[1:, :-1, :], out=scratch)
     scratch.mul_(1.0 / dy)
@@ -667,7 +994,11 @@ def _electric_phase(
     scratch.mul_(-1.0 / dz)
     ex_target.addcmul_(inv_ex[:, :-1, :-1], scratch, value=dt)
 
-    ey_target = ey[:-1, :, :-1]
+    ey_target = (
+        _field_region(ey, (0, 0, 0), (1, 0, 1))
+        if direct_view_mutations
+        else ey[:-1, :, :-1]
+    )
     scratch = scratch_ey
     torch.sub(hx[:, 1:, 1:], hx[:, 1:, :-1], out=scratch)
     scratch.mul_(1.0 / dz)
@@ -676,7 +1007,11 @@ def _electric_phase(
     scratch.mul_(-1.0 / dx)
     ey_target.addcmul_(inv_ey[:-1, :, :-1], scratch, value=dt)
 
-    ez_target = ez[:-1, :-1, :]
+    ez_target = (
+        _field_region(ez, (0, 0, 0), (1, 1, 0))
+        if direct_view_mutations
+        else ez[:-1, :-1, :]
+    )
     scratch = scratch_ez
     torch.sub(hy[1:, :, 1:], hy[:-1, :, 1:], out=scratch)
     scratch.mul_(1.0 / dx)
@@ -703,8 +1038,13 @@ def _magnetic_phase(
     dx,
     dy,
     dz,
+    direct_view_mutations,
 ):
-    hx_target = hx[:, 1:, 1:]
+    hx_target = (
+        _field_region(hx, (0, 1, 1), (0, 0, 0))
+        if direct_view_mutations
+        else hx[:, 1:, 1:]
+    )
     scratch = scratch_hx
     torch.sub(ey[:-1, :, 1:], ey[:-1, :, :-1], out=scratch)
     scratch.mul_(1.0 / dz)
@@ -713,7 +1053,11 @@ def _magnetic_phase(
     scratch.mul_(-1.0 / dy)
     hx_target.addcmul_(inv_hx[:, 1:, 1:], scratch, value=dt)
 
-    hy_target = hy[1:, :, 1:]
+    hy_target = (
+        _field_region(hy, (1, 0, 1), (0, 0, 0))
+        if direct_view_mutations
+        else hy[1:, :, 1:]
+    )
     scratch = scratch_hy
     torch.sub(ez[1:, :-1, :], ez[:-1, :-1, :], out=scratch)
     scratch.mul_(1.0 / dx)
@@ -722,7 +1066,11 @@ def _magnetic_phase(
     scratch.mul_(-1.0 / dz)
     hy_target.addcmul_(inv_hy[1:, :, 1:], scratch, value=dt)
 
-    hz_target = hz[1:, 1:, :]
+    hz_target = (
+        _field_region(hz, (1, 1, 0), (0, 0, 0))
+        if direct_view_mutations
+        else hz[1:, 1:, :]
+    )
     scratch = scratch_hz
     torch.sub(ex[:, 1:, :-1], ex[:, :-1, :-1], out=scratch)
     scratch.mul_(1.0 / dy)
@@ -749,17 +1097,33 @@ def _electric_phase_2d_z(
     dx,
     dy,
     dz,
+    direct_view_mutations,
 ):
     del scratch_ex, scratch_ey, scratch_ez, dz
-    ex[:, :-1, :-1].add_(
+    ex_target = (
+        _field_region(ex, (0, 0, 0), (0, 1, 1))
+        if direct_view_mutations
+        else ex[:, :-1, :-1]
+    )
+    ex_target.add_(
         inv_ex[:, :-1, :-1] * (hz[1:, 1:, :] - hz[1:, :-1, :]),
         alpha=dt / dy,
     )
-    ey[:-1, :, :-1].add_(
+    ey_target = (
+        _field_region(ey, (0, 0, 0), (1, 0, 1))
+        if direct_view_mutations
+        else ey[:-1, :, :-1]
+    )
+    ey_target.add_(
         inv_ey[:-1, :, :-1] * (hz[1:, 1:, :] - hz[:-1, 1:, :]),
         alpha=-dt / dx,
     )
-    ez[:-1, :-1, :].add_(
+    ez_target = (
+        _field_region(ez, (0, 0, 0), (1, 1, 0))
+        if direct_view_mutations
+        else ez[:-1, :-1, :]
+    )
+    ez_target.add_(
         inv_ez[:-1, :-1, :]
         * (
             (hy[1:, :, 1:] - hy[:-1, :, 1:]) / dx
@@ -786,17 +1150,33 @@ def _magnetic_phase_2d_z(
     dx,
     dy,
     dz,
+    direct_view_mutations,
 ):
     del scratch_hx, scratch_hy, scratch_hz, dz
-    hx[:, 1:, 1:].add_(
+    hx_target = (
+        _field_region(hx, (0, 1, 1), (0, 0, 0))
+        if direct_view_mutations
+        else hx[:, 1:, 1:]
+    )
+    hx_target.add_(
         inv_hx[:, 1:, 1:] * (ez[:-1, 1:, :] - ez[:-1, :-1, :]),
         alpha=-dt / dy,
     )
-    hy[1:, :, 1:].add_(
+    hy_target = (
+        _field_region(hy, (1, 0, 1), (0, 0, 0))
+        if direct_view_mutations
+        else hy[1:, :, 1:]
+    )
+    hy_target.add_(
         inv_hy[1:, :, 1:] * (ez[1:, :-1, :] - ez[:-1, :-1, :]),
         alpha=dt / dx,
     )
-    hz[1:, 1:, :].add_(
+    hz_target = (
+        _field_region(hz, (1, 1, 0), (0, 0, 0))
+        if direct_view_mutations
+        else hz[1:, 1:, :]
+    )
+    hz_target.add_(
         inv_hz[1:, 1:, :]
         * (
             (ex[:, 1:, :-1] - ex[:, :-1, :-1]) / dy
@@ -826,7 +1206,16 @@ def _upml_bucket_update(
     scale1,
     scale2,
     direction,
+    reshape_fields,
 ):
+    if reshape_fields and field.ndim == 4:
+        field = field.reshape(-1, field.shape[-1])
+        source1 = source1.reshape(-1, source1.shape[-1])
+        source2 = source2.reshape(-1, source2.shape[-1])
+    elif reshape_fields:
+        field = field.reshape(-1)
+        source1 = source1.reshape(-1)
+        source2 = source2.reshape(-1)
     _gather_difference(
         source1, stencil[:, 0], stencil[:, 1], scratch0, scratch2, scale1
     )
@@ -860,7 +1249,16 @@ def _cpml_bucket_update(
     scale2,
     direction,
     dt,
+    reshape_fields,
 ):
+    if reshape_fields and field.ndim == 4:
+        field = field.reshape(-1, field.shape[-1])
+        source1 = source1.reshape(-1, source1.shape[-1])
+        source2 = source2.reshape(-1, source2.shape[-1])
+    elif reshape_fields:
+        field = field.reshape(-1)
+        source1 = source1.reshape(-1)
+        source2 = source2.reshape(-1)
     _gather_difference(
         source1, stencil[:, 0], stencil[:, 1], scratch0, scratch2, scale1
     )
@@ -877,6 +1275,36 @@ def _cpml_bucket_update(
     scratch0.sub_(scratch1).mul_(coefficients[:, 0]).mul_(dt * direction)
     scratch2.add_(scratch0)
     field.index_copy_(0, targets, scratch2)
+
+
+def _cpml_residual_axis_update(
+    field,
+    source,
+    targets,
+    stencil,
+    parameters,
+    state,
+    scratch0,
+    scratch1,
+    scale,
+    direction,
+    axis_sign,
+    dt,
+    reshape_fields,
+):
+    if reshape_fields and field.ndim == 4:
+        field = field.reshape(-1, field.shape[-1])
+        source = source.reshape(-1, source.shape[-1])
+    elif reshape_fields:
+        field = field.reshape(-1)
+        source = source.reshape(-1)
+    _gather_difference(source, stencil[:, 0], stencil[:, 1], scratch0, scratch1, scale)
+    state.mul_(parameters[:, 1]).addcmul_(parameters[:, 2], scratch0)
+    torch.index_select(field, 0, targets, out=scratch1)
+    scratch0.mul_(parameters[:, 3]).add_(state)
+    scratch0.mul_(parameters[:, 0]).mul_(dt * direction * axis_sign)
+    scratch1.add_(scratch0)
+    field.index_copy_(0, targets, scratch1)
 
 
 class TorchSimulation:
@@ -950,6 +1378,16 @@ class TorchSimulation:
                 f"processes oversubscribe {processors} available CPUs"
             )
         torch.set_num_threads(threads)
+        if runtime.cpu_interop_threads is not None:
+            current_interop_threads = torch.get_num_interop_threads()
+            if current_interop_threads != runtime.cpu_interop_threads:
+                try:
+                    torch.set_num_interop_threads(runtime.cpu_interop_threads)
+                except RuntimeError as error:
+                    raise TorchConfigurationError(
+                        "cpu_interop_threads must be configured before Torch parallel "
+                        "work starts"
+                    ) from error
         if runtime.launch.world_size == 1:
             if int(space.numprocs) != 1:
                 raise TorchConfigurationError(
@@ -1000,6 +1438,11 @@ class TorchSimulation:
             device_type=device.type,
             policy=runtime.execution_policy,
             execution_tile_size=runtime.planner_tile_size,
+            cpml_sparse_residual=(
+                runtime.compile_policy == "compile"
+                and device.type == "cpu"
+                and _distributed_partition is None
+            ),
         )
         component_plans = planner.build()
         has_dm2 = any(
@@ -1036,11 +1479,33 @@ class TorchSimulation:
             device=device,
             dtype=runtime.dtype,
         )
+        grouped_dispersive_io = (
+            runtime.experimental_dispersive_grouping
+            and runtime.compile_policy == "compile"
+            and device.type == "cpu"
+            and _distributed_partition is None
+            and bool(plan.dispersive_buckets)
+        )
+        dispersive_overlay = (
+            DispersiveExecutionOverlay(
+                plan,
+                plan.dispersive_buckets,
+                paired_real=bloch is not None,
+                dtype=runtime.dtype,
+                device=device,
+                scope=runtime.experimental_dispersive_grouping_scope,
+            )
+            if grouped_dispersive_io
+            else None
+        )
+        if dispersive_overlay is not None and not dispersive_overlay.groups:
+            dispersive_overlay = None
         state = TorchSimulationState(
             plan,
             paired_real=bloch is not None,
             device=device,
             dtype=runtime.dtype,
+            execution_overlay=dispersive_overlay,
         )
 
         self.runtime = runtime
@@ -1053,6 +1518,12 @@ class TorchSimulation:
         self.geom_tree = geom_tree
         self.plan = plan
         self.state = state
+        self._dispersive_overlay = dispersive_overlay
+        self._dispersive_execution_representation = (
+            EXACT_SCHEMA_DISPERSIVE_REPRESENTATION
+            if dispersive_overlay is not None
+            else BUCKET_DISPERSIVE_REPRESENTATION
+        )
         self._has_dm2 = has_dm2
         self._has_electric_constants = any(
             getattr(plan, f"constant_targets_{name.lower()}").numel()
@@ -1067,34 +1538,68 @@ class TorchSimulation:
             for component in component_plans
             for bucket in component.buckets
         )
+        self._cpml_execution_representation = (
+            SPARSE_CPML_REPRESENTATION
+            if plan.cpml_sparse_residual
+            else DEFAULT_CPML_REPRESENTATION
+        )
+        self._material_execution_representation = (
+            "dense-base+axis-sparse-cpml-v2"
+            if plan.cpml_sparse_residual
+            else "dense-base+compact-indexed-materials-v1"
+        )
+        self._fused_local_phases = (
+            runtime.compile_policy == "compile" and _distributed_partition is None
+        )
+        self._packed_dm2 = runtime.compile_policy == "compile" and device.type == "cpu"
+        self._dm2_execution_representation = (
+            PACKED_DM2_REPRESENTATION
+            if self._packed_dm2
+            else FUNCTIONAL_DM2_REPRESENTATION
+        )
+        self._fused_source_updates = self._fused_local_phases and device.type == "cpu"
+        self._source_execution_representation = (
+            FUSED_SOURCE_REPRESENTATION
+            if self._fused_source_updates
+            else EXTERNAL_SOURCE_REPRESENTATION
+        )
+        self._direct_view_mutations = self._fused_local_phases and device.type == "cpu"
+        self._view_mutation_representation = (
+            DIRECT_VIEW_MUTATION_REPRESENTATION
+            if self._direct_view_mutations
+            else DEFAULT_VIEW_MUTATION_REPRESENTATION
+        )
         z_collapsed = (
             shapes["Ez"][2] == 1
             and bloch is None
             and runtime.compile_policy == "compile"
-            and not self._has_pml
+            and (
+                not self._has_pml
+                or (device.type == "cpu" and _distributed_partition is None)
+            )
         )
         if z_collapsed:
             electric_function = _electric_phase_2d_z
             magnetic_function = _magnetic_phase_2d_z
+            self._phase_specialization = "z-collapsed-v1"
         else:
             electric_function = _electric_phase
             magnetic_function = _magnetic_phase
+            self._phase_specialization = "three-axis-v1"
         self._electric = electric_function
         self._magnetic = magnetic_function
-        compile_options = None
-        if runtime.compile_policy == "compile":
-            compile_options = {"cpp_wrapper": True} if device.type == "cpu" else None
-            self._electric = torch.compile(
+        if runtime.compile_policy == "compile" and not self._fused_local_phases:
+            self._electric = _compile_fullgraph(
                 electric_function,
-                fullgraph=True,
+                runtime,
+                device,
                 dynamic=False,
-                options=compile_options,
             )
-            self._magnetic = torch.compile(
+            self._magnetic = _compile_fullgraph(
                 magnetic_function,
-                fullgraph=True,
+                runtime,
+                device,
                 dynamic=False,
-                options=compile_options,
             )
         self._electric_args = self._electric_arguments()
         self._magnetic_args = self._magnetic_arguments()
@@ -1102,71 +1607,75 @@ class TorchSimulation:
             "upml": _upml_bucket_update,
             "cpml": _cpml_bucket_update,
         }
-        if runtime.compile_policy == "compile":
-            pml_functions = {
-                model: torch.compile(
-                    function,
-                    fullgraph=True,
-                    dynamic=True,
-                    options=compile_options,
-                )
-                for model, function in pml_functions.items()
-            }
         self._electric_pml = self._pml_executions(("Ex", "Ey", "Ez"), pml_functions)
         self._magnetic_pml = self._pml_executions(("Hx", "Hy", "Hz"), pml_functions)
         self._dm2_updates = []
         for bucket_state in state.dm2_buckets:
             metadata = bucket_state.metadata
             prefix = metadata.prefix
-            prepare = bucket_state.prepare
-            iterate = bucket_state.iterate
-            finalize = bucket_state.finalize
             repetitions = DM2_MAX_ITERATIONS // DM2_ITERATIONS_PER_CHUNK
-            if runtime.compile_policy == "compile":
-                prepare, iterate, finalize = (
-                    torch.compile(
-                        function,
-                        fullgraph=True,
-                        dynamic=False,
-                        options=compile_options,
-                    )
-                    for function in (prepare, iterate, finalize)
-                )
-            self._dm2_updates.append(
-                (
-                    prepare,
-                    (
-                        state.field(metadata.component),
-                        state.field(metadata.source_component),
-                        state.step_count,
-                        state.time_step,
-                        getattr(plan, f"{prefix}_targets"),
-                        getattr(plan, f"{prefix}_source_positive_indices"),
-                        getattr(plan, f"{prefix}_source_negative_indices"),
-                        getattr(plan, f"{prefix}_rho30"),
-                        getattr(plan, f"{prefix}_gamma"),
-                        getattr(plan, f"{prefix}_t1"),
-                        getattr(plan, f"{prefix}_t2"),
-                        getattr(plan, f"{prefix}_hbar"),
-                        getattr(plan, f"{prefix}_omega"),
-                        getattr(plan, f"{prefix}_n_atom"),
-                        getattr(plan, f"{prefix}_curl_scale"),
-                    ),
-                    iterate,
-                    (
-                        0.5 * plan.dt,
-                        0.25 * plan.dt,
-                        getattr(plan, f"{prefix}_rtol"),
-                        getattr(plan, f"{prefix}_omega"),
-                    ),
-                    finalize,
-                    (
-                        state.field(metadata.component),
-                        getattr(plan, f"{prefix}_targets"),
-                    ),
-                    repetitions,
-                )
+            prepare_args = (
+                state.field(metadata.component),
+                state.field(metadata.source_component),
+                state.step_count,
+                state.time_step,
+                getattr(plan, f"{prefix}_targets"),
+                getattr(plan, f"{prefix}_source_positive_indices"),
+                getattr(plan, f"{prefix}_source_negative_indices"),
+                getattr(plan, f"{prefix}_rho30"),
+                getattr(plan, f"{prefix}_gamma"),
+                getattr(plan, f"{prefix}_t1"),
+                getattr(plan, f"{prefix}_t2"),
+                getattr(plan, f"{prefix}_hbar"),
+                getattr(plan, f"{prefix}_omega"),
+                getattr(plan, f"{prefix}_n_atom"),
+                getattr(plan, f"{prefix}_curl_scale"),
             )
+            iterate_args = (
+                0.5 * plan.dt,
+                0.25 * plan.dt,
+                getattr(plan, f"{prefix}_rtol"),
+                getattr(plan, f"{prefix}_omega"),
+            )
+            finalize_args = (
+                state.field(metadata.component),
+                getattr(plan, f"{prefix}_targets"),
+            )
+            if runtime.compile_policy == "compile":
+                solve = (
+                    bucket_state.solve_packed_cpu
+                    if self._packed_dm2
+                    else bucket_state.solve
+                )
+                if not self._fused_local_phases:
+                    solve = _compile_fullgraph(
+                        solve,
+                        runtime,
+                        device,
+                        dynamic=False,
+                    )
+                self._dm2_updates.append(
+                    (
+                        solve,
+                        (
+                            *prepare_args,
+                            *iterate_args[:3],
+                            DM2_MAX_ITERATIONS,
+                        ),
+                    )
+                )
+            else:
+                self._dm2_updates.append(
+                    (
+                        bucket_state.prepare,
+                        prepare_args,
+                        bucket_state.iterate,
+                        iterate_args,
+                        bucket_state.finalize,
+                        finalize_args,
+                        repetitions,
+                    )
+                )
         if has_dm2 and device.type == "cuda":
             self._dm2_iterations_host = torch.empty(
                 plan.dm2_target_count,
@@ -1178,15 +1687,44 @@ class TorchSimulation:
             self._dm2_iterations_host = state._dm2_iterations
 
         self._dispersive = self._apply_dispersive
-        if self._dispersive_buckets and runtime.compile_policy == "compile":
-            self._dispersive = torch.compile(
-                self._apply_dispersive,
-                fullgraph=True,
-                dynamic=False,
-                options=compile_options,
-            )
+        self._electric_material = self._electric_material_update
+        self._magnetic_material = self._magnetic_material_update
+        if runtime.compile_policy == "compile" and not self._fused_local_phases:
+            if (
+                self._electric_pml
+                or self._dispersive_buckets
+                or self._has_electric_constants
+            ):
+                self._electric_material = _compile_fullgraph(
+                    self._electric_material_update,
+                    runtime,
+                    device,
+                    dynamic=False,
+                )
+            if self._magnetic_pml or self._has_magnetic_constants:
+                self._magnetic_material = _compile_fullgraph(
+                    self._magnetic_material_update,
+                    runtime,
+                    device,
+                    dynamic=False,
+                )
         self._distributed_partition = _distributed_partition
         self._distributed_exchange = None
+        self._electric_half = None
+        self._magnetic_half = None
+        if self._fused_local_phases:
+            self._electric_half = _compile_fullgraph(
+                self._electric_half_update,
+                runtime,
+                device,
+                dynamic=False,
+            )
+            self._magnetic_half = _compile_fullgraph(
+                self._magnetic_half_update,
+                runtime,
+                device,
+                dynamic=False,
+            )
         simulation_factory = (
             type(self) if _auxiliary_factory is None else _auxiliary_factory
         )
@@ -1200,7 +1738,134 @@ class TorchSimulation:
         self._is_auxiliary = bool(_is_auxiliary)
         self.probes = TorchProbeBuffer(probes, simulation=self)
         self.plan_identity = self._compute_plan_identity()
+        self.compile_cache_key = self._compute_compile_cache_key()
         self._cuda_graphs = {}
+
+    def _compute_compile_cache_key(self):
+        if self.device.type == "cuda":
+            capability = torch.cuda.get_device_capability(self.device)
+        else:
+            capability = torch.backends.cpu.get_cpu_capability()
+        planner_only_suffixes = (
+            "_region_keys",
+            "_region_coefficient_indices",
+            "_target_region_indices",
+            "_tile_origins",
+            "_tile_region_indices",
+            "_positions",
+        )
+        inactive_prefixes = tuple(
+            f"bucket_{component_name.lower()}_{index}_"
+            for component_name, component in self.plan.components.items()
+            for index, bucket in enumerate(component.buckets)
+            if bucket.signature.model in {"const", "dielectric", "dummy"}
+        )
+
+        def buffer_layouts(module, *, plan=False, recurse=True):
+            layouts = []
+            for name, value in module.named_buffers(recurse=recurse):
+                if plan:
+                    if name.startswith(
+                        ("material_ids_", "underlying_ids_", "ownership_")
+                    ):
+                        continue
+                    if name.startswith(inactive_prefixes):
+                        continue
+                    if name.endswith(planner_only_suffixes):
+                        continue
+                    if name.endswith("_coefficients") and not name.endswith(
+                        "_cell_coefficients"
+                    ):
+                        continue
+                layouts.append(
+                    (
+                        name,
+                        str(value.device),
+                        str(value.dtype),
+                        str(value.layout),
+                        tuple(value.shape),
+                        tuple(value.stride()),
+                    )
+                )
+            return tuple(layouts)
+
+        signatures = tuple(
+            (component_name, index, repr(bucket.signature))
+            for component_name, component in self.plan.components.items()
+            for index, bucket in enumerate(component.buckets)
+        )
+        source_topology = tuple(
+            (
+                f"{type(batch).__module__}.{type(batch).__qualname__}",
+                batch.component,
+                getattr(batch, "paired_real", None),
+                getattr(batch, "auxiliary_component", None),
+                getattr(batch, "gaussian_width", None),
+            )
+            for batch in self.sources.batches
+        )
+        if self._fused_local_phases:
+            region_topology = "local-two-fused-half-steps"
+        elif self._distributed_partition is not None:
+            region_topology = "distributed-stencil-and-material-regions"
+        else:
+            region_topology = "local-eager-stencil-and-material-phases"
+        self._compiled_region_topology = region_topology
+        payload = (
+            TORCH_SOLVER_ABI,
+            torch.__version__,
+            capability,
+            str(self.dtype),
+            self.runtime.compile_policy,
+            self.runtime.compile_mode,
+            region_topology,
+            self._material_execution_representation,
+            self._dispersive_execution_representation,
+            (
+                self.runtime.experimental_dispersive_grouping_scope
+                if self._dispersive_overlay is not None
+                else None
+            ),
+            self._cpml_execution_representation,
+            self._view_mutation_representation,
+            self._dm2_execution_representation,
+            self._source_execution_representation,
+            self._phase_specialization,
+            tuple(self.plan.dr),
+            self.plan.dt,
+            self.plan.bloch,
+            self.state.paired_real,
+            self._fused_local_phases,
+            (
+                None
+                if self._distributed_partition is None
+                else self._distributed_partition.identity
+            ),
+            (
+                self._has_dm2,
+                DM2_MAX_ITERATIONS,
+                DM2_ITERATIONS_PER_CHUNK,
+                self._has_electric_constants,
+                self._has_magnetic_constants,
+                self._has_pml,
+            ),
+            tuple(sorted(self.plan.shapes.items())),
+            signatures,
+            source_topology,
+            tuple(
+                auxiliary.compile_cache_key for auxiliary in self.sources.auxiliaries
+            ),
+            buffer_layouts(self.plan, plan=True),
+            buffer_layouts(self.state, recurse=False),
+            tuple(buffer_layouts(bucket) for bucket in self.state.dm2_buckets),
+            (
+                buffer_layouts(self._dispersive_overlay)
+                if self._dispersive_overlay is not None
+                else ()
+            ),
+            buffer_layouts(self.sources) if self._fused_source_updates else (),
+        )
+        return hashlib.sha256(repr(payload).encode()).hexdigest()
 
     def _compute_plan_identity(self):
         digest = hashlib.sha256()
@@ -1235,6 +1900,7 @@ class TorchSimulation:
             state._scratch_ez,
             plan.dt,
             *plan.dr,
+            self._direct_view_mutations,
         )
 
     def _magnetic_arguments(self):
@@ -1255,11 +1921,16 @@ class TorchSimulation:
             state._scratch_hz,
             plan.dt,
             *plan.dr,
+            self._direct_view_mutations,
         )
 
     def _pml_executions(self, names, functions):
         executions = []
         paired_width = 2 if self.state.paired_real else None
+        residual_metadata = {
+            (metadata.component, metadata.bucket_index, metadata.axis): metadata
+            for metadata in self.plan.cpml_residual_axes
+        }
         for name in names:
             component = self.plan.components[name]
             for index, bucket in enumerate(component.buckets):
@@ -1269,15 +1940,58 @@ class TorchSimulation:
                 prefix = f"bucket_{name.lower()}_{index}"
                 state_prefix = f"pml_{name.lower()}_{index}"
                 flatten = (
-                    (lambda value: value.reshape(-1, paired_width))
-                    if paired_width is not None
-                    else (lambda value: value.reshape(-1))
+                    (lambda value: value)
+                    if self._direct_view_mutations
+                    else (
+                        (lambda value: value.reshape(-1, paired_width))
+                        if paired_width is not None
+                        else (lambda value: value.reshape(-1))
+                    )
                 )
                 terms = component.stencil
                 direction = 1.0
                 if name not in ELECTRIC_COMPONENTS:
                     terms = tuple(reversed(terms))
                     direction = -1.0
+                if bucket.cpml_residual_axes:
+                    for residual in bucket.cpml_residual_axes:
+                        metadata = residual_metadata[(name, index, residual.axis)]
+                        if metadata.target_count == 0:
+                            continue
+                        executions.append(
+                            (
+                                _cpml_residual_axis_update,
+                                (
+                                    flatten(self.state.field(name)),
+                                    flatten(
+                                        self.state.field(metadata.source_component)
+                                    ),
+                                    getattr(self.plan, f"{metadata.prefix}_targets"),
+                                    getattr(
+                                        self.plan,
+                                        f"{metadata.prefix}_stencil_indices",
+                                    ),
+                                    getattr(self.plan, f"{metadata.prefix}_parameters"),
+                                    getattr(
+                                        self.state, f"{metadata.state_prefix}_state"
+                                    ),
+                                    getattr(
+                                        self.state,
+                                        f"{metadata.state_prefix}_scratch0",
+                                    ),
+                                    getattr(
+                                        self.state,
+                                        f"{metadata.state_prefix}_scratch1",
+                                    ),
+                                    1.0 / self.plan.dr[metadata.scale_axis],
+                                    direction,
+                                    metadata.axis_sign,
+                                    self.plan.dt,
+                                    self._direct_view_mutations,
+                                ),
+                            )
+                        )
+                    continue
                 term1, term2 = terms
                 arguments = [
                     flatten(self.state.field(name)),
@@ -1296,6 +2010,7 @@ class TorchSimulation:
                 ]
                 if model == "cpml":
                     arguments.append(self.plan.dt)
+                arguments.append(self._direct_view_mutations)
                 executions.append((functions[model], tuple(arguments)))
         return tuple(executions)
 
@@ -1332,14 +2047,22 @@ class TorchSimulation:
             for axis in range(3):
                 if axis == component_axis or axis == skip_axis:
                     continue
-                destination = [slice(None)] * field.ndim
-                source = [slice(None)] * field.ndim
-                destination[axis] = -1 if high_from_low else 0
-                source[axis] = 0 if high_from_low else -1
+                destination_index = -1 if high_from_low else 0
+                source_index = 0 if high_from_low else -1
                 direction = 1 if high_from_low else -1
+                if self._direct_view_mutations:
+                    destination = _boundary_plane(field, axis, destination_index)
+                    source = _boundary_plane(field, axis, source_index)
+                else:
+                    destination_slice = [slice(None)] * field.ndim
+                    source_slice = [slice(None)] * field.ndim
+                    destination_slice[axis] = destination_index
+                    source_slice[axis] = source_index
+                    destination = field[tuple(destination_slice)]
+                    source = field[tuple(source_slice)]
                 self._rotate_or_copy(
-                    field[tuple(destination)],
-                    field[tuple(source)],
+                    destination,
+                    source,
                     self._boundary_angle(name, axis, direction),
                     getattr(self.state, f"_boundary_{name.lower()}_{axis}", None),
                 )
@@ -1367,15 +2090,20 @@ class TorchSimulation:
                 field.reshape(-1).index_copy_(0, targets, values)
 
     def _update_dm2(self):
-        for (
-            prepare,
-            prepare_args,
-            iterate,
-            iterate_args,
-            finalize,
-            finalize_args,
-            repetitions,
-        ) in self._dm2_updates:
+        for update in self._dm2_updates:
+            if len(update) == 2:
+                solve, solve_args = update
+                solve(*solve_args)
+                continue
+            (
+                prepare,
+                prepare_args,
+                iterate,
+                iterate_args,
+                finalize,
+                finalize_args,
+                repetitions,
+            ) = update
             prepare(*prepare_args)
             for _ in range(repetitions):
                 iterate(*iterate_args)
@@ -1400,21 +2128,60 @@ class TorchSimulation:
             )
 
     def _apply_dispersive(self):
+        if self._dispersive_overlay is not None:
+            for entry in self._dispersive_overlay.entries:
+                update_execution_entry(
+                    self.plan,
+                    self.state,
+                    self._dispersive_overlay,
+                    entry,
+                )
+            return
         for descriptor in self._dispersive_buckets:
             update_bucket(self.plan, self.state, descriptor)
 
-    def _electric_post_update(self):
+    def _electric_material_update(self):
         self._run_pml(self._electric_pml)
         if self._dispersive_buckets:
             self._dispersive()
-        self._update_dm2()
         if self._has_electric_constants:
             self._apply_constants(("Ex", "Ey", "Ez"))
 
-    def _magnetic_post_update(self):
+    def _magnetic_material_update(self):
         self._run_pml(self._magnetic_pml)
         if self._has_magnetic_constants:
             self._apply_constants(("Hx", "Hy", "Hz"))
+
+    def _electric_post_update(self):
+        self._electric_material()
+        self._update_dm2()
+
+    def _magnetic_post_update(self):
+        self._magnetic_material()
+
+    def _electric_half_update(self):
+        self._sync_magnetic_boundaries()
+        self._electric(*self._electric_args)
+        self._electric_post_update()
+        if self._fused_source_updates and not self.sources.empty:
+            self.sources.apply(
+                self,
+                electric=True,
+                time=self.state.source_time + 0.5 * self.state.time_step,
+                transparent_time=self.state.source_time,
+            )
+
+    def _magnetic_half_update(self):
+        self._sync_electric_boundaries()
+        self._magnetic(*self._magnetic_args)
+        self._magnetic_post_update()
+        if self._fused_source_updates and not self.sources.empty:
+            self.sources.apply(
+                self,
+                electric=False,
+                time=self.state.source_time + self.state.time_step,
+                transparent_time=self.state.source_time + self.state.time_step,
+            )
 
     def _run_compute_region(self, name, function):
         graph = self._cuda_graphs.get(name)
@@ -1431,19 +2198,25 @@ class TorchSimulation:
         if self._cuda_graphs:
             return self
         checkpoint = self.checkpoint()
-        regions = [
-            ("electric", lambda: self._electric(*self._electric_args)),
-            ("magnetic", lambda: self._magnetic(*self._magnetic_args)),
-        ]
-        if (
-            self._has_pml
-            or self._dispersive_buckets
-            or self._has_dm2
-            or self._has_electric_constants
-        ):
-            regions.append(("electric_post", self._electric_post_update))
-        if self._has_pml or self._has_magnetic_constants:
-            regions.append(("magnetic_post", self._magnetic_post_update))
+        if self._electric_half is not None:
+            regions = [
+                ("electric_half", self._electric_half),
+                ("magnetic_half", self._magnetic_half),
+            ]
+        else:
+            regions = [
+                ("electric", lambda: self._electric(*self._electric_args)),
+                ("magnetic", lambda: self._magnetic(*self._magnetic_args)),
+            ]
+            if (
+                self._has_pml
+                or self._dispersive_buckets
+                or self._has_dm2
+                or self._has_electric_constants
+            ):
+                regions.append(("electric_post", self._electric_post_update))
+            if self._has_pml or self._has_magnetic_constants:
+                regions.append(("magnetic_post", self._magnetic_post_update))
         for _name, function in regions:
             function()
         torch.cuda.synchronize(self.device)
@@ -1466,22 +2239,28 @@ class TorchSimulation:
         exchange = self._distributed_exchange
         split_axis = None if exchange is None else exchange.axis
         for _ in range(steps):
-            self._sync_magnetic_boundaries(skip_axis=split_axis)
-            if exchange is not None:
-                exchange.begin("magnetic")
-            self._run_compute_region(
-                "electric", lambda: self._electric(*self._electric_args)
-            )
-            if exchange is not None:
-                exchange.finish("magnetic")
-            self._run_compute_region("electric_post", self._electric_post_update)
-            if not self.sources.empty:
-                self.sources.apply(
-                    self,
-                    electric=True,
-                    time=self.state.source_time + 0.5 * self.state.time_step,
-                    transparent_time=self.state.source_time,
+            if self.device.type == "cuda" and self.runtime.compile_policy == "compile":
+                torch.compiler.cudagraph_mark_step_begin()
+            if self._electric_half is not None:
+                self._run_compute_region("electric_half", self._electric_half)
+            else:
+                self._sync_magnetic_boundaries(skip_axis=split_axis)
+                if exchange is not None:
+                    exchange.begin("magnetic")
+                self._run_compute_region(
+                    "electric", lambda: self._electric(*self._electric_args)
                 )
+                if exchange is not None:
+                    exchange.finish("magnetic")
+                self._run_compute_region("electric_post", self._electric_post_update)
+            if not self.sources.empty:
+                if not self._fused_source_updates:
+                    self.sources.apply(
+                        self,
+                        electric=True,
+                        time=self.state.source_time + 0.5 * self.state.time_step,
+                        transparent_time=self.state.source_time,
+                    )
                 self.sources.step_auxiliaries()
             if not self.probes.empty:
                 self.probes.record(
@@ -1489,22 +2268,26 @@ class TorchSimulation:
                     electric=True,
                     time=self.state.source_time + 0.5 * self.state.time_step,
                 )
-            self._sync_electric_boundaries(skip_axis=split_axis)
-            if exchange is not None:
-                exchange.begin("electric")
-            self._run_compute_region(
-                "magnetic", lambda: self._magnetic(*self._magnetic_args)
-            )
-            if exchange is not None:
-                exchange.finish("electric")
-            self._run_compute_region("magnetic_post", self._magnetic_post_update)
-            if not self.sources.empty:
-                self.sources.apply(
-                    self,
-                    electric=False,
-                    time=self.state.source_time + self.state.time_step,
-                    transparent_time=self.state.source_time + self.state.time_step,
+            if self._magnetic_half is not None:
+                self._run_compute_region("magnetic_half", self._magnetic_half)
+            else:
+                self._sync_electric_boundaries(skip_axis=split_axis)
+                if exchange is not None:
+                    exchange.begin("electric")
+                self._run_compute_region(
+                    "magnetic", lambda: self._magnetic(*self._magnetic_args)
                 )
+                if exchange is not None:
+                    exchange.finish("electric")
+                self._run_compute_region("magnetic_post", self._magnetic_post_update)
+            if not self.sources.empty:
+                if not self._fused_source_updates:
+                    self.sources.apply(
+                        self,
+                        electric=False,
+                        time=self.state.source_time + self.state.time_step,
+                        transparent_time=self.state.source_time + self.state.time_step,
+                    )
             if not self.probes.empty:
                 self.probes.record(
                     self,
@@ -1512,7 +2295,7 @@ class TorchSimulation:
                     time=self.state.source_time + self.state.time_step,
                 )
             self.state.source_time.add_(self.state.time_step)
-            self.state.step_count.add_(1)
+            self.state.step_count.add_(self.state._step_increment)
         return self
 
     def step(self):
@@ -1692,6 +2475,18 @@ class TorchSimulation:
         result = torch_runtime_diagnostics(self.runtime)
         result["resolved_device"] = str(self.device)
         result["cpu_threads"] = self.cpu_threads
+        result["cpu_interop_threads"] = torch.get_num_interop_threads()
+        result["compile_cache_key"] = self.compile_cache_key
+        result["compile_solver_abi"] = TORCH_SOLVER_ABI
+        result["compiled_region_topology"] = self._compiled_region_topology
+        result["material_execution_representation"] = (
+            self._material_execution_representation
+        )
+        result["cpml_execution_representation"] = self._cpml_execution_representation
+        result["view_mutation_representation"] = self._view_mutation_representation
+        result["dm2_execution_representation"] = self._dm2_execution_representation
+        result["phase_specialization"] = self._phase_specialization
+        result["cuda_graph_regions"] = tuple(sorted(self._cuda_graphs))
         result["material_plan"] = self.plan.decision_report()
         if self._has_dm2:
             self._dm2_iterations_host.copy_(self.state._dm2_iterations)
@@ -1723,8 +2518,13 @@ class TorchSimulation:
             "state_bytes": sum(
                 value.numel() * value.element_size()
                 for name, value in self.state.named_buffers(recurse=False)
-                if name.startswith("pml_") and name.endswith("_state")
+                if (name.startswith("pml_") or name.startswith("_pml_"))
+                and name.endswith("_state")
             ),
+            "active_axis_states": sum(
+                metadata.target_count for metadata in self.plan.cpml_residual_axes
+            ),
+            "execution_representation": self._cpml_execution_representation,
             "launches_per_step": len(self._electric_pml) + len(self._magnetic_pml),
         }
         result["dispersive"] = {
@@ -1735,7 +2535,46 @@ class TorchSimulation:
                 for name, value in self.state.state_dict().items()
                 if name.startswith("bucket_")
             ),
+            # Preserve the legacy logical count; grouped dispatches are reported below.
             "launches_per_step": len(self._dispersive_buckets),
+            "logical_buckets_per_step": len(self._dispersive_buckets),
+            "execution_representation": self._dispersive_execution_representation,
+            "experimental_grouping_scope": (
+                self.runtime.experimental_dispersive_grouping_scope
+                if self._dispersive_overlay is not None
+                else None
+            ),
+            "execution_entries_per_step": (
+                len(self._dispersive_overlay.entries)
+                if self._dispersive_overlay is not None
+                else len(self._dispersive_buckets)
+            ),
+            "exact_schema_groups": (
+                len(self._dispersive_overlay.groups)
+                if self._dispersive_overlay is not None
+                else 0
+            ),
+            "exact_schema_spans": (
+                tuple(
+                    {
+                        "component": group.component,
+                        "recurrence": group.recurrence,
+                        "target_count": group.target_count,
+                        "logical_spans": tuple(
+                            {
+                                "prefix": span.descriptor.prefix,
+                                "model": span.descriptor.model,
+                                "start": span.start,
+                                "stop": span.stop,
+                            }
+                            for span in group.spans
+                        ),
+                    }
+                    for group in self._dispersive_overlay.groups
+                )
+                if self._dispersive_overlay is not None
+                else ()
+            ),
             "state_width_policy": "exact",
             "padding_elements": 0,
             "padding_elements_avoided": sum(
@@ -1746,6 +2585,7 @@ class TorchSimulation:
             ),
         }
         result["sources"] = {
+            "execution_representation": self._source_execution_representation,
             "batches": len(self.sources.batches),
             "target_rows": sum(
                 value.numel()
@@ -1804,6 +2644,13 @@ class TorchSimulation:
                 for name, tensor in self.probes.named_buffers()
             }
         )
+        if self._dispersive_overlay is not None:
+            result.update(
+                {
+                    f"dispersive_overlay.{name}": tensor.data_ptr()
+                    for name, tensor in self._dispersive_overlay.named_buffers()
+                }
+            )
         for index, auxiliary in enumerate(self.sources.auxiliaries):
             result.update(
                 {

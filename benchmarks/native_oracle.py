@@ -20,14 +20,74 @@ import numpy as np
 ROOT = Path(__file__).resolve().parent
 DEFAULT_MANIFEST = ROOT / "native_oracle_workloads.json"
 COMPONENT_NAMES = ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")
+FIELD_INITIALIZER = "native-affine-ramp-v1"
 
 
 def load_manifest(path=DEFAULT_MANIFEST):
     """Load and validate the portable workload and frozen gate description."""
     data = json.loads(Path(path).read_text())
-    if data.get("schema_version") != 1:
+    if data.get("schema_version") != 2:
         raise ValueError("unsupported native oracle workload schema")
     reference = data["reference"]
+    observer_commit = reference.get("observer_commit", "")
+    if len(observer_commit) != 40 or any(
+        character not in "0123456789abcdef" for character in observer_commit
+    ):
+        raise ValueError("observer_commit must be a full lowercase Git commit")
+    performance_summary_sha256 = reference.get("performance_summary_sha256", "")
+    if len(performance_summary_sha256) != 64 or any(
+        character not in "0123456789abcdef" for character in performance_summary_sha256
+    ):
+        raise ValueError(
+            "performance_summary_sha256 must be a lowercase SHA-256 digest"
+        )
+    if reference.get("field_initializer") != FIELD_INITIALIZER:
+        raise ValueError("unsupported native oracle field initializer")
+    for name in (
+        "performance_warmup_steps",
+        "performance_steps_per_repeat",
+        "performance_repetitions",
+        "performance_profile_steps",
+    ):
+        if not isinstance(reference.get(name), int) or reference[name] < 1:
+            raise ValueError(f"{name} must be a positive integer")
+    acceptance = data.get("performance_gates", {}).get("cpu_acceptance", {})
+    known_cases = {
+        case["name"]
+        for group in ("correctness", "benchmarks")
+        for case in data.get(group, ())
+    }
+    cases = acceptance.get("cases")
+    if (
+        not isinstance(cases, list)
+        or not cases
+        or len(cases) != len(set(cases))
+        or any(case not in known_cases for case in cases)
+    ):
+        raise ValueError("cpu_acceptance cases must be unique known workloads")
+    if acceptance.get("thread_modes") != ["one", "physical"]:
+        raise ValueError("cpu_acceptance thread_modes must be one and physical")
+    if acceptance.get("precision") != "float64":
+        raise ValueError("cpu_acceptance precision must be float64")
+    ratio = acceptance.get("max_individual_ratio")
+    if not isinstance(ratio, (int, float)) or ratio < 1:
+        raise ValueError("cpu_acceptance max_individual_ratio must be at least one")
+    statistics = acceptance.get("statistics", {})
+    if statistics.get("method") != "independent-stratified-bootstrap-log-geomean-v1":
+        raise ValueError("unsupported cpu_acceptance statistics method")
+    if not isinstance(statistics.get("resamples"), int) or statistics["resamples"] < 1:
+        raise ValueError("cpu_acceptance resamples must be a positive integer")
+    if not isinstance(statistics.get("seed"), int):
+        raise ValueError("cpu_acceptance seed must be an integer")
+    confidence = statistics.get("one_sided_confidence")
+    if not isinstance(confidence, (int, float)) or not 0 < confidence < 1:
+        raise ValueError("cpu_acceptance confidence must be between zero and one")
+    regression_ratio = statistics.get("regression_ratio")
+    if not isinstance(regression_ratio, (int, float)) or regression_ratio <= 0:
+        raise ValueError("cpu_acceptance regression_ratio must be positive")
+    relative_mad = statistics.get("max_relative_mad")
+    if not isinstance(relative_mad, (int, float)) or not 0 <= relative_mad < 1:
+        raise ValueError("cpu_acceptance max_relative_mad must be in [0, 1)")
     if reference["capture_steps"] != sorted(set(reference["capture_steps"])):
         raise ValueError("capture_steps must be unique and increasing")
     cases = (
@@ -374,13 +434,17 @@ def build_simulation(spec, gmes):
     )
 
 
-def initialize_fields(simulation, seed, scale=1e-3):
-    """Fill every active field with fixed-seed nonzero values."""
+def initial_field_values(shapes, seed, scale=1e-3, *, complex_fields=False):
+    """Build backend-neutral fixed-seed fields in canonical component order."""
+    if set(shapes) != set(COMPONENT_NAMES):
+        raise ValueError("field shapes must contain all canonical Yee components")
     rng = np.random.default_rng(seed)
-    for field in simulation.field.values():
+    result = {}
+    for name in COMPONENT_NAMES:
+        shape = tuple(int(length) for length in shapes[name])
         values = scale * (1 + 0.1 * rng.random())
-        for axis, length in enumerate(field.shape):
-            ramp_shape = [1] * field.ndim
+        for axis, length in enumerate(shape):
+            ramp_shape = [1] * len(shape)
             ramp_shape[axis] = length
             values = values + (
                 scale
@@ -388,9 +452,26 @@ def initialize_fields(simulation, seed, scale=1e-3):
                 * (axis + 1)
                 * np.linspace(0, 1, length).reshape(ramp_shape)
             )
-        if np.issubdtype(field.dtype, np.complexfloating):
+        if complex_fields:
             values = values + 1j * scale * (1 + 0.1 * rng.random())
-        field[...] = values
+        result[name] = np.broadcast_to(values, shape).copy()
+    return result
+
+
+def initialize_fields(simulation, seed, scale=1e-3):
+    """Fill every active field with fixed-seed nonzero values."""
+    shapes = {
+        component.__name__: tuple(field.shape)
+        for component, field in simulation.field.items()
+    }
+    values = initial_field_values(
+        shapes,
+        seed,
+        scale,
+        complex_fields=simulation.cmplx,
+    )
+    for component, field in simulation.field.items():
+        field[...] = values[component.__name__]
         if not np.all(field != 0):
             raise AssertionError("oracle seed unexpectedly produced a zero field value")
 
@@ -926,6 +1007,15 @@ def benchmark_case(spec, manifest, repeats, warmup, steps):
     warmup_seconds = perf_counter() - start
     one_step_samples = []
     for _ in range(repeats):
+        simulation = build_simulation(spec, gmes)
+        simulation.init()
+        initialize_fields(
+            simulation,
+            manifest["reference"]["seed"],
+            manifest["reference"]["field_scale"],
+        )
+        for _ in range(warmup):
+            simulation.step()
         start = perf_counter()
         simulation.step()
         one_step_samples.append(perf_counter() - start)
@@ -949,9 +1039,19 @@ def benchmark_case(spec, manifest, repeats, warmup, steps):
     final_records = _updater_records(simulation, "benchmark", {})
     elapsed_cells = sum(record["cells"] for record in final_records) * steps
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "backend": "native",
         "workload": spec,
+        "benchmark_contract": {
+            "initializer": FIELD_INITIALIZER,
+            "seed": manifest["reference"]["seed"],
+            "field_scale": manifest["reference"]["field_scale"],
+            "warmup_steps": warmup,
+            "steps_per_repeat": steps,
+            "repetitions": repeats,
+            "timer": "time.perf_counter",
+            "sample_start": "independently-rebuilt-post-warmup-state",
+        },
         "environment": environment_metadata(gmes),
         "measurements": {
             "construction": _timing_summary(construction),

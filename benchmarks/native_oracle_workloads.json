@@ -1,11 +1,18 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "reference": {
     "commit": "d87d25afd160d96b1fa0890cacecd90802448d57",
     "tag": "native-oracle-d87d25a",
     "observer_tag": "native-oracle-observer-v4",
+    "observer_commit": "11ac12d4992ad85b19b414b837383b392904a131",
+    "performance_summary_sha256": "a81b87e8cb2870d2fbbf1bbb7409c98d10780da30eb23cb5965fce39b9109fb6",
+    "field_initializer": "native-affine-ramp-v1",
     "field_scale": 0.001,
     "seed": 115,
+    "performance_warmup_steps": 5,
+    "performance_steps_per_repeat": 100,
+    "performance_repetitions": 15,
+    "performance_profile_steps": 5,
     "capture_steps": [1, 2, 5, 20, 100],
     "precondition_steps": 2
   },
@@ -73,6 +80,21 @@
   "performance_gates": {
     "cpu_crossover": {"cases": ["cpu-crossover-2d", "cpu-crossover-3d"], "sizes": [[16, 16, 0], [16, 16, 16]], "resolutions": [10, 4], "repeats": 15, "threads": [1, "physical"]},
     "cpu_large": {"cases": ["cpu-large-2d", "cpu-large-3d"], "sizes": [[64, 64, 0], [32, 32, 32]], "resolutions": [10, 4], "repeats": 15, "threads": [1, "physical"], "max_individual_regression_percent": 5, "geomean_regression": "not-statistically-meaningful"},
+    "cpu_acceptance": {
+      "contract_id": "cpu-acceptance-v1",
+      "cases": ["cpu-crossover-2d", "cpu-crossover-3d", "cpu-large-2d", "cpu-large-3d", "bloch-2d", "bloch-3d"],
+      "thread_modes": ["one", "physical"],
+      "precision": "float64",
+      "max_individual_ratio": 1.05,
+      "statistics": {
+        "method": "independent-stratified-bootstrap-log-geomean-v1",
+        "resamples": 20000,
+        "seed": 123,
+        "one_sided_confidence": 0.95,
+        "regression_ratio": 1.0,
+        "max_relative_mad": 0.05
+      }
+    },
     "single_gpu": {"cases": ["single-gpu-2d", "single-gpu-3d"], "sizes": [[256, 256, 0], [96, 96, 96]], "resolutions": [4, 1], "repeats": 15, "devices": [0], "large_mixed_minimum_native_cpu_speedup": 2.0},
     "two_gpu": {"cases": ["two-gpu-2d", "two-gpu-3d"], "sizes": [[384, 256, 0], [128, 96, 96]], "resolutions": [4, 1], "repeats": 15, "devices": [0, 1], "strong_scaling_minimum": 1.6, "weak_scaling_efficiency_minimum": 0.8},
     "coverage_percent": [1, 10, 50, 90],

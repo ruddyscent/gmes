@@ -100,6 +100,8 @@ class _TorchProbeRing(nn.Module):
         )
 
     def record(self, field, time):
+        """Copy one field sample and its time into the device ring."""
+
         slot = torch.remainder(self.write_count, self.capacity).reshape(1)
         self.samples.index_copy_(0, slot, field[self.index].unsqueeze(0))
         self.times.index_copy_(0, slot, time.reshape(1))
@@ -108,6 +110,8 @@ class _TorchProbeRing(nn.Module):
 
     @torch.inference_mode()
     def flush(self):
+        """Return chronological host samples and reset the ring cursor."""
+
         count = int(self.write_count.detach().cpu())
         total = int(self.total_count.detach().cpu())
         available = min(count, self.capacity)
@@ -134,6 +138,13 @@ class TorchProbeBuffer(nn.Module):
     """A set of bounded overwrite-on-backpressure device probe rings."""
 
     def __init__(self, specs, *, simulation):
+        """Allocate bounded device rings for probe specifications.
+
+        Args:
+            specs: Iterable of TorchProbeSpec values.
+            simulation: Simulation providing field shapes, device, and dtype.
+        """
+
         super().__init__()
         rings = []
         for spec in specs:
@@ -154,9 +165,13 @@ class TorchProbeBuffer(nn.Module):
 
     @property
     def empty(self):
+        """Return whether no probe rings are configured."""
+
         return not self.rings
 
     def record(self, simulation, *, electric, time):
+        """Record probes belonging to one electric or magnetic half step."""
+
         prefix = "E" if electric else "H"
         for ring in self.rings:
             if ring.component.startswith(prefix):
@@ -169,12 +184,16 @@ class TorchProbeBuffer(nn.Module):
 
     @torch.inference_mode()
     def checkpoint(self):
+        """Clone device ring state for inclusion in a simulation checkpoint."""
+
         return {
             name: value.detach().clone() for name, value in self.state_dict().items()
         }
 
     @torch.inference_mode()
     def load_checkpoint(self, values):
+        """Restore compatible ring tensors from a checkpoint mapping."""
+
         expected = self.state_dict()
         if set(values) != set(expected):
             raise ValueError("probe checkpoint keys do not match the configured probes")

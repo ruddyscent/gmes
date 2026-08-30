@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
+"""Run legacy NumPy and native-kernel finite-difference time-domain simulations."""
 
 from cmath import exp as cexp
 from copy import deepcopy
@@ -525,6 +526,8 @@ class FDTD(object):
             aggregate.merge(pw_obj)
 
     def init_material(self):
+        """Map geometry materials to native update objects for active fields."""
+
         init_mat_func = {
             Ex: self.init_material_ex,
             Ey: self.init_material_ey,
@@ -571,6 +574,8 @@ class FDTD(object):
             updater.finalize(component_id, *shapes)
 
     def init_source_ex(self):
+        """Build and aggregate native source updates for the Ex field."""
+
         self.pw_source[Ex] = {}
         for so in self.src_list:
             pw_src = so.get_pw_source_ex(self.ex, self.space, self.geom_tree)
@@ -584,6 +589,8 @@ class FDTD(object):
                 self.pw_source[Ex][type(pw_src)] = pw_src
 
     def init_source_ey(self):
+        """Build and aggregate native source updates for the Ey field."""
+
         self.pw_source[Ey] = {}
         for so in self.src_list:
             pw_src = so.get_pw_source_ey(self.ey, self.space, self.geom_tree)
@@ -597,6 +604,8 @@ class FDTD(object):
                 self.pw_source[Ey][type(pw_src)] = pw_src
 
     def init_source_ez(self):
+        """Build and aggregate native source updates for the Ez field."""
+
         self.pw_source[Ez] = {}
         for so in self.src_list:
             pw_src = so.get_pw_source_ez(self.ez, self.space, self.geom_tree)
@@ -610,6 +619,8 @@ class FDTD(object):
                 self.pw_source[Ez][type(pw_src)] = pw_src
 
     def init_source_hx(self):
+        """Build and aggregate native source updates for the Hx field."""
+
         self.pw_source[Hx] = {}
         for so in self.src_list:
             pw_src = so.get_pw_source_hx(self.hx, self.space, self.geom_tree)
@@ -623,6 +634,8 @@ class FDTD(object):
                 self.pw_source[Hx][type(pw_src)] = pw_src
 
     def init_source_hy(self):
+        """Build and aggregate native source updates for the Hy field."""
+
         self.pw_source[Hy] = {}
         for so in self.src_list:
             pw_src = so.get_pw_source_hy(self.hy, self.space, self.geom_tree)
@@ -636,6 +649,8 @@ class FDTD(object):
                 self.pw_source[Hy][type(pw_src)] = pw_src
 
     def init_source_hz(self):
+        """Build and aggregate native source updates for the Hz field."""
+
         self.pw_source[Hz] = {}
         for so in self.src_list:
             pw_src = so.get_pw_source_hz(self.hz, self.space, self.geom_tree)
@@ -649,6 +664,8 @@ class FDTD(object):
                 self.pw_source[Hz][type(pw_src)] = pw_src
 
     def init_source(self):
+        """Map configured sources to native updates for all active fields."""
+
         init_src_func = {
             Ex: self.init_source_ex,
             Ey: self.init_source_ey,
@@ -673,10 +690,11 @@ class FDTD(object):
                 self._print_pw_obj(self.pw_source[comp])
 
     def set_probe(self, p, prefix=None):
-        """
-        p: space coordinates. type: tuple-3
-        prefix: prefix of the recording file name. type: str
+        """Attach text-file probes for active fields at a physical point.
 
+        Args:
+            p: Three-dimensional physical coordinates of the probe.
+            prefix: Optional output filename prefix. Component suffixes are added.
         """
         spc2idx = {
             Ex: self.space.space_to_ex_index,
@@ -739,6 +757,8 @@ class FDTD(object):
                 self.h_recorder.append(recorder)
 
     def update_ex(self):
+        """Update the Ex array in place using mapped materials and sources."""
+
         for pw_obj in self.pw_material[Ex].values():
             pw_obj.update_all(
                 self.ex,
@@ -762,6 +782,8 @@ class FDTD(object):
             )
 
     def update_ey(self):
+        """Update the Ey array in place using mapped materials and sources."""
+
         for pw_obj in self.pw_material[Ey].values():
             pw_obj.update_all(
                 self.ey,
@@ -785,6 +807,8 @@ class FDTD(object):
             )
 
     def update_ez(self):
+        """Update the Ez array in place using mapped materials and sources."""
+
         for pw_obj in self.pw_material[Ez].values():
             pw_obj.update_all(
                 self.ez,
@@ -808,6 +832,8 @@ class FDTD(object):
             )
 
     def update_hx(self):
+        """Update the Hx array in place using mapped materials and sources."""
+
         for pw_obj in self.pw_material[Hx].values():
             pw_obj.update_all(
                 self.hx,
@@ -831,6 +857,8 @@ class FDTD(object):
             )
 
     def update_hy(self):
+        """Update the Hy array in place using mapped materials and sources."""
+
         for pw_obj in self.pw_material[Hy].values():
             pw_obj.update_all(
                 self.hy,
@@ -854,6 +882,8 @@ class FDTD(object):
             )
 
     def update_hz(self):
+        """Update the Hz array in place using mapped materials and sources."""
+
         for pw_obj in self.pw_material[Hz].values():
             pw_obj.update_all(
                 self.hz,
@@ -1165,6 +1195,13 @@ class FDTD(object):
         )
 
     def step(self):
+        """Advance electric and magnetic fields by one complete time step.
+
+        The method mutates all active field arrays, advances time_step by two
+        half steps, exchanges halo data, advances auxiliary simulations, and
+        records configured probes.
+        """
+
         self.time_step.half_step_up()
 
         for comp in self.h_field_compnt:

@@ -1,6 +1,8 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
+"""Define temporal waveforms and spatial sources for legacy FDTD simulations."""
+
 from cmath import exp as cexp
 from copy import deepcopy
 from math import cos, exp, pi, sin, sqrt
@@ -44,12 +46,18 @@ class SrcTime(object):
     """Time-dependent part of a source."""
 
     def init(self, cmplx):
+        """Configure whether oscillator values must retain a complex phase."""
+
         raise NotImplementedError
 
     def oscillator(self, time):
+        """Return the source amplitude at a physical simulation time."""
+
         raise NotImplementedError
 
     def display_info(self, indent=0):
+        """Print a human-readable waveform summary."""
+
         raise NotImplementedError
 
 
@@ -57,30 +65,48 @@ class Src(object):
     """Space-dependent part of a source."""
 
     def display_info(self, indent=0):
+        """Print a human-readable spatial source summary."""
+
         raise NotImplementedError
 
     def init(self, geom_tree, space, cmplx):
+        """Bind geometry and grid state before point-wise source lowering."""
+
         raise NotImplementedError
 
     def step(self):
+        """Advance any auxiliary simulation owned by the source."""
+
         raise NotImplementedError
 
     def get_pw_source_ex(self, ex_field, space, geom_tree):
+        """Return an Ex point-wise updater, or None when the source is inactive."""
+
         raise NotImplementedError
 
     def get_pw_source_ey(self, ey_field, space, geom_tree):
+        """Return an Ey point-wise updater, or None when the source is inactive."""
+
         raise NotImplementedError
 
     def get_pw_source_ez(self, ez_field, space, geom_tree):
+        """Return an Ez point-wise updater, or None when the source is inactive."""
+
         raise NotImplementedError
 
     def get_pw_source_hx(self, hx_field, space, geom_tree):
+        """Return an Hx point-wise updater, or None when the source is inactive."""
+
         raise NotImplementedError
 
     def get_pw_source_hy(self, hy_field, space, geom_tree):
+        """Return an Hy point-wise updater, or None when the source is inactive."""
+
         raise NotImplementedError
 
     def get_pw_source_hz(self, hz_field, space, geom_tree):
+        """Return an Hz point-wise updater, or None when the source is inactive."""
+
         raise NotImplementedError
 
 
@@ -186,10 +212,11 @@ class DifferentiatedGaussian(SrcTime):
     """
 
     def __init__(self, tw, t0):
-        """
-        tw: half-width of pulse
-        t0: dealy time
+        """Initialize a differentiated Gaussian pulse.
 
+        Args:
+            tw: Pulse half-width in simulation time units.
+            t0: Delay to the pulse center in simulation time units.
         """
         self.tw = float(tw)
         self.t0 = float(t0)
@@ -214,6 +241,16 @@ class DifferentiatedGaussian(SrcTime):
 
 
 class PointSource(Src):
+    """Inject a temporal waveform into one field or current component.
+
+    Args:
+        src_time: Temporal waveform implementing the SrcTime contract.
+        center: Three-dimensional physical source location.
+        component: Field or current component class to excite.
+        amp: Scalar source amplitude.
+        filename: Optional path for recording evaluated source values.
+    """
+
     def __init__(self, src_time, center, component, amp=1, filename=None):
         self.center = np.array(center, np.double)
         self.comp = component
@@ -437,6 +474,8 @@ class TotalFieldScatteredField(Src):
         self.src_time.display_info(4)
 
     def mode_function(self, x, y, z):
+        """Return the unit spatial mode amplitude for a plane wave."""
+
         return 1.0
 
     def _dist_from_center(self, point):
@@ -506,7 +545,8 @@ class TotalFieldScatteredField(Src):
         return zeta * wave_number
 
     def _3d_dispersion_relation(self, zeta, v, omega, ds, dt, k):
-        """
+        """Evaluate the three-dimensional numerical dispersion residual.
+
         Keyword arguments:
         zeta: a scalar factor which is yet to be determined.
         v: the phase speed of the wave in the default medium.
@@ -526,7 +566,8 @@ class TotalFieldScatteredField(Src):
         return lhs - rhs
 
     def _1d_dispersion_relation(self, ds, zeta, v, omega, dt, k):
-        """
+        """Evaluate the one-dimensional numerical dispersion residual.
+
         Keyword arguments:
         ds: an 1D cell-size which is yet to be determined
         zeta: the scalar factor which relates the true and numerical
@@ -634,7 +675,8 @@ class TotalFieldScatteredField(Src):
     def _get_pw_source(
         self, space, component, cosine, field, low_idx, high_idx, source, samp_i2s, face
     ):
-        """
+        """Build one transparent point-wise source aggregate.
+
         Keyword arguments:
         space - the Coordinate object given as a FDTD argument
         component - Specify the field component
@@ -1580,25 +1622,17 @@ class GaussianBeam(TotalFieldScatteredField):
         waist=inf,
         amp=1,
     ):
-        """
+        """Initialize a transparent Gaussian-beam interface.
 
-        Keyword arguments:
-        directivity -- directivity of the incidence interface.
-           type: a child class of constant.Directional.
-        center -- center of the incidence interface. The beam axis crosses
-                  this point.
-           type: a tuple with three real numbers.
-        size --  size of the incidence interface plane.
-           type: a tuple with three real numbers.
-        direction -- propagation direction of the beam.
-           type: a tuple with three real numbers.
-        polarization -- electric field direction of the beam.
-           type: a tuple with three real numbers.
-        waist -- the Gaussian beam radius. The default is inf.
-           type: a tuple with three real numbers.
-        amp -- amplitude of the plane wave. The default is 1.
-           type: a tuple with three real numbers.
-
+        Args:
+            src_time: Temporal waveform of the incident beam.
+            directivity: Directional class selecting the interface face.
+            center: Three-dimensional center of the interface and beam axis.
+            size: Three-dimensional interface extents.
+            direction: Beam propagation vector.
+            polarization: Electric-field polarization vector.
+            waist: Gaussian beam radius in space units.
+            amp: Peak incident-wave amplitude.
         """
         TotalFieldScatteredField.__init__(
             self, src_time, center, size, direction, polarization, amp
@@ -1771,6 +1805,8 @@ class GaussianBeam(TotalFieldScatteredField):
 
 class _GaussianBeamSrcTime(object):
     class EX(object):
+        """Expose the auxiliary Ex field multiplied by the beam envelope."""
+
         def __init__(self, outer):
             self.outer = outer
 
@@ -1778,6 +1814,8 @@ class _GaussianBeamSrcTime(object):
             return self.outer.envelope() * self.outer.aux_fdtd.ex[idx]
 
     class HY(object):
+        """Expose the auxiliary Hy field multiplied by the beam envelope."""
+
         def __init__(self, outer):
             self.outer = outer
 
@@ -1794,11 +1832,15 @@ class _GaussianBeamSrcTime(object):
         self.t = 0
 
     def step(self):
+        """Advance the auxiliary FDTD and update envelope time."""
+
         self.aux_fdtd.step()
         self.n += 1
         self.t = self.n * self.aux_fdtd.time_step.dt
 
     def envelope(self):
+        """Return the smooth Gaussian-beam startup envelope."""
+
         width = self.aux_fdtd.src_list[0].src_time.width
         if self.t < width:
             env = sin(0.5 * pi * self.t / width) ** 2

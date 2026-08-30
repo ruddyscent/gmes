@@ -389,6 +389,8 @@ class TorchSourcePlan(nn.Module):
 
     @property
     def empty(self):
+        """Return whether the plan contains no source batches."""
+
         return not self.batches
 
     def apply(self, simulation, *, electric, time, transparent_time):
@@ -403,6 +405,8 @@ class TorchSourcePlan(nn.Module):
                 batch.apply(simulation.state.field(batch.component), batch_time)
 
     def step_auxiliaries(self):
+        """Advance every device-resident auxiliary source simulation once."""
+
         for auxiliary in self.auxiliaries:
             auxiliary.step()
 

@@ -134,6 +134,10 @@ extend_skip = [
 
 [tool.pylint.main]
 py-version = "3.14"
+load-plugins = [
+    "pylint.extensions.docparams",
+    "pylint.extensions.docstyle",
+]
 extension-pkg-allow-list = [
     "gmes._constant",
     "gmes._pw_material",
@@ -146,9 +150,22 @@ ignore-patterns = [
 [tool.pylint.messages_control]
 disable = ["all"]
 enable = [
+    "bad-docstring-quotes",
+    "differing-param-doc",
+    "docstring-first-line-empty",
+    "empty-docstring",
+    "missing-any-param-doc",
+    "missing-class-docstring",
+    "missing-function-docstring",
+    "missing-module-docstring",
+    "missing-param-doc",
+    "missing-raises-doc",
+    "missing-return-doc",
+    "missing-yield-doc",
     "possibly-used-before-assignment",
     "syntax-error",
     "undefined-variable",
+    "useless-param-doc",
     "used-before-assignment",
 ]
 

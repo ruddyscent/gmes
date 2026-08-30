@@ -1,6 +1,8 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
+"""Display live field slices and material snapshots with Matplotlib."""
+
 from threading import Thread
 
 import numpy as np
@@ -165,6 +167,8 @@ class ShowLine(Thread):
         self.window_title = "GMES" + " " + str(fdtd.space.cart_comm.Get_topo()[2])
 
     def animate(self):
+        """Refresh the plotted line and schedule the next GUI update."""
+
         self.line.set_ydata(self.ydata)
         self.line.recache()
         self.time_note.set_text(self.note_form % self.time_step.t)
@@ -174,6 +178,8 @@ class ShowLine(Thread):
             window.after(self.interval, self.animate)
 
     def run(self):
+        """Create and run the one-dimensional Matplotlib view."""
+
         self.manager = new_figure_manager(self.id)
         ax = self.manager.canvas.figure.add_subplot(111)
         (self.line,) = ax.plot(self.xdata, self.ydata)
@@ -341,6 +347,8 @@ class ShowPlane(Thread):
         self.note_form = "time: %f"
 
     def animate(self):
+        """Refresh the plotted plane and schedule the next GUI update."""
+
         self.im.set_data(self.data)
         self.time_note.set_text(self.note_form % self.time_step.t)
         self.manager.canvas.draw()
@@ -349,6 +357,8 @@ class ShowPlane(Thread):
             window.after(self.interval, self.animate)
 
     def run(self):
+        """Create and run the two-dimensional Matplotlib view."""
+
         self.manager = new_figure_manager(self.id)
         ax = self.manager.canvas.figure.add_subplot(111)
         self.im = ax.imshow(
@@ -538,6 +548,8 @@ class Snapshot(Thread):
         self.id = fig_id
 
     def run(self):
+        """Create and display the static material snapshot."""
+
         self.manager = new_figure_manager(self.id)
         ax = self.manager.canvas.figure.add_subplot(111)
         self.im = ax.imshow(

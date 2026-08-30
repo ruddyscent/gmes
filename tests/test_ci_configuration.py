@@ -31,6 +31,14 @@ class CiConfigurationTest(unittest.TestCase):
         self.assertIn("GMES_ENABLE_OPENMP=1 uv build", self.ci_workflow)
         self.assertIn("GMES_ENABLE_OPENMP=auto uv build", self.ci_workflow)
 
+    def test_macos_default_suite_runs_without_plot_extra(self):
+        self.assertIn(
+            """- name: Install macOS test dependencies without plot extra
+        if: runner.os == 'macOS'
+        run: uv sync --locked --extra torch-cpu --extra hdf5""",
+            self.ci_workflow,
+        )
+
     def test_prerelease_is_scheduled_advisory_using_nightly_wheels(self):
         self.assertIn("name: Python prerelease (advisory)", self.prerelease_workflow)
         self.assertIn("schedule:", self.prerelease_workflow)

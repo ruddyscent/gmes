@@ -880,10 +880,22 @@ def _cpml_bucket_update(
 
 
 class TorchSimulation:
-    """Breaking Torch-only construction and execution API.
+    """Plan and execute FDTD field updates with PyTorch tensors.
 
     Geometry construction and host conversion are deliberately separate from
     the electric, magnetic, PML, dispersive, source, and observation phases.
+
+    Examples:
+        Run two eager CPU steps with double-precision field tensors:
+
+        >>> import gmes
+        >>> runtime = gmes.TorchRuntimeConfig(device="cpu", cpu_threads=1)
+        >>> simulation = gmes.TorchSimulation(
+        ...     space=gmes.Cartesian(size=(2, 2, 2), resolution=2),
+        ...     geometry=[gmes.DefaultMedium(gmes.Dielectric())],
+        ...     runtime=runtime,
+        ... )
+        >>> _ = simulation.advance(2)
     """
 
     def __init__(
@@ -901,6 +913,29 @@ class TorchSimulation:
         _distributed_partition=None,
         _auxiliary_factory=None,
     ):
+        """Lower geometry and allocate fixed-shape device state.
+
+        Args:
+            space: Cartesian simulation grid.
+            geometry: Iterable of initialized-compatible geometric objects.
+            runtime: Explicit device, real dtype, threading, and compiler policy.
+            courant_ratio: Fraction of the Courant stability limit.
+            dt: Optional explicit time step in simulation-time units.
+            bloch: Optional three-component Bloch wave vector. When present,
+                fields use a trailing length-two real plane for complex values.
+            sources: Legacy or Torch source specifications to lower.
+            probes: Bounded Torch probe specifications.
+
+        Raises:
+            TorchConfigurationError: If the runtime or launch is unsupported.
+            ValueError: If geometry does not contain a default medium.
+
+        Note:
+            Construction sets PyTorch's CPU thread count for the process and
+            allocates mutable field, material-state, source, probe, and scratch
+            buffers on the requested device. Host conversion remains explicit.
+        """
+
         if not isinstance(runtime, TorchRuntimeConfig):
             raise TypeError("runtime must be a TorchRuntimeConfig")
         runtime.validate_static()

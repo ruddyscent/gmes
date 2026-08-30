@@ -1,6 +1,8 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
+"""Build GMES native extensions and generated SWIG proxy modules."""
+
 # System imports
 import os
 import sys
@@ -31,6 +33,8 @@ class BuildExt(build_ext):
     """Configure native extensions and copy generated SWIG proxies."""
 
     def build_extensions(self):
+        """Configure OpenMP, build native modules, and copy generated proxies."""
+
         self._configure_openmp()
         super().build_extensions()
 

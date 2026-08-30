@@ -1,6 +1,8 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
+"""Aggregate per-cell source parameters into legacy field-update kernels."""
+
 import sys
 from math import cos, floor, pi, sin
 
@@ -12,23 +14,33 @@ from . import constant as const
 
 
 class PwSourceParam(object):
+    """Base marker for parameters attached to one point-wise source cell."""
+
     pass
 
 
 class PwSource(object):
+    """Aggregate source parameters by field index and update them in place."""
+
     def __init__(self):
         self._param = {}
 
     def name(self):
+        """Return the descriptive source-kernel name."""
+
         raise NotImplementedError
 
     def attach(self, idx, parameter):
+        """Attach source parameters to an array index, replacing duplicates."""
+
         key = tuple(idx)
         if key in self._param:
             sys.stderr.write("Overwriting the existing index.\n")
         self._param[tuple(idx)] = parameter
 
     def merge(self, ps):
+        """Merge another compatible point-wise source into this aggregate."""
+
         for idx, param in ps._param.items():
             if idx in self._param and isinstance(self._param[idx], TransparentParam):
                 self._param[idx].merge(param)
@@ -36,9 +48,13 @@ class PwSource(object):
                 self._param[idx] = param
 
     def idx_size(self):
+        """Return the number of indexed source updates."""
+
         return len(self._param)
 
     def update_all(self, inplace_field, in_field1, in_field2, d1, d2, dt, n):
+        """Apply every indexed source update to the destination field in place."""
+
         for idx, param in self._param.items():
             self._update(inplace_field, in_field1, in_field2, d1, d2, dt, n, idx, param)
 
@@ -47,6 +63,8 @@ class PwSource(object):
 
 
 class PointSourceParam(PwSourceParam):
+    """Store one point source waveform, amplitude, medium, and optional output."""
+
     def __init__(
         self, src_time=None, amp=1, comp=None, eps_inf=1, mu_inf=1, filename=None
     ):
@@ -68,15 +86,15 @@ def _record_source_value(output, time, value):
 
 
 class PointSourceElectric(PwSource):
+    """Apply electric-field or electric-current point sources."""
+
     def name(self):
+        """Return the electric point-source kernel name."""
+
         return "PointSourceElectric"
 
     def _update(self, e, h1, h2, dr1, dr2, dt, n, idx, param):
-        """
-        This _update should be called after that the pw_material._update
-        is called.
-
-        """
+        """Apply one electric source after its material update."""
         src_t = param.amp * param.src_time.oscillator(dt * n)
         if param.f:
             _record_source_value(param.f, dt * n, src_t)
@@ -88,27 +106,33 @@ class PointSourceElectric(PwSource):
 
 
 class PointSourceEx(PointSourceElectric):
+    """Apply an x-directed electric point source."""
+
     pass
 
 
 class PointSourceEy(PointSourceElectric):
+    """Apply a y-directed electric point source."""
+
     pass
 
 
 class PointSourceEz(PointSourceElectric):
+    """Apply a z-directed electric point source."""
+
     pass
 
 
 class PointSourceMagnetic(PwSource):
+    """Apply magnetic-field or magnetic-current point sources."""
+
     def name(self):
+        """Return the magnetic point-source kernel name."""
+
         return "PointSourceMagnetic"
 
     def _update(self, h, e1, e2, dr1, dr2, dt, n, idx, param):
-        """
-        This _update should be called after that the pw_material._update
-        is called.
-
-        """
+        """Apply one magnetic source after its material update."""
         src_t = param.amp * param.src_time.oscillator(dt * n)
         if param.f:
             _record_source_value(param.f, dt * n, src_t)
@@ -120,18 +144,26 @@ class PointSourceMagnetic(PwSource):
 
 
 class PointSourceHx(PointSourceMagnetic):
+    """Apply an x-directed magnetic point source."""
+
     pass
 
 
 class PointSourceHy(PointSourceMagnetic):
+    """Apply a y-directed magnetic point source."""
+
     pass
 
 
 class PointSourceHz(PointSourceMagnetic):
+    """Apply a z-directed magnetic point source."""
+
     pass
 
 
 class TransparentParam(PwSourceParam):
+    """Store incident-field amplitudes for one or more interface faces."""
+
     def __init__(self, amp, aux_fdtd, directional):
         self.aux_fdtd = aux_fdtd
 
@@ -139,6 +171,8 @@ class TransparentParam(PwSourceParam):
         self.amp = {directional: amp}
 
     def merge(self, param):
+        """Merge compatible face parameters from the same auxiliary FDTD."""
+
         if type(self) is not type(param) or self.aux_fdtd is not param.aux_fdtd:
             raise ValueError("incompatible transparent source parameters")
 
@@ -149,6 +183,8 @@ class TransparentParam(PwSourceParam):
 
 
 class TransparentElectricParam(TransparentParam):
+    """Store interpolated auxiliary magnetic samples for an electric update."""
+
     def __init__(self, eps_inf, amp, aux_fdtd, samp_pnt, directional):
         TransparentParam.__init__(self, amp, aux_fdtd, directional)
 
@@ -164,6 +200,8 @@ class TransparentElectricParam(TransparentParam):
         self.r0 = {directional: 1 - r1_value}
 
     def merge(self, param):
+        """Merge compatible electric-interface interpolation parameters."""
+
         super().merge(param)
         self.samp_idx0.update(param.samp_idx0)
         self.samp_idx1.update(param.samp_idx1)
@@ -172,6 +210,8 @@ class TransparentElectricParam(TransparentParam):
 
 
 class TransparentMagneticParam(TransparentParam):
+    """Store interpolated auxiliary electric samples for a magnetic update."""
+
     def __init__(self, mu_inf, amp, aux_fdtd, samp_pnt, directional):
         TransparentParam.__init__(self, amp, aux_fdtd, directional)
 
@@ -187,6 +227,8 @@ class TransparentMagneticParam(TransparentParam):
         self.r0 = {directional: 1 - r1_value}
 
     def merge(self, param):
+        """Merge compatible magnetic-interface interpolation parameters."""
+
         super().merge(param)
         self.samp_idx0.update(param.samp_idx0)
         self.samp_idx1.update(param.samp_idx1)
@@ -195,11 +237,17 @@ class TransparentMagneticParam(TransparentParam):
 
 
 class TransparentElectric(PwSource):
+    """Base aggregate for total-field electric boundary corrections."""
+
     def name(self):
+        """Return the transparent electric-source kernel name."""
+
         return "TransparentElectric"
 
 
 class TransparentEx(TransparentElectric):
+    """Correct Ex values on transverse total-field interface faces."""
+
     def __init__(self):
         PwSource.__init__(self)
         self._consist_cond = {
@@ -247,6 +295,8 @@ class TransparentEx(TransparentElectric):
 
 
 class TransparentEy(TransparentElectric):
+    """Correct Ey values on transverse total-field interface faces."""
+
     def __init__(self):
         PwSource.__init__(self)
         self._consist_cond = {
@@ -294,6 +344,8 @@ class TransparentEy(TransparentElectric):
 
 
 class TransparentEz(TransparentElectric):
+    """Correct Ez values on transverse total-field interface faces."""
+
     def __init__(self):
         PwSource.__init__(self)
         self._consist_cond = {
@@ -341,11 +393,17 @@ class TransparentEz(TransparentElectric):
 
 
 class TransparentMagnetic(PwSource):
+    """Base aggregate for total-field magnetic boundary corrections."""
+
     def name(self):
+        """Return the transparent magnetic-source kernel name."""
+
         return "TransparentMagnetic"
 
 
 class TransparentHx(TransparentMagnetic):
+    """Correct Hx values on transverse total-field interface faces."""
+
     def __init__(self):
         PwSource.__init__(self)
         self._consist_cond = {
@@ -393,6 +451,8 @@ class TransparentHx(TransparentMagnetic):
 
 
 class TransparentHy(TransparentMagnetic):
+    """Correct Hy values on transverse total-field interface faces."""
+
     def __init__(self):
         PwSource.__init__(self)
         self._consist_cond = {
@@ -440,6 +500,8 @@ class TransparentHy(TransparentMagnetic):
 
 
 class TransparentHz(TransparentMagnetic):
+    """Correct Hz values on transverse total-field interface faces."""
+
     def __init__(self):
         PwSource.__init__(self)
         self._consist_cond = {

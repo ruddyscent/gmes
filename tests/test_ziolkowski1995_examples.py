@@ -1,5 +1,11 @@
 import unittest
+from importlib.util import find_spec
 from math import pi
+from pathlib import Path
+from subprocess import run
+from sys import executable
+from tempfile import TemporaryDirectory
+from textwrap import dedent
 
 import numpy as np
 
@@ -19,14 +25,64 @@ from examples.ziolkowski1995_common import (
     PumpProbe,
     SechSinePulse,
     SmoothSine,
+    SpatialSnapshot,
     UltrafastPulse,
     carrier_intensity,
     gain_scenario,
     make_simulation,
+    plot_population,
     pump_probe_scenario,
     sit_scenario,
     ultrafast_scenario,
 )
+
+MATPLOTLIB_AVAILABLE = find_spec("matplotlib") is not None
+
+
+class ZiolkowskiOptionalDependencyTest(unittest.TestCase):
+    def test_computational_helpers_import_without_plot_extra(self):
+        script = dedent("""
+            import sys
+
+            class BlockMatplotlib:
+                def find_spec(self, fullname, path=None, target=None):
+                    if fullname.partition(".")[0] == "matplotlib":
+                        raise ModuleNotFoundError(
+                            "No module named 'matplotlib'", name="matplotlib"
+                        )
+                    return None
+
+            sys.meta_path.insert(0, BlockMatplotlib())
+
+            from examples.ziolkowski1995_common import gain_scenario
+
+            assert gain_scenario().cells == 2_000
+            """)
+
+        result = run(
+            [executable, "-c", script],
+            cwd=Path(__file__).parents[1],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipUnless(MATPLOTLIB_AVAILABLE, "plot extra is not installed")
+    def test_plot_helpers_render_with_plot_extra(self):
+        distance = np.array([0.0, 0.5, 1.0])
+        snapshot = SpatialSnapshot(
+            distance,
+            np.zeros(3),
+            np.array([0.0, 0.5, 0.0]),
+            np.zeros(3),
+            -np.ones(3),
+        )
+
+        with TemporaryDirectory() as directory:
+            output = Path(directory) / "population.png"
+            plot_population(snapshot, 1, output, title="Population")
+            self.assertGreater(output.stat().st_size, 0)
 
 
 class ZiolkowskiUnitsTest(unittest.TestCase):

@@ -10,6 +10,10 @@ https://doi.org/10.1103/PhysRevA.52.3082.
 from argparse import ArgumentParser
 from pathlib import Path
 
+import matplotlib
+
+matplotlib.use("Agg")
+
 import matplotlib.pyplot as plt
 from ziolkowski1995_common import (
     figure_title,

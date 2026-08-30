@@ -262,12 +262,15 @@ class Cartesian(object):
         try:
             if parallel:
                 # mpi4py is an optional runtime backend without a base install.
-                from mpi4py import MPI  # type: ignore[import-not-found]
+                from mpi4py import MPI
 
                 self.my_id = MPI.COMM_WORLD.rank
                 self.numprocs = MPI.COMM_WORLD.size
-                self.cart_comm = MPI.COMM_WORLD.Create_cart(
-                    self.find_best_deploy(), (1, 1, 1)
+                self.cart_comm = cast(
+                    _CartComm,
+                    MPI.COMM_WORLD.Create_cart(
+                        self.find_best_deploy(), (True, True, True)
+                    ),
                 )
         except ImportError:
             pass

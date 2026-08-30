@@ -155,6 +155,10 @@ module = ["gmes.constant", "gmes.pw_material"]
 disallow_untyped_defs = false
 disallow_incomplete_defs = false
 
+[[tool.mypy.overrides]]
+module = ["mpi4py"]
+ignore_missing_imports = true
+
 [tool.pylint.main]
 py-version = "3.14"
 load-plugins = [

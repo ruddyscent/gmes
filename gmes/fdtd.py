@@ -4,26 +4,99 @@
 """Run legacy NumPy and native-kernel finite-difference time-domain simulations."""
 
 from cmath import exp as cexp
+from collections.abc import Callable, Mapping, Sequence
 from copy import deepcopy
 from datetime import datetime, timedelta
 from math import sqrt
+from os import PathLike, fspath
+from threading import Thread
+from typing import Any, Protocol, Self, cast
 
 import numpy as np
 from numpy import arange, array, inf
+from numpy.typing import NDArray
 
 from .constant import *
 from .file_io import Probe
 
 # GMES modules
-from .geometry import DefaultMedium, GeomBoxTree, in_range
-
-# from file_io import write_hdf5, snapshot
+from .geometry import Cartesian, DefaultMedium, GeomBoxTree, in_range
 from .material import (
     _BUILTIN_MATERIAL_TYPES,
     Dummy,
     _native_material_descriptor,
 )
-from .pygeom import GeomBox
+
+# from file_io import write_hdf5, snapshot
+from .pw_material import PwMaterialCmplx, PwMaterialReal
+from .pw_source import PwSource
+from .pygeom import GeomBox, GeometricObject, Material
+
+type ComponentType = type[Component]
+type NamedComponentType = (
+    type[Ex] | type[Ey] | type[Ez] | type[Hx] | type[Hy] | type[Hz]
+)
+type AxisType = type[X] | type[Y] | type[Z]
+type Index3 = tuple[int, int, int]
+type Vector3 = Sequence[float] | NDArray[np.float64]
+type Coordinate3 = tuple[float | np.float64, float | np.float64, float | np.float64]
+type RealArray = NDArray[np.float64]
+type ComplexArray = NDArray[np.complex128]
+type FieldArray = RealArray | ComplexArray
+type NativeMaterial = PwMaterialReal | PwMaterialCmplx
+
+
+class _PointwiseUpdate(Protocol):
+    """Common inspection methods exposed by native point-wise updates."""
+
+    def name(self) -> str:
+        """Return the update-kernel name."""
+
+    def idx_size(self) -> int:
+        """Return the number of indexed update records."""
+
+
+class _Source(Protocol):
+    """Legacy source operations consumed by FDTD."""
+
+    def init(self, geom_tree: GeomBoxTree, space: Cartesian, cmplx: bool) -> None:
+        """Bind geometry and grid state."""
+
+    def step(self) -> None:
+        """Advance auxiliary source state."""
+
+    def display_info(self, indent: int = 0) -> None:
+        """Print source configuration."""
+
+    def get_pw_source_ex(
+        self, ex_field: FieldArray, space: Cartesian, geom_tree: GeomBoxTree
+    ) -> PwSource | None:
+        """Return the Ex source updater when active."""
+
+    def get_pw_source_ey(
+        self, ey_field: FieldArray, space: Cartesian, geom_tree: GeomBoxTree
+    ) -> PwSource | None:
+        """Return the Ey source updater when active."""
+
+    def get_pw_source_ez(
+        self, ez_field: FieldArray, space: Cartesian, geom_tree: GeomBoxTree
+    ) -> PwSource | None:
+        """Return the Ez source updater when active."""
+
+    def get_pw_source_hx(
+        self, hx_field: FieldArray, space: Cartesian, geom_tree: GeomBoxTree
+    ) -> PwSource | None:
+        """Return the Hx source updater when active."""
+
+    def get_pw_source_hy(
+        self, hy_field: FieldArray, space: Cartesian, geom_tree: GeomBoxTree
+    ) -> PwSource | None:
+        """Return the Hy source updater when active."""
+
+    def get_pw_source_hz(
+        self, hz_field: FieldArray, space: Cartesian, geom_tree: GeomBoxTree
+    ) -> PwSource | None:
+        """Return the Hz source updater when active."""
 
 
 class TimeStep(object):
@@ -36,7 +109,7 @@ class TimeStep(object):
 
     """
 
-    def __init__(self, dt, n=0.0, t=0.0):
+    def __init__(self, dt: float, n: float = 0.0, t: float = 0.0) -> None:
         """Constructor.
 
         Keyword arguments:
@@ -49,7 +122,7 @@ class TimeStep(object):
         self.t = float(t)
         self.dt = float(dt)
 
-    def half_step_up(self):
+    def half_step_up(self) -> None:
         """Increase n and t for the electric or magnetic field update."""
         self.n += 0.5
         self.t = self.n * self.dt
@@ -78,16 +151,25 @@ class FDTD(object):
 
     _MATERIAL_TILE_SIZE = 65536
 
+    e_field_compnt: tuple[ComponentType, ...]
+    h_field_compnt: tuple[ComponentType, ...]
+    e_recorder: list[Probe]
+    h_recorder: list[Probe]
+    field: dict[ComponentType, FieldArray]
+    pw_material: dict[ComponentType, dict[type[NativeMaterial], NativeMaterial]]
+    pw_source: dict[ComponentType, dict[type[PwSource], PwSource]]
+    bloch: RealArray | None
+
     def __init__(
         self,
-        space=None,
-        geom_list=None,
-        src_list=None,
-        courant_ratio=0.99,
-        dt=None,
-        bloch=None,
-        verbose=True,
-    ):
+        space: Cartesian | None = None,
+        geom_list: Sequence[GeometricObject] | None = None,
+        src_list: Sequence[_Source] | None = None,
+        courant_ratio: float = 0.99,
+        dt: float | None = None,
+        bloch: Vector3 | None = None,
+        verbose: bool = True,
+    ) -> None:
         """Constructor.
 
         Keyword arguments:
@@ -130,16 +212,20 @@ class FDTD(object):
 
         self.verbose = bool(verbose)
 
-        self.space = space
+        self.space = cast(Cartesian, space)
 
         self._fig_id = int(self.space.my_id)
 
         self.dx, self.dy, self.dz = self.space.dr
 
-        default_medium = next((i for i in geom_list if isinstance(i, DefaultMedium)))
+        configured_geom = cast(Sequence[GeometricObject], geom_list)
+        configured_space = cast(Cartesian, space)
+        default_medium = next(
+            i for i in configured_geom if isinstance(i, DefaultMedium)
+        )
         eps_inf = default_medium.material.eps_inf
         mu_inf = default_medium.material.mu_inf
-        dt_limit = self._dt_limit(space, eps_inf, mu_inf)
+        dt_limit = self._dt_limit(configured_space, eps_inf, mu_inf)
 
         if dt is None:
             self.courant_ratio = float(courant_ratio)
@@ -163,7 +249,7 @@ class FDTD(object):
         if self.verbose:
             print("Initializing the geometry list...", end=" ")
 
-        self.geom_list = geom_list
+        self.geom_list = configured_geom
 
         for go in self.geom_list:
             go.init(self.space)
@@ -200,7 +286,7 @@ class FDTD(object):
             # Third Edition, 3rd ed. Artech House Publishers, 2005'.
             ds = np.array((self.dx, self.dy, self.dz))
             default_medium = next(
-                (i for i in geom_list if isinstance(i, DefaultMedium))
+                (i for i in configured_geom if isinstance(i, DefaultMedium))
             )
             eps_inf = default_medium.material.eps_inf
             mu_inf = default_medium.material.mu_inf
@@ -231,7 +317,7 @@ class FDTD(object):
 
         self.pw_material = {}
 
-    def init(self):
+    def init(self) -> None:
         """Initialize sources."""
         st = datetime.now()
 
@@ -284,7 +370,7 @@ class FDTD(object):
         if self.verbose:
             print("Elapsed time:", (et - st))
 
-    def _print_pw_obj(self, pw_obj):
+    def _print_pw_obj(self, pw_obj: Mapping[Any, _PointwiseUpdate]) -> None:
         """Print information of the piecewise material and source."""
         for o in pw_obj.values():
             print(o.name(), "at", o.idx_size(), "point(s).", end=" ")
@@ -293,12 +379,12 @@ class FDTD(object):
         else:
             print(None)
 
-    def _init_field_compnt(self):
+    def _init_field_compnt(self) -> None:
         """Set the significant electromagnetic field components."""
         self.e_field_compnt = (Ex, Ey, Ez)
         self.h_field_compnt = (Hx, Hy, Hz)
 
-    def _dt_limit(self, space, eps_inf, mu_inf):
+    def _dt_limit(self, space: Cartesian, eps_inf: float, mu_inf: float) -> float:
         """Courant stability bound of a time-step.
 
         Equation 4.54b at p.131 of A. Taflove and S. C. Hagness, Computational
@@ -310,28 +396,45 @@ class FDTD(object):
         # 0 for dx, 1 for dy, and 2 for dz.
         ds = {Ex: (1, 2), Ey: (2, 0), Ez: (0, 1), Hx: (1, 2), Hy: (2, 0), Hz: (0, 1)}
 
-        e_ds = set()
+        e_ds: set[int] = set()
         for i in self.e_field_compnt:
             e_ds.update(ds[i])
-        h_ds = set()
+        h_ds: set[int] = set()
         for i in self.h_field_compnt:
             h_ds.update(ds[i])
 
         non_inf = e_ds.intersection(h_ds)
 
         dr = array(space.dr, np.double)
-        for i in range(3):
-            if i not in non_inf:
-                dr[i] = inf
+        for axis in range(3):
+            if axis not in non_inf:
+                dr[axis] = inf
 
         c = 1 / sqrt(eps_inf * mu_inf)
         return 1 / c / sqrt(sum(dr**-2))
 
-    def _step_aux_fdtd(self):
+    def _sendrecv[T](
+        self,
+        sendbuf: T,
+        dest: int,
+        sendtag: int,
+        recvbuf: object | None,
+        source: int,
+        recvtag: int,
+    ) -> T:
+        """Return a neighbor exchange result after callers validate both ranks."""
+        return cast(
+            T,
+            self.space.cart_comm.sendrecv(
+                sendbuf, dest, sendtag, recvbuf, source, recvtag
+            ),
+        )
+
+    def _step_aux_fdtd(self) -> None:
         for src in self.src_list:
             src.step()
 
-    def __deepcopy__(self, memo=None):
+    def __deepcopy__(self, memo: dict[int, object] | None = None) -> Self:
         """The classes generated by swig do not have __deepcopy__ method.
         Thus, the tricky constructor call follows.
 
@@ -357,7 +460,7 @@ class FDTD(object):
         newcopy.time_step = deepcopy(self.time_step, memo)
         return newcopy
 
-    def init_material_ex(self):
+    def init_material_ex(self) -> None:
         """Set up the update mechanism for Ex field.
 
         Set up the update mechanism for Ex field and stores the result
@@ -366,7 +469,7 @@ class FDTD(object):
         """
         self._init_material_component(Ex)
 
-    def init_material_ey(self):
+    def init_material_ey(self) -> None:
         """Set up the update mechanism for Ey field.
 
         Set up the update mechanism for Ey field and stores the result
@@ -375,7 +478,7 @@ class FDTD(object):
         """
         self._init_material_component(Ey)
 
-    def init_material_ez(self):
+    def init_material_ez(self) -> None:
         """Set up the update mechanism for Ez field.
 
         Set up the update mechanism for Ez field and stores the result
@@ -384,7 +487,7 @@ class FDTD(object):
         """
         self._init_material_component(Ez)
 
-    def init_material_hx(self):
+    def init_material_hx(self) -> None:
         """Set up the update mechanism for Hx field.
 
         Set up the update mechanism for Hx field and stores the result
@@ -393,7 +496,7 @@ class FDTD(object):
         """
         self._init_material_component(Hx)
 
-    def init_material_hy(self):
+    def init_material_hy(self) -> None:
         """Set up the update mechanism for Hy field.
 
         Set up the update mechanism for Hy field and stores the result
@@ -402,7 +505,7 @@ class FDTD(object):
         """
         self._init_material_component(Hy)
 
-    def init_material_hz(self):
+    def init_material_hz(self) -> None:
         """Set up the update mechanism for Hz field.
 
         Set up the update mechanism for Hz field and stores the result
@@ -412,7 +515,9 @@ class FDTD(object):
         self._init_material_component(Hz)
 
     @staticmethod
-    def _is_dummy_material_index(component, idx, shape):
+    def _is_dummy_material_index(
+        component: ComponentType, idx: Index3, shape: Sequence[int]
+    ) -> bool:
         if component is Ex:
             return idx[1] == shape[1] - 1 or idx[2] == shape[2] - 1
         if component is Ey:
@@ -425,14 +530,16 @@ class FDTD(object):
             return idx[2] == 0 or idx[0] == 0
         return idx[0] == 0 or idx[1] == 0
 
-    def _init_material_component(self, component):
+    def _init_material_component(self, component: ComponentType) -> None:
         field = self.field[component]
         shape = field.shape
         self.pw_material[component] = {}
-        aggregates = {}
-        dummy_cache = {}
+        aggregates: dict[Any, Any] = {}
+        dummy_cache: dict[Any, Any] = {}
 
-        axes = self.space.component_coordinate_axes(component, shape)
+        axes: tuple[np.ndarray, np.ndarray, np.ndarray] = (
+            self.space.component_coordinate_axes(component, shape)
+        )
         total = int(np.prod(shape))
         plane = shape[1] * shape[2]
         for start in range(0, total, self._MATERIAL_TILE_SIZE):
@@ -470,15 +577,15 @@ class FDTD(object):
 
     def _attach_mapped_material(
         self,
-        component,
-        material,
-        idx,
-        coords,
-        underneath,
-        shape,
-        aggregates,
-        dummy_cache,
-    ):
+        component: ComponentType,
+        material: Material,
+        idx: Index3,
+        coords: Coordinate3,
+        underneath: Material | None,
+        shape: Sequence[int],
+        aggregates: dict[type[Material], NativeMaterial],
+        dummy_cache: dict[tuple[float, float], Dummy],
+    ) -> None:
         if self._is_dummy_material_index(component, idx, shape):
             key = material.eps_inf, material.mu_inf
             dummy = dummy_cache.get(key)
@@ -489,8 +596,14 @@ class FDTD(object):
         self._attach_material(component, material, idx, coords, underneath, aggregates)
 
     def _attach_material(
-        self, component, material, idx, coords, underneath, aggregates
-    ):
+        self,
+        component: ComponentType,
+        material: Material,
+        idx: Index3,
+        coords: Coordinate3,
+        underneath: Material | None,
+        aggregates: dict[type[Material], NativeMaterial],
+    ) -> None:
         getter_name = f"get_pw_material_{component.__name__.lower()}"
         getter = getattr(material, getter_name)
         descriptor = _native_material_descriptor(material, getter_name)
@@ -525,7 +638,7 @@ class FDTD(object):
         else:
             aggregate.merge(pw_obj)
 
-    def init_material(self):
+    def init_material(self) -> None:
         """Map geometry materials to native update objects for active fields."""
 
         init_mat_func = {
@@ -555,7 +668,7 @@ class FDTD(object):
             if self.verbose:
                 self._print_pw_obj(self.pw_material[comp])
 
-    def _finalize_material_component(self, component):
+    def _finalize_material_component(self, component: ComponentType) -> None:
         plan_fields = {
             Ex: (Ex, Hz, Hy),
             Ey: (Ey, Hx, Hz),
@@ -573,7 +686,7 @@ class FDTD(object):
         for updater in self.pw_material[component].values():
             updater.finalize(component_id, *shapes)
 
-    def init_source_ex(self):
+    def init_source_ex(self) -> None:
         """Build and aggregate native source updates for the Ex field."""
 
         self.pw_source[Ex] = {}
@@ -588,7 +701,7 @@ class FDTD(object):
             else:
                 self.pw_source[Ex][type(pw_src)] = pw_src
 
-    def init_source_ey(self):
+    def init_source_ey(self) -> None:
         """Build and aggregate native source updates for the Ey field."""
 
         self.pw_source[Ey] = {}
@@ -603,7 +716,7 @@ class FDTD(object):
             else:
                 self.pw_source[Ey][type(pw_src)] = pw_src
 
-    def init_source_ez(self):
+    def init_source_ez(self) -> None:
         """Build and aggregate native source updates for the Ez field."""
 
         self.pw_source[Ez] = {}
@@ -618,7 +731,7 @@ class FDTD(object):
             else:
                 self.pw_source[Ez][type(pw_src)] = pw_src
 
-    def init_source_hx(self):
+    def init_source_hx(self) -> None:
         """Build and aggregate native source updates for the Hx field."""
 
         self.pw_source[Hx] = {}
@@ -633,7 +746,7 @@ class FDTD(object):
             else:
                 self.pw_source[Hx][type(pw_src)] = pw_src
 
-    def init_source_hy(self):
+    def init_source_hy(self) -> None:
         """Build and aggregate native source updates for the Hy field."""
 
         self.pw_source[Hy] = {}
@@ -648,7 +761,7 @@ class FDTD(object):
             else:
                 self.pw_source[Hy][type(pw_src)] = pw_src
 
-    def init_source_hz(self):
+    def init_source_hz(self) -> None:
         """Build and aggregate native source updates for the Hz field."""
 
         self.pw_source[Hz] = {}
@@ -663,7 +776,7 @@ class FDTD(object):
             else:
                 self.pw_source[Hz][type(pw_src)] = pw_src
 
-    def init_source(self):
+    def init_source(self) -> None:
         """Map configured sources to native updates for all active fields."""
 
         init_src_func = {
@@ -689,7 +802,7 @@ class FDTD(object):
             if self.verbose:
                 self._print_pw_obj(self.pw_source[comp])
 
-    def set_probe(self, p, prefix=None):
+    def set_probe(self, p: Vector3, prefix: str | PathLike[str] | None = None) -> None:
         """Attach text-file probes for active fields at a physical point.
 
         Args:
@@ -714,7 +827,7 @@ class FDTD(object):
             Hz: self.space.hz_index_to_space,
         }
 
-        validity = {
+        validity: dict[ComponentType, Callable[[Index3], bool]] = {
             Ex: (lambda idx: in_range(idx, self.ex.shape, Ex)),
             Ey: (lambda idx: in_range(idx, self.ey.shape, Ey)),
             Ez: (lambda idx: in_range(idx, self.ez.shape, Ez)),
@@ -736,7 +849,7 @@ class FDTD(object):
             idx = spc2idx[comp](*p)
             if validity[comp](idx):
                 if prefix:
-                    filename = prefix + postfix[comp]
+                    filename = fspath(prefix) + postfix[comp]
                 else:
                     filename = postfix[comp]
                 recorder = Probe(idx, self.field[comp], filename)
@@ -748,7 +861,7 @@ class FDTD(object):
             idx = spc2idx[comp](*p)
             if validity[comp](idx):
                 if prefix:
-                    filename = prefix + postfix[comp]
+                    filename = fspath(prefix) + postfix[comp]
                 else:
                     filename = postfix[comp]
                 recorder = Probe(idx, self.field[comp], filename)
@@ -756,7 +869,7 @@ class FDTD(object):
                 recorder.write_header(loc, self.time_step.dt)
                 self.h_recorder.append(recorder)
 
-    def update_ex(self):
+    def update_ex(self) -> None:
         """Update the Ex array in place using mapped materials and sources."""
 
         for pw_obj in self.pw_material[Ex].values():
@@ -770,8 +883,8 @@ class FDTD(object):
                 self.time_step.n,
             )
 
-        for pw_obj in self.pw_source[Ex].values():
-            pw_obj.update_all(
+        for source_update in self.pw_source[Ex].values():
+            source_update.update_all(
                 self.ex,
                 self.hz,
                 self.hy,
@@ -781,7 +894,7 @@ class FDTD(object):
                 self.time_step.n,
             )
 
-    def update_ey(self):
+    def update_ey(self) -> None:
         """Update the Ey array in place using mapped materials and sources."""
 
         for pw_obj in self.pw_material[Ey].values():
@@ -795,8 +908,8 @@ class FDTD(object):
                 self.time_step.n,
             )
 
-        for pw_obj in self.pw_source[Ey].values():
-            pw_obj.update_all(
+        for source_update in self.pw_source[Ey].values():
+            source_update.update_all(
                 self.ey,
                 self.hx,
                 self.hz,
@@ -806,7 +919,7 @@ class FDTD(object):
                 self.time_step.n,
             )
 
-    def update_ez(self):
+    def update_ez(self) -> None:
         """Update the Ez array in place using mapped materials and sources."""
 
         for pw_obj in self.pw_material[Ez].values():
@@ -820,8 +933,8 @@ class FDTD(object):
                 self.time_step.n,
             )
 
-        for pw_obj in self.pw_source[Ez].values():
-            pw_obj.update_all(
+        for source_update in self.pw_source[Ez].values():
+            source_update.update_all(
                 self.ez,
                 self.hy,
                 self.hx,
@@ -831,7 +944,7 @@ class FDTD(object):
                 self.time_step.n,
             )
 
-    def update_hx(self):
+    def update_hx(self) -> None:
         """Update the Hx array in place using mapped materials and sources."""
 
         for pw_obj in self.pw_material[Hx].values():
@@ -845,8 +958,8 @@ class FDTD(object):
                 self.time_step.n,
             )
 
-        for pw_obj in self.pw_source[Hx].values():
-            pw_obj.update_all(
+        for source_update in self.pw_source[Hx].values():
+            source_update.update_all(
                 self.hx,
                 self.ez,
                 self.ey,
@@ -856,7 +969,7 @@ class FDTD(object):
                 self.time_step.n,
             )
 
-    def update_hy(self):
+    def update_hy(self) -> None:
         """Update the Hy array in place using mapped materials and sources."""
 
         for pw_obj in self.pw_material[Hy].values():
@@ -870,8 +983,8 @@ class FDTD(object):
                 self.time_step.n,
             )
 
-        for pw_obj in self.pw_source[Hy].values():
-            pw_obj.update_all(
+        for source_update in self.pw_source[Hy].values():
+            source_update.update_all(
                 self.hy,
                 self.ex,
                 self.ez,
@@ -881,7 +994,7 @@ class FDTD(object):
                 self.time_step.n,
             )
 
-    def update_hz(self):
+    def update_hz(self) -> None:
         """Update the Hz array in place using mapped materials and sources."""
 
         for pw_obj in self.pw_material[Hz].values():
@@ -895,8 +1008,8 @@ class FDTD(object):
                 self.time_step.n,
             )
 
-        for pw_obj in self.pw_source[Hz].values():
-            pw_obj.update_all(
+        for source_update in self.pw_source[Hz].values():
+            source_update.update_all(
                 self.hz,
                 self.ey,
                 self.ex,
@@ -906,7 +1019,7 @@ class FDTD(object):
                 self.time_step.n,
             )
 
-    def talk_with_ex_neighbors(self):
+    def talk_with_ex_neighbors(self) -> None:
         """Synchronize ex data.
 
         This method uses the object serialization interface of MPI4Python.
@@ -918,18 +1031,17 @@ class FDTD(object):
             return
 
         if self.cmplx:
+            assert self.bloch is not None
             dest_spc = self.space.ex_index_to_space(0, self.ex.shape[1] - 1, 0)[1]
 
             src_spc = self.space.ex_index_to_space(0, 0, 0)[1]
-            src_spc = self.space.cart_comm.sendrecv(
-                src_spc, dest, Ex.tag, None, src, Ex.tag
-            )
+            src_spc = self._sendrecv(src_spc, dest, Ex.tag, None, src, Ex.tag)
 
             phase_shift = cexp(1j * self.bloch[1] * (dest_spc - src_spc))
         else:
             phase_shift = 1
 
-        self.ex[:, -1, :] = phase_shift * self.space.cart_comm.sendrecv(
+        self.ex[:, -1, :] = phase_shift * self._sendrecv(
             self.ex[:, 0, :], dest, Ex.tag, None, src, Ex.tag
         )
 
@@ -939,22 +1051,21 @@ class FDTD(object):
             return
 
         if self.cmplx:
+            assert self.bloch is not None
             dest_spc = self.space.ex_index_to_space(0, 0, self.ex.shape[2] - 1)[2]
 
             src_spc = self.space.ex_index_to_space(0, 0, 0)[2]
-            src_spc = self.space.cart_comm.sendrecv(
-                src_spc, dest, Ex.tag, None, src, Ex.tag
-            )
+            src_spc = self._sendrecv(src_spc, dest, Ex.tag, None, src, Ex.tag)
 
             phase_shift = cexp(1j * self.bloch[2] * (dest_spc - src_spc))
         else:
             phase_shift = 1
 
-        self.ex[:, :, -1] = phase_shift * self.space.cart_comm.sendrecv(
+        self.ex[:, :, -1] = phase_shift * self._sendrecv(
             self.ex[:, :, 0], dest, Ex.tag, None, src, Ex.tag
         )
 
-    def talk_with_ey_neighbors(self):
+    def talk_with_ey_neighbors(self) -> None:
         """Synchronize ey data.
 
         This method uses the object serialization interface of MPI4Python.
@@ -966,18 +1077,17 @@ class FDTD(object):
             return
 
         if self.cmplx:
+            assert self.bloch is not None
             dest_spc = self.space.ey_index_to_space(0, 0, self.ey.shape[2] - 1)[2]
 
             src_spc = self.space.ey_index_to_space(0, 0, 0)[2]
-            src_spc = self.space.cart_comm.sendrecv(
-                src_spc, dest, Ey.tag, None, src, Ey.tag
-            )
+            src_spc = self._sendrecv(src_spc, dest, Ey.tag, None, src, Ey.tag)
 
             phase_shift = cexp(1j * self.bloch[2] * (dest_spc - src_spc))
         else:
             phase_shift = 1
 
-        self.ey[:, :, -1] = phase_shift * self.space.cart_comm.sendrecv(
+        self.ey[:, :, -1] = phase_shift * self._sendrecv(
             self.ey[:, :, 0], dest, Ey.tag, None, src, Ey.tag
         )
 
@@ -987,22 +1097,21 @@ class FDTD(object):
             return
 
         if self.cmplx:
+            assert self.bloch is not None
             dest_spc = self.space.ey_index_to_space(self.ey.shape[0] - 1, 0, 0)[0]
 
             src_spc = self.space.ey_index_to_space(0, 0, 0)[0]
-            src_spc = self.space.cart_comm.sendrecv(
-                src_spc, dest, Ey.tag, None, src, Ey.tag
-            )
+            src_spc = self._sendrecv(src_spc, dest, Ey.tag, None, src, Ey.tag)
 
             phase_shift = cexp(1j * self.bloch[0] * (dest_spc - src_spc))
         else:
             phase_shift = 1
 
-        self.ey[-1, :, :] = phase_shift * self.space.cart_comm.sendrecv(
+        self.ey[-1, :, :] = phase_shift * self._sendrecv(
             self.ey[0, :, :], dest, Ey.tag, None, src, Ey.tag
         )
 
-    def talk_with_ez_neighbors(self):
+    def talk_with_ez_neighbors(self) -> None:
         """Synchronize ez data.
 
         This method uses the object serialization interface of MPI4Python.
@@ -1014,18 +1123,17 @@ class FDTD(object):
             return
 
         if self.cmplx:
+            assert self.bloch is not None
             dest_spc = self.space.ez_index_to_space(self.ez.shape[0] - 1, 0, 0)[0]
 
             src_spc = self.space.ez_index_to_space(0, 0, 0)[0]
-            src_spc = self.space.cart_comm.sendrecv(
-                src_spc, dest, Ez.tag, None, src, Ez.tag
-            )
+            src_spc = self._sendrecv(src_spc, dest, Ez.tag, None, src, Ez.tag)
 
             phase_shift = cexp(1j * self.bloch[0] * (dest_spc - src_spc))
         else:
             phase_shift = 1
 
-        self.ez[-1, :, :] = phase_shift * self.space.cart_comm.sendrecv(
+        self.ez[-1, :, :] = phase_shift * self._sendrecv(
             self.ez[0, :, :], dest, Ez.tag, None, src, Ez.tag
         )
 
@@ -1035,22 +1143,21 @@ class FDTD(object):
             return
 
         if self.cmplx:
+            assert self.bloch is not None
             dest_spc = self.space.ez_index_to_space(0, self.ez.shape[1] - 1, 0)[1]
 
             src_spc = self.space.ez_index_to_space(0, 0, 0)[1]
-            src_spc = self.space.cart_comm.sendrecv(
-                src_spc, dest, Ez.tag, None, src, Ez.tag
-            )
+            src_spc = self._sendrecv(src_spc, dest, Ez.tag, None, src, Ez.tag)
 
             phase_shift = cexp(1j * self.bloch[1] * (dest_spc - src_spc))
         else:
             phase_shift = 1
 
-        self.ez[:, -1, :] = phase_shift * self.space.cart_comm.sendrecv(
+        self.ez[:, -1, :] = phase_shift * self._sendrecv(
             self.ez[:, 0, :], dest, Ez.tag, None, src, Ez.tag
         )
 
-    def talk_with_hx_neighbors(self):
+    def talk_with_hx_neighbors(self) -> None:
         """Synchronize hx data.
 
         This method uses the object serialization interface of MPI4Python.
@@ -1062,18 +1169,17 @@ class FDTD(object):
             return
 
         if self.cmplx:
+            assert self.bloch is not None
             dest_spc = self.space.hx_index_to_space(0, 0, 0)[1]
 
             src_spc = self.space.hx_index_to_space(0, self.hx.shape[1] - 1, 0)[1]
-            src_spc = self.space.cart_comm.sendrecv(
-                src_spc, dest, Hx.tag, None, src, Hx.tag
-            )
+            src_spc = self._sendrecv(src_spc, dest, Hx.tag, None, src, Hx.tag)
 
             phase_shift = cexp(1j * self.bloch[1] * (dest_spc - src_spc))
         else:
             phase_shift = 1
 
-        self.hx[:, 0, :] = phase_shift * self.space.cart_comm.sendrecv(
+        self.hx[:, 0, :] = phase_shift * self._sendrecv(
             self.hx[:, -1, :], dest, Hx.tag, None, src, Hx.tag
         )
 
@@ -1083,22 +1189,21 @@ class FDTD(object):
             return
 
         if self.cmplx:
+            assert self.bloch is not None
             dest_spc = self.space.hx_index_to_space(0, 0, 0)[2]
 
             src_spc = self.space.hx_index_to_space(0, 0, self.hx.shape[2] - 1)[2]
-            src_spc = self.space.cart_comm.sendrecv(
-                src_spc, dest, Hx.tag, None, src, Hx.tag
-            )
+            src_spc = self._sendrecv(src_spc, dest, Hx.tag, None, src, Hx.tag)
 
             phase_shift = cexp(1j * self.bloch[2] * (dest_spc - src_spc))
         else:
             phase_shift = 1
 
-        self.hx[:, :, 0] = phase_shift * self.space.cart_comm.sendrecv(
+        self.hx[:, :, 0] = phase_shift * self._sendrecv(
             self.hx[:, :, -1], dest, Hx.tag, None, src, Hx.tag
         )
 
-    def talk_with_hy_neighbors(self):
+    def talk_with_hy_neighbors(self) -> None:
         """Synchronize hy data.
 
         This method uses the object serialization interface of MPI4Python.
@@ -1110,18 +1215,17 @@ class FDTD(object):
             return
 
         if self.cmplx:
+            assert self.bloch is not None
             dest_spc = self.space.hy_index_to_space(0, 0, 0)[2]
 
             src_spc = self.space.hy_index_to_space(0, 0, self.hy.shape[2] - 1)[2]
-            src_spc = self.space.cart_comm.sendrecv(
-                src_spc, dest, Hy.tag, None, src, Hy.tag
-            )
+            src_spc = self._sendrecv(src_spc, dest, Hy.tag, None, src, Hy.tag)
 
             phase_shift = cexp(1j * self.bloch[2] * (dest_spc - src_spc))
         else:
             phase_shift = 1
 
-        self.hy[:, :, 0] = phase_shift * self.space.cart_comm.sendrecv(
+        self.hy[:, :, 0] = phase_shift * self._sendrecv(
             self.hy[:, :, -1], dest, Hy.tag, None, src, Hy.tag
         )
 
@@ -1131,22 +1235,21 @@ class FDTD(object):
             return
 
         if self.cmplx:
+            assert self.bloch is not None
             dest_spc = self.space.hy_index_to_space(0, 0, 0)[0]
 
             src_spc = self.space.hy_index_to_space(self.hy.shape[0] - 1, 0, 0)[0]
-            src_spc = self.space.cart_comm.sendrecv(
-                src_spc, dest, Hy.tag, None, src, Hy.tag
-            )
+            src_spc = self._sendrecv(src_spc, dest, Hy.tag, None, src, Hy.tag)
 
             phase_shift = cexp(1j * self.bloch[0] * (dest_spc - src_spc))
         else:
             phase_shift = 1
 
-        self.hy[0, :, :] = phase_shift * self.space.cart_comm.sendrecv(
+        self.hy[0, :, :] = phase_shift * self._sendrecv(
             self.hy[-1, :, :], dest, Hy.tag, None, src, Hy.tag
         )
 
-    def talk_with_hz_neighbors(self):
+    def talk_with_hz_neighbors(self) -> None:
         """Synchronize hz data.
 
         This method uses the object serialization interface of MPI4Python.
@@ -1158,18 +1261,17 @@ class FDTD(object):
             return
 
         if self.cmplx:
+            assert self.bloch is not None
             dest_spc = self.space.hz_index_to_space(0, 0, 0)[0]
 
             src_spc = self.space.hz_index_to_space(self.hz.shape[0] - 1, 0, 0)[0]
-            src_spc = self.space.cart_comm.sendrecv(
-                src_spc, dest, Hz.tag, None, src, Hz.tag
-            )
+            src_spc = self._sendrecv(src_spc, dest, Hz.tag, None, src, Hz.tag)
 
             phase_shift = cexp(1j * self.bloch[0] * (dest_spc - src_spc))
         else:
             phase_shift = 1
 
-        self.hz[0, :, :] = phase_shift * self.space.cart_comm.sendrecv(
+        self.hz[0, :, :] = phase_shift * self._sendrecv(
             self.hz[-1, :, :], dest, Hz.tag, None, src, Hz.tag
         )
 
@@ -1179,22 +1281,21 @@ class FDTD(object):
             return
 
         if self.cmplx:
+            assert self.bloch is not None
             dest_spc = self.space.hz_index_to_space(0, 0, 0)[1]
 
             src_spc = self.space.hz_index_to_space(0, self.hz.shape[1] - 1, 0)[1]
-            src_spc = self.space.cart_comm.sendrecv(
-                src_spc, dest, Hz.tag, None, src, Hz.tag
-            )
+            src_spc = self._sendrecv(src_spc, dest, Hz.tag, None, src, Hz.tag)
 
             phase_shift = cexp(1j * self.bloch[1] * (dest_spc - src_spc))
         else:
             phase_shift = 1
 
-        self.hz[:, 0, :] = phase_shift * self.space.cart_comm.sendrecv(
+        self.hz[:, 0, :] = phase_shift * self._sendrecv(
             self.hz[:, -1, :], dest, Hz.tag, None, src, Hz.tag
         )
 
-    def step(self):
+    def step(self) -> None:
         """Advance electric and magnetic fields by one complete time step.
 
         The method mutates all active field arrays, advances time_step by two
@@ -1226,7 +1327,9 @@ class FDTD(object):
         for probe in self.h_recorder:
             probe.write(self.time_step.n)
 
-    def step_while_zero(self, component, point, modulus=inf):
+    def step_while_zero(
+        self, component: ComponentType, point: Vector3, modulus: float = inf
+    ) -> None:
         """Run self.step() while the field value at the given point is 0.
 
         Keyword arguments:
@@ -1271,9 +1374,11 @@ class FDTD(object):
                 print("n:", self.time_step.n, "t:", self.time_step.t)
             if self.space.my_id == hot_node and self.field[component][idx] != 0:
                 flag = False
-            flag = self.space.cart_comm.bcast(flag, hot_node)
+            broadcast_flag = self.space.cart_comm.bcast(flag, hot_node)
+            assert broadcast_flag is not None
+            flag = broadcast_flag
 
-    def step_until_n(self, n=0, modulus=inf):
+    def step_until_n(self, n: float = 0, modulus: float = inf) -> None:
         """Run self.step() until time step reaches n."""
         st = datetime.now()
 
@@ -1294,7 +1399,7 @@ class FDTD(object):
         et = datetime.now()
         print("Elapsed time:", (et - st))
 
-    def step_until_t(self, t=0, modulus=inf):
+    def step_until_t(self, t: float = 0, modulus: float = inf) -> None:
         """Run self.step() until time reaches t."""
         st = datetime.now()
         sn = self.time_step.n
@@ -1319,7 +1424,14 @@ class FDTD(object):
         print("Elapsed time:", (et - st), end=" ")
         print("(%d timesteps)" % (en - sn))
 
-    def show_field_line(self, comp, start, end, vrange=(-1, 1), interval=2500):
+    def show_field_line(
+        self,
+        comp: ComponentType,
+        start: Vector3,
+        end: Vector3,
+        vrange: Sequence[float] = (-1, 1),
+        interval: int = 2500,
+    ) -> Thread:
         """Show the real value of the feild along the line.
 
         comp: field component
@@ -1347,7 +1459,14 @@ class FDTD(object):
         showcase.start()
         return showcase
 
-    def show_field(self, comp, axis, cut, vrange=(-1, 1), interval=2500):
+    def show_field(
+        self,
+        comp: ComponentType,
+        axis: AxisType,
+        cut: float,
+        vrange: Sequence[float] = (-1, 1),
+        interval: int = 2500,
+    ) -> Thread:
         """Show the real value of the ex on the plone.
 
         comp: field component
@@ -1377,7 +1496,13 @@ class FDTD(object):
         showcase.start()
         return showcase
 
-    def show_permittivity(self, comp, axis, cut, vrange=None):
+    def show_permittivity(
+        self,
+        comp: ComponentType,
+        axis: AxisType,
+        cut: float,
+        vrange: Sequence[float] | None = None,
+    ) -> Thread:
         """Show permittivity for the ex on the plane.
 
         Keyword arguments:
@@ -1407,12 +1532,12 @@ class FDTD(object):
 
     def write_field(
         self,
-        comp,
-        low=(-inf, -inf, -inf),
-        high=(inf, inf, inf),
-        prefix=None,
-        postfix=None,
-    ):
+        comp: ComponentType,
+        low: Vector3 = (-inf, -inf, -inf),
+        high: Vector3 = (inf, inf, inf),
+        prefix: str | None = None,
+        postfix: str | None = None,
+    ) -> None:
         """Dump the field values on a file.
 
         comp: Component of the field
@@ -1480,7 +1605,7 @@ class FDTD(object):
             else:
                 raise ValueError("unsupported electric component")
         elif issubclass(comp, Magnetic):
-            high_bndry_idx = [i - 1 for i in self.field[comp].shape]
+            high_bndry_idx = tuple(i - 1 for i in self.field[comp].shape)
             if comp is Hx:
                 low_bndry_idx = (0, 1, 1)
             elif comp is Hy:
@@ -1529,15 +1654,19 @@ class FDTD(object):
         )
 
     def write_field_all(
-        self, low=(-inf, -inf, -inf), high=(inf, inf, inf), prefix=None, postfix=None
-    ):
+        self,
+        low: Vector3 = (-inf, -inf, -inf),
+        high: Vector3 = (inf, inf, inf),
+        prefix: str | None = None,
+        postfix: str | None = None,
+    ) -> None:
         """Write the all current fields."""
         for comp in self.e_field_compnt:
             self.write_field(comp, low, high, prefix, postfix)
         for comp in self.h_field_compnt:
             self.write_field(comp, low, high, prefix, postfix)
 
-    def snapshot_field(self, comp, axis, cut):
+    def snapshot_field(self, comp: ComponentType, axis: AxisType, cut: float) -> None:
         """Take a graphical snapshot of a field.
 
         comp: field component
@@ -1569,7 +1698,7 @@ class FDTD(object):
         from .file_io import snapshot
 
         filename = "t=" + str(self.time_step.t)
-        snapshot(data, filename, comp.str())
+        snapshot(data, filename, cast(NamedComponentType, comp).str())
 
 
 class TExFDTD(FDTD):
@@ -1581,7 +1710,7 @@ class TExFDTD(FDTD):
 
     """
 
-    def _init_field_compnt(self):
+    def _init_field_compnt(self) -> None:
         self.e_field_compnt = (Ey, Ez)
         self.h_field_compnt = (Hx,)
 
@@ -1595,7 +1724,7 @@ class TEyFDTD(FDTD):
 
     """
 
-    def _init_field_compnt(self):
+    def _init_field_compnt(self) -> None:
         self.e_field_compnt = (Ex, Ez)
         self.h_field_compnt = (Hy,)
 
@@ -1609,7 +1738,7 @@ class TEzFDTD(FDTD):
 
     """
 
-    def _init_field_compnt(self):
+    def _init_field_compnt(self) -> None:
         self.e_field_compnt = (Ex, Ey)
         self.h_field_compnt = (Hz,)
 
@@ -1623,7 +1752,7 @@ class TMxFDTD(FDTD):
 
     """
 
-    def _init_field_compnt(self):
+    def _init_field_compnt(self) -> None:
         self.e_field_compnt = (Ex,)
         self.h_field_compnt = (Hy, Hz)
 
@@ -1637,7 +1766,7 @@ class TMyFDTD(FDTD):
 
     """
 
-    def _init_field_compnt(self):
+    def _init_field_compnt(self) -> None:
         self.e_field_compnt = (Ey,)
         self.h_field_compnt = (Hz, Hx)
 
@@ -1651,7 +1780,7 @@ class TMzFDTD(FDTD):
 
     """
 
-    def _init_field_compnt(self):
+    def _init_field_compnt(self) -> None:
         self.e_field_compnt = (Ez,)
         self.h_field_compnt = (Hx, Hy)
 
@@ -1665,7 +1794,7 @@ class TEMxFDTD(FDTD):
 
     """
 
-    def _init_field_compnt(self):
+    def _init_field_compnt(self) -> None:
         self.e_field_compnt = (Ey,)
         self.h_field_compnt = (Hz,)
 
@@ -1679,7 +1808,7 @@ class TEMyFDTD(FDTD):
 
     """
 
-    def _init_field_compnt(self):
+    def _init_field_compnt(self) -> None:
         self.e_field_compnt = (Ez,)
         self.h_field_compnt = (Hx,)
 
@@ -1693,6 +1822,6 @@ class TEMzFDTD(FDTD):
 
     """
 
-    def _init_field_compnt(self):
+    def _init_field_compnt(self) -> None:
         self.e_field_compnt = (Ex,)
         self.h_field_compnt = (Hy,)

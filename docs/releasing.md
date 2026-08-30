@@ -58,6 +58,8 @@ API token is stored in GitHub.
    uv sync --locked --extra hdf5
    uv run --no-sync python -m isort --check-only gmes examples tests utils setup.py
    uv run --no-sync python -m black --check gmes examples tests utils setup.py
+   uv run --no-sync python -m mypy
+   uv run --no-sync python -m mypy.stubtest gmes.constant gmes.pw_material
    uv run --no-sync python -m pylint gmes setup.py
    uv run --no-sync python -m unittest discover -v
    uv build

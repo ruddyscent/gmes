@@ -38,6 +38,9 @@ class SourceDistributionTest(unittest.TestCase):
                 }
 
         self.assertIn(PurePosixPath("examples/VERIFICATION.md"), packaged_paths)
+        self.assertIn(PurePosixPath("gmes/py.typed"), packaged_paths)
+        self.assertIn(PurePosixPath("gmes/constant.pyi"), packaged_paths)
+        self.assertIn(PurePosixPath("gmes/pw_material.pyi"), packaged_paths)
 
 
 if __name__ == "__main__":

@@ -50,7 +50,11 @@ Examples:
     >>> simulation.step()
 """
 
+from typing import Any
+
 from . import constant, fdtd, geometry, material, pw_material, pw_source, source
+
+norm: Any
 from .constant import *
 from .fdtd import *
 from .geometry import *

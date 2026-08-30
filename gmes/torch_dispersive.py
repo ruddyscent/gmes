@@ -1,11 +1,30 @@
 """Device-resident exact-width tensor buckets for linear dispersive media."""
 
+from collections.abc import Iterable
 from dataclasses import dataclass
+from typing import Any, Protocol
 
 import numpy as np
 import torch
+from torch import nn
+
+from .torch_plan import ComponentPlan, MaterialBucketPlan
 
 DISPERSIVE_MODELS = frozenset(("drude", "lorentz", "dcp-ade", "dcp-plrc", "dcp-rc"))
+
+
+class _DispersiveState(Protocol):
+    """Mutable tensor state required by dispersive bucket updates."""
+
+    paired_real: bool
+
+    def field(self, component: str) -> torch.Tensor:
+        """Return a live component tensor."""
+
+    def register_buffer(
+        self, name: str, tensor: torch.Tensor, persistent: bool = True
+    ) -> None:
+        """Register device state without changing module ownership."""
 
 
 @dataclass(frozen=True)
@@ -21,21 +40,23 @@ class DispersiveBucket:
     state_width: int
 
 
-def _tensor(values, *, dtype, device):
+def _tensor(values: Any, *, dtype: Any, device: Any) -> Any:
     return torch.tensor(values, dtype=dtype, device=device).contiguous()
 
 
-def _target_rows(bucket):
+def _target_rows(bucket: Any) -> Any:
     rows = bucket.region_coefficient_indices[bucket.target_region_indices]
     return bucket.coefficient_table[rows]
 
 
-def _coefficient_columns(bucket, target_rows, names):
+def _coefficient_columns(bucket: Any, target_rows: Any, names: Any) -> Any:
     indices = {name: index for index, name in enumerate(bucket.coefficient_names)}
     return np.stack([target_rows[:, indices[name]] for name in names])
 
 
-def _real_recurrence(bucket, target_rows, stem, width, terms):
+def _real_recurrence(
+    bucket: Any, target_rows: Any, stem: Any, width: Any, terms: Any
+) -> Any:
     if width == 0:
         return np.empty((terms, 0, len(target_rows)), dtype=np.float64)
     names = tuple(
@@ -46,7 +67,9 @@ def _real_recurrence(bucket, target_rows, stem, width, terms):
     )
 
 
-def _complex_recurrence(bucket, target_rows, stem, width, terms):
+def _complex_recurrence(
+    bucket: Any, target_rows: Any, stem: Any, width: Any, terms: Any
+) -> Any:
     values = np.empty((terms, width, len(target_rows), 2), dtype=np.float64)
     indices = {name: index for index, name in enumerate(bucket.coefficient_names)}
     for term in range(terms):
@@ -60,7 +83,15 @@ def _complex_recurrence(bucket, target_rows, stem, width, terms):
     return values
 
 
-def register_plan_buffers(module, bucket, component, prefix, *, dtype, device):
+def register_plan_buffers(
+    module: nn.Module,
+    bucket: MaterialBucketPlan,
+    component: ComponentPlan,
+    prefix: str,
+    *,
+    dtype: torch.dtype,
+    device: torch.device | str,
+) -> DispersiveBucket | None:
     """Finalize one host bucket as contiguous device-side SoA tensors."""
     model = bucket.signature.model
     if model not in DISPERSIVE_MODELS:
@@ -140,11 +171,18 @@ def register_plan_buffers(module, bucket, component, prefix, *, dtype, device):
     )
 
 
-def register_state_buffers(module, descriptors, *, paired_real, dtype, device):
+def register_state_buffers(
+    module: nn.Module,
+    descriptors: Iterable[DispersiveBucket],
+    *,
+    paired_real: bool,
+    dtype: torch.dtype,
+    device: torch.device | str,
+) -> None:
     """Allocate exact-width mutable state and fixed scratch storage."""
     channels = 2 if paired_real else 1
 
-    def zeros(name, shape, *, persistent=True):
+    def zeros(name: Any, shape: Any, *, persistent: Any = True) -> Any:
         module.register_buffer(
             name,
             torch.zeros(shape, dtype=dtype, device=device),
@@ -167,6 +205,7 @@ def register_state_buffers(module, descriptors, *, paired_real, dtype, device):
 
         poles = descriptor.pole_count
         points = descriptor.point_count
+        point_shape: tuple[int, ...]
         if descriptor.model in {"drude", "lorentz"}:
             shape = (poles, count, channels)
             zeros(f"{prefix}_previous", shape)
@@ -192,7 +231,7 @@ def register_state_buffers(module, descriptors, *, paired_real, dtype, device):
             zeros(f"{prefix}_point_work", point_shape, persistent=False)
 
 
-def _prepare_curl(plan, state, descriptor):
+def _prepare_curl(plan: Any, state: Any, descriptor: Any) -> Any:
     prefix = descriptor.prefix
     channels = 2 if state.paired_real else 1
     field = state.field(descriptor.component).reshape(-1, channels)
@@ -223,7 +262,7 @@ def _prepare_curl(plan, state, descriptor):
     return field, targets
 
 
-def _update_two_level(plan, state, descriptor):
+def _update_two_level(plan: Any, state: Any, descriptor: Any) -> Any:
     prefix = descriptor.prefix
     a = getattr(plan, f"{prefix}_a")
     c = getattr(plan, f"{prefix}_c")
@@ -249,7 +288,7 @@ def _update_two_level(plan, state, descriptor):
     current.copy_(pole_work)
 
 
-def _update_dcp_ade(plan, state, descriptor):
+def _update_dcp_ade(plan: Any, state: Any, descriptor: Any) -> Any:
     prefix = descriptor.prefix
     a = getattr(plan, f"{prefix}_a")
     b = getattr(plan, f"{prefix}_b")
@@ -299,7 +338,7 @@ def _update_dcp_ade(plan, state, descriptor):
     field_old.copy_(field_now)
 
 
-def _update_dcp_convolution(plan, state, descriptor):
+def _update_dcp_convolution(plan: Any, state: Any, descriptor: Any) -> Any:
     prefix = descriptor.prefix
     a = getattr(plan, f"{prefix}_a")
     b = getattr(plan, f"{prefix}_b")
@@ -344,7 +383,9 @@ def _update_dcp_convolution(plan, state, descriptor):
     point_state.copy_(point_work)
 
 
-def update_bucket(plan, state, descriptor):
+def update_bucket(
+    plan: nn.Module, state: _DispersiveState, descriptor: DispersiveBucket
+) -> None:
     """Apply one exact-width bucket with unique indexed destinations."""
     field, targets = _prepare_curl(plan, state, descriptor)
     if descriptor.model in {"drude", "lorentz"}:

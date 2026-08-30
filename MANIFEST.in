@@ -1,4 +1,4 @@
-include VERSION README.md LICENSE CHANGELOG.md CONTRIBUTING.md SECURITY.md build-constraints.txt
+include VERSION README.md LICENSE CHANGELOG.md CONTRIBUTING.md SECURITY.md build-constraints.txt gmes/py.typed gmes/*.pyi
 recursive-include src *.cc *.hh *.i
 recursive-include examples README *.md *.py
 recursive-include tests README *.py

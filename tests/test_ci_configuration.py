@@ -31,6 +31,13 @@ class CiConfigurationTest(unittest.TestCase):
         self.assertIn("GMES_ENABLE_OPENMP=1 uv build", self.ci_workflow)
         self.assertIn("GMES_ENABLE_OPENMP=auto uv build", self.ci_workflow)
 
+    def test_required_ci_runs_static_and_native_stub_checks(self):
+        self.assertIn("python -m mypy", self.ci_workflow)
+        self.assertIn(
+            "python -m mypy.stubtest gmes.constant gmes.pw_material",
+            self.ci_workflow,
+        )
+
     def test_prerelease_is_scheduled_advisory_using_nightly_wheels(self):
         self.assertIn("name: Python prerelease (advisory)", self.prerelease_workflow)
         self.assertIn("schedule:", self.prerelease_workflow)

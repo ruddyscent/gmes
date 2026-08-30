@@ -25,7 +25,46 @@ class Dm2BucketMetadata:
 class TorchDm2BucketState(nn.Module):
     """Contiguous mutable state and fixed scratch for one DM2 bucket."""
 
-    def __init__(self, metadata, *, status, iterations, device, dtype):
+    metadata: Dm2BucketMetadata
+    u: torch.Tensor
+    _status: torch.Tensor
+    _iterations: torch.Tensor
+    _u_new: torch.Tensor
+    _u_previous: torch.Tensor
+    _u_candidate: torch.Tensor
+    _a: torch.Tensor
+    _b: torch.Tensor
+    _transition: torch.Tensor
+    _e_old: torch.Tensor
+    _e_base: torch.Tensor
+    _e_new: torch.Tensor
+    _e_previous: torch.Tensor
+    _e_candidate: torch.Tensor
+    _source_positive: torch.Tensor
+    _source_negative: torch.Tensor
+    _c_plus: torch.Tensor
+    _c_minus: torch.Tensor
+    _d: torch.Tensor
+    _error: torch.Tensor
+    _error_candidate: torch.Tensor
+    _cell0: torch.Tensor
+    _cell1: torch.Tensor
+    _cell2: torch.Tensor
+    _active: torch.Tensor
+    _invalid: torch.Tensor
+    _mask: torch.Tensor
+    _mask2: torch.Tensor
+    _time: torch.Tensor
+
+    def __init__(
+        self,
+        metadata: Dm2BucketMetadata,
+        *,
+        status: torch.Tensor,
+        iterations: torch.Tensor,
+        device: torch.device | str,
+        dtype: torch.dtype,
+    ) -> None:
         super().__init__()
         self.metadata = metadata
         self._status = status
@@ -83,22 +122,22 @@ class TorchDm2BucketState(nn.Module):
 
     def prepare(
         self,
-        field,
-        source,
-        step_count,
-        time_step,
-        targets,
-        source_positive_indices,
-        source_negative_indices,
-        rho30,
-        gamma,
-        t1,
-        t2,
-        hbar,
-        omega,
-        n_atom,
-        curl_scale,
-    ):
+        field: torch.Tensor,
+        source: torch.Tensor,
+        step_count: torch.Tensor,
+        time_step: torch.Tensor,
+        targets: torch.Tensor,
+        source_positive_indices: torch.Tensor,
+        source_negative_indices: torch.Tensor,
+        rho30: torch.Tensor,
+        gamma: torch.Tensor,
+        t1: torch.Tensor,
+        t2: torch.Tensor,
+        hbar: torch.Tensor,
+        omega: torch.Tensor,
+        n_atom: torch.Tensor,
+        curl_scale: torch.Tensor,
+    ) -> None:
         """Prepare time-dependent coefficients and initial corrector state."""
         self._time.copy_(step_count).add_(1).mul_(time_step)
         self._cell0.copy_(self._time).div_(t2).neg_().exp_()
@@ -138,7 +177,13 @@ class TorchDm2BucketState(nn.Module):
         self._status.zero_()
         self._iterations.zero_()
 
-    def iterate(self, half_dt, quarter_dt, rtol, omega):
+    def iterate(
+        self,
+        half_dt: float,
+        quarter_dt: float,
+        rtol: torch.Tensor,
+        omega: torch.Tensor,
+    ) -> None:
         """Advance one fixed device-side masked corrector chunk."""
         for _ in range(DM2_ITERATIONS_PER_CHUNK):
             self._e_previous.copy_(self._e_new)
@@ -231,7 +276,7 @@ class TorchDm2BucketState(nn.Module):
             torch.logical_not(self._invalid, out=self._mask)
             torch.logical_and(self._active, self._mask, out=self._active)
 
-    def finalize(self, field, targets):
+    def finalize(self, field: torch.Tensor, targets: torch.Tensor) -> None:
         """Commit converged targets and retain failed targets' prior state."""
         flat_field = field.reshape(-1)
         self._status.masked_fill_(self._invalid, 1)

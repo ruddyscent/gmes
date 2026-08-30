@@ -2,9 +2,13 @@
 
 import hashlib
 import os
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from math import sqrt
+from os import PathLike
+from pathlib import Path
 from types import MappingProxyType
+from typing import Any, Literal, Protocol, Self, cast
 
 import numpy as np
 
@@ -16,10 +20,12 @@ except ImportError as error:  # pragma: no cover
         "GMES Torch execution requires PyTorch 2.13; run `uv sync --locked`."
     ) from error
 
-from .geometry import DefaultMedium, GeomBoxTree
+from .geometry import Cartesian, DefaultMedium, GeomBoxTree
 from .material import Dielectric
+from .pygeom import GeometricObject
 from .torch_dispersive import (
     DISPERSIVE_MODELS,
+    DispersiveBucket,
     register_plan_buffers,
     register_state_buffers,
     update_bucket,
@@ -53,12 +59,23 @@ from .torch_plan import (
 from .torch_source import (
     TorchPointSourceRecord,
     TorchSourceLoweringContext,
+    TorchSourcePlan,
     lower_sources,
 )
 
 
 class TorchConfigurationError(ValueError):
     """A requested Torch execution configuration cannot be honored."""
+
+
+class _DistributedExchange(Protocol):
+    axis: int
+
+    def begin(self, phase: Literal["magnetic", "electric"]) -> None:
+        """Start halo exchange for ``phase``."""
+
+    def finish(self, phase: Literal["magnetic", "electric"]) -> None:
+        """Complete halo exchange for ``phase``."""
 
 
 @dataclass(frozen=True)
@@ -70,7 +87,7 @@ class DistributedLaunch:
     local_rank: int = 0
     local_world_size: int = 1
 
-    def validate(self):
+    def validate(self) -> None:
         """Validate launch metadata without initializing a process group."""
         if self.world_size < 1 or self.local_world_size < 1:
             raise TorchConfigurationError("world sizes must be positive")
@@ -85,15 +102,15 @@ class TorchRuntimeConfig:
     """Explicit device, precision, compilation, and launch configuration."""
 
     device: str
-    precision: str = "float64"
-    compile_policy: str = "eager"
+    precision: Literal["float32", "float64"] = "float64"
+    compile_policy: Literal["eager", "compile"] = "eager"
     cpu_threads: int | None = None
     launch: DistributedLaunch = field(default_factory=DistributedLaunch)
     autograd: bool = False
-    execution_policy: str = "auto"
+    execution_policy: Literal["auto", "dense", "compact", "tiled"] = "auto"
     planner_tile_size: int = 4096
 
-    def validate_static(self):
+    def validate_static(self) -> None:
         """Reject invalid requests before tensors or compiler state are created."""
         if not isinstance(self.device, str) or not self.device.strip():
             raise TorchConfigurationError(
@@ -118,12 +135,12 @@ class TorchRuntimeConfig:
         self.launch.validate()
 
     @property
-    def dtype(self):
+    def dtype(self) -> torch.dtype:
         """Return the requested real Torch dtype."""
         return {"float32": torch.float32, "float64": torch.float64}[self.precision]
 
 
-def _resolved_device(config):
+def _resolved_device(config: Any) -> Any:
     try:
         device = torch.device(config.device)
     except RuntimeError as error:
@@ -135,7 +152,8 @@ def _resolved_device(config):
             f"unsupported device {config.device!r}; this slice supports CPU and CUDA"
         )
     if device.type == "cpu":
-        if device.index is not None:
+        device_index = cast(int | None, device.index)
+        if device_index is not None:
             raise TorchConfigurationError(
                 "CPU device indices are unsupported; use 'cpu'"
             )
@@ -155,11 +173,13 @@ def _resolved_device(config):
     return torch.device("cuda", index)
 
 
-def torch_runtime_diagnostics(config):
+def torch_runtime_diagnostics(
+    config: TorchRuntimeConfig,
+) -> dict[str, object]:
     """Return focused Torch/device diagnostics without unrelated environment data."""
     config.validate_static()
     requested = torch.device(config.device)
-    result = {
+    result: dict[str, object] = {
         "torch": torch.__version__,
         "requested_device": config.device,
         "execution_policy": config.execution_policy,
@@ -178,7 +198,7 @@ def torch_runtime_diagnostics(config):
     return result
 
 
-def _field_shapes(space):
+def _field_shapes(space: Any) -> Any:
     nx, ny, nz = (int(value) for value in space.my_field_size)
     return MappingProxyType(
         {
@@ -195,18 +215,44 @@ def _field_shapes(space):
 class TorchSimulationPlan(nn.Module):
     """Finalized immutable tensors and metadata for mixed-material execution."""
 
-    def __init__(self, component_plans, *, dr, dt, bloch, device, dtype):
+    components: MappingProxyType[str, ComponentPlan]
+    shapes: MappingProxyType[str, tuple[int, int, int]]
+    dr: tuple[float, float, float]
+    dt: float
+    bloch: tuple[float, float, float] | None
+    dm2_buckets: tuple[Dm2BucketMetadata, ...]
+    dm2_target_count: int
+    dispersive_buckets: tuple[DispersiveBucket, ...]
+    inv_eps_ex: torch.Tensor
+    inv_eps_ey: torch.Tensor
+    inv_eps_ez: torch.Tensor
+    inv_mu_hx: torch.Tensor
+    inv_mu_hy: torch.Tensor
+    inv_mu_hz: torch.Tensor
+
+    def __init__(
+        self,
+        component_plans: Iterable[ComponentPlan],
+        *,
+        dr: Sequence[float],
+        dt: float,
+        bloch: Sequence[float] | None,
+        device: torch.device | str,
+        dtype: torch.dtype,
+    ) -> None:
         super().__init__()
         plans = {component.name: component for component in component_plans}
         if set(plans) != set(COMPONENTS):
             raise ValueError("the execution plan must contain all six Yee components")
         self.components = MappingProxyType(plans)
-        self.shapes = MappingProxyType(
-            {name: tuple(plans[name].shape) for name in COMPONENTS}
-        )
-        self.dr = tuple(float(value) for value in dr)
+        self.shapes = MappingProxyType({name: plans[name].shape for name in COMPONENTS})
+        self.dr = (float(dr[0]), float(dr[1]), float(dr[2]))
         self.dt = float(dt)
-        self.bloch = None if bloch is None else tuple(float(value) for value in bloch)
+        self.bloch = (
+            None
+            if bloch is None
+            else (float(bloch[0]), float(bloch[1]), float(bloch[2]))
+        )
         dm2_buckets = []
         dm2_status_offset = 0
         dispersive_buckets = []
@@ -360,10 +406,9 @@ class TorchSimulationPlan(nn.Module):
                     )
                     term = component.stencil[1]
                     coordinates = np.unravel_index(bucket.targets, component.shape)
-                    source_bases = sum(
-                        coordinate * stride
-                        for coordinate, stride in zip(coordinates, term.source_strides)
-                    )
+                    source_bases = np.zeros_like(bucket.targets)
+                    for coordinate, stride in zip(coordinates, term.source_strides):
+                        source_bases += coordinate * stride
                     source_positive_indices = (
                         source_bases + term.positive_offset
                     ).astype(np.int64, copy=False)
@@ -448,14 +493,14 @@ class TorchSimulationPlan(nn.Module):
             "dispersive_buckets",
         }
 
-    def __setattr__(self, name, value):
+    def __setattr__(self, name: Any, value: Any) -> Any:
         sealed = self.__dict__.get("_sealed_names", ())
         if name in sealed:
             raise AttributeError(f"Torch simulation plan buffer {name!r} is immutable")
         super().__setattr__(name, value)
 
     @property
-    def unsupported_models(self):
+    def unsupported_models(self) -> tuple[str, ...]:
         """Return planned models without a Torch execution implementation."""
         supported = {
             "dielectric",
@@ -476,7 +521,7 @@ class TorchSimulationPlan(nn.Module):
             )
         )
 
-    def decision_report(self):
+    def decision_report(self) -> tuple[dict[str, object], ...]:
         """Return policy choices and their occupancy/cost evidence."""
         return tuple(self.components[name].decision_record() for name in COMPONENTS)
 
@@ -484,7 +529,35 @@ class TorchSimulationPlan(nn.Module):
 class TorchSimulationState(nn.Module):
     """Device-resident fields, clocks, coefficients, and fixed scratch storage."""
 
-    def __init__(self, plan, *, paired_real, device, dtype):
+    plan: TorchSimulationPlan
+    paired_real: bool
+    ex: torch.Tensor
+    ey: torch.Tensor
+    ez: torch.Tensor
+    hx: torch.Tensor
+    hy: torch.Tensor
+    hz: torch.Tensor
+    _scratch_ex: torch.Tensor
+    _scratch_ey: torch.Tensor
+    _scratch_ez: torch.Tensor
+    _scratch_hx: torch.Tensor
+    _scratch_hy: torch.Tensor
+    _scratch_hz: torch.Tensor
+    step_count: torch.Tensor
+    source_time: torch.Tensor
+    time_step: torch.Tensor
+    _dm2_status: torch.Tensor
+    _dm2_iterations: torch.Tensor
+    dm2_buckets: nn.ModuleList
+
+    def __init__(
+        self,
+        plan: TorchSimulationPlan,
+        *,
+        paired_real: bool,
+        device: torch.device | str,
+        dtype: torch.dtype,
+    ) -> None:
         super().__init__()
         self.plan = plan
         self.paired_real = bool(paired_real)
@@ -512,11 +585,13 @@ class TorchSimulationState(nn.Module):
             }
             for name, axes in boundary_axes.items():
                 for axis in axes:
-                    shape = list(plan.shapes[name])
-                    del shape[axis]
+                    boundary_shape = list(plan.shapes[name])
+                    del boundary_shape[axis]
                     self.register_buffer(
                         f"_boundary_{name.lower()}_{axis}",
-                        torch.zeros(tuple(shape) + (2,), device=device, dtype=dtype),
+                        torch.zeros(
+                            tuple(boundary_shape) + (2,), device=device, dtype=dtype
+                        ),
                         persistent=False,
                     )
         register_state_buffers(
@@ -576,28 +651,28 @@ class TorchSimulationState(nn.Module):
                     )
         self.requires_grad_(False)
 
-    def field(self, component):
+    def field(self, component: str | type[object]) -> torch.Tensor:
         """Return one live device field by component type or canonical name."""
         name = component if isinstance(component, str) else component.__name__
         if name not in COMPONENTS:
             raise KeyError(f"unknown field component {name!r}")
-        return getattr(self, name.lower())
+        return cast(torch.Tensor, getattr(self, name.lower()))
 
-    def fields(self):
+    def fields(self) -> Mapping[str, torch.Tensor]:
         """Return a read-only name-to-live-buffer view."""
         return MappingProxyType(
             {name: getattr(self, name.lower()) for name in COMPONENTS}
         )
 
     @torch.inference_mode()
-    def checkpoint(self):
+    def checkpoint(self) -> dict[str, torch.Tensor]:
         """Extract an independent device-resident checkpoint."""
         return {
             name: value.detach().clone() for name, value in self.state_dict().items()
         }
 
     @torch.inference_mode()
-    def load_checkpoint(self, checkpoint):
+    def load_checkpoint(self, checkpoint: Mapping[str, torch.Tensor]) -> None:
         """Restore a checkpoint without replacing any registered buffer."""
         expected = set(self.state_dict())
         if set(checkpoint) != expected:
@@ -611,12 +686,14 @@ class TorchSimulationState(nn.Module):
             target.copy_(value.to(device=target.device))
 
     @torch.inference_mode()
-    def snapshot(self):
+    def snapshot(self) -> dict[str, torch.Tensor]:
         """Clone all live fields on their current device."""
         return {name: value.detach().clone() for name, value in self.fields().items()}
 
     @torch.inference_mode()
-    def pml_state_snapshot(self, *, numpy=True, complex_state=True):
+    def pml_state_snapshot(
+        self, *, numpy: bool = True, complex_state: bool = True
+    ) -> dict[str, np.ndarray | torch.Tensor]:
         """Explicitly extract active-cell PML state for oracle comparison."""
         result = {}
         for name, value in self.named_buffers(recurse=False):
@@ -629,7 +706,9 @@ class TorchSimulationState(nn.Module):
         return result
 
     @torch.inference_mode()
-    def host_snapshot(self, *, numpy=True, complex_fields=True):
+    def host_snapshot(
+        self, *, numpy: bool = True, complex_fields: bool = True
+    ) -> dict[str, np.ndarray | torch.Tensor]:
         """Explicitly transfer cloned fields to host memory."""
         result = {}
         for name, field_value in self.fields().items():
@@ -641,23 +720,23 @@ class TorchSimulationState(nn.Module):
 
 
 def _electric_phase(
-    ex,
-    ey,
-    ez,
-    hx,
-    hy,
-    hz,
-    inv_ex,
-    inv_ey,
-    inv_ez,
-    scratch_ex,
-    scratch_ey,
-    scratch_ez,
-    dt,
-    dx,
-    dy,
-    dz,
-):
+    ex: Any,
+    ey: Any,
+    ez: Any,
+    hx: Any,
+    hy: Any,
+    hz: Any,
+    inv_ex: Any,
+    inv_ey: Any,
+    inv_ez: Any,
+    scratch_ex: Any,
+    scratch_ey: Any,
+    scratch_ez: Any,
+    dt: Any,
+    dx: Any,
+    dy: Any,
+    dz: Any,
+) -> Any:
     ex_target = ex[:, :-1, :-1]
     scratch = scratch_ex
     torch.sub(hz[1:, 1:, :], hz[1:, :-1, :], out=scratch)
@@ -687,23 +766,23 @@ def _electric_phase(
 
 
 def _magnetic_phase(
-    ex,
-    ey,
-    ez,
-    hx,
-    hy,
-    hz,
-    inv_hx,
-    inv_hy,
-    inv_hz,
-    scratch_hx,
-    scratch_hy,
-    scratch_hz,
-    dt,
-    dx,
-    dy,
-    dz,
-):
+    ex: Any,
+    ey: Any,
+    ez: Any,
+    hx: Any,
+    hy: Any,
+    hz: Any,
+    inv_hx: Any,
+    inv_hy: Any,
+    inv_hz: Any,
+    scratch_hx: Any,
+    scratch_hy: Any,
+    scratch_hz: Any,
+    dt: Any,
+    dx: Any,
+    dy: Any,
+    dz: Any,
+) -> Any:
     hx_target = hx[:, 1:, 1:]
     scratch = scratch_hx
     torch.sub(ey[:-1, :, 1:], ey[:-1, :, :-1], out=scratch)
@@ -733,23 +812,23 @@ def _magnetic_phase(
 
 
 def _electric_phase_2d_z(
-    ex,
-    ey,
-    ez,
-    hx,
-    hy,
-    hz,
-    inv_ex,
-    inv_ey,
-    inv_ez,
-    scratch_ex,
-    scratch_ey,
-    scratch_ez,
-    dt,
-    dx,
-    dy,
-    dz,
-):
+    ex: Any,
+    ey: Any,
+    ez: Any,
+    hx: Any,
+    hy: Any,
+    hz: Any,
+    inv_ex: Any,
+    inv_ey: Any,
+    inv_ez: Any,
+    scratch_ex: Any,
+    scratch_ey: Any,
+    scratch_ez: Any,
+    dt: Any,
+    dx: Any,
+    dy: Any,
+    dz: Any,
+) -> Any:
     del scratch_ex, scratch_ey, scratch_ez, dz
     ex[:, :-1, :-1].add_(
         inv_ex[:, :-1, :-1] * (hz[1:, 1:, :] - hz[1:, :-1, :]),
@@ -770,23 +849,23 @@ def _electric_phase_2d_z(
 
 
 def _magnetic_phase_2d_z(
-    ex,
-    ey,
-    ez,
-    hx,
-    hy,
-    hz,
-    inv_hx,
-    inv_hy,
-    inv_hz,
-    scratch_hx,
-    scratch_hy,
-    scratch_hz,
-    dt,
-    dx,
-    dy,
-    dz,
-):
+    ex: Any,
+    ey: Any,
+    ez: Any,
+    hx: Any,
+    hy: Any,
+    hz: Any,
+    inv_hx: Any,
+    inv_hy: Any,
+    inv_hz: Any,
+    scratch_hx: Any,
+    scratch_hy: Any,
+    scratch_hz: Any,
+    dt: Any,
+    dx: Any,
+    dy: Any,
+    dz: Any,
+) -> Any:
     del scratch_hx, scratch_hy, scratch_hz, dz
     hx[:, 1:, 1:].add_(
         inv_hx[:, 1:, 1:] * (ez[:-1, 1:, :] - ez[:-1, :-1, :]),
@@ -806,27 +885,29 @@ def _magnetic_phase_2d_z(
     )
 
 
-def _gather_difference(source, positive, negative, output, temporary, scale):
+def _gather_difference(
+    source: Any, positive: Any, negative: Any, output: Any, temporary: Any, scale: Any
+) -> Any:
     torch.index_select(source, 0, positive, out=output)
     torch.index_select(source, 0, negative, out=temporary)
     output.sub_(temporary).mul_(scale)
 
 
 def _upml_bucket_update(
-    field,
-    source1,
-    source2,
-    targets,
-    stencil,
-    coefficients,
-    state,
-    scratch0,
-    scratch1,
-    scratch2,
-    scale1,
-    scale2,
-    direction,
-):
+    field: Any,
+    source1: Any,
+    source2: Any,
+    targets: Any,
+    stencil: Any,
+    coefficients: Any,
+    state: Any,
+    scratch0: Any,
+    scratch1: Any,
+    scratch2: Any,
+    scale1: Any,
+    scale2: Any,
+    direction: Any,
+) -> Any:
     _gather_difference(
         source1, stencil[:, 0], stencil[:, 1], scratch0, scratch2, scale1
     )
@@ -846,21 +927,21 @@ def _upml_bucket_update(
 
 
 def _cpml_bucket_update(
-    field,
-    source1,
-    source2,
-    targets,
-    stencil,
-    coefficients,
-    state,
-    scratch0,
-    scratch1,
-    scratch2,
-    scale1,
-    scale2,
-    direction,
-    dt,
-):
+    field: Any,
+    source1: Any,
+    source2: Any,
+    targets: Any,
+    stencil: Any,
+    coefficients: Any,
+    state: Any,
+    scratch0: Any,
+    scratch1: Any,
+    scratch2: Any,
+    scale1: Any,
+    scale2: Any,
+    direction: Any,
+    dt: Any,
+) -> Any:
     _gather_difference(
         source1, stencil[:, 0], stencil[:, 1], scratch0, scratch2, scale1
     )
@@ -898,21 +979,44 @@ class TorchSimulation:
         >>> _ = simulation.advance(2)
     """
 
+    runtime: TorchRuntimeConfig
+    cpu_threads: int
+    device: torch.device
+    dtype: torch.dtype
+    geometry: tuple[GeometricObject, ...]
+    plan: TorchSimulationPlan
+    state: TorchSimulationState
+    sources: TorchSourcePlan
+    probes: TorchProbeBuffer
+    _dispersive_buckets: tuple[DispersiveBucket, ...]
+    _electric: Callable[..., Any]
+    _magnetic: Callable[..., Any]
+    _electric_args: tuple[Any, ...]
+    _magnetic_args: tuple[Any, ...]
+    _electric_pml: tuple[tuple[Callable[..., Any], tuple[Any, ...]], ...]
+    _magnetic_pml: tuple[tuple[Callable[..., Any], tuple[Any, ...]], ...]
+    _dm2_updates: list[Any]
+    _dm2_iterations_host: torch.Tensor
+    _dispersive: Callable[..., Any]
+    _distributed_partition: Any
+    _distributed_exchange: _DistributedExchange | None
+    _cuda_graphs: dict[str, torch.cuda.CUDAGraph]
+
     def __init__(
         self,
         *,
-        space,
-        geometry,
-        runtime,
-        courant_ratio=0.99,
-        dt=None,
-        bloch=None,
-        sources=(),
-        probes=(),
-        _is_auxiliary=False,
-        _distributed_partition=None,
-        _auxiliary_factory=None,
-    ):
+        space: Cartesian,
+        geometry: Iterable[GeometricObject],
+        runtime: TorchRuntimeConfig,
+        courant_ratio: float = 0.99,
+        dt: float | None = None,
+        bloch: Sequence[float] | None = None,
+        sources: Iterable[object] = (),
+        probes: Iterable[TorchProbeSpec] = (),
+        _is_auxiliary: bool = False,
+        _distributed_partition: object | None = None,
+        _auxiliary_factory: Callable[..., TorchSimulation] | None = None,
+    ) -> None:
         """Lower geometry and allocate fixed-shape device state.
 
         Args:
@@ -1081,7 +1185,7 @@ class TorchSimulation:
             magnetic_function = _magnetic_phase
         self._electric = electric_function
         self._magnetic = magnetic_function
-        compile_options = None
+        compile_options: dict[str, str | int | bool | Callable[..., Any]] | None = None
         if runtime.compile_policy == "compile":
             compile_options = {"cpp_wrapper": True} if device.type == "cpu" else None
             self._electric = torch.compile(
@@ -1098,7 +1202,7 @@ class TorchSimulation:
             )
         self._electric_args = self._electric_arguments()
         self._magnetic_args = self._magnetic_arguments()
-        pml_functions = {
+        pml_functions: dict[str, Callable[..., Any]] = {
             "upml": _upml_bucket_update,
             "cpml": _cpml_bucket_update,
         }
@@ -1115,7 +1219,7 @@ class TorchSimulation:
         self._electric_pml = self._pml_executions(("Ex", "Ey", "Ez"), pml_functions)
         self._magnetic_pml = self._pml_executions(("Hx", "Hy", "Hz"), pml_functions)
         self._dm2_updates = []
-        for bucket_state in state.dm2_buckets:
+        for bucket_state in cast(Iterable[TorchDm2BucketState], state.dm2_buckets):
             metadata = bucket_state.metadata
             prefix = metadata.prefix
             prepare = bucket_state.prepare
@@ -1202,7 +1306,7 @@ class TorchSimulation:
         self.plan_identity = self._compute_plan_identity()
         self._cuda_graphs = {}
 
-    def _compute_plan_identity(self):
+    def _compute_plan_identity(self) -> Any:
         digest = hashlib.sha256()
         digest.update(repr((self.plan.dr, self.plan.dt, self.plan.bloch)).encode())
         for module in (self.plan, self.sources):
@@ -1217,7 +1321,7 @@ class TorchSimulation:
             digest.update(auxiliary.plan_identity.encode())
         return digest.hexdigest()
 
-    def _electric_arguments(self):
+    def _electric_arguments(self) -> Any:
         state = self.state
         plan = self.plan
         return (
@@ -1237,7 +1341,7 @@ class TorchSimulation:
             *plan.dr,
         )
 
-    def _magnetic_arguments(self):
+    def _magnetic_arguments(self) -> Any:
         state = self.state
         plan = self.plan
         return (
@@ -1257,7 +1361,7 @@ class TorchSimulation:
             *plan.dr,
         )
 
-    def _pml_executions(self, names, functions):
+    def _pml_executions(self, names: Any, functions: Any) -> Any:
         executions = []
         paired_width = 2 if self.state.paired_real else None
         for name in names:
@@ -1268,7 +1372,7 @@ class TorchSimulation:
                     continue
                 prefix = f"bucket_{name.lower()}_{index}"
                 state_prefix = f"pml_{name.lower()}_{index}"
-                flatten = (
+                flatten: Callable[[torch.Tensor], torch.Tensor] = (
                     (lambda value: value.reshape(-1, paired_width))
                     if paired_width is not None
                     else (lambda value: value.reshape(-1))
@@ -1300,18 +1404,18 @@ class TorchSimulation:
         return tuple(executions)
 
     @staticmethod
-    def _run_pml(executions):
+    def _run_pml(executions: Any) -> Any:
         for function, arguments in executions:
             function(*arguments)
 
-    def _boundary_angle(self, name, axis, direction):
+    def _boundary_angle(self, name: Any, axis: Any, direction: Any) -> Any:
         if self.plan.bloch is None:
             return None
         length = (self.plan.shapes[name][axis] - 1) * self.plan.dr[axis]
         return direction * self.plan.bloch[axis] * length
 
     @staticmethod
-    def _rotate_or_copy(destination, source, angle, scratch):
+    def _rotate_or_copy(destination: Any, source: Any, angle: Any, scratch: Any) -> Any:
         if scratch is not None:
             scratch.copy_(source)
             source = scratch
@@ -1325,15 +1429,17 @@ class TorchSimulation:
         destination[..., 1].copy_(source[..., 0]).mul_(sine)
         destination[..., 1].add_(source[..., 1], alpha=cosine)
 
-    def _sync_boundary_family(self, names, *, high_from_low, skip_axis=None):
+    def _sync_boundary_family(
+        self, names: Any, *, high_from_low: Any, skip_axis: Any = None
+    ) -> Any:
         for name in names:
             component_axis = ("x", "y", "z").index(name[1].lower())
             field = self.state.field(name)
             for axis in range(3):
                 if axis == component_axis or axis == skip_axis:
                     continue
-                destination = [slice(None)] * field.ndim
-                source = [slice(None)] * field.ndim
+                destination: list[slice | int] = [slice(None)] * field.ndim
+                source: list[slice | int] = [slice(None)] * field.ndim
                 destination[axis] = -1 if high_from_low else 0
                 source[axis] = 0 if high_from_low else -1
                 direction = 1 if high_from_low else -1
@@ -1344,17 +1450,17 @@ class TorchSimulation:
                     getattr(self.state, f"_boundary_{name.lower()}_{axis}", None),
                 )
 
-    def _sync_electric_boundaries(self, *, skip_axis=None):
+    def _sync_electric_boundaries(self, *, skip_axis: Any = None) -> Any:
         self._sync_boundary_family(
             ("Ex", "Ey", "Ez"), high_from_low=True, skip_axis=skip_axis
         )
 
-    def _sync_magnetic_boundaries(self, *, skip_axis=None):
+    def _sync_magnetic_boundaries(self, *, skip_axis: Any = None) -> Any:
         self._sync_boundary_family(
             ("Hx", "Hy", "Hz"), high_from_low=False, skip_axis=skip_axis
         )
 
-    def _apply_constants(self, names):
+    def _apply_constants(self, names: Any) -> Any:
         for name in names:
             targets = getattr(self.plan, f"constant_targets_{name.lower()}")
             if targets.numel() == 0:
@@ -1366,7 +1472,7 @@ class TorchSimulation:
             else:
                 field.reshape(-1).index_copy_(0, targets, values)
 
-    def _update_dm2(self):
+    def _update_dm2(self) -> Any:
         for (
             prepare,
             prepare_args,
@@ -1399,11 +1505,11 @@ class TorchSimulation:
                 "Dm2 corrector failed to converge for " + label,
             )
 
-    def _apply_dispersive(self):
+    def _apply_dispersive(self) -> Any:
         for descriptor in self._dispersive_buckets:
             update_bucket(self.plan, self.state, descriptor)
 
-    def _electric_post_update(self):
+    def _electric_post_update(self) -> Any:
         self._run_pml(self._electric_pml)
         if self._dispersive_buckets:
             self._dispersive()
@@ -1411,12 +1517,12 @@ class TorchSimulation:
         if self._has_electric_constants:
             self._apply_constants(("Ex", "Ey", "Ez"))
 
-    def _magnetic_post_update(self):
+    def _magnetic_post_update(self) -> Any:
         self._run_pml(self._magnetic_pml)
         if self._has_magnetic_constants:
             self._apply_constants(("Hx", "Hy", "Hz"))
 
-    def _run_compute_region(self, name, function):
+    def _run_compute_region(self, name: Any, function: Any) -> Any:
         graph = self._cuda_graphs.get(name)
         if graph is None:
             function()
@@ -1424,14 +1530,14 @@ class TorchSimulation:
             graph.replay()
 
     @torch.inference_mode()
-    def capture_cuda_graphs(self):
+    def capture_cuda_graphs(self) -> Self:
         """Capture fixed-storage compute regions without NCCL or host I/O."""
         if self.device.type != "cuda":
             raise TorchConfigurationError("CUDA graph capture requires a CUDA runtime")
         if self._cuda_graphs:
             return self
         checkpoint = self.checkpoint()
-        regions = [
+        regions: list[tuple[str, Callable[[], Any]]] = [
             ("electric", lambda: self._electric(*self._electric_args)),
             ("magnetic", lambda: self._magnetic(*self._magnetic_args)),
         ]
@@ -1459,7 +1565,7 @@ class TorchSimulation:
         return self
 
     @torch.inference_mode()
-    def advance(self, steps):
+    def advance(self, steps: int) -> Self:
         """Advance fixed rank-local state without implicit host conversion."""
         if isinstance(steps, bool) or not isinstance(steps, int) or steps < 0:
             raise ValueError("steps must be a non-negative integer")
@@ -1476,7 +1582,7 @@ class TorchSimulation:
                 exchange.finish("magnetic")
             self._run_compute_region("electric_post", self._electric_post_update)
             if not self.sources.empty:
-                self.sources.apply(
+                self.sources.execute(
                     self,
                     electric=True,
                     time=self.state.source_time + 0.5 * self.state.time_step,
@@ -1499,7 +1605,7 @@ class TorchSimulation:
                 exchange.finish("electric")
             self._run_compute_region("magnetic_post", self._magnetic_post_update)
             if not self.sources.empty:
-                self.sources.apply(
+                self.sources.execute(
                     self,
                     electric=False,
                     time=self.state.source_time + self.state.time_step,
@@ -1515,12 +1621,12 @@ class TorchSimulation:
             self.state.step_count.add_(1)
         return self
 
-    def step(self):
+    def step(self) -> Self:
         """Advance one step as a convenience wrapper."""
         return self.advance(1)
 
     @torch.inference_mode()
-    def checkpoint(self):
+    def checkpoint(self) -> dict[str, object]:
         """Return a versioned tensor/metadata checkpoint, never a simulation pickle."""
         return {
             "format": "gmes.torch.simulation",
@@ -1539,7 +1645,7 @@ class TorchSimulation:
         }
 
     @torch.inference_mode()
-    def load_checkpoint(self, checkpoint):
+    def load_checkpoint(self, checkpoint: Mapping[str, object]) -> Self:
         """Restore a trusted versioned checkpoint into fixed live buffers."""
         if (
             not isinstance(checkpoint, dict)
@@ -1582,24 +1688,26 @@ class TorchSimulation:
         self.probes.load_checkpoint(checkpoint["probes"])
         return self
 
-    def save_checkpoint(self, filename):
+    def save_checkpoint(self, filename: str | PathLike[str]) -> Path:
         """Explicitly persist the versioned tensor/metadata checkpoint."""
         return write_torch_checkpoint(self.checkpoint(), filename)
 
-    def load_checkpoint_file(self, filename):
+    def load_checkpoint_file(self, filename: str | PathLike[str]) -> Self:
         """Explicitly load and restore a pickle-free checkpoint file."""
         return self.load_checkpoint(read_torch_checkpoint(filename, device=self.device))
 
-    def flush_probes(self):
+    def flush_probes(self) -> tuple[TorchProbeSamples, ...]:
         """Explicitly synchronize and drain bounded probe rings to host arrays."""
         return self.probes.flush()
 
-    def host_snapshot(self, *, numpy=True, complex_fields=True):
+    def host_snapshot(
+        self, *, numpy: bool = True, complex_fields: bool = True
+    ) -> dict[str, np.ndarray | torch.Tensor]:
         """Explicit host adapter for file, plotting, and NumPy consumers."""
         return self.state.host_snapshot(numpy=numpy, complex_fields=complex_fields)
 
     @torch.inference_mode()
-    def load_host_fields(self, fields):
+    def load_host_fields(self, fields: Mapping[str, object]) -> Self:
         """Explicitly copy NumPy or CPU Torch field values into live buffers."""
         if set(fields) != set(COMPONENTS):
             raise ValueError("host fields must contain Ex, Ey, Ez, Hx, Hy, and Hz")
@@ -1623,11 +1731,15 @@ class TorchSimulation:
         return self
 
     @torch.inference_mode()
-    def load_host_dm2_state(self, states, *, step_count=None):
+    def load_host_dm2_state(
+        self, states: Sequence[object], *, step_count: int | None = None
+    ) -> Self:
         """Copy cell-major (cell, transition, u/v/w) DM2 state arrays."""
         if len(states) != len(self.state.dm2_buckets):
             raise ValueError("DM2 state input must contain one array per bucket")
-        for bucket, values in zip(self.state.dm2_buckets, states):
+        for bucket, values in zip(
+            cast(Iterable[TorchDm2BucketState], self.state.dm2_buckets), states
+        ):
             source = torch.as_tensor(values)
             expected = (
                 bucket.metadata.target_count,
@@ -1654,11 +1766,14 @@ class TorchSimulation:
         return self
 
     @torch.inference_mode()
-    def dm2_state_snapshot(self):
+    def dm2_state_snapshot(self) -> tuple[dict[str, object], ...]:
         """Return explicit host snapshots of transformed and physical DM2 state."""
         time = float(self.state.source_time.detach().cpu().numpy())
         snapshots = []
-        for metadata, bucket in zip(self.plan.dm2_buckets, self.state.dm2_buckets):
+        for metadata, bucket in zip(
+            self.plan.dm2_buckets,
+            cast(Iterable[TorchDm2BucketState], self.state.dm2_buckets),
+        ):
             prefix = metadata.prefix
             u = bucket.u.detach().cpu().permute(1, 2, 0).contiguous().numpy().copy()
             t1 = getattr(self.plan, f"{prefix}_t1").detach().cpu().numpy()
@@ -1687,7 +1802,7 @@ class TorchSimulation:
         return tuple(snapshots)
 
     @torch.inference_mode()
-    def diagnostics(self):
+    def diagnostics(self) -> dict[str, object]:
         """Return the focused runtime diagnostic record for this simulation."""
         result = torch_runtime_diagnostics(self.runtime)
         result["resolved_device"] = str(self.device)
@@ -1759,7 +1874,9 @@ class TorchSimulation:
         }
         result["probes"] = {
             "rings": len(self.probes.rings),
-            "capacity": sum(ring.capacity for ring in self.probes.rings),
+            "capacity": sum(
+                ring.capacity for ring in cast(Iterable[Any], self.probes.rings)
+            ),
             "device_bytes": sum(
                 value.numel() * value.element_size() for value in self.probes.buffers()
             ),
@@ -1780,7 +1897,7 @@ class TorchSimulation:
         }
         return result
 
-    def buffer_addresses(self):
+    def buffer_addresses(self) -> dict[str, int]:
         """Return fixed storage addresses for explicit capture diagnostics."""
         result = {
             f"state.{name}": tensor.data_ptr()

@@ -6,6 +6,7 @@ import numpy as np
 import torch
 
 DISPERSIVE_MODELS = frozenset(("drude", "lorentz", "dcp-ade", "dcp-plrc", "dcp-rc"))
+DISPERSIVE_GROUPING_SCOPES = ("combined", "two-level", "dcp-convolution")
 
 
 @dataclass(frozen=True)
@@ -70,9 +71,11 @@ def _group_recurrence(descriptor):
     return None
 
 
-def _matching_pair(first, second):
+def _matching_pair(first, second, scope):
     recurrence = _group_recurrence(first)
     if recurrence is None or recurrence != _group_recurrence(second):
+        return None
+    if scope != "combined" and recurrence != scope:
         return None
     if (
         first.component != second.component
@@ -100,11 +103,15 @@ class DispersiveExecutionOverlay(torch.nn.Module):
         "response",
     )
 
-    def __init__(self, plan, descriptors, *, paired_real, dtype, device):
+    def __init__(
+        self, plan, descriptors, *, paired_real, dtype, device, scope="combined"
+    ):
         super().__init__()
         device = torch.device(device)
         if device.type != "cpu":
             raise ValueError("exact-schema dispersive grouping is CPU-only")
+        if scope not in DISPERSIVE_GROUPING_SCOPES:
+            raise ValueError(f"unsupported dispersive grouping scope: {scope!r}")
 
         entries = []
         groups = []
@@ -114,7 +121,9 @@ class DispersiveExecutionOverlay(torch.nn.Module):
         while index < len(descriptors):
             first = descriptors[index]
             second = descriptors[index + 1] if index + 1 < len(descriptors) else None
-            recurrence = _matching_pair(first, second) if second is not None else None
+            recurrence = (
+                _matching_pair(first, second, scope) if second is not None else None
+            )
             if recurrence is None:
                 entries.append(first)
                 index += 1
@@ -212,6 +221,7 @@ class DispersiveExecutionOverlay(torch.nn.Module):
 
         self.entries = tuple(entries)
         self.groups = tuple(groups)
+        self.scope = scope
         self._spans_by_prefix = spans_by_prefix
         self.requires_grad_(False)
 

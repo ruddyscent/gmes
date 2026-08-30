@@ -137,6 +137,16 @@ native comparison instead of trusting embedded booleans. Raw samples are also ch
 replicate count, relative MAD, the 5% individual limit, and a deterministic
 one-sided bootstrap test of the log-geometric-mean ratio.
 
+CPU RSS acceptance uses 28 consecutive five-step windows in a fresh process.
+The first 16 windows are a fixed stabilization phase. The remaining 12 windows
+form two non-overlapping six-window evaluation blocks. A run is bounded only
+when its upward excursion from the first evaluation sample is at most 1 MiB
+and an exact one-sided permutation test does not report a positive-order trend
+in both blocks. Downward returns remain in the absolute-envelope diagnostics;
+they are not treated as leaks, and unavailable measurements fail closed.
+Linux reads `/proc/self/statm`; Darwin uses `proc_pid_rusage` only after its
+byte value is validated against a `ps` KiB reference within the same 1 MiB bound.
+
 The current dense/compact/tiled selector changes planner metadata and optional
 storage only; material execution still uses one dense dielectric base plus
 compact indexed material updates. Policy-matrix timings are therefore retained

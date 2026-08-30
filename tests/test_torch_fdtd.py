@@ -136,6 +136,10 @@ class TorchRuntimeConfigTest(unittest.TestCase):
             ),
             TorchRuntimeConfig(
                 device="cpu",
+                experimental_dispersive_grouping_scope="unknown",
+            ),
+            TorchRuntimeConfig(
+                device="cpu",
                 launch=DistributedLaunch(world_size=2, local_world_size=2),
             ),
         )
@@ -199,7 +203,7 @@ class TorchRuntimeConfigTest(unittest.TestCase):
             first.diagnostics()["compile_cache_key"], first.compile_cache_key
         )
         self.assertEqual(
-            first.diagnostics()["compile_solver_abi"], "torch-fdtd-regions-v7"
+            first.diagnostics()["compile_solver_abi"], "torch-fdtd-regions-v8"
         )
         self.assertEqual(
             first.diagnostics()["view_mutation_representation"],

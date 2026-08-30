@@ -606,7 +606,7 @@ class DispersiveStorageTest(unittest.TestCase):
         torch._dynamo.reset()
         graphs_before = torch._dynamo.utils.counters["stats"]["unique_graphs"]
 
-        def build(compile_policy, *, experimental=False):
+        def build(compile_policy, *, experimental=False, scope="combined"):
             return gmes.TorchSimulation(
                 space=gmes.Cartesian((8, 2, 2), 2),
                 geometry=_mixed_geometry(),
@@ -615,18 +615,33 @@ class DispersiveStorageTest(unittest.TestCase):
                     cpu_threads=schema_threads,
                     compile_policy=compile_policy,
                     experimental_dispersive_grouping=experimental,
+                    experimental_dispersive_grouping_scope=scope,
                 ),
             )
 
         eager = build("eager", experimental=True)
         compiled = build("compile", experimental=True)
         default_compiled = build("compile")
+        two_level = build("compile", experimental=True, scope="two-level")
+        dcp_convolution = build("compile", experimental=True, scope="dcp-convolution")
         overlay = compiled._dispersive_overlay
         self.assertIsNone(eager._dispersive_overlay)
         self.assertIsNone(default_compiled._dispersive_overlay)
         self.assertIsNotNone(overlay)
         self.assertEqual(len(overlay.groups), 6)
         self.assertEqual(len(overlay.entries), 9)
+        self.assertEqual(len(two_level._dispersive_overlay.groups), 3)
+        self.assertEqual(len(two_level._dispersive_overlay.entries), 12)
+        self.assertEqual(
+            {group.recurrence for group in two_level._dispersive_overlay.groups},
+            {"two-level"},
+        )
+        self.assertEqual(len(dcp_convolution._dispersive_overlay.groups), 3)
+        self.assertEqual(len(dcp_convolution._dispersive_overlay.entries), 12)
+        self.assertEqual(
+            {group.recurrence for group in dcp_convolution._dispersive_overlay.groups},
+            {"dcp-convolution"},
+        )
         self.assertEqual(
             tuple(
                 tuple(span.descriptor.model for span in group.spans)
@@ -698,6 +713,14 @@ class DispersiveStorageTest(unittest.TestCase):
         self.assertNotEqual(
             compiled.compile_cache_key,
             default_compiled.compile_cache_key,
+        )
+        self.assertNotEqual(
+            compiled.compile_cache_key,
+            two_level.compile_cache_key,
+        )
+        self.assertNotEqual(
+            two_level.compile_cache_key,
+            dcp_convolution.compile_cache_key,
         )
         compiled.advance(1)
         self.assertEqual(
@@ -773,6 +796,7 @@ class DispersiveStorageTest(unittest.TestCase):
             len(compiled.plan.dispersive_buckets),
         )
         self.assertEqual(diagnostics["exact_schema_groups"], 6)
+        self.assertEqual(diagnostics["experimental_grouping_scope"], "combined")
         self.assertEqual(len(diagnostics["exact_schema_spans"]), 6)
         self.assertEqual(
             tuple(

@@ -19,6 +19,7 @@ except ImportError as error:  # pragma: no cover
 from .geometry import DefaultMedium, GeomBoxTree
 from .material import Dielectric
 from .torch_dispersive import (
+    DISPERSIVE_GROUPING_SCOPES,
     DISPERSIVE_MODELS,
     DispersiveExecutionOverlay,
     register_plan_buffers,
@@ -64,7 +65,7 @@ class TorchConfigurationError(ValueError):
 
 
 COMPILE_MODES = ("default", "reduce-overhead", "max-autotune")
-TORCH_SOLVER_ABI = "torch-fdtd-regions-v7"
+TORCH_SOLVER_ABI = "torch-fdtd-regions-v8"
 DIRECT_VIEW_MUTATION_REPRESENTATION = "direct-nonoverlapping-as-strided-v1"
 DEFAULT_VIEW_MUTATION_REPRESENTATION = "slice-views-v1"
 PACKED_DM2_REPRESENTATION = "single-carry-packed-loop-v1"
@@ -111,6 +112,7 @@ class TorchRuntimeConfig:
     execution_policy: str = "auto"
     planner_tile_size: int = 4096
     experimental_dispersive_grouping: bool = False
+    experimental_dispersive_grouping_scope: str = "combined"
 
     def validate_static(self):
         """Reject invalid requests before tensors or compiler state are created."""
@@ -151,6 +153,14 @@ class TorchRuntimeConfig:
         if not isinstance(self.experimental_dispersive_grouping, bool):
             raise TorchConfigurationError(
                 "experimental_dispersive_grouping must be a boolean"
+            )
+        if (
+            self.experimental_dispersive_grouping_scope
+            not in DISPERSIVE_GROUPING_SCOPES
+        ):
+            raise TorchConfigurationError(
+                "experimental_dispersive_grouping_scope must be 'combined', "
+                "'two-level', or 'dcp-convolution'"
             )
         self.launch.validate()
 
@@ -204,6 +214,9 @@ def torch_runtime_diagnostics(config):
         "compile_policy": config.compile_policy,
         "compile_mode": config.compile_mode,
         "experimental_dispersive_grouping": (config.experimental_dispersive_grouping),
+        "experimental_dispersive_grouping_scope": (
+            config.experimental_dispersive_grouping_scope
+        ),
         "cuda_build": torch.version.cuda,
         "cuda_available": torch.cuda.is_available(),
         "cuda_device_count": torch.cuda.device_count(),
@@ -1445,6 +1458,7 @@ class TorchSimulation:
                 paired_real=bloch is not None,
                 dtype=runtime.dtype,
                 device=device,
+                scope=runtime.experimental_dispersive_grouping_scope,
             )
             if grouped_dispersive_io
             else None
@@ -1772,6 +1786,11 @@ class TorchSimulation:
             region_topology,
             self._material_execution_representation,
             self._dispersive_execution_representation,
+            (
+                self.runtime.experimental_dispersive_grouping_scope
+                if self._dispersive_overlay is not None
+                else None
+            ),
             self._cpml_execution_representation,
             self._view_mutation_representation,
             self._dm2_execution_representation,
@@ -2485,6 +2504,11 @@ class TorchSimulation:
             "launches_per_step": len(self._dispersive_buckets),
             "logical_buckets_per_step": len(self._dispersive_buckets),
             "execution_representation": self._dispersive_execution_representation,
+            "experimental_grouping_scope": (
+                self.runtime.experimental_dispersive_grouping_scope
+                if self._dispersive_overlay is not None
+                else None
+            ),
             "execution_entries_per_step": (
                 len(self._dispersive_overlay.entries)
                 if self._dispersive_overlay is not None

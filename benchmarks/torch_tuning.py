@@ -4,13 +4,18 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
+import ctypes.util
+import functools
 import hashlib
+import itertools
 import json
 import math
 import os
 import platform
 import resource
 import subprocess
+import sys
 import time
 from collections import Counter
 from pathlib import Path
@@ -61,7 +66,11 @@ COMPILE_VARIANTS = (
     ("reduce-overhead", "reduce-overhead", False),
     ("max-autotune", "max-autotune", False),
 )
-EVIDENCE_CONTRACT_ID = "torch-cpu-acceptance-v3"
+EVIDENCE_CONTRACT_ID = "torch-cpu-acceptance-v7"
+CPU_RSS_LIMIT_BYTES = 1024 * 1024
+CPU_RSS_STABILIZATION_WINDOWS = 16
+CPU_RSS_EVALUATION_BLOCK_WINDOWS = 6
+CPU_RSS_EVALUATION_BLOCKS = 2
 RUNTIME_ACCEPTANCE_KEYS = (
     "compiler_clean",
     "compiled_hot_path_complete",
@@ -99,6 +108,58 @@ def _rss_bytes():
     return int(value if platform.system() == "Darwin" else value * 1024)
 
 
+class _DarwinRusageInfoV0(ctypes.Structure):
+    """Public ``rusage_info_v0`` layout from Darwin's ``libproc.h``."""
+
+    _fields_ = [
+        ("ri_uuid", ctypes.c_uint8 * 16),
+        ("ri_user_time", ctypes.c_uint64),
+        ("ri_system_time", ctypes.c_uint64),
+        ("ri_pkg_idle_wkups", ctypes.c_uint64),
+        ("ri_interrupt_wkups", ctypes.c_uint64),
+        ("ri_pageins", ctypes.c_uint64),
+        ("ri_wired_size", ctypes.c_uint64),
+        ("ri_resident_size", ctypes.c_uint64),
+        ("ri_phys_footprint", ctypes.c_uint64),
+        ("ri_proc_start_abstime", ctypes.c_uint64),
+        ("ri_proc_exit_abstime", ctypes.c_uint64),
+    ]
+
+
+@functools.cache
+def _darwin_proc_pid_rusage_function():
+    """Load the Darwin self-process resource function once per child."""
+    library_name = ctypes.util.find_library("proc") or "/usr/lib/libproc.dylib"
+    try:
+        library = ctypes.CDLL(library_name, use_errno=True)
+        proc_pid_rusage = library.proc_pid_rusage
+        proc_pid_rusage.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
+        proc_pid_rusage.restype = ctypes.c_int
+    except AttributeError, OSError:
+        return None
+    return library, proc_pid_rusage
+
+
+def _darwin_proc_pid_rusage_bytes():
+    """Return current Darwin RSS directly from the self-process kernel API."""
+    loaded = _darwin_proc_pid_rusage_function()
+    if loaded is None:
+        return None
+    _library, proc_pid_rusage = loaded
+    usage = _DarwinRusageInfoV0()
+    if proc_pid_rusage(os.getpid(), 0, ctypes.byref(usage)) != 0:
+        return None
+    return int(usage.ri_resident_size)
+
+
+def _ps_current_rss_bytes():
+    value = _command_text("ps", "-o", "rss=", "-p", str(os.getpid()))
+    try:
+        return int(value) * 1024 if value is not None else None
+    except ValueError:
+        return None
+
+
 def _current_rss_bytes():
     """Return current resident memory on supported CPU acceptance hosts."""
     system = platform.system()
@@ -106,15 +167,62 @@ def _current_rss_bytes():
         try:
             fields = Path("/proc/self/statm").read_text(encoding="ascii").split()
             return int(fields[1]) * int(os.sysconf("SC_PAGE_SIZE"))
-        except (IndexError, OSError, ValueError):
+        except IndexError, OSError, ValueError:
             return None
     if system == "Darwin":
-        value = _command_text("ps", "-o", "rss=", "-p", str(os.getpid()))
-        try:
-            return int(value) * 1024 if value is not None else None
-        except ValueError:
-            return None
+        return _darwin_proc_pid_rusage_bytes()
     return None
+
+
+def _current_rss_provider():
+    """Select and document a current-RSS provider for one probe process."""
+    system = platform.system()
+    if system == "Linux":
+        return _current_rss_bytes, {
+            "name": "proc-self-statm",
+            "units": "bytes",
+            "validated": True,
+        }
+    if system == "Darwin":
+        direct_before = _darwin_proc_pid_rusage_bytes()
+        reference = _ps_current_rss_bytes()
+        direct_after = _darwin_proc_pid_rusage_bytes()
+        available = all(
+            value is not None for value in (direct_before, reference, direct_after)
+        )
+        lower = (
+            min(direct_before, direct_after) - CPU_RSS_LIMIT_BYTES
+            if available
+            else None
+        )
+        upper = (
+            max(direct_before, direct_after) + CPU_RSS_LIMIT_BYTES
+            if available
+            else None
+        )
+        validated = bool(available and lower <= reference <= upper)
+        metadata = {
+            "name": "proc-pid-rusage-v0",
+            "units": "bytes",
+            "validated": validated,
+            "validation": {
+                "reference_provider": "ps-rss",
+                "direct_before_bytes": direct_before,
+                "reference_bytes": reference,
+                "direct_after_bytes": direct_after,
+                "tolerance_bytes": CPU_RSS_LIMIT_BYTES,
+            },
+        }
+        return (
+            _darwin_proc_pid_rusage_bytes if validated else lambda: None,
+            metadata,
+        )
+    return lambda: None, {
+        "name": "unavailable",
+        "units": "bytes",
+        "validated": False,
+        "system": system,
+    }
 
 
 def _cpu_memory_probe(simulation, checkpoint, steps):
@@ -136,6 +244,308 @@ def _cpu_memory_probe(simulation, checkpoint, steps):
             after - before if before is not None and after is not None else None
         ),
     }
+
+
+def _positive_order_permutation_pvalue(values):
+    """Return the exact one-sided p-value for a positive six-point trend."""
+    values = tuple(int(value) for value in values)
+    if len(values) != CPU_RSS_EVALUATION_BLOCK_WINDOWS:
+        raise ValueError("RSS trend blocks must contain exactly six values")
+    positions = tuple(range(len(values)))
+
+    def order_score(items):
+        return sum(position * value for position, value in zip(positions, items))
+
+    observed = order_score(values)
+    at_least_observed = sum(
+        order_score(permutation) >= observed
+        for permutation in itertools.permutations(values)
+    )
+    return at_least_observed / math.factorial(len(values))
+
+
+def _evaluate_cpu_rss_plateau(samples):
+    """Fail closed unless a 28-window RSS series reaches a bounded plateau."""
+    expected = CPU_RSS_STABILIZATION_WINDOWS + (
+        CPU_RSS_EVALUATION_BLOCK_WINDOWS * CPU_RSS_EVALUATION_BLOCKS
+    )
+    if not isinstance(samples, (list, tuple)) or len(samples) != expected:
+        return {
+            "schema_version": 2,
+            "bounded": False,
+            "error": f"expected exactly {expected} RSS windows",
+        }
+    try:
+        before = tuple(int(sample["before_bytes"]) for sample in samples)
+        after = tuple(int(sample["after_bytes"]) for sample in samples)
+    except KeyError, TypeError, ValueError:
+        return {
+            "schema_version": 2,
+            "bounded": False,
+            "error": "RSS windows contain unavailable or malformed measurements",
+        }
+    if any(value < 0 for value in before + after):
+        return {
+            "schema_version": 2,
+            "bounded": False,
+            "error": "RSS measurements must be non-negative",
+        }
+
+    stable = after[CPU_RSS_STABILIZATION_WINDOWS:]
+    blocks = tuple(
+        stable[
+            index
+            * CPU_RSS_EVALUATION_BLOCK_WINDOWS : (index + 1)
+            * CPU_RSS_EVALUATION_BLOCK_WINDOWS
+        ]
+        for index in range(CPU_RSS_EVALUATION_BLOCKS)
+    )
+    pvalues = tuple(_positive_order_permutation_pvalue(block) for block in blocks)
+    positions = tuple(range(CPU_RSS_EVALUATION_BLOCK_WINDOWS))
+    position_mean = sum(positions) / len(positions)
+    position_variance = sum((position - position_mean) ** 2 for position in positions)
+    block_slopes = tuple(
+        sum(
+            (position - position_mean) * (value - (sum(block) / len(block)))
+            for position, value in zip(positions, block)
+        )
+        / position_variance
+        for block in blocks
+    )
+    persistent_positive_order_trend = all(value <= 0.05 for value in pvalues)
+    upward_excursion = max(0, max(stable) - stable[0])
+    bounded = (
+        upward_excursion <= CPU_RSS_LIMIT_BYTES and not persistent_positive_order_trend
+    )
+    return {
+        "schema_version": 2,
+        "bounded": bounded,
+        "error": None,
+        "window_count": expected,
+        "stabilization_window_count": CPU_RSS_STABILIZATION_WINDOWS,
+        "stabilization_boundary_index": CPU_RSS_STABILIZATION_WINDOWS,
+        "evaluation_block_window_count": CPU_RSS_EVALUATION_BLOCK_WINDOWS,
+        "evaluation_block_count": CPU_RSS_EVALUATION_BLOCKS,
+        "limit_bytes": CPU_RSS_LIMIT_BYTES,
+        "stable_start_bytes": stable[0],
+        "stable_start_upward_excursion_bytes": upward_excursion,
+        "absolute_envelope_bytes": max(stable) - min(stable),
+        "evaluation_block_pvalues": pvalues,
+        "evaluation_block_slopes_bytes_per_window": block_slopes,
+        "persistent_positive_order_trend": persistent_positive_order_trend,
+        "peak_rss_bytes": max(before + after),
+        "before_bytes": before,
+        "after_bytes": after,
+        "deltas_bytes": tuple(
+            after_value - before_value
+            for before_value, after_value in zip(before, after)
+        ),
+    }
+
+
+def _cpu_memory_plateau_probe(simulation, steps):
+    """Record the fixed RSS window vector without measured-interval bookkeeping."""
+    probe_steps = max(1, int(steps))
+    window_count = CPU_RSS_STABILIZATION_WINDOWS + (
+        CPU_RSS_EVALUATION_BLOCK_WINDOWS * CPU_RSS_EVALUATION_BLOCKS
+    )
+    readings = np.empty((window_count, 2), dtype=np.int64)
+    read_rss, provider = _current_rss_provider()
+    for index in range(window_count):
+        before = read_rss()
+        if before is None:
+            result = _evaluate_cpu_rss_plateau(())
+            result["measurement_provider"] = provider
+            return result
+        simulation.advance(probe_steps)
+        _synchronize(simulation.device)
+        after = read_rss()
+        if after is None:
+            result = _evaluate_cpu_rss_plateau(())
+            result["measurement_provider"] = provider
+            return result
+        readings[index, 0] = before
+        readings[index, 1] = after
+    samples = [
+        {"before_bytes": int(before), "after_bytes": int(after)}
+        for before, after in readings
+    ]
+    result = _evaluate_cpu_rss_plateau(samples)
+    result["probe_steps_per_window"] = probe_steps
+    result["measurement_provider"] = provider
+    return result
+
+
+def _cpu_rss_request(
+    name,
+    *,
+    precision,
+    compile_mode,
+    execution_policy,
+    experimental_dispersive_grouping,
+    experimental_dispersive_grouping_scope,
+    threads,
+    interop_threads,
+    warmup,
+    profile_steps,
+):
+    return {
+        "case": name,
+        "device": "cpu",
+        "precision": precision,
+        "compile_mode": compile_mode,
+        "execution_policy": execution_policy,
+        "experimental_dispersive_grouping": experimental_dispersive_grouping,
+        "experimental_dispersive_grouping_scope": (
+            experimental_dispersive_grouping_scope
+        ),
+        "threads": threads,
+        "interop_threads": interop_threads,
+        "warmup": warmup,
+        "profile_steps": profile_steps,
+    }
+
+
+def _run_cpu_rss_child(request, manifest):
+    """Build and probe one CPU case in the current fresh child process."""
+    torch._dynamo.reset()
+    torch._dynamo.utils.counters.clear()
+    torch.set_num_threads(request["threads"])
+    if torch.get_num_interop_threads() != request["interop_threads"]:
+        torch.set_num_interop_threads(request["interop_threads"])
+    _spec, space, geometry, sources, bloch = _build_case(request["case"], manifest)
+    runtime = gmes.TorchRuntimeConfig(
+        device="cpu",
+        precision=request["precision"],
+        compile_policy="compile",
+        compile_mode=request["compile_mode"],
+        cpu_threads=request["threads"],
+        cpu_interop_threads=request["interop_threads"],
+        execution_policy=request["execution_policy"],
+        experimental_dispersive_grouping=request["experimental_dispersive_grouping"],
+        experimental_dispersive_grouping_scope=request[
+            "experimental_dispersive_grouping_scope"
+        ],
+    )
+    simulation = gmes.TorchSimulation(
+        space=space,
+        geometry=geometry,
+        sources=sources,
+        bloch=bloch,
+        runtime=runtime,
+    )
+    _initialize_fields(
+        simulation,
+        manifest["reference"]["seed"],
+        manifest["reference"]["field_scale"],
+    )
+    checkpoint = simulation.checkpoint()
+    simulation.advance(1)
+    simulation.load_checkpoint(checkpoint).advance(1)
+    simulation.load_checkpoint(checkpoint).advance(request["warmup"])
+    counters_before = _counter_snapshot()
+    addresses = simulation.buffer_addresses()
+    plateau = _cpu_memory_plateau_probe(simulation, request["profile_steps"])
+    counters_after = _counter_snapshot()
+    counter_growth = _counter_delta(counters_before, counters_after)
+    storage_stable = addresses == simulation.buffer_addresses()
+    compiler_clean = (
+        counter_growth["unique_graphs"] == 0
+        and counter_growth["frames_total"] == 0
+        and counter_growth["graph_breaks"] == 0
+    )
+    plateau["bounded"] = bool(
+        plateau.get("bounded") and compiler_clean and storage_stable
+    )
+    return {
+        "schema_version": 1,
+        "kind": "cpu-rss-fresh-process",
+        "pid": os.getpid(),
+        "parent_pid": os.getppid(),
+        "request": request,
+        "evidence": _current_evidence(manifest),
+        "compile_cache_key": simulation.compile_cache_key,
+        "counter_growth": counter_growth,
+        "compiler_clean": compiler_clean,
+        "storage_addresses_stable": storage_stable,
+        "plateau": plateau,
+    }
+
+
+def _fresh_cpu_memory_probe(request, manifest):
+    """Launch and validate the fixed RSS probe in one new Python process."""
+    expected_evidence = _current_evidence(manifest)
+    command = [
+        sys.executable,
+        "-m",
+        "benchmarks.torch_tuning",
+        "--cpu-rss-child",
+        "--case",
+        request["case"],
+        "--precision",
+        request["precision"],
+        "--compile-mode",
+        request["compile_mode"],
+        "--policy",
+        request["execution_policy"],
+        "--experimental-dispersive-grouping-scope",
+        request["experimental_dispersive_grouping_scope"],
+        "--threads",
+        str(request["threads"]),
+        "--interop-threads",
+        str(request["interop_threads"]),
+        "--warmup",
+        str(request["warmup"]),
+        "--profile-steps",
+        str(request["profile_steps"]),
+    ]
+    if request["experimental_dispersive_grouping"]:
+        command.append("--experimental-dispersive-grouping")
+    completed = subprocess.run(
+        command,
+        check=False,
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+    )
+    if completed.returncode != 0:
+        return {
+            "schema_version": 1,
+            "kind": "cpu-rss-fresh-process",
+            "request": request,
+            "plateau": {
+                "schema_version": 2,
+                "bounded": False,
+                "error": "fresh RSS child failed",
+            },
+            "child_returncode": completed.returncode,
+            "child_stderr": completed.stderr[-4000:],
+        }
+    try:
+        result = json.loads(completed.stdout)
+    except json.JSONDecodeError:
+        result = {
+            "schema_version": 1,
+            "kind": "cpu-rss-fresh-process",
+            "request": request,
+            "plateau": {
+                "schema_version": 2,
+                "bounded": False,
+                "error": "fresh RSS child returned malformed JSON",
+            },
+        }
+    if (
+        result.get("request") != request
+        or result.get("parent_pid") != os.getpid()
+        or not isinstance(result.get("pid"), int)
+        or result.get("pid") <= 0
+        or result.get("evidence") != expected_evidence
+    ):
+        result.setdefault("plateau", {})["bounded"] = False
+        result["binding_error"] = (
+            "fresh RSS child request, PID, or checkout binding failed"
+        )
+    return result
 
 
 def _memory_growth_bounded(device, cuda_growth, cpu_rss_growth):
@@ -386,9 +796,7 @@ def _timer_samples(simulation, steps, repeats, threads, checkpoint):
     return samples
 
 
-def _perf_counter_samples(
-    simulation, steps, repeats, initial_checkpoint, warmup
-):
+def _perf_counter_samples(simulation, steps, repeats, initial_checkpoint, warmup):
     """Measure repeats after independently restoring and warming initial state."""
     samples = []
     for _ in range(repeats):
@@ -405,9 +813,7 @@ def _perf_counter_samples(
 def _state_change_summary(first, second):
     if set(first) != set(second):
         raise ValueError("state checkpoint keys changed during timed execution")
-    changed = {
-        name for name in first if not torch.equal(first[name], second[name])
-    }
+    changed = {name for name in first if not torch.equal(first[name], second[name])}
     field_names = {name.lower() for name in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")}
     pml_names = {name for name in first if name.startswith("pml_")}
     dispersive_names = {name for name in first if name.startswith("bucket_")}
@@ -433,6 +839,7 @@ def _trace_filename(
     threads,
     interop_threads,
     experimental_dispersive_grouping=False,
+    experimental_dispersive_grouping_scope="combined",
 ):
     values = (
         name,
@@ -445,11 +852,14 @@ def _trace_filename(
         f"interop-{interop_threads}",
     )
     if experimental_dispersive_grouping:
-        values += ("exact-schema-dispersive",)
-    return "__".join(
-        "".join(character if character.isalnum() else "-" for character in value)
-        for value in values
-    ) + ".json"
+        values += (f"exact-schema-dispersive-{experimental_dispersive_grouping_scope}",)
+    return (
+        "__".join(
+            "".join(character if character.isalnum() else "-" for character in value)
+            for value in values
+        )
+        + ".json"
+    )
 
 
 def _trace_summary(path):
@@ -584,8 +994,7 @@ def _source_index_operations_per_step(simulation):
 
 def _compiled_local_simulation_count(simulation):
     count = int(
-        simulation._electric_half is not None
-        and simulation._magnetic_half is not None
+        simulation._electric_half is not None and simulation._magnetic_half is not None
     )
     return count + sum(
         _compiled_local_simulation_count(auxiliary)
@@ -732,8 +1141,7 @@ def _native_gate(reference, name, threads, candidate, manifest):
             "replicate count does not match the frozen performance contract",
         ),
         (
-            len(sample.get("raw_seconds", ()))
-            == expected["performance_repetitions"],
+            len(sample.get("raw_seconds", ())) == expected["performance_repetitions"],
             "native raw replicate count does not match the frozen contract",
         ),
         (
@@ -788,13 +1196,11 @@ def _native_gate(reference, name, threads, candidate, manifest):
     try:
         native_values = tuple(sample.get("raw_seconds", ()))
         candidate_values = tuple(candidate_sample.get("raw_seconds", ()))
-        if any(
-            isinstance(value, bool) for value in native_values + candidate_values
-        ):
+        if any(isinstance(value, bool) for value in native_values + candidate_values):
             raise TypeError
         native_raw = tuple(float(value) for value in native_values)
         candidate_raw = tuple(float(value) for value in candidate_values)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         native_raw = ()
         candidate_raw = ()
         errors.append("raw timing samples must be numeric")
@@ -806,9 +1212,9 @@ def _native_gate(reference, name, threads, candidate, manifest):
         math.isfinite(value) and value > 0 for value in candidate_raw
     ):
         errors.append("Torch raw timing samples must be finite and positive")
-    max_relative_mad = manifest["performance_gates"]["cpu_acceptance"][
-        "statistics"
-    ]["max_relative_mad"]
+    max_relative_mad = manifest["performance_gates"]["cpu_acceptance"]["statistics"][
+        "max_relative_mad"
+    ]
     for label, values in (("native", native_raw), ("Torch", candidate_raw)):
         if values:
             middle = median(values)
@@ -817,12 +1223,13 @@ def _native_gate(reference, name, threads, candidate, manifest):
                 errors.append(
                     f"{label} raw timing samples exceed the relative-MAD limit"
                 )
+
     def reported_value_matches(value, expected_value):
         try:
             return math.isclose(
                 float(value), expected_value, rel_tol=1e-12, abs_tol=0.0
             )
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             return False
 
     if native_raw and not reported_value_matches(
@@ -843,9 +1250,7 @@ def _native_gate(reference, name, threads, candidate, manifest):
         median(native_raw) / sample["steps_per_repeat"] if native_raw else None
     )
     candidate_seconds = (
-        median(candidate_raw) / contract["steps_per_repeat"]
-        if candidate_raw
-        else None
+        median(candidate_raw) / contract["steps_per_repeat"] if candidate_raw else None
     )
     ratio = (
         candidate_seconds / reference_seconds
@@ -907,7 +1312,7 @@ def _bootstrap_geomean_regression(gates, statistics):
             if isinstance(gate["torch_to_native_ratio"], bool):
                 return invalid
             point_ratio = float(gate["torch_to_native_ratio"])
-        except (KeyError, TypeError, ValueError):
+        except KeyError, TypeError, ValueError:
             return invalid
         if (
             native.ndim != 1
@@ -935,7 +1340,7 @@ def _bootstrap_geomean_regression(gates, statistics):
         seed = int(statistics["seed"])
         confidence = float(statistics["one_sided_confidence"])
         regression_ratio = float(statistics["regression_ratio"])
-    except (KeyError, TypeError, ValueError):
+    except KeyError, TypeError, ValueError:
         return invalid
     if (
         resamples < 1
@@ -977,9 +1382,7 @@ def _bootstrap_geomean_regression(gates, statistics):
     }
 
 
-def _evaluate_cpu_slice(
-    output, manifest, native_summary=None, expected_evidence=None
-):
+def _evaluate_cpu_slice(output, manifest, native_summary=None, expected_evidence=None):
     """Recompute one CPU slice from raw measurements and pinned provenance."""
     acceptance = manifest["performance_gates"]["cpu_acceptance"]
     expected_cases = tuple(acceptance["cases"])
@@ -1031,7 +1434,9 @@ def _evaluate_cpu_slice(
             or runtime.get("execution_policy") != "auto"
             or runtime.get("experimental_dispersive_grouping", False) is not False
         ):
-            errors.append("CPU slice runtime execution policy differs from the contract")
+            errors.append(
+                "CPU slice runtime execution policy differs from the contract"
+            )
             break
     for name in ("cpu_affinity", "cpu_count_physical_affinity", "cpu_topology"):
         if any(runtime.get(name) != environment.get(name) for runtime in runtimes):
@@ -1072,9 +1477,7 @@ def _evaluate_cpu_slice(
         for gate in native_gates
     ):
         errors.append("CPU slice contains an invalid or failing native comparison")
-    statistics = _bootstrap_geomean_regression(
-        native_gates, acceptance["statistics"]
-    )
+    statistics = _bootstrap_geomean_regression(native_gates, acceptance["statistics"])
     if statistics["passed"] is not True:
         errors.append("CPU slice geometric-mean regression gate failed")
     return {
@@ -1092,9 +1495,7 @@ def _aggregate_cpu_slice_outputs(
     """Accept only two complete slices from one clean candidate checkout."""
     expected_evidence = expected_evidence or _current_evidence(manifest)
     slices = [
-        _evaluate_cpu_slice(
-            output, manifest, native_summary, expected_evidence
-        )
+        _evaluate_cpu_slice(output, manifest, native_summary, expected_evidence)
         for output in outputs
     ]
     errors = []
@@ -1170,6 +1571,7 @@ def run_case(
     capture_graphs,
     execution_policy,
     experimental_dispersive_grouping,
+    experimental_dispersive_grouping_scope,
     threads,
     interop_threads,
     warmup,
@@ -1191,6 +1593,7 @@ def run_case(
         cpu_interop_threads=interop_threads,
         execution_policy=execution_policy,
         experimental_dispersive_grouping=experimental_dispersive_grouping,
+        experimental_dispersive_grouping_scope=(experimental_dispersive_grouping_scope),
     )
     cpu_contract = _cpu_contract_environment()
     benchmark_device = torch.device(device)
@@ -1238,16 +1641,13 @@ def run_case(
         capture_seconds = time.perf_counter() - start
     after_warmup = _counter_snapshot()
     addresses = simulation.buffer_addresses()
-    cpu_memory = (
-        _cpu_memory_probe(simulation, warm_checkpoint, profile_steps)
-        if simulation.device.type == "cpu"
-        else {
-            "probe_steps": None,
-            "before_bytes": None,
-            "after_bytes": None,
-            "growth_bytes": None,
-        }
-    )
+    cpu_memory = {
+        "probe_steps": None,
+        "before_bytes": None,
+        "after_bytes": None,
+        "growth_bytes": None,
+        "fresh_process": None,
+    }
     allocated_before = (
         torch.cuda.memory_allocated(simulation.device)
         if simulation.device.type == "cuda"
@@ -1306,9 +1706,45 @@ def run_case(
         threads=threads,
         interop_threads=interop_threads,
         experimental_dispersive_grouping=experimental_dispersive_grouping,
+        experimental_dispersive_grouping_scope=(experimental_dispersive_grouping_scope),
     )
     profiler = _profile(simulation, profile_steps, trace_path)
     after_steady = _counter_snapshot()
+    if simulation.device.type == "cpu":
+        rss_request = _cpu_rss_request(
+            name,
+            precision=precision,
+            compile_mode=compile_mode,
+            execution_policy=execution_policy,
+            experimental_dispersive_grouping=experimental_dispersive_grouping,
+            experimental_dispersive_grouping_scope=(
+                experimental_dispersive_grouping_scope
+            ),
+            threads=threads,
+            interop_threads=interop_threads,
+            warmup=warmup,
+            profile_steps=profile_steps,
+        )
+        rss_artifact = _fresh_cpu_memory_probe(rss_request, manifest)
+        plateau = rss_artifact.get("plateau", {})
+        if rss_artifact.get("compile_cache_key") != simulation.compile_cache_key:
+            plateau["bounded"] = False
+            rss_artifact["compile_key_binding_error"] = (
+                "fresh RSS child compile key differs from the measured parent"
+            )
+        after_values = plateau.get("after_bytes", ())
+        before_values = plateau.get("before_bytes", ())
+        cpu_memory = {
+            "probe_steps": plateau.get("probe_steps_per_window"),
+            "before_bytes": before_values[0] if before_values else None,
+            "after_bytes": after_values[-1] if after_values else None,
+            "growth_bytes": (
+                after_values[-1] - before_values[0]
+                if after_values and before_values
+                else None
+            ),
+            "fresh_process": rss_artifact,
+        }
     counter_growth = _counter_delta(after_warmup, after_steady)
     storage_stable = addresses == simulation.buffer_addresses()
     memory_growth = (
@@ -1324,10 +1760,14 @@ def run_case(
         and profiler["device_to_host_events"] == 0
     )
     allocations_clean = _recurring_allocations_zero(simulation.device, profiler)
-    memory_bounded = _memory_growth_bounded(
-        simulation.device,
-        memory_growth,
-        cpu_memory["growth_bytes"],
+    memory_bounded = (
+        cpu_memory["fresh_process"].get("plateau", {}).get("bounded") is True
+        if simulation.device.type == "cpu"
+        else _memory_growth_bounded(
+            simulation.device,
+            memory_growth,
+            cpu_memory["growth_bytes"],
+        )
     )
     profiler_step_count = int(simulation.state.step_count.cpu())
     expected_one_step_count = warmup + 1
@@ -1340,15 +1780,12 @@ def run_case(
         and profile_steps == manifest["reference"]["performance_profile_steps"]
     )
     compiled_simulations = _compiled_local_simulation_count(simulation)
-    expected_compiled_region_events = (
-        2 * profile_steps * compiled_simulations
-    )
+    expected_compiled_region_events = 2 * profile_steps * compiled_simulations
     compiled_hot_path_complete = (
         len(simulation._cuda_graphs) == 2
         and profiler["cuda_graph_launches"] == 2 * profile_steps
         if capture_graphs
-        else profiler["compiled_region_events"]
-        == expected_compiled_region_events
+        else profiler["compiled_region_events"] == expected_compiled_region_events
         and bool(profiler["compiled_region_names"])
         and all(
             count > 0 and count % profile_steps == 0
@@ -1362,13 +1799,12 @@ def run_case(
             if count
         }
     )
-    profiler["expected_source_indexed_write_names_outside_compiled_regions"] = (
-        dict(sorted(expected_external_indexed_writes.items()))
+    profiler["expected_source_indexed_write_names_outside_compiled_regions"] = dict(
+        sorted(expected_external_indexed_writes.items())
     )
-    external_indexed_writes_clean = (
-        profiler["indexed_write_names_outside_compiled_regions"]
-        == dict(sorted(expected_external_indexed_writes.items()))
-    )
+    external_indexed_writes_clean = profiler[
+        "indexed_write_names_outside_compiled_regions"
+    ] == dict(sorted(expected_external_indexed_writes.items()))
     material_state_progressed = (
         (not simulation._has_pml or state_changes["pml_state_changed"])
         and (
@@ -1399,8 +1835,9 @@ def run_case(
             "compile_mode": compile_mode,
             "explicit_cuda_graphs": capture_graphs,
             "execution_policy": execution_policy,
-            "experimental_dispersive_grouping": (
-                experimental_dispersive_grouping
+            "experimental_dispersive_grouping": (experimental_dispersive_grouping),
+            "experimental_dispersive_grouping_scope": (
+                experimental_dispersive_grouping_scope
             ),
             "threads": threads,
             "interop_threads": interop_threads,
@@ -1435,6 +1872,7 @@ def run_case(
             "cpu_rss_before_bytes": cpu_memory["before_bytes"],
             "cpu_rss_after_bytes": cpu_memory["after_bytes"],
             "cpu_rss_growth_bytes": cpu_memory["growth_bytes"],
+            "cpu_rss_fresh_process": cpu_memory["fresh_process"],
             "cuda_allocated_before_bytes": allocated_before,
             "cuda_allocated_after_bytes": allocated_after,
             "cuda_allocated_growth_bytes": memory_growth,
@@ -1503,6 +1941,9 @@ def _variant_matrix(args, name, manifest):
             experimental_dispersive_grouping=getattr(
                 args, "experimental_dispersive_grouping", False
             ),
+            experimental_dispersive_grouping_scope=getattr(
+                args, "experimental_dispersive_grouping_scope", "combined"
+            ),
             threads=args.threads,
             interop_threads=args.interop_threads,
             warmup=args.warmup,
@@ -1537,6 +1978,9 @@ def _policy_matrix(args, name, manifest):
             experimental_dispersive_grouping=getattr(
                 args, "experimental_dispersive_grouping", False
             ),
+            experimental_dispersive_grouping_scope=getattr(
+                args, "experimental_dispersive_grouping_scope", "combined"
+            ),
             threads=args.threads,
             interop_threads=args.interop_threads,
             warmup=args.warmup,
@@ -1565,8 +2009,7 @@ def _arguments():
     reference = manifest["reference"]
     cpu_acceptance = manifest["performance_gates"]["cpu_acceptance"]
     names = tuple(
-        item["name"]
-        for item in manifest["benchmarks"] + manifest["correctness"]
+        item["name"] for item in manifest["benchmarks"] + manifest["correctness"]
     )
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -1591,10 +2034,17 @@ def _arguments():
         default="auto",
     )
     parser.add_argument("--capture-graphs", action="store_true")
+    parser.add_argument("--cpu-rss-child", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument(
         "--experimental-dispersive-grouping",
         action="store_true",
         help="enable the unselected CPU exact-schema dispersive prototype",
+    )
+    parser.add_argument(
+        "--experimental-dispersive-grouping-scope",
+        choices=("combined", "two-level", "dcp-convolution"),
+        default="combined",
+        help="select the exact-schema recurrence family used by the experiment",
     )
     parser.add_argument("--threads", type=int, default=1)
     parser.add_argument("--interop-threads", type=int, default=1)
@@ -1630,14 +2080,35 @@ def _arguments():
 def main():
     args, manifest = _arguments()
     cpu_gate_cases = _cpu_gate_cases(manifest)
+    if getattr(args, "cpu_rss_child", False):
+        request = _cpu_rss_request(
+            args.case,
+            precision=args.precision,
+            compile_mode=args.compile_mode,
+            execution_policy=args.policy,
+            experimental_dispersive_grouping=args.experimental_dispersive_grouping,
+            experimental_dispersive_grouping_scope=(
+                args.experimental_dispersive_grouping_scope
+            ),
+            threads=args.threads,
+            interop_threads=args.interop_threads,
+            warmup=args.warmup,
+            profile_steps=args.profile_steps,
+        )
+        output = _run_cpu_rss_child(request, manifest)
+        rendered = json.dumps(output, indent=2, sort_keys=True) + "\n"
+        if args.output is not None:
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            args.output.write_text(rendered)
+        print(rendered, end="")
+        # An adverse but structurally valid plateau is evidence, not a child crash.
+        return 0
     cpu_slice_artifacts = getattr(args, "cpu_slice_artifacts", None)
     if cpu_slice_artifacts is not None:
         if args.case != "cpu-gates":
             raise ValueError("--cpu-slice-artifacts requires --case cpu-gates")
         if args.native_summary is None:
-            raise ValueError(
-                "--cpu-slice-artifacts requires --native-summary"
-            )
+            raise ValueError("--cpu-slice-artifacts requires --native-summary")
         output = _aggregate_cpu_slice_files(
             cpu_slice_artifacts, manifest, args.native_summary
         )
@@ -1703,6 +2174,9 @@ def main():
                 experimental_dispersive_grouping=getattr(
                     args, "experimental_dispersive_grouping", False
                 ),
+                experimental_dispersive_grouping_scope=getattr(
+                    args, "experimental_dispersive_grouping_scope", "combined"
+                ),
                 threads=args.threads,
                 interop_threads=args.interop_threads,
                 warmup=args.warmup,
@@ -1731,9 +2205,7 @@ def main():
         for result in results
         if result.get("native_gate") is not None
     ]
-    valid_native_gates = [
-        item for item in native_gates if item["comparison_valid"]
-    ]
+    valid_native_gates = [item for item in native_gates if item["comparison_valid"]]
     native_comparisons_present = bool(native_gates)
     complete_native_slice = (
         native_comparisons_present
@@ -1766,9 +2238,7 @@ def main():
             and len(native_gates) == len(cases)
             and all(item["comparison_valid"] for item in native_gates)
         )
-    cpu_thread_modes = manifest["performance_gates"]["cpu_acceptance"][
-        "thread_modes"
-    ]
+    cpu_thread_modes = manifest["performance_gates"]["cpu_acceptance"]["thread_modes"]
     environment = _environment()
     physical_threads = environment.get("cpu_count_physical_affinity")
     if args.threads == 1:
@@ -1779,9 +2249,8 @@ def main():
         evaluated_thread_mode = "unsupported"
     if cpu_full_suite_requested and evaluated_thread_mode == "unsupported":
         diagnostic_passed = False
-    is_cpu_diagnostic = (
-        torch.device(args.device).type == "cpu"
-        and any(name in cpu_gate_cases for name in cases)
+    is_cpu_diagnostic = torch.device(args.device).type == "cpu" and any(
+        name in cpu_gate_cases for name in cases
     )
     named_non_cpu_suite = args.case in {"cuda-gates", "policy-gates"}
     suite_passed = False
@@ -1797,7 +2266,9 @@ def main():
         "environment": environment,
         "cases": results,
         "diagnostic_acceptance": {
-            "scope": "cpu-thread-slice" if cpu_full_suite_requested else "requested-run",
+            "scope": (
+                "cpu-thread-slice" if cpu_full_suite_requested else "requested-run"
+            ),
             "passed": diagnostic_passed,
         },
         "suite_acceptance": {
@@ -1828,18 +2299,18 @@ def main():
             "cpu_suite_status": (
                 "thread-slice"
                 if cpu_full_suite_requested
-                else "diagnostic-only"
-                if is_cpu_diagnostic
-                else "not-applicable"
+                else "diagnostic-only" if is_cpu_diagnostic else "not-applicable"
             ),
             "cpu_incomplete_reason": (
                 "cpu-gates records one isolated thread slice; both one-thread and "
                 "physical-core artifacts must be combined with "
                 "--cpu-slice-artifacts for epic acceptance"
                 if cpu_full_suite_requested
-                else "a single CPU case cannot satisfy the epic CPU suite"
-                if is_cpu_diagnostic
-                else None
+                else (
+                    "a single CPU case cannot satisfy the epic CPU suite"
+                    if is_cpu_diagnostic
+                    else None
+                )
             ),
             "passed": suite_passed,
         },

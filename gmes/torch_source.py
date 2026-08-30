@@ -259,7 +259,9 @@ class TorchPointSourceBatch(nn.Module):
             persistent=False,
         )
 
-    def execute(self, field: Any, time: Any) -> Any:
+    def apply(  # type: ignore[override]  # Source execution, not Module traversal
+        self, field: torch.Tensor, time: torch.Tensor
+    ) -> None:
         """Apply this point-source batch to ``field`` in place."""
 
         plane = 2 if self.paired_real else 1
@@ -397,7 +399,9 @@ class TorchTransparentBatch(nn.Module):
             persistent=False,
         )
 
-    def execute(self, field: Any, source_time: Any) -> Any:
+    def apply(  # type: ignore[override]  # Source execution, not Module traversal
+        self, field: torch.Tensor, source_time: torch.Tensor
+    ) -> None:
         """Apply this transparent-source batch to ``field`` in place."""
 
         plane = 2 if self.paired_real else 1
@@ -441,6 +445,7 @@ class _AuxiliarySimulation(_SourceSimulation, Protocol):
     """Nested simulation lifecycle owned by transparent sources."""
 
     plan_identity: str
+    compile_cache_key: str
 
     def step(self) -> object:
         """Advance the auxiliary simulation once."""
@@ -476,7 +481,7 @@ class TorchSourcePlan(nn.Module):
 
         return not self.batches
 
-    def execute(
+    def apply(  # type: ignore[override]  # Source execution, not Module traversal
         self,
         simulation: _SourceSimulation,
         *,
@@ -496,7 +501,7 @@ class TorchSourcePlan(nn.Module):
                     if isinstance(batch, TorchTransparentBatch)
                     else time
                 )
-                batch.execute(simulation.state.field(batch.component), batch_time)
+                batch.apply(simulation.state.field(batch.component), batch_time)
 
     def step_auxiliaries(self) -> None:
         """Advance every device-resident auxiliary source simulation once."""

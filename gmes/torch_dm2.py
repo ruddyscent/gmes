@@ -1,12 +1,24 @@
 """Device-resident Maxwell--Bloch updates for Torch DM2 material buckets."""
 
 from dataclasses import dataclass
+from typing import Any
 
 import torch
 from torch import nn
 
 DM2_MAX_ITERATIONS = 100
 DM2_ITERATIONS_PER_CHUNK = 10
+_DM2_INVALID_CODE_OFFSET = DM2_MAX_ITERATIONS + 1
+
+
+def _packed_loop_layout(cells: Any, transitions: Any) -> Any:
+    sizes = (cells, 3 * cells * transitions, cells)
+    offsets = []
+    offset = 0
+    for size in sizes:
+        offsets.append(offset)
+        offset += size
+    return tuple(offsets), sizes, offset
 
 
 @dataclass(frozen=True)
@@ -55,6 +67,7 @@ class TorchDm2BucketState(nn.Module):
     _mask: torch.Tensor
     _mask2: torch.Tensor
     _time: torch.Tensor
+    _packed_loop_state: torch.Tensor
 
     def __init__(
         self,
@@ -117,6 +130,14 @@ class TorchDm2BucketState(nn.Module):
             )
         self.register_buffer(
             "_time", torch.zeros((), device=device, dtype=dtype), persistent=False
+        )
+        # A single homogeneous carry collapses the separate functional loop
+        # buffers into one exact-size workspace. Current CPU Inductor still
+        # returns a fresh packed carry for each while-loop iteration.
+        self.register_buffer(
+            "_packed_loop_state",
+            torch.empty(cells * (3 * transitions + 2), device=device, dtype=dtype),
+            persistent=False,
         )
         self.requires_grad_(False)
 
@@ -245,14 +266,14 @@ class TorchDm2BucketState(nn.Module):
             )
 
             torch.sub(self._e_new, self._e_previous, out=self._cell0)
-            self._cell0.square_()
+            self._cell0.copy_(torch.square(self._cell0))
             torch.sub(self._u_new, self._u_previous, out=self._u_candidate)
-            self._u_candidate.square_()
+            self._u_candidate.copy_(torch.square(self._u_candidate))
             torch.sum(self._u_candidate, dim=(0, 2), out=self._cell2)
             self._cell0.add_(self._cell2).sqrt_()
 
-            self._cell1.copy_(self._e_previous).square_()
-            self._u_previous.square_()
+            self._cell1.copy_(torch.square(self._e_previous))
+            self._u_previous.copy_(torch.square(self._u_previous))
             torch.sum(self._u_previous, dim=(0, 2), out=self._cell2)
             self._cell1.add_(self._cell2).sqrt_()
             torch.div(self._cell0, self._cell1, out=self._error_candidate)
@@ -275,6 +296,388 @@ class TorchDm2BucketState(nn.Module):
             torch.logical_and(self._active, self._mask, out=self._active)
             torch.logical_not(self._invalid, out=self._mask)
             torch.logical_and(self._active, self._mask, out=self._active)
+
+    def solve(
+        self,
+        field: torch.Tensor,
+        source: torch.Tensor,
+        step_count: torch.Tensor,
+        time_step: torch.Tensor,
+        targets: torch.Tensor,
+        source_positive_indices: torch.Tensor,
+        source_negative_indices: torch.Tensor,
+        rho30: torch.Tensor,
+        gamma: torch.Tensor,
+        t1: torch.Tensor,
+        t2: torch.Tensor,
+        hbar: torch.Tensor,
+        omega: torch.Tensor,
+        n_atom: torch.Tensor,
+        curl_scale: torch.Tensor,
+        half_dt: float,
+        quarter_dt: float,
+        rtol: torch.Tensor,
+        repetitions: int,
+    ) -> None:
+        """Run all bounded corrector chunks in one device-side control-flow graph."""
+        time = (step_count.to(dtype=time_step.dtype) + 1) * time_step
+        decay = torch.exp(-(time / t2))
+        a = n_atom * gamma[:, None]
+        a = a / t2[:, None]
+        a = a * decay[:, None]
+        b = n_atom * gamma[:, None]
+        b = b * omega
+        b = b * decay[:, None]
+
+        c_plus_decay = torch.exp(-((1 / t1 - 1 / t2) * time))
+        c_plus = gamma * 2
+        c_plus = c_plus / hbar
+        c_plus = c_plus * c_plus_decay
+        c_minus_decay = torch.exp(-((1 / t2 - 1 / t1) * time))
+        c_minus = gamma * 2
+        c_minus = c_minus / hbar
+        c_minus = c_minus * c_minus_decay
+        d = gamma * rho30
+        d = d * 2
+        d = d / hbar
+        d = d * torch.exp(time / t2)
+
+        flat_field = field.reshape(-1)
+        flat_source = source.reshape(-1)
+        e_old = torch.index_select(flat_field, 0, targets)
+        source_positive = torch.index_select(flat_source, 0, source_positive_indices)
+        source_negative = torch.index_select(flat_source, 0, source_negative_indices)
+        e_base = source_positive - source_negative
+        e_base = e_base * curl_scale
+        e_base = e_base + e_old
+        u_old = self.u.clone()
+
+        def condition(
+            iteration: Any,
+            e_new: Any,
+            u_new: Any,
+            active: Any,
+            invalid: Any,
+            error: Any,
+            iterations: Any,
+        ) -> Any:
+            del e_new, u_new, invalid, error, iterations
+            return torch.logical_and(iteration < repetitions, torch.any(active))
+
+        def body(
+            iteration: Any,
+            e_new: Any,
+            u_new: Any,
+            active: Any,
+            invalid: Any,
+            error: Any,
+            iterations: Any,
+        ) -> Any:
+            e_previous = e_new
+            u_previous = u_new
+
+            e_candidate = e_base
+            e_candidate = e_candidate - half_dt * torch.sum(
+                (u_new[0] + u_old[0]) * a,
+                dim=1,
+            )
+            e_candidate = e_candidate + half_dt * torch.sum(
+                (u_new[1] + u_old[1]) * b,
+                dim=1,
+            )
+            e_new = torch.where(active, e_candidate, e_new)
+
+            u0_candidate = u_old[0] + ((u_new[1] + u_old[1]) * omega * half_dt)
+            field_sum = e_new + e_old
+            u1_candidate = u_old[1] - ((u0_candidate + u_old[0]) * omega * half_dt)
+            u1_candidate = u1_candidate + (
+                (u_new[2] + u_old[2])
+                * c_plus[:, None]
+                * field_sum[:, None]
+                * quarter_dt
+            )
+            u1_candidate = u1_candidate + (d[:, None] * field_sum[:, None] * half_dt)
+            u2_candidate = u_old[2] - (
+                (u1_candidate + u_old[1])
+                * c_minus[:, None]
+                * field_sum[:, None]
+                * quarter_dt
+            )
+            u_candidate = torch.stack(
+                (u0_candidate, u1_candidate, u2_candidate),
+                dim=0,
+            )
+            u_new = torch.where(
+                active[None, :, None],
+                u_candidate,
+                u_new,
+            )
+
+            numerator = torch.sqrt(
+                torch.square(e_new - e_previous)
+                + torch.sum(
+                    torch.square(u_new - u_previous),
+                    dim=(0, 2),
+                )
+            )
+            denominator = torch.sqrt(
+                torch.square(e_previous)
+                + torch.sum(torch.square(u_previous), dim=(0, 2))
+            )
+            error_candidate = numerator / denominator
+            both_zero = torch.logical_and(numerator == 0, denominator == 0)
+            error_candidate = torch.where(
+                both_zero,
+                torch.zeros_like(error_candidate),
+                error_candidate,
+            )
+            error = torch.where(active, error_candidate, error)
+            iterations = iterations + active.to(dtype=iterations.dtype)
+            invalid = torch.logical_or(
+                invalid,
+                torch.logical_and(torch.isnan(error_candidate), active),
+            )
+            active = torch.logical_and(active, error > rtol)
+            active = torch.logical_and(active, torch.logical_not(invalid))
+            return (
+                iteration + 1,
+                e_new,
+                u_new,
+                active,
+                invalid,
+                error,
+                iterations,
+            )
+
+        initial = (
+            torch.zeros((), dtype=torch.int64, device=field.device),
+            e_old.clone(),
+            u_old.clone(),
+            torch.ones_like(e_old, dtype=torch.bool),
+            torch.zeros_like(e_old, dtype=torch.bool),
+            torch.zeros_like(e_old),
+            torch.zeros_like(e_old, dtype=torch.int32),
+        )
+        (
+            _iteration,
+            e_new,
+            u_new,
+            active,
+            invalid,
+            error,
+            iterations,
+        ) = torch.while_loop(
+            condition, body, initial
+        )  # type: ignore[no-untyped-call]  # Torch while_loop lacks a typed callable signature.
+        del error
+        status = torch.zeros_like(self._status)
+        status = torch.where(invalid, 1, status)
+        status = torch.where(active, 2, status)
+        converged = torch.logical_and(
+            torch.logical_not(invalid), torch.logical_not(active)
+        )
+        committed_e = torch.where(converged, e_new, e_old)
+        committed_u = torch.where(converged[None, :, None], u_new, u_old)
+        flat_field.index_copy_(0, targets, committed_e)
+        self.u.copy_(committed_u)
+        self._status.copy_(status)
+        self._iterations.copy_(iterations)
+
+    def solve_packed_cpu(
+        self,
+        field: torch.Tensor,
+        source: torch.Tensor,
+        step_count: torch.Tensor,
+        time_step: torch.Tensor,
+        targets: torch.Tensor,
+        source_positive_indices: torch.Tensor,
+        source_negative_indices: torch.Tensor,
+        rho30: torch.Tensor,
+        gamma: torch.Tensor,
+        t1: torch.Tensor,
+        t2: torch.Tensor,
+        hbar: torch.Tensor,
+        omega: torch.Tensor,
+        n_atom: torch.Tensor,
+        curl_scale: torch.Tensor,
+        half_dt: float,
+        quarter_dt: float,
+        rtol: torch.Tensor,
+        repetitions: int,
+    ) -> None:
+        """Run the CPU corrector with one exact-size packed functional carry."""
+        cells = self.metadata.target_count
+        transitions = self.metadata.transition_count
+        offsets, sizes, _total = _packed_loop_layout(cells, transitions)
+        packed = self._packed_loop_state
+
+        def views(value: Any) -> Any:
+            e_new, u_new, code = tuple(
+                value.narrow(0, offset, size) for offset, size in zip(offsets, sizes)
+            )
+            return e_new, u_new.view(3, cells, transitions), code
+
+        time = (step_count.to(dtype=time_step.dtype) + 1) * time_step
+        decay = torch.exp(-(time / t2))
+        a = n_atom * gamma[:, None]
+        a = a / t2[:, None]
+        a = a * decay[:, None]
+        b = n_atom * gamma[:, None]
+        b = b * omega
+        b = b * decay[:, None]
+
+        c_plus_decay = torch.exp(-((1 / t1 - 1 / t2) * time))
+        c_plus = gamma * 2
+        c_plus = c_plus / hbar
+        c_plus = c_plus * c_plus_decay
+        c_minus_decay = torch.exp(-((1 / t2 - 1 / t1) * time))
+        c_minus = gamma * 2
+        c_minus = c_minus / hbar
+        c_minus = c_minus * c_minus_decay
+        d = gamma * rho30
+        d = d * 2
+        d = d / hbar
+        d = d * torch.exp(time / t2)
+
+        flat_field = field.reshape(-1)
+        flat_source = source.reshape(-1)
+        e_old = torch.index_select(flat_field, 0, targets)
+        source_positive = torch.index_select(flat_source, 0, source_positive_indices)
+        source_negative = torch.index_select(flat_source, 0, source_negative_indices)
+        e_base = source_positive - source_negative
+        e_base = e_base * curl_scale
+        e_base = e_base + e_old
+        u_old = self.u
+
+        # The code segment starts at zero. Non-negative values are active
+        # iteration counts, -count is converged, and -(offset + count) is invalid.
+        # Counts through DM2_MAX_ITERATIONS are exact in every supported dtype.
+        packed.copy_(
+            torch.cat(
+                (
+                    e_old,
+                    u_old.reshape(-1),
+                    torch.zeros_like(e_old),
+                )
+            )
+        )
+
+        def condition(value: Any) -> Any:
+            code = value.narrow(0, offsets[2], sizes[2])
+            active = torch.logical_and(code >= 0, code < repetitions)
+            return torch.any(active)
+
+        def body(value: Any) -> Any:
+            e_new, u_new, code = views(value)
+            active = torch.logical_and(code >= 0, code < repetitions)
+            e_previous = e_new
+            u_previous = u_new
+
+            e_candidate = e_base
+            e_candidate = e_candidate - half_dt * torch.sum(
+                (u_new[0] + u_old[0]) * a,
+                dim=1,
+            )
+            e_candidate = e_candidate + half_dt * torch.sum(
+                (u_new[1] + u_old[1]) * b,
+                dim=1,
+            )
+            e_next = torch.where(active, e_candidate, e_new)
+
+            u0_candidate = u_old[0] + ((u_new[1] + u_old[1]) * omega * half_dt)
+            field_sum = e_next + e_old
+            u1_candidate = u_old[1] - ((u0_candidate + u_old[0]) * omega * half_dt)
+            u1_candidate = u1_candidate + (
+                (u_new[2] + u_old[2])
+                * c_plus[:, None]
+                * field_sum[:, None]
+                * quarter_dt
+            )
+            u1_candidate = u1_candidate + (d[:, None] * field_sum[:, None] * half_dt)
+            u2_candidate = u_old[2] - (
+                (u1_candidate + u_old[1])
+                * c_minus[:, None]
+                * field_sum[:, None]
+                * quarter_dt
+            )
+            u_candidate = torch.stack(
+                (u0_candidate, u1_candidate, u2_candidate),
+                dim=0,
+            )
+            u_next = torch.where(
+                active[None, :, None],
+                u_candidate,
+                u_new,
+            )
+
+            numerator = torch.sqrt(
+                torch.square(e_next - e_previous)
+                + torch.sum(
+                    torch.square(u_next - u_previous),
+                    dim=(0, 2),
+                )
+            )
+            denominator = torch.sqrt(
+                torch.square(e_previous)
+                + torch.sum(torch.square(u_previous), dim=(0, 2))
+            )
+            error_candidate = numerator / denominator
+            both_zero = torch.logical_and(numerator == 0, denominator == 0)
+            error_candidate = torch.where(
+                both_zero,
+                torch.zeros_like(error_candidate),
+                error_candidate,
+            )
+
+            iterations_next = code + active.to(dtype=code.dtype)
+            invalid_next = torch.logical_and(torch.isnan(error_candidate), active)
+            active_next = torch.logical_and(active, error_candidate > rtol)
+            active_next = torch.logical_and(
+                active_next, torch.logical_not(invalid_next)
+            )
+            finished = torch.logical_and(active, torch.logical_not(active_next))
+            final_code = torch.where(
+                invalid_next,
+                -(_DM2_INVALID_CODE_OFFSET + iterations_next),
+                -iterations_next,
+            )
+            code_next = torch.where(active, iterations_next, code)
+            code_next = torch.where(finished, final_code, code_next)
+            return (
+                torch.cat(
+                    (
+                        e_next,
+                        u_next.reshape(-1),
+                        code_next,
+                    )
+                ),
+            )
+
+        (result,) = torch.while_loop(condition, body, (packed,))  # type: ignore[no-untyped-call]  # Torch while_loop lacks a typed callable signature.
+        packed.copy_(result)
+        e_new, u_new, code = views(result)
+        nonconverged = code >= repetitions
+        invalid = code <= -_DM2_INVALID_CODE_OFFSET
+        iterations = torch.where(
+            nonconverged,
+            code,
+            torch.where(
+                invalid,
+                -code - _DM2_INVALID_CODE_OFFSET,
+                -code,
+            ),
+        )
+        self._status.zero_()
+        self._status.masked_fill_(invalid, 1)
+        self._status.masked_fill_(nonconverged, 2)
+        converged = torch.logical_and(
+            torch.logical_not(invalid), torch.logical_not(nonconverged)
+        )
+        committed_e = torch.where(converged, e_new, e_old)
+        committed_u = torch.where(converged[None, :, None], u_new, u_old)
+        flat_field.index_copy_(0, targets, committed_e)
+        self.u.copy_(committed_u)
+        self._iterations.copy_(iterations.to(dtype=self._iterations.dtype))
 
     def finalize(self, field: torch.Tensor, targets: torch.Tensor) -> None:
         """Commit converged targets and retain failed targets' prior state."""

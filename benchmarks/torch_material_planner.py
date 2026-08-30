@@ -296,6 +296,7 @@ def build_host_plan(
     device_type,
     tile_size,
     gmes,
+    compile_policy="eager",
 ):
     """Build a validated host plan, including stateful synthetic workloads."""
     from gmes.geometry import GeomBoxTree
@@ -316,9 +317,51 @@ def build_host_plan(
         device_type=device_type,
         policy=policy,
         execution_tile_size=tile_size,
+        cpml_sparse_residual=(compile_policy == "compile" and device_type == "cpu"),
     ).build()
     seconds = perf_counter() - start
     return space, geometry, bloch, plans, seconds
+
+
+def _pml_traffic_summary(plans, *, scalar_width, element_size):
+    """Model indexed PML source/target traffic from the selected representation."""
+    indexed_targets = 0
+    sparse_axis_targets = 0
+    scalar_values = 0
+    has_indexed = False
+    has_sparse = False
+    for plan in plans:
+        for bucket in plan.buckets:
+            if bucket.signature.model not in {"upml", "cpml"}:
+                continue
+            if bucket.cpml_residual_axes:
+                has_sparse = True
+                for axis in bucket.cpml_residual_axes:
+                    count = len(axis.targets)
+                    sparse_axis_targets += count
+                    # Every indexed update also reads and writes its field target.
+                    scalar_values += count * (axis.stencil_indices.shape[1] + 2)
+            else:
+                has_indexed = True
+                indexed_targets += bucket.target_count
+                scalar_values += bucket.target_count * (
+                    bucket.stencil_indices.shape[1] + 2
+                )
+    if has_sparse and has_indexed:
+        representation = "mixed-full-curl-and-axis-sparse-residual-v1"
+    elif has_sparse:
+        representation = "axis-sparse-residual-v1"
+    elif has_indexed:
+        representation = "compact-full-curl-v1"
+    else:
+        representation = "none"
+    return {
+        "traffic_representation": representation,
+        "indexed_target_cells": indexed_targets,
+        "sparse_residual_axis_targets": sparse_axis_targets,
+        "gather_scatter_scalar_values_per_step": scalar_values,
+        "gather_scatter_bytes_per_step": (scalar_values * scalar_width * element_size),
+    }
 
 
 def plan_summary(plans):
@@ -351,6 +394,9 @@ def plan_summary(plans):
         "estimated_plan_bytes": bytes_used,
         "bytes_per_active_component_cell": bytes_used / max(1, active),
         "material_launches_per_step": sum(plan.launch_count for plan in plans),
+        "cpml_sparse_residual": any(
+            bucket.cpml_residual_axes for plan in plans for bucket in plan.buckets
+        ),
         "signature_count": len(signatures),
         "signatures": [
             {
@@ -467,6 +513,7 @@ def run_case(
         device_type=device_type,
         tile_size=tile_size,
         gmes=gmes,
+        compile_policy=compile_policy,
     )
     result = {
         "case": case,
@@ -583,8 +630,12 @@ def run_case(
     )
     pml = simulation.diagnostics()["pml"]
     scalar_width = 2 if simulation.state.paired_real else 1
-    pml["gather_scatter_bytes_per_step"] = (
-        pml["active_cells"] * 6 * scalar_width * simulation.state.ex.element_size()
+    pml.update(
+        _pml_traffic_summary(
+            simulation.plan.components.values(),
+            scalar_width=scalar_width,
+            element_size=simulation.state.ex.element_size(),
+        )
     )
     result["pml"] = pml
     if profile:
@@ -593,24 +644,21 @@ def run_case(
 
 
 def run_policy_matrix(case, **kwargs):
-    """Measure auto and all forced candidates from the same workload contract."""
+    """Retain exploratory timings while executable policies remain identical."""
     results = {
         policy: run_case(case, policy=policy, **kwargs)
         for policy in ("auto", "dense", "compact", "tiled")
     }
-    if case in EXECUTABLE_CASES:
-        fastest = min(
-            results[policy]["median_seconds_per_step"]
-            for policy in ("dense", "compact", "tiled")
-        )
-        auto = results["auto"]["median_seconds_per_step"]
-        ratio = auto / fastest
-    else:
-        ratio = None
     return {
         "case": case,
-        "auto_to_fastest_forced_ratio": ratio,
-        "within_ten_percent": ratio is None or ratio <= 1.10,
+        "comparison_valid": False,
+        "invalid_reason": (
+            "execution_policy currently changes planner/storage metadata only; "
+            "runtime uses dense dielectric and compact indexed material updates"
+        ),
+        "auto_to_fastest_forced_ratio": None,
+        "within_ten_percent": None,
+        "passed": False,
         "results": results,
     }
 

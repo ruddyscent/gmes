@@ -11,10 +11,18 @@ import torch
 
 import gmes
 from gmes.torch_fdtd import (
+    DEFAULT_VIEW_MUTATION_REPRESENTATION,
+    DIRECT_VIEW_MUTATION_REPRESENTATION,
+    EXTERNAL_SOURCE_REPRESENTATION,
+    FUNCTIONAL_DM2_REPRESENTATION,
+    FUSED_SOURCE_REPRESENTATION,
+    PACKED_DM2_REPRESENTATION,
     DistributedLaunch,
     TorchConfigurationError,
     TorchRuntimeConfig,
     TorchSimulation,
+    _boundary_plane,
+    _field_region,
     torch_runtime_diagnostics,
 )
 
@@ -107,6 +115,7 @@ class TorchRuntimeConfigTest(unittest.TestCase):
         self.assertIn("torch", diagnostics)
         self.assertIn("cuda_available", diagnostics)
         self.assertIn("nccl_available", diagnostics)
+        self.assertFalse(diagnostics["experimental_dispersive_grouping"])
         self.assertNotIn("environment", diagnostics)
 
     def test_invalid_requests_are_rejected(self):
@@ -114,6 +123,21 @@ class TorchRuntimeConfigTest(unittest.TestCase):
             TorchRuntimeConfig(device="cpu", precision="float16"),
             TorchRuntimeConfig(device="mps"),
             TorchRuntimeConfig(device="cpu", autograd=True),
+            TorchRuntimeConfig(device="cpu", compile_mode="reduce-overhead"),
+            TorchRuntimeConfig(
+                device="cuda:0",
+                compile_policy="eager",
+                compile_mode="max-autotune",
+            ),
+            TorchRuntimeConfig(device="cpu", cpu_interop_threads=0),
+            TorchRuntimeConfig(
+                device="cpu",
+                experimental_dispersive_grouping=1,
+            ),
+            TorchRuntimeConfig(
+                device="cpu",
+                experimental_dispersive_grouping_scope="unknown",
+            ),
             TorchRuntimeConfig(
                 device="cpu",
                 launch=DistributedLaunch(world_size=2, local_world_size=2),
@@ -144,6 +168,141 @@ class TorchRuntimeConfigTest(unittest.TestCase):
                 runtime=config,
             )
 
+    def test_compile_cache_key_tracks_execution_specialization(self):
+        common = {
+            "space": gmes.Cartesian((2, 2, 0), 2),
+            "geometry": _geometry(),
+        }
+        first = TorchSimulation(
+            **common,
+            runtime=TorchRuntimeConfig(
+                device="cpu",
+                compile_policy="compile",
+                execution_policy="auto",
+                cpu_threads=1,
+            ),
+        )
+        second = TorchSimulation(
+            **common,
+            runtime=TorchRuntimeConfig(
+                device="cpu",
+                compile_policy="compile",
+                execution_policy="dense",
+                cpu_threads=1,
+            ),
+        )
+
+        self.assertEqual(len(first.compile_cache_key), 64)
+        self.assertEqual(first.compile_cache_key, second.compile_cache_key)
+        self.assertEqual(
+            first.diagnostics()["material_execution_representation"],
+            "dense-base+compact-indexed-materials-v1",
+        )
+        self.assertEqual(first.diagnostics()["phase_specialization"], "z-collapsed-v1")
+        self.assertEqual(
+            first.diagnostics()["compile_cache_key"], first.compile_cache_key
+        )
+        self.assertEqual(
+            first.diagnostics()["compile_solver_abi"], "torch-fdtd-regions-v8"
+        )
+        self.assertEqual(
+            first.diagnostics()["view_mutation_representation"],
+            DIRECT_VIEW_MUTATION_REPRESENTATION,
+        )
+        self.assertEqual(
+            first.diagnostics()["dm2_execution_representation"],
+            PACKED_DM2_REPRESENTATION,
+        )
+        self.assertEqual(
+            first.diagnostics()["sources"]["execution_representation"],
+            FUSED_SOURCE_REPRESENTATION,
+        )
+
+        three_dimensional = {
+            "space": gmes.Cartesian((2, 2, 2), 1),
+            "geometry": _geometry(),
+        }
+        compiled_3d = TorchSimulation(
+            **three_dimensional,
+            runtime=TorchRuntimeConfig(
+                device="cpu", compile_policy="compile", cpu_threads=1
+            ),
+        )
+        eager_3d = TorchSimulation(
+            **three_dimensional,
+            runtime=TorchRuntimeConfig(
+                device="cpu", compile_policy="eager", cpu_threads=1
+            ),
+        )
+        self.assertNotEqual(compiled_3d.compile_cache_key, eager_3d.compile_cache_key)
+        self.assertEqual(
+            eager_3d.diagnostics()["view_mutation_representation"],
+            DEFAULT_VIEW_MUTATION_REPRESENTATION,
+        )
+        self.assertEqual(
+            eager_3d.diagnostics()["dm2_execution_representation"],
+            FUNCTIONAL_DM2_REPRESENTATION,
+        )
+        self.assertEqual(
+            eager_3d.diagnostics()["sources"]["execution_representation"],
+            EXTERNAL_SOURCE_REPRESENTATION,
+        )
+
+        bloch_a = TorchSimulation(
+            **common,
+            bloch=(0.07, 0.11, 0.0),
+            runtime=TorchRuntimeConfig(
+                device="cpu", compile_policy="compile", cpu_threads=1
+            ),
+        )
+        bloch_b = TorchSimulation(
+            **common,
+            bloch=(0.08, 0.11, 0.0),
+            runtime=TorchRuntimeConfig(
+                device="cpu", compile_policy="compile", cpu_threads=1
+            ),
+        )
+        self.assertNotEqual(first.compile_cache_key, bloch_a.compile_cache_key)
+        self.assertNotEqual(bloch_a.compile_cache_key, bloch_b.compile_cache_key)
+        self.assertEqual(bloch_a.diagnostics()["phase_specialization"], "three-axis-v1")
+
+        pole = gmes.DrudePole(omega=0.6, gamma=0.03)
+        material = gmes.Drude(eps_inf=1.2, dps=(pole,))
+        material_runtime = TorchRuntimeConfig(
+            device="cpu", compile_policy="compile", cpu_threads=1
+        )
+        sparse = TorchSimulation(
+            space=common["space"],
+            geometry=[
+                *_geometry(),
+                gmes.Block(material, center=(0, 0, 0), size=(0.5, 0.5, 1)),
+            ],
+            runtime=material_runtime,
+        )
+        sparse_forced = TorchSimulation(
+            space=common["space"],
+            geometry=[
+                *_geometry(),
+                gmes.Block(material, center=(0, 0, 0), size=(0.5, 0.5, 1)),
+            ],
+            runtime=TorchRuntimeConfig(
+                device="cpu",
+                compile_policy="compile",
+                execution_policy="dense",
+                cpu_threads=1,
+            ),
+        )
+        broad = TorchSimulation(
+            space=common["space"],
+            geometry=[
+                *_geometry(),
+                gmes.Block(material, center=(0, 0, 0), size=(1.5, 1.5, 1)),
+            ],
+            runtime=material_runtime,
+        )
+        self.assertEqual(sparse.compile_cache_key, sparse_forced.compile_cache_key)
+        self.assertNotEqual(sparse.compile_cache_key, broad.compile_cache_key)
+
     def test_missing_cuda_has_actionable_error_and_no_fallback(self):
         config = TorchRuntimeConfig(device="cuda:0")
         with (
@@ -161,6 +320,32 @@ class TorchRuntimeConfigTest(unittest.TestCase):
 
 
 class TorchStateTest(unittest.TestCase):
+    def test_direct_mutation_views_match_the_solver_slices(self):
+        field = torch.arange(5 * 6 * 7 * 2, dtype=torch.float64).reshape(5, 6, 7, 2)
+        regions = (
+            ((0, 0, 0), (0, 1, 1), field[:, :-1, :-1]),
+            ((0, 0, 0), (1, 0, 1), field[:-1, :, :-1]),
+            ((0, 0, 0), (1, 1, 0), field[:-1, :-1, :]),
+            ((0, 1, 1), (0, 0, 0), field[:, 1:, 1:]),
+            ((1, 0, 1), (0, 0, 0), field[1:, :, 1:]),
+            ((1, 1, 0), (0, 0, 0), field[1:, 1:, :]),
+        )
+        for starts, trims, expected in regions:
+            with self.subTest(starts=starts, trims=trims):
+                actual = _field_region(field, starts, trims)
+                self.assertTrue(torch.equal(actual, expected))
+                self.assertEqual(actual.storage_offset(), expected.storage_offset())
+                self.assertEqual(actual.stride(), expected.stride())
+
+        for axis in range(3):
+            for index in (0, -1):
+                with self.subTest(axis=axis, index=index):
+                    expected = field.select(axis, index)
+                    actual = _boundary_plane(field, axis, index)
+                    self.assertTrue(torch.equal(actual, expected))
+                    self.assertEqual(actual.storage_offset(), expected.storage_offset())
+                    self.assertEqual(actual.stride(), expected.stride())
+
     def test_yee_shapes_cover_collapsed_1d_2d_3d(self):
         for size in ((8, 0, 0), (8, 6, 0), (6, 5, 4), (0, 0, 0)):
             with self.subTest(size=size):
@@ -191,7 +376,11 @@ class TorchStateTest(unittest.TestCase):
                 expected_dtype = torch.int8
             elif name == "_dm2_iterations":
                 expected_dtype = torch.int32
-            elif name == "step_count" or "targets" in name or "tile_origins" in name:
+            elif (
+                name in {"step_count", "_step_increment"}
+                or "targets" in name
+                or "tile_origins" in name
+            ):
                 expected_dtype = torch.int64
             elif any(
                 marker in name
@@ -225,6 +414,8 @@ class TorchStateTest(unittest.TestCase):
         addresses = simulation.buffer_addresses()
         snapshot = simulation.state.snapshot()
         checkpoint = simulation.state.checkpoint()
+        self.assertNotIn("_step_increment", simulation.state.state_dict())
+        self.assertIn("state._step_increment", addresses)
         simulation.advance(4)
         self.assertEqual(addresses, simulation.buffer_addresses())
         self.assertFalse(torch.equal(snapshot["Ex"], simulation.state.ex))

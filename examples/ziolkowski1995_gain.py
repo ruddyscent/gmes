@@ -11,6 +11,10 @@ is not fully reproduced; see VERIFICATION.md for the equation audit.
 from argparse import ArgumentParser
 from pathlib import Path
 
+import matplotlib
+
+matplotlib.use("Agg")
+
 import matplotlib.pyplot as plt
 from ziolkowski1995_common import (
     UNITS,

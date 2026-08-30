@@ -20,11 +20,6 @@ from math import pi, sin
 from pathlib import Path
 from time import perf_counter
 
-import matplotlib
-
-matplotlib.use("Agg")
-
-import matplotlib.pyplot as plt
 import numpy as np
 
 from gmes import (
@@ -631,6 +626,18 @@ def print_intensity_summary(
     )
 
 
+def _pyplot():
+    """Load the non-interactive plotting backend on demand."""
+
+    import matplotlib
+
+    matplotlib.use("Agg")
+
+    from matplotlib import pyplot
+
+    return pyplot
+
+
 def configure_axes(axis, *, x_label=r"Distance ($\mu$m)"):
     axis.set_xlabel(x_label)
     axis.set_ylabel("Normalized amplitude")
@@ -643,12 +650,13 @@ def figure_title(title: str, quick: bool) -> str:
 
 
 def save_plot(figure, path: Path, show: bool = False):
+    pyplot = _pyplot()
     path.parent.mkdir(parents=True, exist_ok=True)
     figure.tight_layout()
     figure.savefig(path, dpi=180)
     if show:
-        plt.show()
-    plt.close(figure)
+        pyplot.show()
+    pyplot.close(figure)
     print(f"wrote {path}")
 
 
@@ -661,7 +669,8 @@ def plot_spatial_pair(
     title: str,
     show: bool = False,
 ):
-    figure, axis = plt.subplots(figsize=(8, 4.5))
+    pyplot = _pyplot()
+    figure, axis = pyplot.subplots(figsize=(8, 4.5))
     axis.plot(
         snapshot.distance_um,
         snapshot.electric / UNITS.electric_field(scenario.amplitude_v_m),
@@ -686,7 +695,8 @@ def plot_population(
     show: bool = False,
 ):
     values = (snapshot.rho1, snapshot.rho2)[rho_index - 1]
-    figure, axis = plt.subplots(figsize=(8, 4.5))
+    pyplot = _pyplot()
+    figure, axis = pyplot.subplots(figsize=(8, 4.5))
     axis.plot(snapshot.distance_um, values, label=rf"$\rho_{{{rho_index}}}$")
     axis.set_xlim(*(x_limits or (0, snapshot.distance_um[-1])))
     axis.set_title(title)
@@ -701,7 +711,8 @@ def plot_gain(
     title: str,
     show: bool = False,
 ):
-    figure, axis = plt.subplots(figsize=(8, 4.5))
+    pyplot = _pyplot()
+    figure, axis = pyplot.subplots(figsize=(8, 4.5))
     axis.plot(result.time_s / 1.0e-12, result.output_intensity, label="output")
     axis.plot(
         result.time_s / 1.0e-12,

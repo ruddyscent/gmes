@@ -9,6 +9,7 @@ import numpy as np
 import torch
 
 import gmes
+from gmes.torch_fdtd import FUSED_SOURCE_REPRESENTATION
 
 _COMPONENTS = ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")
 
@@ -123,6 +124,34 @@ class TorchPointSourceTest(unittest.TestCase):
         addresses = simulation.buffer_addresses()
         _assert_fields(self, native, simulation, 4)
         self.assertEqual(addresses, simulation.buffer_addresses())
+        self.assertEqual(
+            simulation.diagnostics()["sources"]["execution_representation"],
+            FUSED_SOURCE_REPRESENTATION,
+        )
+
+    def test_compile_cache_key_tracks_source_component(self):
+        def build(component):
+            return gmes.TorchSimulation(
+                space=gmes.Cartesian((2, 2, 2), 1),
+                geometry=_geometry(),
+                sources=[
+                    gmes.PointSource(
+                        gmes.Continuous(0.2, width=1),
+                        (0, 0, 0),
+                        component,
+                    )
+                ],
+                runtime=gmes.TorchRuntimeConfig(
+                    device="cpu", cpu_threads=1, compile_policy="compile"
+                ),
+            )
+
+        electric_x = build(gmes.Ex)
+        electric_y = build(gmes.Ey)
+        self.assertNotEqual(
+            electric_x.compile_cache_key,
+            electric_y.compile_cache_key,
+        )
 
     def test_explicit_source_extension_lowers_once(self):
         class Extension:
@@ -254,7 +283,9 @@ class TorchPointSourceTest(unittest.TestCase):
 class TorchTransparentSourceTest(unittest.TestCase):
     def test_all_tfsf_faces_and_paired_real_auxiliary_match_native(self):
         native, simulation = _native_and_torch(
-            lambda: [_tfsf()], bloch=(0.03, 0.04, 0.05)
+            lambda: [_tfsf()],
+            bloch=(0.03, 0.04, 0.05),
+            compile_policy="compile",
         )
         self.assertEqual(len(simulation.sources.auxiliaries), 1)
         auxiliary = simulation.sources.auxiliaries[0]

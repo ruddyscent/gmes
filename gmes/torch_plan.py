@@ -43,6 +43,31 @@ def _readonly(values: Any, dtype: Any = None) -> Any:
     return result
 
 
+def _cpml_residual_is_numerically_stable(cell_coefficients: Any, precision: Any) -> Any:
+    """Return whether base-plus-residual preserves direct reciprocal kappa."""
+    dtype = np.dtype(precision)
+    kappas = np.asarray(cell_coefficients[:, (3, 6)], dtype=dtype)
+    direct = np.asarray(1.0, dtype=dtype) / kappas
+    residual = np.asarray(
+        1.0 / cell_coefficients[:, (3, 6)] - 1.0,
+        dtype=dtype,
+    )
+    reconstructed = np.asarray(
+        np.asarray(1.0, dtype=dtype) + residual,
+        dtype=dtype,
+    )
+    return bool(
+        np.all(
+            np.isclose(
+                reconstructed,
+                direct,
+                rtol=8.0 * np.finfo(dtype).eps,
+                atol=0.0,
+            )
+        )
+    )
+
+
 @dataclass(frozen=True, order=True)
 class ExecutionSignature:
     """Object-independent material/state execution identity."""
@@ -64,6 +89,47 @@ class FlattenedStencilTerm:
     negative_offset: int
     scale_axis: int
     sign: int
+
+
+@dataclass(frozen=True)
+class CpmlResidualAxisPlan:
+    """One active CPML curl axis lowered as a sparse residual update."""
+
+    axis: int
+    positions: np.ndarray
+    targets: np.ndarray
+    stencil_indices: np.ndarray
+    parameters: np.ndarray
+
+    def __post_init__(self) -> None:
+        if self.axis not in (0, 1):
+            raise ValueError("a CPML residual axis must be zero or one")
+        count = len(self.targets)
+        if (
+            self.positions.dtype != np.int64
+            or self.positions.shape != (count,)
+            or self.targets.dtype != np.int64
+            or self.targets.shape != (count,)
+        ):
+            raise ValueError("CPML residual rows and targets must be flat int64 arrays")
+        if self.stencil_indices.shape != (count, 2):
+            raise ValueError("a CPML residual axis requires two stencil indices")
+        if self.stencil_indices.dtype != np.int64:
+            raise ValueError("CPML residual stencil indices must use int64")
+        if self.parameters.shape != (count, 4) or self.parameters.dtype != np.float64:
+            raise ValueError(
+                "CPML residual parameters must contain inv_base, b, c, and 1/kappa-1"
+            )
+        for values in (
+            self.positions,
+            self.targets,
+            self.stencil_indices,
+            self.parameters,
+        ):
+            if values.flags.writeable or not values.flags.c_contiguous:
+                raise ValueError(
+                    "CPML residual arrays must be immutable and contiguous"
+                )
 
 
 @dataclass(frozen=True)
@@ -90,6 +156,7 @@ class MaterialBucketPlan:
     cell_coefficient_names: tuple[str, ...]
     cell_coefficients: np.ndarray
     stencil_indices: np.ndarray
+    cpml_residual_axes: tuple[CpmlResidualAxisPlan, ...]
     tile_origins: np.ndarray
     tile_region_indices: np.ndarray
     estimated_bytes: int
@@ -119,6 +186,24 @@ class MaterialBucketPlan:
             )
         if self.stencil_indices.shape not in ((0, 4), (self.target_count, 4)):
             raise ValueError("stencil indices must be empty or cover every target")
+        if self.cpml_residual_axes:
+            if self.signature.model != "cpml" or len(self.cpml_residual_axes) != 2:
+                raise ValueError(
+                    "only CPML buckets may define both sparse residual axes"
+                )
+            for expected_axis, residual in enumerate(self.cpml_residual_axes):
+                if residual.axis != expected_axis:
+                    raise ValueError("CPML residual axes must retain curl-term order")
+                if len(residual.positions) and (
+                    residual.positions[0] < 0
+                    or residual.positions[-1] >= self.target_count
+                    or np.any(np.diff(residual.positions) <= 0)
+                ):
+                    raise ValueError("CPML residual rows must be sorted and unique")
+                if not np.array_equal(
+                    residual.targets, self.targets[residual.positions]
+                ):
+                    raise ValueError("CPML residual targets changed bucket row order")
         if self.tile_region_indices.ndim != 2:
             raise ValueError("tile-dense region indices must be two-dimensional")
         if len(self.tile_origins) != len(self.tile_region_indices):
@@ -142,6 +227,8 @@ class MaterialBucketPlan:
         """Return the steady-state material launch estimate for this signature."""
         if self.target_count == 0 or self.signature.model == "dummy":
             return 0
+        if self.cpml_residual_axes:
+            return sum(bool(len(axis.targets)) for axis in self.cpml_residual_axes)
         if (
             self.selected_policy == "tiled"
             and self.signature.model not in SINGLE_BUCKET_MODELS
@@ -243,10 +330,7 @@ class ComponentPlan:
     @property
     def launch_count(self) -> int:
         """Object-independent material launch estimate for this component."""
-        dense = any(
-            bucket.signature.model == "dielectric" and bucket.target_count
-            for bucket in self.buckets
-        )
+        dense = np.any(self.dense_inverse)
         non_dense = sum(
             bucket.launch_count
             for bucket in self.buckets
@@ -284,6 +368,9 @@ class ComponentPlan:
                     "estimated_bytes": bucket.estimated_bytes,
                     "coefficient_rows": len(bucket.coefficient_table),
                     "cell_coefficient_width": len(bucket.cell_coefficient_names),
+                    "cpml_residual_axis_targets": tuple(
+                        len(axis.targets) for axis in bucket.cpml_residual_axes
+                    ),
                 }
                 for bucket in self.buckets
             ],
@@ -607,6 +694,7 @@ class TorchExecutionPlanner:
         policy: str = "auto",
         material_tile_size: int = 65536,
         execution_tile_size: int = 4096,
+        cpml_sparse_residual: bool = False,
     ) -> None:
         if policy not in EXECUTION_POLICIES:
             raise ValueError(
@@ -622,6 +710,7 @@ class TorchExecutionPlanner:
         self.policy = policy
         self.material_tile_size = int(material_tile_size)
         self.execution_tile_size = int(execution_tile_size)
+        self.cpml_sparse_residual = bool(cpml_sparse_residual)
 
     def build(self) -> tuple[ComponentPlan, ...]:
         """Build and validate all six component plans before tensor finalization."""
@@ -740,6 +829,7 @@ class TorchExecutionPlanner:
             cell_coefficient_names: tuple[str, ...] = ()
             cell_coefficients = np.empty((0, 0), dtype=np.float64)
             stencil_indices = np.empty((0, 4), dtype=np.int64)
+            cpml_residual_axes: tuple[CpmlResidualAxisPlan, ...] = ()
             if signature.model in {"upml", "cpml"}:
                 cell_coefficient_names = _PML_CELL_COEFFICIENT_NAMES[signature.model]
                 linear_coordinates = np.unravel_index(targets, shape)
@@ -762,6 +852,43 @@ class TorchExecutionPlanner:
                 stencil_indices = _pml_stencil_indices(
                     name, targets, shape, self.shapes
                 )
+                if (
+                    signature.model == "cpml"
+                    and self.cpml_sparse_residual
+                    and _cpml_residual_is_numerically_stable(
+                        cell_coefficients, self.precision
+                    )
+                ):
+                    residual_axes: list[CpmlResidualAxisPlan] = []
+                    for axis, (b_column, c_column, kappa_column) in enumerate(
+                        ((1, 2, 3), (4, 5, 6))
+                    ):
+                        active = np.logical_or(
+                            cell_coefficients[:, c_column] != 0.0,
+                            cell_coefficients[:, kappa_column] != 1.0,
+                        )
+                        positions = np.flatnonzero(active).astype(np.int64, copy=False)
+                        parameters = np.column_stack(
+                            (
+                                cell_coefficients[positions, 0],
+                                cell_coefficients[positions, b_column],
+                                cell_coefficients[positions, c_column],
+                                1.0 / cell_coefficients[positions, kappa_column] - 1.0,
+                            )
+                        )
+                        residual_axes.append(
+                            CpmlResidualAxisPlan(
+                                axis=axis,
+                                positions=_readonly(positions, np.int64),
+                                targets=_readonly(targets[positions], np.int64),
+                                stencil_indices=_readonly(
+                                    stencil_indices[positions, 2 * axis : 2 * axis + 2],
+                                    np.int64,
+                                ),
+                                parameters=_readonly(parameters, np.float64),
+                            )
+                        )
+                    cpml_residual_axes = tuple(residual_axes)
 
             tile_ids = np.unique(targets // self.execution_tile_size)
             tile_cells = len(tile_ids) * self.execution_tile_size
@@ -805,6 +932,8 @@ class TorchExecutionPlanner:
             if signature.model == "dielectric":
                 target_coefficients = region_coefficient_indices[target_region_indices]
                 dense_inverse[targets] = coefficient_table[target_coefficients, 0]
+            elif signature.model == "cpml" and cpml_residual_axes:
+                dense_inverse[targets] = cell_coefficients[:, 0]
             elif signature.model == "const":
                 target_coefficients = region_coefficient_indices[target_region_indices]
                 values = coefficient_table[target_coefficients, 1:3]
@@ -823,6 +952,15 @@ class TorchExecutionPlanner:
                     stencil_indices,
                     tile_origins,
                     tile_region_indices,
+                )
+            ) + sum(
+                values.nbytes
+                for residual in cpml_residual_axes
+                for values in (
+                    residual.positions,
+                    residual.targets,
+                    residual.stencil_indices,
+                    residual.parameters,
                 )
             )
             buckets.append(
@@ -851,6 +989,7 @@ class TorchExecutionPlanner:
                     cell_coefficient_names=cell_coefficient_names,
                     cell_coefficients=_readonly(cell_coefficients, np.float64),
                     stencil_indices=_readonly(stencil_indices, np.int64),
+                    cpml_residual_axes=cpml_residual_axes,
                     tile_origins=_readonly(tile_origins, np.int64),
                     tile_region_indices=_readonly(tile_region_indices, np.int32),
                     estimated_bytes=estimated_bytes,
@@ -889,6 +1028,7 @@ __all__ = [
     "ELECTRIC_COMPONENTS",
     "EXECUTION_POLICIES",
     "ComponentPlan",
+    "CpmlResidualAxisPlan",
     "ExecutionSignature",
     "FlattenedStencilTerm",
     "MaterialBucketPlan",

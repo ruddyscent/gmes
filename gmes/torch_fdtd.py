@@ -19,10 +19,13 @@ except ImportError as error:  # pragma: no cover
 from .geometry import DefaultMedium, GeomBoxTree
 from .material import Dielectric
 from .torch_dispersive import (
+    DISPERSIVE_GROUPING_SCOPES,
     DISPERSIVE_MODELS,
+    DispersiveExecutionOverlay,
     register_plan_buffers,
     register_state_buffers,
     update_bucket,
+    update_execution_entry,
 )
 from .torch_dm2 import (
     DM2_ITERATIONS_PER_CHUNK,
@@ -62,7 +65,7 @@ class TorchConfigurationError(ValueError):
 
 
 COMPILE_MODES = ("default", "reduce-overhead", "max-autotune")
-TORCH_SOLVER_ABI = "torch-fdtd-regions-v6"
+TORCH_SOLVER_ABI = "torch-fdtd-regions-v8"
 DIRECT_VIEW_MUTATION_REPRESENTATION = "direct-nonoverlapping-as-strided-v1"
 DEFAULT_VIEW_MUTATION_REPRESENTATION = "slice-views-v1"
 PACKED_DM2_REPRESENTATION = "single-carry-packed-loop-v1"
@@ -71,6 +74,8 @@ FUSED_SOURCE_REPRESENTATION = "fused-half-step-v1"
 EXTERNAL_SOURCE_REPRESENTATION = "external-v1"
 SPARSE_CPML_REPRESENTATION = "dense-base-axis-sparse-residual-v1"
 DEFAULT_CPML_REPRESENTATION = "compact-two-axis-state-v1"
+EXACT_SCHEMA_DISPERSIVE_REPRESENTATION = "exact-schema-grouped-io-v1"
+BUCKET_DISPERSIVE_REPRESENTATION = "bucket-indexed-io-v1"
 
 
 @dataclass(frozen=True)
@@ -106,6 +111,8 @@ class TorchRuntimeConfig:
     autograd: bool = False
     execution_policy: str = "auto"
     planner_tile_size: int = 4096
+    experimental_dispersive_grouping: bool = False
+    experimental_dispersive_grouping_scope: str = "combined"
 
     def validate_static(self):
         """Reject invalid requests before tensors or compiler state are created."""
@@ -143,6 +150,18 @@ class TorchRuntimeConfig:
             )
         if self.planner_tile_size < 1:
             raise TorchConfigurationError("planner_tile_size must be positive")
+        if not isinstance(self.experimental_dispersive_grouping, bool):
+            raise TorchConfigurationError(
+                "experimental_dispersive_grouping must be a boolean"
+            )
+        if (
+            self.experimental_dispersive_grouping_scope
+            not in DISPERSIVE_GROUPING_SCOPES
+        ):
+            raise TorchConfigurationError(
+                "experimental_dispersive_grouping_scope must be 'combined', "
+                "'two-level', or 'dcp-convolution'"
+            )
         self.launch.validate()
 
     @property
@@ -194,6 +213,10 @@ def torch_runtime_diagnostics(config):
         "requested_precision": config.precision,
         "compile_policy": config.compile_policy,
         "compile_mode": config.compile_mode,
+        "experimental_dispersive_grouping": (config.experimental_dispersive_grouping),
+        "experimental_dispersive_grouping_scope": (
+            config.experimental_dispersive_grouping_scope
+        ),
         "cuda_build": torch.version.cuda,
         "cuda_available": torch.cuda.is_available(),
         "cuda_device_count": torch.cuda.device_count(),
@@ -651,7 +674,7 @@ class TorchSimulationPlan(nn.Module):
 class TorchSimulationState(nn.Module):
     """Device-resident fields, clocks, coefficients, and fixed scratch storage."""
 
-    def __init__(self, plan, *, paired_real, device, dtype):
+    def __init__(self, plan, *, paired_real, device, dtype, execution_overlay=None):
         super().__init__()
         self.plan = plan
         self.paired_real = bool(paired_real)
@@ -692,6 +715,7 @@ class TorchSimulationState(nn.Module):
             paired_real=paired_real,
             dtype=dtype,
             device=device,
+            execution_overlay=execution_overlay,
         )
         self.register_buffer(
             "step_count", torch.zeros((), device=device, dtype=torch.int64)
@@ -765,6 +789,15 @@ class TorchSimulationState(nn.Module):
             self.register_state_dict_post_hook(_cpml_state_dict_post_hook)
             self.register_load_state_dict_pre_hook(_cpml_load_state_dict_pre_hook)
         self.requires_grad_(False)
+
+    def load_state_dict(self, state_dict, strict=True, assign=False):
+        """Restore grouped logical state without replacing its physical arena."""
+        if assign and hasattr(self, "_grouped_dispersive_state_names"):
+            raise ValueError(
+                "assign=True would detach grouped dispersive state from its fixed "
+                "execution arena; use assign=False"
+            )
+        return super().load_state_dict(state_dict, strict=strict, assign=assign)
 
     def field(self, component):
         """Return one live device field by component type or canonical name."""
@@ -848,6 +881,8 @@ class TorchSimulationState(nn.Module):
             for name, value in self.state_dict().items()
             if name not in logical_names
         }
+        for name in getattr(self, "_grouped_dispersive_state_names", ()):
+            persistent[name] = getattr(self, name)
         expected = set(persistent) | logical_names
         if set(checkpoint) != expected:
             raise ValueError("checkpoint keys do not match the simulation state")
@@ -1409,11 +1444,33 @@ class TorchSimulation:
             device=device,
             dtype=runtime.dtype,
         )
+        grouped_dispersive_io = (
+            runtime.experimental_dispersive_grouping
+            and runtime.compile_policy == "compile"
+            and device.type == "cpu"
+            and _distributed_partition is None
+            and bool(plan.dispersive_buckets)
+        )
+        dispersive_overlay = (
+            DispersiveExecutionOverlay(
+                plan,
+                plan.dispersive_buckets,
+                paired_real=bloch is not None,
+                dtype=runtime.dtype,
+                device=device,
+                scope=runtime.experimental_dispersive_grouping_scope,
+            )
+            if grouped_dispersive_io
+            else None
+        )
+        if dispersive_overlay is not None and not dispersive_overlay.groups:
+            dispersive_overlay = None
         state = TorchSimulationState(
             plan,
             paired_real=bloch is not None,
             device=device,
             dtype=runtime.dtype,
+            execution_overlay=dispersive_overlay,
         )
 
         self.runtime = runtime
@@ -1426,6 +1483,12 @@ class TorchSimulation:
         self.geom_tree = geom_tree
         self.plan = plan
         self.state = state
+        self._dispersive_overlay = dispersive_overlay
+        self._dispersive_execution_representation = (
+            EXACT_SCHEMA_DISPERSIVE_REPRESENTATION
+            if dispersive_overlay is not None
+            else BUCKET_DISPERSIVE_REPRESENTATION
+        )
         self._has_dm2 = has_dm2
         self._has_electric_constants = any(
             getattr(plan, f"constant_targets_{name.lower()}").numel()
@@ -1722,6 +1785,12 @@ class TorchSimulation:
             self.runtime.compile_mode,
             region_topology,
             self._material_execution_representation,
+            self._dispersive_execution_representation,
+            (
+                self.runtime.experimental_dispersive_grouping_scope
+                if self._dispersive_overlay is not None
+                else None
+            ),
             self._cpml_execution_representation,
             self._view_mutation_representation,
             self._dm2_execution_representation,
@@ -1754,6 +1823,11 @@ class TorchSimulation:
             buffer_layouts(self.plan, plan=True),
             buffer_layouts(self.state, recurse=False),
             tuple(buffer_layouts(bucket) for bucket in self.state.dm2_buckets),
+            (
+                buffer_layouts(self._dispersive_overlay)
+                if self._dispersive_overlay is not None
+                else ()
+            ),
             buffer_layouts(self.sources) if self._fused_source_updates else (),
         )
         return hashlib.sha256(repr(payload).encode()).hexdigest()
@@ -2019,6 +2093,15 @@ class TorchSimulation:
             )
 
     def _apply_dispersive(self):
+        if self._dispersive_overlay is not None:
+            for entry in self._dispersive_overlay.entries:
+                update_execution_entry(
+                    self.plan,
+                    self.state,
+                    self._dispersive_overlay,
+                    entry,
+                )
+            return
         for descriptor in self._dispersive_buckets:
             update_bucket(self.plan, self.state, descriptor)
 
@@ -2417,7 +2500,46 @@ class TorchSimulation:
                 for name, value in self.state.state_dict().items()
                 if name.startswith("bucket_")
             ),
+            # Preserve the legacy logical count; grouped dispatches are reported below.
             "launches_per_step": len(self._dispersive_buckets),
+            "logical_buckets_per_step": len(self._dispersive_buckets),
+            "execution_representation": self._dispersive_execution_representation,
+            "experimental_grouping_scope": (
+                self.runtime.experimental_dispersive_grouping_scope
+                if self._dispersive_overlay is not None
+                else None
+            ),
+            "execution_entries_per_step": (
+                len(self._dispersive_overlay.entries)
+                if self._dispersive_overlay is not None
+                else len(self._dispersive_buckets)
+            ),
+            "exact_schema_groups": (
+                len(self._dispersive_overlay.groups)
+                if self._dispersive_overlay is not None
+                else 0
+            ),
+            "exact_schema_spans": (
+                tuple(
+                    {
+                        "component": group.component,
+                        "recurrence": group.recurrence,
+                        "target_count": group.target_count,
+                        "logical_spans": tuple(
+                            {
+                                "prefix": span.descriptor.prefix,
+                                "model": span.descriptor.model,
+                                "start": span.start,
+                                "stop": span.stop,
+                            }
+                            for span in group.spans
+                        ),
+                    }
+                    for group in self._dispersive_overlay.groups
+                )
+                if self._dispersive_overlay is not None
+                else ()
+            ),
             "state_width_policy": "exact",
             "padding_elements": 0,
             "padding_elements_avoided": sum(
@@ -2487,6 +2609,13 @@ class TorchSimulation:
                 for name, tensor in self.probes.named_buffers()
             }
         )
+        if self._dispersive_overlay is not None:
+            result.update(
+                {
+                    f"dispersive_overlay.{name}": tensor.data_ptr()
+                    for name, tensor in self._dispersive_overlay.named_buffers()
+                }
+            )
         for index, auxiliary in enumerate(self.sources.auxiliaries):
             result.update(
                 {

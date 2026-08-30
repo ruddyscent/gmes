@@ -115,6 +115,7 @@ class TorchRuntimeConfigTest(unittest.TestCase):
         self.assertIn("torch", diagnostics)
         self.assertIn("cuda_available", diagnostics)
         self.assertIn("nccl_available", diagnostics)
+        self.assertFalse(diagnostics["experimental_dispersive_grouping"])
         self.assertNotIn("environment", diagnostics)
 
     def test_invalid_requests_are_rejected(self):
@@ -129,6 +130,14 @@ class TorchRuntimeConfigTest(unittest.TestCase):
                 compile_mode="max-autotune",
             ),
             TorchRuntimeConfig(device="cpu", cpu_interop_threads=0),
+            TorchRuntimeConfig(
+                device="cpu",
+                experimental_dispersive_grouping=1,
+            ),
+            TorchRuntimeConfig(
+                device="cpu",
+                experimental_dispersive_grouping_scope="unknown",
+            ),
             TorchRuntimeConfig(
                 device="cpu",
                 launch=DistributedLaunch(world_size=2, local_world_size=2),
@@ -194,7 +203,7 @@ class TorchRuntimeConfigTest(unittest.TestCase):
             first.diagnostics()["compile_cache_key"], first.compile_cache_key
         )
         self.assertEqual(
-            first.diagnostics()["compile_solver_abi"], "torch-fdtd-regions-v6"
+            first.diagnostics()["compile_solver_abi"], "torch-fdtd-regions-v8"
         )
         self.assertEqual(
             first.diagnostics()["view_mutation_representation"],

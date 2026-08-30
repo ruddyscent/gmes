@@ -479,16 +479,27 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
         ):
             self.assertEqual(self.benchmark._current_rss_bytes(), 42 * 4096)
 
-    def test_current_rss_reads_macos_ps_kibibytes(self):
-        completed = SimpleNamespace(returncode=0, stdout=" 12345\n")
+    def test_current_rss_reads_macos_direct_provider(self):
         with (
             patch.object(self.benchmark.platform, "system", return_value="Darwin"),
+            patch.object(
+                self.benchmark,
+                "_darwin_proc_pid_rusage_bytes",
+                return_value=12_641_280,
+            ) as direct,
+        ):
+            self.assertEqual(self.benchmark._current_rss_bytes(), 12_641_280)
+        direct.assert_called_once_with()
+
+    def test_ps_rss_reference_converts_kibibytes_to_bytes(self):
+        completed = SimpleNamespace(returncode=0, stdout=" 12345\n")
+        with (
             patch.object(self.benchmark.os, "getpid", return_value=321),
             patch.object(
                 self.benchmark.subprocess, "run", return_value=completed
             ) as run,
         ):
-            self.assertEqual(self.benchmark._current_rss_bytes(), 12345 * 1024)
+            self.assertEqual(self.benchmark._ps_current_rss_bytes(), 12345 * 1024)
         run.assert_called_once_with(
             ("ps", "-o", "rss=", "-p", "321"),
             check=False,
@@ -562,6 +573,179 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
         self.assertTrue(self.benchmark._memory_growth_bounded(cpu, None, 1024**2))
         self.assertFalse(self.benchmark._memory_growth_bounded(cpu, None, 1024**2 + 1))
 
+    def test_cpu_rss_plateau_accepts_stabilization_and_bounded_oscillation(self):
+        samples = [
+            {"before_bytes": value, "after_bytes": value}
+            for value in (
+                tuple(range(0, 16_000, 1_000))
+                + (20_000, 20_100, 20_000, 20_200, 20_050, 20_100)
+                + (20_100, 20_000, 20_150, 20_050, 20_100, 20_000)
+            )
+        ]
+        result = self.benchmark._evaluate_cpu_rss_plateau(samples)
+        self.assertTrue(result["bounded"])
+        self.assertFalse(result["persistent_positive_order_trend"])
+        self.assertLessEqual(result["stable_start_upward_excursion_bytes"], 1024**2)
+        self.assertEqual(result["stabilization_boundary_index"], 16)
+        self.assertEqual(len(result["evaluation_block_slopes_bytes_per_window"]), 2)
+        self.assertEqual(result["peak_rss_bytes"], 20_200)
+
+    def test_cpu_rss_plateau_accepts_falling_evaluation_windows(self):
+        stable = tuple(range(20_000_000, 18_800_000, -100_000))
+        result = self.benchmark._evaluate_cpu_rss_plateau(
+            [
+                {"before_bytes": value, "after_bytes": value}
+                for value in tuple(range(16)) + stable
+            ]
+        )
+        self.assertTrue(result["bounded"])
+        self.assertFalse(result["persistent_positive_order_trend"])
+        self.assertEqual(result["stable_start_upward_excursion_bytes"], 0)
+        self.assertTrue(
+            all(
+                slope < 0
+                for slope in result["evaluation_block_slopes_bytes_per_window"]
+            )
+        )
+
+    def test_cpu_rss_plateau_rejects_persistent_growth(self):
+        values = tuple(range(16)) + tuple(
+            10_000 + 16_384 * index for index in range(12)
+        )
+        result = self.benchmark._evaluate_cpu_rss_plateau(
+            [{"before_bytes": value, "after_bytes": value} for value in values]
+        )
+        self.assertFalse(result["bounded"])
+        self.assertTrue(result["persistent_positive_order_trend"])
+        self.assertLessEqual(result["stable_start_upward_excursion_bytes"], 1024**2)
+
+    def test_cpu_rss_plateau_rejects_large_excursion_without_trend(self):
+        stable = (
+            10_000,
+            10_000 + 1024**2 + 1,
+            10_000,
+            10_000,
+            10_000,
+            10_000,
+        ) * 2
+        result = self.benchmark._evaluate_cpu_rss_plateau(
+            [
+                {"before_bytes": value, "after_bytes": value}
+                for value in tuple(range(16)) + stable
+            ]
+        )
+        self.assertFalse(result["bounded"])
+        self.assertFalse(result["persistent_positive_order_trend"])
+
+    def test_cpu_rss_plateau_fails_closed_for_unavailable_evidence(self):
+        self.assertFalse(self.benchmark._evaluate_cpu_rss_plateau([])["bounded"])
+        malformed = [{"before_bytes": 1, "after_bytes": 1} for _ in range(28)]
+        malformed[-1]["after_bytes"] = None
+        result = self.benchmark._evaluate_cpu_rss_plateau(malformed)
+        self.assertFalse(result["bounded"])
+        self.assertIn("unavailable", result["error"])
+
+    def test_darwin_rss_provider_validates_direct_bytes_against_ps(self):
+        with (
+            patch.object(self.benchmark.platform, "system", return_value="Darwin"),
+            patch.object(
+                self.benchmark,
+                "_darwin_proc_pid_rusage_bytes",
+                side_effect=[100_000_000, 100_200_000, 100_300_000],
+            ),
+            patch.object(
+                self.benchmark,
+                "_ps_current_rss_bytes",
+                return_value=100_100_000,
+            ),
+        ):
+            reader, provider = self.benchmark._current_rss_provider()
+            self.assertEqual(reader(), 100_300_000)
+        self.assertEqual(provider["name"], "proc-pid-rusage-v0")
+        self.assertEqual(provider["units"], "bytes")
+        self.assertTrue(provider["validated"])
+
+    def test_darwin_rss_provider_fails_closed_on_unit_mismatch(self):
+        with (
+            patch.object(self.benchmark.platform, "system", return_value="Darwin"),
+            patch.object(
+                self.benchmark,
+                "_darwin_proc_pid_rusage_bytes",
+                side_effect=[100_000_000, 100_200_000],
+            ),
+            patch.object(
+                self.benchmark,
+                "_ps_current_rss_bytes",
+                return_value=100_000,
+            ),
+        ):
+            reader, provider = self.benchmark._current_rss_provider()
+            self.assertIsNone(reader())
+        self.assertFalse(provider["validated"])
+        self.assertEqual(
+            provider["validation"]["reference_bytes"],
+            100_000,
+        )
+
+    def test_fresh_cpu_rss_probe_binds_request_and_child_pid(self):
+        request = self.benchmark._cpu_rss_request(
+            "cpu-crossover-2d",
+            precision="float64",
+            compile_mode="default",
+            execution_policy="auto",
+            experimental_dispersive_grouping=True,
+            experimental_dispersive_grouping_scope="two-level",
+            threads=1,
+            interop_threads=1,
+            warmup=5,
+            profile_steps=5,
+        )
+        payload = {
+            "schema_version": 1,
+            "kind": "cpu-rss-fresh-process",
+            "pid": 101,
+            "parent_pid": 100,
+            "request": request,
+            "evidence": {"candidate": "same"},
+            "plateau": {"schema_version": 2, "bounded": True},
+        }
+        completed = SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(payload),
+            stderr="",
+        )
+        with (
+            patch.object(self.benchmark.os, "getpid", return_value=100),
+            patch.object(
+                self.benchmark,
+                "_current_evidence",
+                return_value={"candidate": "same"},
+            ),
+            patch.object(
+                self.benchmark.subprocess, "run", return_value=completed
+            ) as run,
+        ):
+            result = self.benchmark._fresh_cpu_memory_probe(request, self.manifest)
+        self.assertTrue(result["plateau"]["bounded"])
+        command = run.call_args.args[0]
+        self.assertIn("--cpu-rss-child", command)
+        self.assertIn("two-level", command)
+
+        payload["parent_pid"] = 99
+        completed.stdout = json.dumps(payload)
+        with (
+            patch.object(self.benchmark.os, "getpid", return_value=100),
+            patch.object(
+                self.benchmark,
+                "_current_evidence",
+                return_value={"candidate": "same"},
+            ),
+            patch.object(self.benchmark.subprocess, "run", return_value=completed),
+        ):
+            invalid = self.benchmark._fresh_cpu_memory_probe(request, self.manifest)
+        self.assertFalse(invalid["plateau"]["bounded"])
+        self.assertIn("binding", invalid["binding_error"])
+
     def test_cuda_memory_gate_preserves_allocated_growth_behavior(self):
         cuda = self.benchmark.torch.device("cuda")
         self.assertTrue(self.benchmark._memory_growth_bounded(cuda, None, None))
@@ -572,7 +756,9 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
         trace = {
             "traceEvents": [
                 {"name": "[memory]", "args": {"Bytes": 32}},
-                {"name": "[memory]", "args": {"Bytes": -32}},
+                {"name": "[memory]", "args": {"Bytes": 16}},
+                {"name": "[memory]", "args": {"Bytes": 32}},
+                {"name": "[memory]", "args": {"Bytes": -80}},
                 {
                     "name": "Torch-Compiled Region: 0/0",
                     "ph": "X",
@@ -619,11 +805,12 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
         self.assertEqual(
             result["chrome_trace_sha256"], hashlib.sha256(trace_bytes).hexdigest()
         )
-        self.assertEqual(result["positive_allocation_events"], 1)
-        self.assertEqual(result["allocated_bytes"], 32)
-        self.assertEqual(result["freed_bytes"], 32)
+        self.assertEqual(result["positive_allocation_events"], 3)
+        self.assertEqual(result["allocated_bytes"], 80)
+        self.assertEqual(result["freed_bytes"], 80)
         self.assertEqual(result["allocation_net_bytes"], 0)
         self.assertEqual(result["max_allocation_bytes"], 32)
+        self.assertEqual(result["allocation_size_histogram"], {"16": 1, "32": 2})
         self.assertEqual(result["compiled_region_events"], 2)
         self.assertEqual(
             result["compiled_region_names"],
@@ -715,9 +902,17 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             ("threads", 4),
             ("interop_threads", 2),
             ("capture_graphs", True),
+            ("experimental_dispersive_grouping", True),
         ):
             arguments = {**common, name: value}
             variants.append(self.benchmark._trace_filename(**arguments))
+        variants.append(
+            self.benchmark._trace_filename(
+                **common,
+                experimental_dispersive_grouping=True,
+                experimental_dispersive_grouping_scope="two-level",
+            )
+        )
         self.assertEqual(len({baseline, *variants}), 1 + len(variants))
 
     def test_native_gate_rejects_a_mismatched_measurement_contract(self):
@@ -981,7 +1176,7 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
         manifest["performance_gates"]["cpu_acceptance"]["statistics"]["resamples"] = 100
         cases = manifest["performance_gates"]["cpu_acceptance"]["cases"]
         evidence = {
-            "evidence_contract_id": "torch-cpu-acceptance-v3",
+            "evidence_contract_id": "torch-cpu-acceptance-v7",
             "cpu_contract_id": manifest["performance_gates"]["cpu_acceptance"][
                 "contract_id"
             ],
@@ -1025,6 +1220,7 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
                             "compile_mode": "default",
                             "explicit_cuda_graphs": False,
                             "execution_policy": "auto",
+                            "experimental_dispersive_grouping": False,
                             "threads": threads,
                             "interop_threads": 1,
                             "cpu_affinity": [0, 1, 2, 3],
@@ -1067,7 +1263,17 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
                 Path("native.json"),
                 evidence,
             )
+            experimental = artifact(4)
+            for case in experimental["cases"]:
+                case["runtime"]["experimental_dispersive_grouping"] = True
+            experimental_result = self.benchmark._aggregate_cpu_slice_outputs(
+                [one, experimental],
+                manifest,
+                Path("native.json"),
+                evidence,
+            )
         self.assertFalse(invalid["suite_acceptance"]["passed"])
+        self.assertFalse(experimental_result["suite_acceptance"]["passed"])
 
     def test_cpu_slice_aggregator_rejects_mixed_candidate_provenance(self):
         output = {"schema_version": 3, "kind": "cpu-acceptance-thread-slice"}

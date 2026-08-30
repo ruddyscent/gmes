@@ -3,15 +3,19 @@
 
 """Display live field slices and material snapshots with Matplotlib."""
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from threading import Thread
 from typing import Any, Protocol, cast
 
 import numpy as np
 from matplotlib.backend_bases import FigureManagerBase, NonGuiException
-from matplotlib.pyplot import cm, new_figure_manager, show
+from matplotlib.pyplot import cm
+from matplotlib.pyplot import new_figure_manager as _new_figure_manager
+from matplotlib.pyplot import show
 from numpy import arange, array, empty, linspace, ndindex
 from numpy.typing import NDArray
+
+new_figure_manager = cast(Callable[[int | str], FigureManagerBase], _new_figure_manager)
 
 # GMES modules
 from .constant import *
@@ -213,7 +217,7 @@ class ShowLine(Thread):
     def run(self) -> None:
         """Create and run the one-dimensional Matplotlib view."""
 
-        self.manager = new_figure_manager(self.id)  # type: ignore[no-untyped-call]  # Matplotlib backend factory lacks a typed signature.
+        self.manager = new_figure_manager(self.id)
         ax = self.manager.canvas.figure.add_subplot(111)
         (self.line,) = ax.plot(self.xdata, self.ydata)
         ax.set_xlabel(self.xlabel)
@@ -402,7 +406,7 @@ class ShowPlane(Thread):
     def run(self) -> None:
         """Create and run the two-dimensional Matplotlib view."""
 
-        self.manager = new_figure_manager(self.id)  # type: ignore[no-untyped-call]  # Matplotlib backend factory lacks a typed signature.
+        self.manager = new_figure_manager(self.id)
         ax = self.manager.canvas.figure.add_subplot(111)
         self.im = ax.imshow(
             self.data,
@@ -606,7 +610,7 @@ class Snapshot(Thread):
     def run(self) -> None:
         """Create and display the static material snapshot."""
 
-        self.manager = new_figure_manager(self.id)  # type: ignore[no-untyped-call]  # Matplotlib backend factory lacks a typed signature.
+        self.manager = new_figure_manager(self.id)
         ax = self.manager.canvas.figure.add_subplot(111)
         self.im = ax.imshow(
             self.data,

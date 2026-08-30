@@ -34,7 +34,7 @@ class CiConfigurationTest(unittest.TestCase):
     def test_required_ci_runs_static_and_native_stub_checks(self):
         self.assertIn("python -m mypy", self.ci_workflow)
         self.assertIn(
-            "python -m mypy.stubtest gmes.constant gmes.pw_material",
+            "python -m mypy.stubtest --mypy-config-file pyproject.toml gmes.constant gmes.pw_material",
             self.ci_workflow,
         )
 

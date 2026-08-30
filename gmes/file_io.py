@@ -3,12 +3,13 @@
 
 """Record field probes and export simulation snapshots."""
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from importlib import import_module
 from os import PathLike
 from os.path import exists
 from pathlib import Path
 from sys import stderr
-from typing import Protocol, TextIO, cast
+from typing import Any, Protocol, TextIO, cast
 
 import numpy as np
 from numpy.typing import NDArray
@@ -100,7 +101,10 @@ def write_hdf5(
     """
 
     # PyTables does not publish PEP 561 metadata.
-    from tables import open_file  # type: ignore[import-untyped]
+    open_file = cast(
+        Callable[..., Any],
+        getattr(import_module("tables"), "open_file"),
+    )
 
     node_name = Path(name).name
     selection = data[

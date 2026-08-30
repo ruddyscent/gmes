@@ -138,7 +138,11 @@ extend_skip = [
 
 [tool.mypy]
 python_version = "3.14"
-files = ["gmes", "tests/typing/public_api.py"]
+files = [
+    "gmes",
+    "tests/typing/public_api.py",
+    "tests/typing/star_import.py",
+]
 exclude = [
     "^gmes/constant\\.py$",
     "^gmes/pw_material\\.py$",
@@ -157,6 +161,10 @@ disallow_incomplete_defs = false
 
 [[tool.mypy.overrides]]
 module = ["mpi4py"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["matplotlib", "matplotlib.*"]
 ignore_missing_imports = true
 
 [tool.pylint.main]

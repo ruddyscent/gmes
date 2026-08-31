@@ -4,6 +4,8 @@ recursive-include examples README *.md *.py
 recursive-include tests README *.py
 recursive-include utils *.py
 recursive-include benchmarks README.md *.json *.py
+exclude benchmarks/evidence/issue-123/torch-cpu-baseline-one.json
+exclude benchmarks/evidence/issue-123/torch-cpu-baseline-physical.json
 recursive-include docs *.md
 exclude gmes/constant.py
 exclude gmes/pw_material.py

@@ -348,19 +348,26 @@ class TorchTransparentSourceTest(unittest.TestCase):
 class TorchBoundaryTest(unittest.TestCase):
     def test_collapsed_paired_real_boundary_scratch_matches_native(self):
         bloch = (0.07, 0.11, 0.13)
-        native, simulation = _native_and_torch(lambda: [], size=(4, 4, 0), bloch=bloch)
-        rng = np.random.default_rng(7)
-        fields = {}
-        for component, field in native.field.items():
-            field[...] = (
-                rng.normal(size=field.shape) * 1e-3
-                + 1j * rng.normal(size=field.shape) * 1e-3
-            )
-            fields[component.__name__] = field.copy()
-        simulation.load_host_fields(fields)
-        addresses = simulation.buffer_addresses()
-        _assert_fields(self, native, simulation, 3)
-        self.assertEqual(addresses, simulation.buffer_addresses())
+        for compile_policy in ("eager", "compile"):
+            with self.subTest(compile_policy=compile_policy):
+                native, simulation = _native_and_torch(
+                    lambda: [],
+                    size=(4, 4, 0),
+                    bloch=bloch,
+                    compile_policy=compile_policy,
+                )
+                rng = np.random.default_rng(7)
+                fields = {}
+                for component, field in native.field.items():
+                    field[...] = (
+                        rng.normal(size=field.shape) * 1e-3
+                        + 1j * rng.normal(size=field.shape) * 1e-3
+                    )
+                    fields[component.__name__] = field.copy()
+                simulation.load_host_fields(fields)
+                addresses = simulation.buffer_addresses()
+                _assert_fields(self, native, simulation, 3)
+                self.assertEqual(addresses, simulation.buffer_addresses())
 
 
 class TorchProbeCheckpointTest(unittest.TestCase):

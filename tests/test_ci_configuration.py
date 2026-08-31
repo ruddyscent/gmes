@@ -63,6 +63,52 @@ class CiConfigurationTest(unittest.TestCase):
         self.assertIn("python -m pip install --no-deps -e .", self.prerelease_workflow)
         self.assertIn("python -m unittest discover -v", self.prerelease_workflow)
 
+    def test_macos_required_job_uploads_candidate_bound_runtime_evidence(self):
+        checkout = (
+            "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 " "# v7.0.1"
+        )
+        upload = (
+            "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a "
+            "# v7.0.1"
+        )
+        self.assertEqual(
+            self.ci_workflow.count("name: Python 3.14 / ${{ matrix.os }}"), 1
+        )
+        self.assertEqual(self.ci_workflow.count(checkout), 2)
+        self.assertNotIn("actions/checkout@v7", self.ci_workflow)
+        self.assertIn(
+            "ref: ${{ github.event.pull_request.head.sha || github.sha }}",
+            self.ci_workflow,
+        )
+        self.assertIn("persist-credentials: false", self.ci_workflow)
+        evidence_condition = (
+            "if: runner.os == 'macOS' && github.event_name == 'pull_request'"
+        )
+        self.assertEqual(self.ci_workflow.count(evidence_condition), 3)
+        self.assertIn('test "$(uname -m)" = arm64', self.ci_workflow)
+        self.assertIn("--clear --no-create-gitignore", self.ci_workflow)
+        for role in (
+            "wheel-import",
+            "wheel-default-suite",
+            "wheel-serial-suite",
+            "sdist-import",
+            "sdist-default-suite",
+            "sdist-serial-suite",
+        ):
+            self.assertIn(f"record_probe {role}", self.ci_workflow)
+        self.assertIn('"$python" -I "$helper" capture', self.ci_workflow)
+        self.assertIn(upload, self.ci_workflow)
+        self.assertIn(
+            "name: issue-123-macos-${{ github.event.pull_request.head.sha || github.sha }}",
+            self.ci_workflow,
+        )
+        self.assertIn(
+            "path: ${{ runner.temp }}/issue-123-macos-evidence", self.ci_workflow
+        )
+        self.assertIn("if-no-files-found: error", self.ci_workflow)
+        self.assertIn("retention-days: 90", self.ci_workflow)
+        self.assertIn("overwrite: true", self.ci_workflow)
+
 
 if __name__ == "__main__":
     unittest.main()

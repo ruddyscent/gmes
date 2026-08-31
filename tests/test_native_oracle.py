@@ -1,9 +1,11 @@
 import importlib.util
 import json
 import os
+import shutil
 import sys
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -30,6 +32,53 @@ class NativeOracleTest(unittest.TestCase):
         cls.isolated = load_script("run_isolated_oracle.py")
         cls.manifest = cls.oracle.load_manifest()
 
+    @classmethod
+    def clean_archive_provenance(cls, checkout, source):
+        return {
+            "checkout": str(Path(checkout).resolve()),
+            "commit": cls.manifest["reference"]["observer_commit"],
+            "git_status": "",
+            "clean": True,
+            "source": str(Path(source).resolve()),
+            "source_sha256": "a" * 64,
+        }
+
+    @staticmethod
+    def rewrite_archive(
+        source, output, *, drop=(), mutate_arrays=None, mutate_metadata=None
+    ):
+        with np.load(source, allow_pickle=False) as archive:
+            arrays = {
+                key: np.array(archive[key], copy=True)
+                for key in archive.files
+                if key not in drop
+            }
+        if mutate_arrays is not None:
+            mutate_arrays(arrays)
+        metadata = json.loads(str(arrays["metadata.json"]))
+        if mutate_metadata is not None:
+            mutate_metadata(metadata)
+        arrays["metadata.json"] = np.asarray(json.dumps(metadata, sort_keys=True))
+        np.savez_compressed(output, **arrays)
+
+    def capture_small_archive(self, directory):
+        spec = dict(self.oracle.find_case(self.manifest, "drude-1"))
+        spec.update(size=[2, 2, 2], resolution=2)
+        manifest = json.loads(json.dumps(self.manifest))
+        manifest["reference"]["capture_steps"] = [1]
+        manifest["correctness"] = [
+            spec if case["name"] == spec["name"] else case
+            for case in manifest["correctness"]
+        ]
+        artifact = Path(directory) / "valid.npz"
+        with patch.object(
+            self.oracle,
+            "_checkout_provenance",
+            side_effect=self.clean_archive_provenance,
+        ):
+            self.oracle.capture_case(spec, manifest, artifact)
+        return manifest, artifact
+
     def test_manifest_freezes_reference_matrix_and_gates(self):
         self.assertEqual(self.manifest["schema_version"], 2)
         reference = self.manifest["reference"]
@@ -37,14 +86,21 @@ class NativeOracleTest(unittest.TestCase):
             reference["commit"], "d87d25afd160d96b1fa0890cacecd90802448d57"
         )
         self.assertEqual(reference["tag"], "native-oracle-d87d25a")
-        self.assertEqual(reference["observer_tag"], "native-oracle-observer-v4")
+        self.assertEqual(reference["observer_tag"], "native-oracle-observer-v6")
         self.assertEqual(
             reference["observer_commit"],
-            "11ac12d4992ad85b19b414b837383b392904a131",
+            "2d5810cebf610fa6384235d9771f4ac699c23fc5",
+        )
+        self.assertEqual(
+            reference["performance_observer_tag"], "native-oracle-observer-v5"
+        )
+        self.assertEqual(
+            reference["performance_observer_commit"],
+            "1ab94e579dc52861db7ecdcd55f24f8af1977de7",
         )
         self.assertEqual(
             reference["performance_summary_sha256"],
-            "a81b87e8cb2870d2fbbf1bbb7409c98d10780da30eb23cb5965fce39b9109fb6",
+            "1c9bdce2717ba858fd03b2e40302a5b2d19a29920496f969e33aee36e34e1baa",
         )
         self.assertEqual(reference["field_initializer"], "native-affine-ramp-v1")
         self.assertEqual(reference["field_scale"], 1e-3)
@@ -100,6 +156,79 @@ class NativeOracleTest(unittest.TestCase):
                 "bloch-3d",
             ],
         )
+        acceptance = gates["cpu_acceptance"]
+        self.assertEqual(acceptance["contract_id"], "cpu-acceptance-v2")
+        timing_reference = acceptance["timing_reference"]
+        self.assertEqual(timing_reference["backend"], "torch")
+        self.assertEqual(
+            timing_reference["root_commit"],
+            "821c075b9328e02c3f3e5d16488a44b64ff08c04",
+        )
+        self.assertEqual(
+            timing_reference["slice_artifacts"],
+            [
+                {
+                    "thread_mode": "one",
+                    "threads": 1,
+                    "publication_url": (
+                        "https://github.com/ruddyscent/gmes/releases/download/"
+                        "issue-123-torch-cpu-baseline-v2/"
+                        "torch-cpu-baseline-one.json"
+                    ),
+                    "size_bytes": 18281,
+                    "sha256": (
+                        "ea57620653b6e96a200ffc15ba8ca9cf2309a5ada2d8ee86a2945e4787431c79"
+                    ),
+                },
+                {
+                    "thread_mode": "physical",
+                    "threads": 4,
+                    "publication_url": (
+                        "https://github.com/ruddyscent/gmes/releases/download/"
+                        "issue-123-torch-cpu-baseline-v2/"
+                        "torch-cpu-baseline-physical.json"
+                    ),
+                    "size_bytes": 18292,
+                    "sha256": (
+                        "492b478211b5d1c32493197064393601008f1f2ca5683e261d9d103699b87ba6"
+                    ),
+                },
+            ],
+        )
+        self.assertEqual(
+            timing_reference["legacy_evidence"],
+            {
+                "evidence_contract_id": "torch-cpu-acceptance-v7",
+                "cpu_contract_id": "cpu-acceptance-v1",
+                "manifest_sha256": (
+                    "6d7fe084c558cf69771f0c3928bc9be96fc6bb5b55ba777d674151fbbe6cbe19"
+                ),
+                "runner_sha256": (
+                    "fee6d418bb50729ddb26ff14e931a4f51bb8d2a92cb0ad537c2757846247a770"
+                ),
+                "solver_sha256": (
+                    "9cd8decc801a6f9d93551c6e6f427afeff1c65e3092e54b03e5abe0a3e9192d5"
+                ),
+                "solver_abi": "torch-fdtd-regions-v8",
+            },
+        )
+        self.assertEqual(acceptance["max_individual_ratio"], 1.05)
+        self.assertEqual(acceptance["native_comparison"], "informational")
+        self.assertEqual(
+            acceptance["allocation_contract"],
+            {
+                "method": "reviewed-fixed-temporary-provenance-v1",
+                "fixed_temporaries": {
+                    "allowed": True,
+                    "reviewed_provenance_required": True,
+                },
+                "max_net_live_growth_bytes": 0,
+                "max_final_live_growth_bytes": 0,
+                "rss_growth": "bounded",
+                "max_full_field_or_domain_clones": 0,
+                "public_upstream_issue_required": True,
+            },
+        )
         self.assertEqual(gates["cpu_acceptance"]["thread_modes"], ["one", "physical"])
         self.assertEqual(
             gates["cpu_acceptance"]["statistics"]["method"],
@@ -121,6 +250,86 @@ class NativeOracleTest(unittest.TestCase):
         self.assertEqual(mixed_3d["size"], [96, 6, 4])
         self.assertEqual(mixed_3d["source"], "none")
         self.assertEqual(self.oracle.find_case(self.manifest, "dm2-4")["size"][2], 0)
+
+    def test_v6_metadata_serializer_and_correctness_reference_projection(self):
+        value = {
+            "nested": [
+                float("inf"),
+                np.float64("-inf"),
+                complex(float("inf"), float("-inf")),
+            ]
+        }
+        self.assertEqual(
+            self.oracle._json_value(value),
+            {
+                "nested": [
+                    {"nonfinite": "positive-infinity"},
+                    {"nonfinite": "negative-infinity"},
+                    {
+                        "real": {"nonfinite": "positive-infinity"},
+                        "imag": {"nonfinite": "negative-infinity"},
+                    },
+                ]
+            },
+        )
+        with self.assertRaisesRegex(ValueError, "NaN coefficient metadata"):
+            self.oracle._json_value({"nested": [complex(0.0, float("nan"))]})
+        projected = self.oracle._correctness_reference_contract(
+            self.manifest["reference"]
+        )
+        self.assertNotIn("performance_observer_tag", projected)
+        self.assertNotIn("performance_observer_commit", projected)
+        self.assertEqual(projected["observer_tag"], "native-oracle-observer-v6")
+
+    def test_manifest_rejects_weakened_cpu_allocation_contract(self):
+        manifest = json.loads(json.dumps(self.manifest))
+        allocation = manifest["performance_gates"]["cpu_acceptance"][
+            "allocation_contract"
+        ]
+        allocation["max_full_field_or_domain_clones"] = 1
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "manifest.json"
+            path.write_text(json.dumps(manifest))
+            with self.assertRaisesRegex(
+                ValueError, "max_full_field_or_domain_clones must be zero"
+            ):
+                self.oracle.load_manifest(path)
+
+    def test_manifest_rejects_redirected_or_weakened_cpu_timing_contract(self):
+        mutations = (
+            ("timing_reference", "root_commit", "0" * 40),
+            (None, "max_individual_ratio", 1.10),
+            ("statistics", "resamples", 1),
+            ("statistics", "regression_ratio", 2.0),
+        )
+        for group, name, value in mutations:
+            manifest = json.loads(json.dumps(self.manifest))
+            acceptance = manifest["performance_gates"]["cpu_acceptance"]
+            target = acceptance if group is None else acceptance[group]
+            target[name] = value
+            with (
+                self.subTest(group=group, name=name),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                path = Path(directory) / "manifest.json"
+                path.write_text(json.dumps(manifest))
+                with self.assertRaises(ValueError):
+                    self.oracle.load_manifest(path)
+
+    def test_manifest_rejects_noncanonical_cpu_artifact_release_url(self):
+        manifest = json.loads(json.dumps(self.manifest))
+        artifacts = manifest["performance_gates"]["cpu_acceptance"]["timing_reference"][
+            "slice_artifacts"
+        ]
+        artifacts[0]["publication_url"] = (
+            "https://github.com/ruddyscent/gmes/releases/download/latest/"
+            "torch-cpu-baseline-one.json"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "manifest.json"
+            path.write_text(json.dumps(manifest))
+            with self.assertRaisesRegex(ValueError, "artifact modes are invalid"):
+                self.oracle.load_manifest(path)
 
     def test_dcp_rc_remains_a_distinct_strategy(self):
         rc = self.oracle.material_from_name("dcp-rc", self.gmes)
@@ -221,9 +430,18 @@ class NativeOracleTest(unittest.TestCase):
         spec.update(size=[2, 2, 2], resolution=2)
         manifest = json.loads(json.dumps(self.manifest))
         manifest["reference"]["capture_steps"] = [1, 2]
+        manifest["correctness"] = [
+            spec if case["name"] == spec["name"] else case
+            for case in manifest["correctness"]
+        ]
         with tempfile.TemporaryDirectory() as directory:
             artifact = Path(directory) / "reference.npz"
-            metadata = self.oracle.capture_case(spec, manifest, artifact)
+            with patch.object(
+                self.oracle,
+                "_checkout_provenance",
+                side_effect=self.clean_archive_provenance,
+            ):
+                metadata = self.oracle.capture_case(spec, manifest, artifact)
             self.assertGreater(metadata["active_cells"], 0)
             self.assertGreater(metadata["state_bytes"], 0)
             self.assertGreater(metadata["index_bytes"], 0)
@@ -254,6 +472,296 @@ class NativeOracleTest(unittest.TestCase):
                 self.assertTrue(any("/source/" in key for key in archive.files))
                 result = self.oracle.compare_archives(artifact, artifact, manifest)
                 self.assertTrue(result["passed"])
+
+    def test_compare_rejects_matching_truncated_archives(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            manifest, artifact = self.capture_small_archive(directory)
+            key = "step/1/field/Ex"
+            reference = directory / "truncated-reference.npz"
+            candidate = directory / "truncated-candidate.npz"
+            self.rewrite_archive(artifact, reference, drop={key})
+            self.rewrite_archive(artifact, candidate, drop={key})
+            result = self.oracle.compare_archives(reference, candidate, manifest)
+            self.assertFalse(result["passed"])
+            self.assertTrue(
+                all(
+                    "archive-contract" in failure["key"]
+                    for failure in result["failures"]
+                )
+            )
+
+    def test_compare_rejects_matching_reshaped_maps(self):
+        def flatten_map(arrays):
+            for suffix in ("material_ids", "underlying_ids"):
+                key = f"map/Ex/{suffix}"
+                arrays[key] = arrays[key].reshape(-1, 1)
+
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            manifest, artifact = self.capture_small_archive(directory)
+            reference = directory / "reshaped-reference.npz"
+            candidate = directory / "reshaped-candidate.npz"
+            self.rewrite_archive(artifact, reference, mutate_arrays=flatten_map)
+            self.rewrite_archive(artifact, candidate, mutate_arrays=flatten_map)
+            result = self.oracle.compare_archives(reference, candidate, manifest)
+            self.assertFalse(result["passed"])
+            self.assertTrue(
+                all(
+                    "archive-contract" in failure["key"]
+                    for failure in result["failures"]
+                )
+            )
+
+    def test_compare_rejects_matching_invalid_state_arrays(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            manifest, artifact = self.capture_small_archive(directory)
+            with np.load(artifact, allow_pickle=False) as archive:
+                state_key = next(
+                    key
+                    for key in archive.files
+                    if "/state/" in key
+                    and key.endswith("/values")
+                    and archive[key].size
+                )
+
+            def make_nonfinite(arrays):
+                arrays[state_key].flat[0] = np.nan
+
+            def reshape_state(arrays):
+                arrays[state_key] = arrays[state_key].reshape(1, -1)
+
+            mutations = (
+                ("nonfinite", make_nonfinite),
+                ("reshaped", reshape_state),
+            )
+            for name, mutation in mutations:
+                with self.subTest(name=name):
+                    reference = directory / f"{name}-reference.npz"
+                    candidate = directory / f"{name}-candidate.npz"
+                    self.rewrite_archive(artifact, reference, mutate_arrays=mutation)
+                    self.rewrite_archive(artifact, candidate, mutate_arrays=mutation)
+                    result = self.oracle.compare_archives(
+                        reference, candidate, manifest
+                    )
+                    self.assertFalse(result["passed"])
+                    self.assertEqual(
+                        [failure["key"] for failure in result["failures"]],
+                        [
+                            "reference/archive-contract",
+                            "candidate/archive-contract",
+                        ],
+                    )
+
+    def test_compare_rejects_nonfinite_source_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            manifest, artifact = self.capture_small_archive(directory)
+            with np.load(artifact, allow_pickle=False) as archive:
+                source_key = next(
+                    key
+                    for key in archive.files
+                    if "/source/" in key
+                    and key.endswith("/values")
+                    and archive[key].size
+                )
+
+            def make_nonfinite(arrays):
+                arrays[source_key].flat[0] = np.nan
+
+            candidate = directory / "nonfinite-source.npz"
+            self.rewrite_archive(artifact, candidate, mutate_arrays=make_nonfinite)
+            result = self.oracle.compare_archives(artifact, candidate, manifest)
+            self.assertFalse(result["passed"])
+            self.assertEqual(
+                [failure["key"] for failure in result["failures"]],
+                ["candidate/archive-contract"],
+            )
+
+    def test_compare_binds_geometry_and_coefficients(self):
+        def mutate_geometry(metadata):
+            metadata["geometry_and_coefficients"][0]["geometry"] += "Tampered"
+
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            manifest, artifact = self.capture_small_archive(directory)
+            candidate = directory / "geometry-tampered.npz"
+            self.rewrite_archive(artifact, candidate, mutate_metadata=mutate_geometry)
+            result = self.oracle.compare_archives(artifact, candidate, manifest)
+            self.assertFalse(result["passed"])
+            self.assertEqual(
+                [failure["key"] for failure in result["failures"]],
+                ["geometry_and_coefficients"],
+            )
+
+    def test_compare_rejects_duplicate_archive_members(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            manifest, artifact = self.capture_small_archive(directory)
+            candidate = directory / "duplicate-member.npz"
+            shutil.copyfile(artifact, candidate)
+            with zipfile.ZipFile(candidate, "a") as archive:
+                member = next(
+                    name
+                    for name in archive.namelist()
+                    if "/state/" in name and name.endswith("/values.npy")
+                )
+                content = archive.read(member)
+                with self.assertWarns(UserWarning):
+                    archive.writestr(member, content)
+            with np.load(candidate, allow_pickle=False) as archive:
+                self.assertEqual(archive.files.count(member.removesuffix(".npy")), 2)
+            result = self.oracle.compare_archives(artifact, candidate, manifest)
+            self.assertFalse(result["passed"])
+            self.assertEqual(
+                [failure["key"] for failure in result["failures"]],
+                ["candidate/archive-contract"],
+            )
+
+    def test_compare_rejects_noncanonical_metadata_json(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            manifest, artifact = self.capture_small_archive(directory)
+            with np.load(artifact, allow_pickle=False) as archive:
+                original_arrays = {
+                    key: np.array(archive[key], copy=True) for key in archive.files
+                }
+            raw_metadata = str(original_arrays["metadata.json"])
+            metadata = json.loads(raw_metadata)
+            duplicate_key = raw_metadata.replace(
+                '"backend": "native"',
+                '"backend": "tampered", "backend": "native"',
+                1,
+            )
+            nonfinite_constant = raw_metadata.replace(
+                f'"active_cells": {metadata["active_cells"]}',
+                '"active_cells": NaN',
+                1,
+            )
+            for name, tampered_metadata in (
+                ("duplicate-key", duplicate_key),
+                ("nonfinite-constant", nonfinite_constant),
+            ):
+                with self.subTest(name=name):
+                    self.assertNotEqual(tampered_metadata, raw_metadata)
+                    arrays = {
+                        key: np.array(value, copy=True)
+                        for key, value in original_arrays.items()
+                    }
+                    arrays["metadata.json"] = np.asarray(tampered_metadata)
+                    candidate = directory / f"{name}.npz"
+                    np.savez_compressed(candidate, **arrays)
+                    result = self.oracle.compare_archives(artifact, candidate, manifest)
+                    self.assertFalse(result["passed"])
+                    self.assertEqual(
+                        [failure["key"] for failure in result["failures"]],
+                        ["candidate/archive-contract"],
+                    )
+
+    def test_compare_rejects_archive_contract_tampering(self):
+        def mutate_reference_commit(metadata):
+            metadata["provenance"]["source"]["commit"] = "b" * 40
+
+        def mutate_candidate_status(metadata):
+            metadata["provenance"]["source"].update(
+                git_status=" M gmes/torch_fdtd.py", clean=False
+            )
+
+        def mutate_candidate_commit(metadata):
+            metadata["provenance"]["source"]["commit"] = "deadbeef"
+
+        def mutate_backend(metadata):
+            metadata["backend"] = "unknown"
+
+        def mutate_workload(metadata):
+            metadata["workload"]["resolution"] += 1
+
+        def mutate_schema(metadata):
+            metadata["schema_version"] = 1
+
+        def mutate_physical(metadata):
+            metadata["steps"]["1"]["physical"]["energy"] += 1.0
+
+        def mutate_bytes(metadata):
+            metadata["archive_array_bytes"] -= 1
+
+        mutations = (
+            ("reference-commit", mutate_reference_commit, None),
+            ("candidate-status", None, mutate_candidate_status),
+            ("candidate-commit", None, mutate_candidate_commit),
+            ("backend", None, mutate_backend),
+            ("workload", mutate_workload, mutate_workload),
+            ("schema", mutate_schema, mutate_schema),
+            ("physical", mutate_physical, mutate_physical),
+            ("bytes", mutate_bytes, mutate_bytes),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            manifest, artifact = self.capture_small_archive(directory)
+            for name, reference_mutation, candidate_mutation in mutations:
+                with self.subTest(name=name):
+                    reference = directory / f"{name}-reference.npz"
+                    candidate = directory / f"{name}-candidate.npz"
+                    self.rewrite_archive(
+                        artifact,
+                        reference,
+                        mutate_metadata=reference_mutation,
+                    )
+                    self.rewrite_archive(
+                        artifact,
+                        candidate,
+                        mutate_metadata=candidate_mutation,
+                    )
+                    result = self.oracle.compare_archives(
+                        reference, candidate, manifest
+                    )
+                    self.assertFalse(result["passed"])
+                    self.assertTrue(
+                        any(
+                            "archive-contract" in failure["key"]
+                            for failure in result["failures"]
+                        )
+                    )
+
+    def test_compare_accepts_declared_torch_candidate_metadata(self):
+        def mark_torch_candidate(metadata):
+            metadata["backend"] = "torch"
+            metadata["backend_metadata"] = {"producer": "future-torch-oracle"}
+            metadata["provenance"]["source"]["commit"] = "b" * 40
+
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            manifest, reference = self.capture_small_archive(directory)
+            candidate = directory / "torch-candidate.npz"
+            self.rewrite_archive(
+                reference,
+                candidate,
+                mutate_metadata=mark_torch_candidate,
+            )
+            result = self.oracle.compare_archives(reference, candidate, manifest)
+            self.assertTrue(result["passed"], result["failures"])
+
+    def test_archive_contract_covers_dimensions_sources_and_state(self):
+        for name in (
+            "dielectric-1d",
+            "tfsf-transparent",
+            "gaussian-auxiliary",
+            "dm2-4",
+        ):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                spec = self.oracle.find_case(self.manifest, name)
+                manifest = json.loads(json.dumps(self.manifest))
+                manifest["reference"]["capture_steps"] = [1]
+                artifact = Path(directory) / f"{name}.npz"
+                with patch.object(
+                    self.oracle,
+                    "_checkout_provenance",
+                    side_effect=self.clean_archive_provenance,
+                ):
+                    self.oracle.capture_case(spec, manifest, artifact)
+                result = self.oracle.compare_archives(artifact, artifact, manifest)
+                self.assertTrue(result["passed"], result["failures"])
 
     def test_benchmark_schema_characterizes_noise_and_memory_growth(self):
         spec = dict(self.oracle.find_case(self.manifest, "dielectric-2d"))
@@ -321,6 +829,19 @@ class NativeOracleTest(unittest.TestCase):
             )
             self.assertEqual(Path(result["checkout"]), ROOT)
             self.assertEqual(result["capture"]["capture_steps"], [1])
+            self.assertEqual(result["capture"]["schema_version"], 2)
+            source = result["capture"]["provenance"]["source"]
+            self.assertEqual(Path(source["checkout"]), ROOT)
+            self.assertEqual(
+                source["commit"],
+                self.oracle._git_output(ROOT, "rev-parse", "HEAD"),
+            )
+            self.assertEqual(
+                source["git_status"],
+                self.oracle._git_output(
+                    ROOT, "status", "--short", "--untracked-files=all"
+                ),
+            )
             self.assertTrue(output.is_file())
 
     def test_capture_rejects_import_outside_requested_checkout(self):

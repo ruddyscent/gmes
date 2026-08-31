@@ -20,6 +20,8 @@ def _host_plans(
     tile_size=16,
     cpml_sparse_residual=False,
     precision="float64",
+    avoid_dense_auto=False,
+    avoid_tiled_auto=False,
 ):
     space = gmes.Cartesian(size, resolution)
     space.dt = 0.05
@@ -37,6 +39,8 @@ def _host_plans(
         material_tile_size=31,
         execution_tile_size=tile_size,
         cpml_sparse_residual=cpml_sparse_residual,
+        avoid_dense_auto=avoid_dense_auto,
+        avoid_tiled_auto=avoid_tiled_auto,
     ).build()
     return space, tree, {plan.name: plan for plan in plans}
 
@@ -52,6 +56,20 @@ def _dielectric_regions(count=2):
             )
         )
     return geometry
+
+
+def _drude_region():
+    return [
+        gmes.DefaultMedium(gmes.Dielectric(eps_inf=1.7, mu_inf=1.05)),
+        gmes.Block(
+            material=gmes.Drude(
+                eps_inf=1.2,
+                dps=(gmes.DrudePole(omega=0.6, gamma=0.03),),
+            ),
+            center=(0, 0, 0),
+            size=(1.2, 1.2, 1.2),
+        ),
+    ]
 
 
 class ComponentPlanTest(unittest.TestCase):
@@ -103,6 +121,29 @@ class ComponentPlanTest(unittest.TestCase):
                 self.assertEqual(
                     bucket_record["selected_policy"], bucket.selected_policy
                 )
+                self.assertEqual(
+                    bucket_record["execution_representation"],
+                    bucket.execution_representation,
+                )
+
+    def test_compiled_cpu_auto_decision_uses_compact_without_full_field_writes(self):
+        _, _, plans = _host_plans(
+            _drude_region(),
+            avoid_dense_auto=True,
+            avoid_tiled_auto=True,
+        )
+        indexed_buckets = []
+        for plan in plans.values():
+            for bucket in plan.buckets:
+                if bucket.signature.model == "drude":
+                    indexed_buckets.append(bucket)
+                    self.assertEqual(bucket.selected_policy, "compact")
+                    self.assertIn("dense is excluded", bucket.decision)
+                    self.assertIn("tiled is excluded", bucket.decision)
+                else:
+                    costs = dict(bucket.estimated_costs)
+                    self.assertEqual(bucket.selected_policy, min(costs, key=costs.get))
+        self.assertTrue(indexed_buckets)
 
     def test_state_width_buckets_and_magnetic_normalization(self):
         drude_one_a = gmes.Drude(

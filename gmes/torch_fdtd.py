@@ -74,7 +74,10 @@ class TorchConfigurationError(ValueError):
 
 
 COMPILE_MODES = ("default", "reduce-overhead", "max-autotune")
-TORCH_SOLVER_ABI = "torch-fdtd-regions-v8"
+TORCH_SOLVER_ABI = "torch-fdtd-regions-v9"
+LOCAL_COMPILED_REGION_TOPOLOGY = (
+    "local-two-static-half-step-regions+external-boundary-sync-v1"
+)
 DIRECT_VIEW_MUTATION_REPRESENTATION = "direct-nonoverlapping-as-strided-v1"
 DEFAULT_VIEW_MUTATION_REPRESENTATION = "slice-views-v1"
 PACKED_DM2_REPRESENTATION = "single-carry-packed-loop-v1"
@@ -1569,6 +1572,16 @@ class TorchSimulation:
                 and device.type == "cpu"
                 and _distributed_partition is None
             ),
+            avoid_dense_auto=(
+                runtime.execution_policy == "auto"
+                and runtime.compile_policy == "compile"
+                and device.type == "cpu"
+            ),
+            avoid_tiled_auto=(
+                runtime.execution_policy == "auto"
+                and runtime.compile_policy == "compile"
+                and device.type == "cpu"
+            ),
         )
         component_plans = planner.build()
         has_dm2 = any(
@@ -1607,6 +1620,7 @@ class TorchSimulation:
         )
         grouped_dispersive_io = (
             runtime.experimental_dispersive_grouping
+            and runtime.execution_policy == "auto"
             and runtime.compile_policy == "compile"
             and device.type == "cpu"
             and _distributed_partition is None
@@ -1645,11 +1659,26 @@ class TorchSimulation:
         self.plan = plan
         self.state = state
         self._dispersive_overlay = dispersive_overlay
-        self._dispersive_execution_representation = (
-            EXACT_SCHEMA_DISPERSIVE_REPRESENTATION
-            if dispersive_overlay is not None
-            else BUCKET_DISPERSIVE_REPRESENTATION
+        dispersive_representations = tuple(
+            sorted(
+                {
+                    descriptor.execution_representation
+                    for descriptor in plan.dispersive_buckets
+                }
+            )
         )
+        if dispersive_overlay is not None:
+            self._dispersive_execution_representation = (
+                EXACT_SCHEMA_DISPERSIVE_REPRESENTATION
+            )
+        elif dispersive_representations:
+            self._dispersive_execution_representation = (
+                "policy-dispatched-bucket-io-v2["
+                + ",".join(dispersive_representations)
+                + "]"
+            )
+        else:
+            self._dispersive_execution_representation = BUCKET_DISPERSIVE_REPRESENTATION
         self._has_dm2 = has_dm2
         self._has_electric_constants = any(
             getattr(plan, f"constant_targets_{name.lower()}").numel()
@@ -1934,7 +1963,7 @@ class TorchSimulation:
             for batch in self.sources.batches
         )
         if self._fused_local_phases:
-            region_topology = "local-two-fused-half-steps"
+            region_topology = LOCAL_COMPILED_REGION_TOPOLOGY
         elif self._distributed_partition is not None:
             region_topology = "distributed-stencil-and-material-regions"
         else:
@@ -1994,6 +2023,11 @@ class TorchSimulation:
             ),
             buffer_layouts(self.sources) if self._fused_source_updates else (),
         )
+        # Preserve the exact immutable input used for the cache digest so
+        # offline evidence validators can recompute, rather than trust, the
+        # reported key. The tuple contains layout metadata only, never field
+        # values or mutable tensor storage.
+        self._compile_cache_key_preimage = payload
         return hashlib.sha256(repr(payload).encode()).hexdigest()
 
     def _compute_plan_identity(self) -> Any:
@@ -2291,7 +2325,6 @@ class TorchSimulation:
         self._magnetic_material()
 
     def _electric_half_update(self) -> Any:
-        self._sync_magnetic_boundaries()
         self._electric(*self._electric_args)
         self._electric_post_update()
         if self._fused_source_updates and not self.sources.empty:
@@ -2303,7 +2336,6 @@ class TorchSimulation:
             )
 
     def _magnetic_half_update(self) -> Any:
-        self._sync_electric_boundaries()
         self._magnetic(*self._magnetic_args)
         self._magnetic_post_update()
         if self._fused_source_updates and not self.sources.empty:
@@ -2373,6 +2405,7 @@ class TorchSimulation:
             if self.device.type == "cuda" and self.runtime.compile_policy == "compile":
                 torch.compiler.cudagraph_mark_step_begin()  # type: ignore[no-untyped-call]  # PyTorch omits this compiler API annotation
             if self._electric_half is not None:
+                self._sync_magnetic_boundaries(skip_axis=split_axis)
                 self._run_compute_region("electric_half", self._electric_half)
             else:
                 self._sync_magnetic_boundaries(skip_axis=split_axis)
@@ -2400,6 +2433,7 @@ class TorchSimulation:
                     time=self.state.source_time + 0.5 * self.state.time_step,
                 )
             if self._magnetic_half is not None:
+                self._sync_electric_boundaries(skip_axis=split_axis)
                 self._run_compute_region("magnetic_half", self._magnetic_half)
             else:
                 self._sync_electric_boundaries(skip_axis=split_axis)
@@ -2679,6 +2713,16 @@ class TorchSimulation:
             "launches_per_step": len(self._dispersive_buckets),
             "logical_buckets_per_step": len(self._dispersive_buckets),
             "execution_representation": self._dispersive_execution_representation,
+            "policy_executions": tuple(
+                {
+                    "component": descriptor.component,
+                    "model": descriptor.model,
+                    "policy": descriptor.execution_policy,
+                    "execution_representation": descriptor.execution_representation,
+                    "targets": descriptor.target_count,
+                }
+                for descriptor in self._dispersive_buckets
+            ),
             "experimental_grouping_scope": (
                 self.runtime.experimental_dispersive_grouping_scope
                 if self._dispersive_overlay is not None

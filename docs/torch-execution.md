@@ -261,10 +261,11 @@ silently discarding them. Standard `TorchSimulationState.state_dict()` and
 `load_state_dict()` use the same virtual canonical entries, so PyTorch module
 serialization does not expose or lose the physical sparse layout.
 
-Periodic/Bloch halo scheduling remains outside compiled material kernels.
-Every active Yee component applies phase directly to paired-real tensors using
-persistent boundary scratch, including collapsed axes where source and
-destination slices alias.
+Periodic/Bloch boundary synchronization remains outside compiled material
+kernels and runs immediately before its next static electric or magnetic
+compute region. Every active Yee component applies phase directly to
+paired-real tensors using persistent boundary scratch, including collapsed axes
+where source and destination slices alias.
 
 ## Install a wheel variant
 
@@ -333,11 +334,12 @@ requested device's name and capability.
 `advance(steps)` is the throughput API; `step()` is only a one-step
 convenience. Both run under `torch.inference_mode()`. The timestep, source
 time, fields, dielectric coefficients, region IDs, and preallocated curl
-scratch are registered non-trainable buffers. For a local simulation, each
-complete electric and magnetic half-step is compiled with `fullgraph=True` and
-`dynamic=False`, reducing steady execution to two static regions. Distributed
-communication, geometry, sources, callbacks, snapshots, and I/O stay outside
-those graphs. The compilation cache key includes the solver ABI, PyTorch
+scratch are registered non-trainable buffers. For a local simulation, the
+electric and magnetic compute half-steps are compiled with `fullgraph=True` and
+`dynamic=False`, reducing steady execution to two static regions. Boundary
+synchronization, distributed communication, geometry, callbacks, snapshots,
+and I/O stay outside those graphs; fused local source updates stay inside the
+compute half-steps. The compilation cache key includes the solver ABI, PyTorch
 version, device capability, dtype, eager/compiled policy, compile mode, actual
 compiled-region and material representation, DM2 algorithm constants, grid
 spacing, timestep, Bloch vector, local/distributed topology, field shapes, and

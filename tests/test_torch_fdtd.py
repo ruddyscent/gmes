@@ -1,5 +1,6 @@
 """Tests for the deliberately breaking Torch-native execution path."""
 
+import hashlib
 import json
 import os
 import unittest
@@ -16,7 +17,9 @@ from gmes.torch_fdtd import (
     EXTERNAL_SOURCE_REPRESENTATION,
     FUNCTIONAL_DM2_REPRESENTATION,
     FUSED_SOURCE_REPRESENTATION,
+    LOCAL_COMPILED_REGION_TOPOLOGY,
     PACKED_DM2_REPRESENTATION,
+    TORCH_SOLVER_ABI,
     DistributedLaunch,
     TorchConfigurationError,
     TorchRuntimeConfig,
@@ -193,6 +196,12 @@ class TorchRuntimeConfigTest(unittest.TestCase):
         )
 
         self.assertEqual(len(first.compile_cache_key), 64)
+        self.assertEqual(
+            hashlib.sha256(
+                repr(first._compile_cache_key_preimage).encode()
+            ).hexdigest(),
+            first.compile_cache_key,
+        )
         self.assertEqual(first.compile_cache_key, second.compile_cache_key)
         self.assertEqual(
             first.diagnostics()["material_execution_representation"],
@@ -202,8 +211,10 @@ class TorchRuntimeConfigTest(unittest.TestCase):
         self.assertEqual(
             first.diagnostics()["compile_cache_key"], first.compile_cache_key
         )
+        self.assertEqual(first.diagnostics()["compile_solver_abi"], TORCH_SOLVER_ABI)
+        self.assertEqual(first._compile_cache_key_preimage[0], TORCH_SOLVER_ABI)
         self.assertEqual(
-            first.diagnostics()["compile_solver_abi"], "torch-fdtd-regions-v8"
+            first._compile_cache_key_preimage[6], LOCAL_COMPILED_REGION_TOPOLOGY
         )
         self.assertEqual(
             first.diagnostics()["view_mutation_representation"],
@@ -300,7 +311,21 @@ class TorchRuntimeConfigTest(unittest.TestCase):
             ],
             runtime=material_runtime,
         )
-        self.assertEqual(sparse.compile_cache_key, sparse_forced.compile_cache_key)
+        self.assertNotEqual(sparse.compile_cache_key, sparse_forced.compile_cache_key)
+        self.assertNotEqual(
+            sparse.diagnostics()["dispersive"]["execution_representation"],
+            sparse_forced.diagnostics()["dispersive"]["execution_representation"],
+        )
+        drude_buckets = [
+            bucket
+            for component in sparse.plan.components.values()
+            for bucket in component.buckets
+            if bucket.signature.model == "drude"
+        ]
+        self.assertTrue(drude_buckets)
+        self.assertTrue(
+            all(bucket.selected_policy == "compact" for bucket in drude_buckets)
+        )
         self.assertNotEqual(sparse.compile_cache_key, broad.compile_cache_key)
 
     def test_missing_cuda_has_actionable_error_and_no_fallback(self):

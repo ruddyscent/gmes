@@ -21,19 +21,19 @@ from urllib.parse import urlsplit
 
 _EXPECTED_CASE_COUNT = 6
 _FROZEN_TIMING_ROOT_COMMIT = "821c075b9328e02c3f3e5d16488a44b64ff08c04"
-_RELEASE_TAG = "issue-123-torch-cpu-baseline-v2"
+_RELEASE_TAG = "issue-123-torch-cpu-baseline-v3"
 _RELEASE_ASSET_BASE_URL = (
     "https://github.com/ruddyscent/gmes/releases/download/" f"{_RELEASE_TAG}/"
 )
 _PUBLIC_BASELINE_HOSTNAME = "redacted"
-_PUBLIC_HOST_IDENTITY_SCHEMA = "torch-cpu-host-identity-v1"
+_PUBLIC_HOST_IDENTITY_SCHEMA = "torch-cpu-host-identity-v2"
 _FROZEN_SLICE_ARTIFACTS = {
     "one": {
         "thread_mode": "one",
         "threads": 1,
         "publication_url": (f"{_RELEASE_ASSET_BASE_URL}torch-cpu-baseline-one.json"),
         "size_bytes": 18281,
-        "sha256": "ea57620653b6e96a200ffc15ba8ca9cf2309a5ada2d8ee86a2945e4787431c79",
+        "sha256": "c8eba3c17ccae5ba744a8fbc90b89d72a77dcf0624339cda1deb4d7f594395ed",
     },
     "physical": {
         "thread_mode": "physical",
@@ -42,7 +42,7 @@ _FROZEN_SLICE_ARTIFACTS = {
             f"{_RELEASE_ASSET_BASE_URL}torch-cpu-baseline-physical.json"
         ),
         "size_bytes": 18292,
-        "sha256": "492b478211b5d1c32493197064393601008f1f2ca5683e261d9d103699b87ba6",
+        "sha256": "b1a3c82a069c2475560468a7b8d0a237db89e857bdce96f8fc812449b5c35602",
     },
 }
 _RUNTIME_HARD_CONTROLS = (
@@ -59,14 +59,11 @@ _RAW_HOST_IDENTITY_KEYS = (
     "platform",
     "python",
     "torch",
-    "cuda_runtime",
-    "devices",
     "cpu_count",
     "cpu_affinity",
     "cpu_count_physical_affinity",
     "cpu_topology",
     "cpu_model",
-    "gpu_topology",
 )
 _PUBLIC_HOST_IDENTITY_KEYS = ("schema", "salt", "sha256")
 _PUBLIC_ENVIRONMENT_KEYS = ("hostname", "host_identity", "thread_environment")
@@ -202,6 +199,15 @@ def _normalized_cpu_model(value):
     )
 
 
+def _normalized_torch_version(value):
+    if not isinstance(value, str) or not value:
+        raise ValueError("CPU baseline host identity torch is empty")
+    public, separator, local = value.partition("+")
+    if not public or (separator and (not local or "+" in local)):
+        raise ValueError("CPU baseline Torch version identity is invalid")
+    return public
+
+
 def _canonical_json_bytes(value):
     try:
         return json.dumps(
@@ -217,15 +223,10 @@ def _raw_host_identity(environment):
     missing = [name for name in _RAW_HOST_IDENTITY_KEYS if name not in environment]
     if missing:
         raise ValueError(f"CPU baseline host identity is incomplete: {missing}")
-    for name in ("platform", "python", "torch"):
+    for name in ("platform", "python"):
         if not isinstance(environment[name], str) or not environment[name]:
             raise ValueError(f"CPU baseline host identity {name} is empty")
-    if environment["cuda_runtime"] is not None and not isinstance(
-        environment["cuda_runtime"], str
-    ):
-        raise ValueError("CPU baseline CUDA runtime identity is invalid")
-    if not isinstance(environment["devices"], list):
-        raise ValueError("CPU baseline device identity must be a sequence")
+    torch_version = _normalized_torch_version(environment["torch"])
     if not _is_integer(environment["cpu_count"]) or environment["cpu_count"] < 1:
         raise ValueError("CPU baseline logical CPU count is invalid")
     affinity = environment["cpu_affinity"]
@@ -239,15 +240,16 @@ def _raw_host_identity(environment):
     physical = environment["cpu_count_physical_affinity"]
     if not _is_integer(physical) or physical < 2:
         raise ValueError("CPU baseline physical-core count must distinguish two modes")
-    for name in ("cpu_topology", "gpu_topology"):
-        value = environment[name]
-        if value is not None and (not isinstance(value, str) or not value):
-            raise ValueError(f"CPU baseline {name} identity is invalid")
+    cpu_topology = environment["cpu_topology"]
+    if cpu_topology is not None and (
+        not isinstance(cpu_topology, str) or not cpu_topology
+    ):
+        raise ValueError("CPU baseline cpu_topology identity is invalid")
     return {
         name: (
             _normalized_cpu_model(environment[name])
             if name == "cpu_model"
-            else copy.deepcopy(environment[name])
+            else torch_version if name == "torch" else copy.deepcopy(environment[name])
         )
         for name in _RAW_HOST_IDENTITY_KEYS
     }

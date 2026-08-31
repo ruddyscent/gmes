@@ -1785,7 +1785,7 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
                 {
                     "publication_url": (
                         "https://github.com/ruddyscent/gmes/releases/download/"
-                        f"issue-123-torch-cpu-baseline-v2/{threads}.json"
+                        f"issue-123-torch-cpu-baseline-v3/{threads}.json"
                     ),
                     "size_bytes": threads,
                     "sha256": str(threads) * 64,
@@ -2967,7 +2967,7 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
                 {
                     "publication_url": (
                         "https://github.com/ruddyscent/gmes/releases/download/"
-                        "issue-123-torch-cpu-baseline-v2/one.json"
+                        "issue-123-torch-cpu-baseline-v3/one.json"
                     ),
                     "size_bytes": 1,
                     "sha256": "1" * 64,

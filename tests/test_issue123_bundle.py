@@ -163,7 +163,7 @@ class Issue123BundleTest(unittest.TestCase):
             mock.patch.object(completion.platform, "system", return_value="Darwin"),
             mock.patch.dict(
                 completion.DARWIN_SYSTEM_PATH_ALIASES,
-                {str(alias): str(target)},
+                {str(alias): str(target.resolve(strict=True))},
             ),
         ):
             checked, metadata = completion._path_without_symlinks(

@@ -292,14 +292,14 @@ class TorchCpuBaselineTest(unittest.TestCase):
                     1,
                     self.baseline_module._release_asset_url("one"),
                     18281,
-                    "ea57620653b6e96a200ffc15ba8ca9cf2309a5ada2d8ee86a2945e4787431c79",
+                    "c8eba3c17ccae5ba744a8fbc90b89d72a77dcf0624339cda1deb4d7f594395ed",
                 ),
                 (
                     "physical",
                     4,
                     self.baseline_module._release_asset_url("physical"),
                     18292,
-                    "492b478211b5d1c32493197064393601008f1f2ca5683e261d9d103699b87ba6",
+                    "b1a3c82a069c2475560468a7b8d0a237db89e857bdce96f8fc812449b5c35602",
                 ),
             ],
         )
@@ -536,6 +536,66 @@ class TorchCpuBaselineTest(unittest.TestCase):
             ),
             baseline,
         )
+
+    def test_host_identity_ignores_device_build_context_but_not_public_version(self):
+        environment = self._environment(1)
+        baseline = self.baseline_module._host_identity_token_from_raw_environment(
+            environment, self._HOST_IDENTITY_SALT
+        )
+        environment["torch"] = "2.13.0+cu130"
+        environment["cuda_runtime"] = "13.0"
+        environment["devices"] = [
+            {"index": 0, "name": "synthetic device"},
+            {"index": 1, "name": "synthetic device"},
+        ]
+        environment["gpu_topology"] = "synthetic topology"
+        self.assertEqual(
+            self.baseline_module._host_identity_token_from_raw_environment(
+                environment, self._HOST_IDENTITY_SALT
+            ),
+            baseline,
+        )
+        environment["torch"] = "2.13.1+cu130"
+        self.assertNotEqual(
+            self.baseline_module._host_identity_token_from_raw_environment(
+                environment, self._HOST_IDENTITY_SALT
+            ),
+            baseline,
+        )
+
+    def test_host_identity_rejects_stable_host_field_changes(self):
+        environment = self._environment(1)
+        baseline = self.baseline_module._host_identity_token_from_raw_environment(
+            environment, self._HOST_IDENTITY_SALT
+        )
+        mutations = {
+            "platform": "Linux-candidate",
+            "python": "3.14.1",
+            "cpu_count": 10,
+            "cpu_affinity": list(range(6)),
+            "cpu_count_physical_affinity": 3,
+            "cpu_topology": "0,0\n1,0\n2,1\n3,1",
+            "cpu_model": "different CPU",
+        }
+        for name, value in mutations.items():
+            candidate = copy.deepcopy(environment)
+            candidate[name] = value
+            with self.subTest(name=name):
+                self.assertNotEqual(
+                    self.baseline_module._host_identity_token_from_raw_environment(
+                        candidate, self._HOST_IDENTITY_SALT
+                    ),
+                    baseline,
+                )
+
+    def test_public_host_identity_rejects_previous_schema(self):
+        environment = self._environment(1)
+        public = self.baseline_module._host_identity_token_from_raw_environment(
+            environment, self._HOST_IDENTITY_SALT
+        )
+        public["schema"] = "torch-cpu-host-identity-v1"
+        with self.assertRaisesRegex(ValueError, "public host identity"):
+            self.baseline_module._public_host_identity_token(public)
 
     def test_rejects_bad_raw_samples_and_reported_median(self):
         bad_values = ([100.0] * 14, [100.0] * 14 + [math.inf], [100.0] * 14 + [0])

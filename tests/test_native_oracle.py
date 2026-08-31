@@ -172,12 +172,12 @@ class NativeOracleTest(unittest.TestCase):
                     "threads": 1,
                     "publication_url": (
                         "https://github.com/ruddyscent/gmes/releases/download/"
-                        "issue-123-torch-cpu-baseline-v2/"
+                        "issue-123-torch-cpu-baseline-v3/"
                         "torch-cpu-baseline-one.json"
                     ),
                     "size_bytes": 18281,
                     "sha256": (
-                        "ea57620653b6e96a200ffc15ba8ca9cf2309a5ada2d8ee86a2945e4787431c79"
+                        "c8eba3c17ccae5ba744a8fbc90b89d72a77dcf0624339cda1deb4d7f594395ed"
                     ),
                 },
                 {
@@ -185,12 +185,12 @@ class NativeOracleTest(unittest.TestCase):
                     "threads": 4,
                     "publication_url": (
                         "https://github.com/ruddyscent/gmes/releases/download/"
-                        "issue-123-torch-cpu-baseline-v2/"
+                        "issue-123-torch-cpu-baseline-v3/"
                         "torch-cpu-baseline-physical.json"
                     ),
                     "size_bytes": 18292,
                     "sha256": (
-                        "492b478211b5d1c32493197064393601008f1f2ca5683e261d9d103699b87ba6"
+                        "b1a3c82a069c2475560468a7b8d0a237db89e857bdce96f8fc812449b5c35602"
                     ),
                 },
             ],

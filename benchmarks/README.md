@@ -195,13 +195,13 @@ count, reported-summary consistency, and relative MAD before comparison.
 The baseline JSON bytes are part of the frozen contract, not merely examples.
 They are sanitized public Release assets, not tracked repository files. The
 one-thread asset is
-[`torch-cpu-baseline-one.json`](https://github.com/ruddyscent/gmes/releases/download/issue-123-torch-cpu-baseline-v2/torch-cpu-baseline-one.json)
+[`torch-cpu-baseline-one.json`](https://github.com/ruddyscent/gmes/releases/download/issue-123-torch-cpu-baseline-v3/torch-cpu-baseline-one.json)
 (18,281 bytes, SHA-256
-`ea57620653b6e96a200ffc15ba8ca9cf2309a5ada2d8ee86a2945e4787431c79`).
+`c8eba3c17ccae5ba744a8fbc90b89d72a77dcf0624339cda1deb4d7f594395ed`).
 The four-physical-core asset is
-[`torch-cpu-baseline-physical.json`](https://github.com/ruddyscent/gmes/releases/download/issue-123-torch-cpu-baseline-v2/torch-cpu-baseline-physical.json)
+[`torch-cpu-baseline-physical.json`](https://github.com/ruddyscent/gmes/releases/download/issue-123-torch-cpu-baseline-v3/torch-cpu-baseline-physical.json)
 (18,292 bytes, SHA-256
-`492b478211b5d1c32493197064393601008f1f2ca5683e261d9d103699b87ba6`).
+`b1a3c82a069c2475560468a7b8d0a237db89e857bdce96f8fc812449b5c35602`).
 The manifest freezes each Release URL, byte size, and digest; the loader
 performs no network access and rejects any URL, schema, size, or content
 substitution. Download the two files explicitly, verify their SHA-256 values,
@@ -211,10 +211,15 @@ The public copies retain only the data required to reproduce the timing and
 allocation checks. They omit hostname, PID values, raw CPU/GPU topology,
 compiler-cache metadata, RSS records, profiler traces, and local paths. A
 release-scoped, 32-byte-salted SHA-256 host commitment lets a local candidate
-prove equality with the frozen hardware/runtime identity without publishing
-that identity directly; each Release uses a fresh salt shared by its two
-slices. This is a public equality commitment, not a guarantee that a party
-with an independently captured candidate fingerprint cannot test equality.
+prove equality with the frozen CPU host and upstream PyTorch release without
+publishing that identity directly; each Release uses a fresh salt shared by its
+two slices. The commitment ignores the PyTorch local-build suffix, CUDA runtime,
+device inventory, and GPU topology because those device-specific values differ
+between CPU and CUDA builds and are validated by the corresponding runtime
+contracts. It still binds the platform, Python version, PyTorch public version,
+CPU counts, affinity, topology, and normalized model. This is a public equality
+commitment, not a guarantee that a party with an independently captured
+candidate fingerprint cannot test equality.
 The legacy artifacts remain timing references only: their recurring allocations
 are reported, while the revised fixed-temporary and full-field-clone rules apply
 to the candidate rather than retroactively to the baseline. Neither asset is

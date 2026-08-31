@@ -281,6 +281,22 @@ class Issue123CompletionTest(unittest.TestCase):
             environment, baseline, thread, "CPU one"
         )
         self.assertEqual(environment["hostname"], "candidate-host")
+        environment["torch"] = "2.13.0+cu130"
+        environment["cuda_runtime"] = "13.0"
+        environment["devices"] = [
+            {"index": 0, "name": "synthetic device"},
+            {"index": 1, "name": "synthetic device"},
+        ]
+        environment["gpu_topology"] = "synthetic topology"
+        completion._require_frozen_baseline_host(
+            environment, baseline, thread, "CPU one"
+        )
+        environment["torch"] = "2.13.1+cu130"
+        with self.assertRaises(completion.EvidenceError):
+            completion._require_frozen_baseline_host(
+                environment, baseline, thread, "CPU one"
+            )
+        environment["torch"] = "2.13.0+cu130"
         environment["cpu_model"] = "different"
         with self.assertRaises(completion.EvidenceError):
             completion._require_frozen_baseline_host(

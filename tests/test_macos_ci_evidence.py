@@ -391,6 +391,76 @@ class MacOSCiEvidenceTest(unittest.TestCase):
         ):
             evidence._installed_archive_sha256(package)
 
+    def test_installed_archive_accepts_uv_empty_pep610_archive_info(self):
+        package = self._package("wheel-import").resolve()
+        digest = hashlib.sha256(package.read_bytes()).hexdigest()
+        distribution = mock.Mock()
+        distribution.read_text.return_value = json.dumps(
+            {"archive_info": {}, "url": package.as_uri()}
+        )
+        with mock.patch.object(
+            evidence.metadata, "distribution", return_value=distribution
+        ):
+            self.assertEqual(evidence._installed_archive_sha256(package), digest)
+
+    def test_installed_archive_rejects_malformed_or_symlinked_pep610_url(self):
+        package = self._package("wheel-import").resolve()
+        digest = hashlib.sha256(package.read_bytes()).hexdigest()
+        distribution = mock.Mock()
+        distribution.read_text.return_value = json.dumps(
+            {"archive_info": {"hash": f"sha256={digest}"}, "url": package.as_uri()}
+        )
+        with mock.patch.object(
+            evidence.metadata, "distribution", return_value=distribution
+        ):
+            self.assertEqual(evidence._installed_archive_sha256(package), digest)
+
+        distribution.read_text.return_value = json.dumps(
+            {"archive_info": {"hash": "sha512=not-a-sha256"}, "url": package.as_uri()}
+        )
+        with (
+            mock.patch.object(
+                evidence.metadata, "distribution", return_value=distribution
+            ),
+            self.assertRaisesRegex(evidence.EvidenceError, "digest differs"),
+        ):
+            evidence._installed_archive_sha256(package)
+
+        distribution.read_text.return_value = json.dumps(
+            {"archive_info": {"hashes": None}, "url": package.as_uri()}
+        )
+        with (
+            mock.patch.object(
+                evidence.metadata, "distribution", return_value=distribution
+            ),
+            self.assertRaisesRegex(evidence.EvidenceError, "digest differs"),
+        ):
+            evidence._installed_archive_sha256(package)
+
+        alias = self.root / "package-alias.whl"
+        alias.symlink_to(package)
+        distribution.read_text.return_value = json.dumps(
+            {"archive_info": {}, "url": alias.as_uri()}
+        )
+        with (
+            mock.patch.object(
+                evidence.metadata, "distribution", return_value=distribution
+            ),
+            self.assertRaisesRegex(evidence.EvidenceError, "local evidence archive"),
+        ):
+            evidence._installed_archive_sha256(package)
+
+        distribution.read_text.return_value = json.dumps(
+            {"archive_info": {}, "url": f"{package.as_uri()}#unexpected"}
+        )
+        with (
+            mock.patch.object(
+                evidence.metadata, "distribution", return_value=distribution
+            ),
+            self.assertRaisesRegex(evidence.EvidenceError, "local evidence archive"),
+        ):
+            evidence._installed_archive_sha256(package)
+
     def test_actions_archive_requires_exact_fifteen_files(self):
         runtime_index = self._capture()
         runtime = json.loads(runtime_index.read_text())

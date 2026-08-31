@@ -1360,6 +1360,7 @@ def assemble_macos_index(
 
 def _installed_archive_sha256(expected_package: Path) -> str:
     expected_package = expected_package.resolve(strict=True)
+    expected_digest = _sha256(expected_package.read_bytes())
     direct_url_raw = metadata.distribution("gmes").read_text("direct_url.json")
     _require(
         isinstance(direct_url_raw, str) and bool(direct_url_raw),
@@ -1374,28 +1375,38 @@ def _installed_archive_sha256(expected_package: Path) -> str:
         "installed gmes archive provenance differs",
     )
     parsed = parse.urlsplit(url)
+    installed_archive = Path(parse.unquote(parsed.path))
     _require(
-        parsed.scheme == "file" and parsed.netloc in {"", "localhost"},
+        parsed.scheme == "file"
+        and parsed.netloc in {"", "localhost"}
+        and not parsed.query
+        and not parsed.fragment
+        and _path_is_exact(str(installed_archive), expected_package),
         "installed gmes did not come from a local evidence archive",
     )
-    installed_archive = Path(parse.unquote(parsed.path)).resolve(strict=True)
-    _require(
-        installed_archive == expected_package,
-        "installed gmes came from a different evidence archive",
-    )
-    hashes = archive_info.get("hashes")
-    digest = hashes.get("sha256") if isinstance(hashes, dict) else None
-    if digest is None:
-        legacy_hash = archive_info.get("hash")
-        if isinstance(legacy_hash, str) and legacy_hash.startswith("sha256="):
-            digest = legacy_hash.removeprefix("sha256=")
-    _require(
-        isinstance(digest, str)
-        and SHA256_RE.fullmatch(digest) is not None
-        and digest == _sha256(expected_package.read_bytes()),
-        "installed gmes archive digest differs",
-    )
-    return digest
+    if "hashes" in archive_info:
+        hashes = archive_info["hashes"]
+        _require(isinstance(hashes, dict), "installed gmes archive digest differs")
+        if "sha256" in hashes:
+            digest = hashes["sha256"]
+            _require(
+                isinstance(digest, str)
+                and SHA256_RE.fullmatch(digest) is not None
+                and digest == expected_digest,
+                "installed gmes archive digest differs",
+            )
+    if "hash" in archive_info:
+        legacy_hash = archive_info["hash"]
+        _require(
+            isinstance(legacy_hash, str) and legacy_hash.startswith("sha256="),
+            "installed gmes archive digest differs",
+        )
+        digest = legacy_hash.removeprefix("sha256=")
+        _require(
+            SHA256_RE.fullmatch(digest) is not None and digest == expected_digest,
+            "installed gmes archive digest differs",
+        )
+    return expected_digest
 
 
 def _command_text(repository: Path, *command: str) -> str:

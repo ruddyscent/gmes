@@ -118,6 +118,7 @@ jobs:
           python="$GITHUB_WORKSPACE/.venv/bin/python"
           helper="$CANDIDATE_DIR/benchmarks/macos_ci_evidence.py"
           record_probe() {
+            local probe_status stderr_path
             probe_args=(record --role "$1")
             if [[ -n "$2" ]]; then
               probe_args+=(--mode "$2")
@@ -130,7 +131,20 @@ jobs:
               --records-dir "$RECORDS_DIR"
               --working-directory "$WORK_DIR"
             )
-            "$python" -I "$helper" "${probe_args[@]}"
+            if "$python" -I "$helper" "${probe_args[@]}"; then
+              return 0
+            else
+              probe_status=$?
+            fi
+            stderr_path="$EVIDENCE_DIR/logs/$1.stderr.txt"
+            printf 'macOS package probe %s failed with exit code %s; captured stderr (%s):\n' "$1" "$probe_status" "$stderr_path" >&2
+            if [[ -s "$stderr_path" ]]; then
+              tail -c 65536 "$stderr_path" >&2
+              printf '\n' >&2
+            else
+              printf '%s\n' '(no captured stderr was written)' >&2
+            fi
+            return "$probe_status"
           }
           GMES_ENABLE_OPENMP=auto UV_NO_CACHE=1 uv pip install \
             --python "$python" --reinstall --no-deps "${wheels[0]}"

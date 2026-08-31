@@ -99,6 +99,9 @@ class CiConfigurationTest(unittest.TestCase):
         self.assertIn('probe_args=(record --role "$1")', self.ci_workflow)
         self.assertIn('probe_args+=(--mode "$2")', self.ci_workflow)
         self.assertNotIn("mode_args=(", self.ci_workflow)
+        self.assertIn("local probe_status stderr_path", self.ci_workflow)
+        self.assertIn('tail -c 65536 "$stderr_path" >&2', self.ci_workflow)
+        self.assertIn('return "$probe_status"', self.ci_workflow)
         self.assertIn('"$python" -I "$helper" capture', self.ci_workflow)
         self.assertIn(upload, self.ci_workflow)
         self.assertIn(

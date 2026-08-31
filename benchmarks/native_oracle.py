@@ -260,10 +260,18 @@ def load_manifest(path=DEFAULT_MANIFEST):
 
 def _json_value(value):
     """Convert coefficient and configuration metadata to stable JSON values."""
-    if value is None or isinstance(value, (bool, int, float, str)):
+    if isinstance(value, float):
+        if math.isnan(value):
+            raise ValueError("NaN coefficient metadata is not allowed")
+        if math.isinf(value):
+            return {
+                "nonfinite": ("positive-infinity" if value > 0 else "negative-infinity")
+            }
+        return value
+    if value is None or isinstance(value, (bool, int, str)):
         return value
     if isinstance(value, complex):
-        return {"real": value.real, "imag": value.imag}
+        return {"real": _json_value(value.real), "imag": _json_value(value.imag)}
     if isinstance(value, np.generic):
         return _json_value(value.item())
     if isinstance(value, np.ndarray):

@@ -43,6 +43,22 @@ class NativeOracleTest(unittest.TestCase):
             "source_sha256": "a" * 64,
         }
 
+    def test_json_value_serializes_infinity_and_rejects_nan(self):
+        self.assertEqual(
+            self.oracle._json_value(float("inf")),
+            {"nonfinite": "positive-infinity"},
+        )
+        self.assertEqual(
+            self.oracle._json_value(float("-inf")),
+            {"nonfinite": "negative-infinity"},
+        )
+        self.assertEqual(
+            self.oracle._json_value(complex(float("inf"), 1.0)),
+            {"real": {"nonfinite": "positive-infinity"}, "imag": 1.0},
+        )
+        with self.assertRaisesRegex(ValueError, "NaN coefficient metadata"):
+            self.oracle._json_value(float("nan"))
+
     @staticmethod
     def rewrite_archive(
         source, output, *, drop=(), mutate_arrays=None, mutate_metadata=None

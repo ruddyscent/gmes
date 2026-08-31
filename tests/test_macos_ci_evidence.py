@@ -368,6 +368,34 @@ class MacOSCiEvidenceTest(unittest.TestCase):
                 self.platform,
             )
 
+    def test_allocated_addresses_omit_zero_sized_tensors(self):
+        addresses = evidence._allocated_addresses(
+            {"state.field": 101, "plan.empty_targets": 0},
+            "captured Torch addresses",
+        )
+
+        self.assertEqual(addresses, {"state.field": 101})
+        evidence._validate_addresses(addresses, "captured Torch addresses")
+
+    def test_allocated_addresses_reject_invalid_or_unallocated_maps(self):
+        for addresses in (
+            {"state.field": -1},
+            {"state.field": False},
+            {"plan.empty_targets": 0},
+        ):
+            with (
+                self.subTest(addresses=addresses),
+                self.assertRaisesRegex(evidence.EvidenceError, "addresses"),
+            ):
+                evidence._allocated_addresses(addresses, "captured Torch addresses")
+
+        for addresses in ({"state.field": 0}, {"state.field": -1}):
+            with (
+                self.subTest(serialized=addresses),
+                self.assertRaisesRegex(evidence.EvidenceError, "addresses"),
+            ):
+                evidence._validate_addresses(addresses, "captured Torch addresses")
+
     def test_installed_archive_requires_exact_pep610_url_and_sha(self):
         package = self._package("wheel-import").resolve()
         digest = hashlib.sha256(package.read_bytes()).hexdigest()

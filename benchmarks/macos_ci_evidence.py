@@ -492,6 +492,24 @@ def _validate_addresses(value: Any, label: str) -> None:
     )
 
 
+def _allocated_addresses(value: Any, label: str) -> dict[str, int]:
+    """Return positive data pointers while omitting empty tensors without storage."""
+    _require(isinstance(value, dict) and bool(value), f"{label} must be nonempty")
+    _require(
+        all(
+            isinstance(name, str)
+            and bool(name)
+            and type(address) is int
+            and address >= 0
+            for name, address in value.items()
+        ),
+        f"{label} differs",
+    )
+    allocated = {name: address for name, address in value.items() if address > 0}
+    _validate_addresses(allocated, label)
+    return allocated
+
+
 def _validate_counter(value: Any, label: str) -> None:
     _exact_keys(value, {"unique_graphs", "calls_captured", "graph_breaks"}, label)
     _require(
@@ -1597,24 +1615,24 @@ def _torch_result(
     simulation.load_host_fields(initial_fields)
     initial = simulation.host_snapshot()
     initial_state = _torch_state(simulation)
-    initial_addresses = {
-        name: int(address) for name, address in simulation.buffer_addresses().items()
-    }
+    initial_addresses = _allocated_addresses(
+        simulation.buffer_addresses(), "captured Torch initial addresses"
+    )
     before = _counter_snapshot(torch_module)
     initial_step = int(simulation.state.step_count.detach().cpu())
     simulation.advance(1)
     warmup_step = int(simulation.state.step_count.detach().cpu())
-    warmup_addresses = {
-        name: int(address) for name, address in simulation.buffer_addresses().items()
-    }
+    warmup_addresses = _allocated_addresses(
+        simulation.buffer_addresses(), "captured Torch warmup addresses"
+    )
     warmup = _counter_snapshot(torch_module)
     simulation.advance(1)
     final_step = int(simulation.state.step_count.detach().cpu())
     final = simulation.host_snapshot()
     final_state = _torch_state(simulation)
-    final_addresses = {
-        name: int(address) for name, address in simulation.buffer_addresses().items()
-    }
+    final_addresses = _allocated_addresses(
+        simulation.buffer_addresses(), "captured Torch final addresses"
+    )
     final_counters = _counter_snapshot(torch_module)
     fields = [_array_record(name, initial[name], final[name]) for name in FIELD_NAMES]
     states = [

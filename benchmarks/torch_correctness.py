@@ -368,12 +368,17 @@ def _material_plan_groups(simulation, component):
             target_families[int(target)] = family
     inactive = np.flatnonzero(np.asarray(plan.ownership).reshape(-1) < 0)
     if len(inactive):
-        groups["Dummy"] = {
-            "targets": [int(value) for value in inactive],
-            "strategies": {"Dummy"},
-            "buckets": set(),
-        }
-        target_families.update((int(value), "Dummy") for value in inactive)
+        group = groups.setdefault(
+            "Dummy",
+            {"targets": [], "strategies": set(), "buckets": set()},
+        )
+        group["strategies"].add("Dummy")
+        for value in inactive:
+            target = int(value)
+            if target in target_families:
+                raise ValueError(f"Torch material target is duplicated for {component}")
+            group["targets"].append(target)
+            target_families[target] = "Dummy"
     if len(target_families) != int(np.prod(plan.shape)):
         raise ValueError(f"Torch material topology is incomplete for {component}")
     normalized = []
@@ -1416,8 +1421,25 @@ def _manifest_tolerance(manifest, key, dtype, strategies, workload_name):
         for strategy in selected
         if strategy != "Dummy"
     }
+    scope = None
     if not models:
-        return {"rtol": 0.0, "atol": 0.0, "scope": "exact/dummy"}
+        parts = key.split("/")
+        dummy_source_numerics = (
+            selected == {"Dummy"}
+            and workload_name == "dummy"
+            and len(parts) > 3
+            and parts[0] == "step"
+            and parts[1].isdigit()
+            and parts[2] in {"field", "physical"}
+        )
+        if dummy_source_numerics:
+            # CPython and compiled Torch can use different libm oscillator
+            # kernels, so the driven cell may differ at the ULP scale. Reuse
+            # the pinned non-dispersive tolerance without relaxing topology.
+            models = {"dielectric"}
+            scope = f"dummy-source-numerics/dielectric/{dtype}"
+        else:
+            return {"rtol": 0.0, "atol": 0.0, "scope": "exact/dummy"}
     tolerances = []
     for model in sorted(models):
         model_dtype = "float64" if model == "dm2" and dtype == "complex128" else dtype
@@ -1437,7 +1459,7 @@ def _manifest_tolerance(manifest, key, dtype, strategies, workload_name):
         name: max(tolerance[name] for tolerance in tolerances)
         for name in ("rtol", "atol")
     }
-    result["scope"] = f"strategies/{','.join(sorted(models))}/{dtype}"
+    result["scope"] = scope or f"strategies/{','.join(sorted(models))}/{dtype}"
     return result
 
 

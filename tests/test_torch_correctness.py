@@ -85,6 +85,7 @@ class TorchCorrectnessTest(unittest.TestCase):
 
     def test_native_step_zero_produces_complete_torch_archives(self):
         cases = (
+            "dummy",
             "dcp-plrc-bloch",
             "dm2-1",
             "cpml-bloch",
@@ -107,6 +108,62 @@ class TorchCorrectnessTest(unittest.TestCase):
                     self.assertEqual(
                         metadata["backend_metadata"]["input_archive"]["prefix"],
                         "step/0",
+                    )
+
+    def test_compiled_dummy_long_capture_covers_topology_and_tolerance(self):
+        capture_steps = [1, 2, 5, 20, 100]
+        manifest = self._small_manifest(("dummy",))
+        manifest["reference"]["capture_steps"] = capture_steps
+        manifest["correctness"][0]["capture_steps"] = capture_steps
+        with tempfile.TemporaryDirectory() as directory:
+            reference, candidate = self._capture_pair(
+                directory,
+                manifest,
+                "dummy",
+                graph_mode="graph",
+                compile_mode="default",
+                precision="float64",
+            )
+            result = torch_correctness.compare_torch_archives(
+                reference,
+                candidate,
+                manifest,
+                include_tolerances=True,
+            )
+            self.assertTrue(result["passed"])
+            self.assertEqual(result["failures"], [])
+            with np.load(candidate, allow_pickle=False) as archive:
+                metadata = native_oracle.read_metadata(archive)
+            records = {
+                record["component"]: record
+                for record in metadata["steps"]["0"]["materials"]
+            }
+            self.assertEqual(set(records), set(native_oracle.COMPONENT_NAMES))
+            for component in native_oracle.COMPONENT_NAMES:
+                with self.subTest(component=component):
+                    self.assertEqual(records[component]["strategies"], ["Dummy"])
+                    self.assertEqual(
+                        records[component]["cells"],
+                        int(np.prod(metadata["maps"][component]["shape"])),
+                    )
+            tolerances = {
+                record["key"]: record for record in result["tolerance_results"]
+            }
+            expected = manifest["tolerances"]["torch"]["dielectric"]["float64"]
+            for key in (
+                "step/100/field/Ex",
+                "step/100/physical/spectrum/Ex",
+            ):
+                with self.subTest(key=key):
+                    self.assertEqual(
+                        {
+                            name: tolerances[key][name]
+                            for name in ("rtol", "atol", "scope")
+                        },
+                        {
+                            **expected,
+                            "scope": "dummy-source-numerics/dielectric/float64",
+                        },
                     )
 
     def test_candidate_capture_is_independent_of_legacy_native_state(self):
@@ -344,6 +401,56 @@ class TorchCorrectnessTest(unittest.TestCase):
             "complex128",
         )
         self.assertEqual(actual, self.manifest["tolerances"]["torch"]["dm2"]["float64"])
+
+    def test_dummy_source_numerics_reuse_nondispersive_tolerance(self):
+        for dtype, expected in self.manifest["tolerances"]["torch"][
+            "dielectric"
+        ].items():
+            for key in (
+                "step/100/field/Ex",
+                "step/100/physical/spectrum/Ex",
+            ):
+                with self.subTest(dtype=dtype, key=key):
+                    actual = torch_correctness._manifest_tolerance(
+                        self.manifest,
+                        key,
+                        dtype,
+                        {"Dummy"},
+                        "dummy",
+                    )
+                    self.assertEqual(
+                        actual,
+                        {
+                            **expected,
+                            "scope": (f"dummy-source-numerics/dielectric/{dtype}"),
+                        },
+                    )
+        exact = {"rtol": 0.0, "atol": 0.0, "scope": "exact/dummy"}
+        for key in (
+            "step/100/time",
+            "step/100/state/Ex/0-Dummy/values",
+        ):
+            with self.subTest(key=key):
+                self.assertEqual(
+                    torch_correctness._manifest_tolerance(
+                        self.manifest,
+                        key,
+                        "float64",
+                        {"Dummy"},
+                        "dummy",
+                    ),
+                    exact,
+                )
+        self.assertEqual(
+            torch_correctness._manifest_tolerance(
+                self.manifest,
+                "step/100/field/Ex",
+                "float64",
+                set(),
+                "dummy",
+            ),
+            exact,
+        )
 
 
 if __name__ == "__main__":

@@ -9,6 +9,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
+import warnings
 import zipfile
 from pathlib import Path
 from unittest import mock
@@ -396,6 +397,54 @@ class MacOSCiEvidenceTest(unittest.TestCase):
             ):
                 evidence._validate_addresses(addresses, "captured Torch addresses")
 
+    def test_inductor_import_filter_ignores_only_the_exact_warning(self):
+        class Simulation:
+            def __init__(self, message, module):
+                self.message = message
+                self.module = module
+                self.calls = []
+
+            def advance(self, steps):
+                self.calls.append(steps)
+                warnings.warn_explicit(
+                    self.message,
+                    DeprecationWarning,
+                    filename="torch/jit/_script.py",
+                    lineno=359,
+                    module=self.module,
+                )
+
+        exact = Simulation(
+            evidence.TORCH_JIT_SCRIPT_METHOD_PY314_WARNING, "torch.jit._script"
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            evidence._run_under_inductor_import_warning_filter(exact.advance, 1)
+            self.assertEqual(exact.calls, [1])
+            with self.assertRaises(DeprecationWarning):
+                warnings.warn_explicit(
+                    evidence.TORCH_JIT_SCRIPT_METHOD_PY314_WARNING,
+                    DeprecationWarning,
+                    filename="torch/jit/_script.py",
+                    lineno=359,
+                    module="torch.jit._script",
+                )
+
+        for message, module in (
+            ("an unrelated deprecation", "torch.jit._script"),
+            (evidence.TORCH_JIT_SCRIPT_METHOD_PY314_WARNING, "torch.jit._other"),
+        ):
+            with (
+                self.subTest(message=message, module=module),
+                warnings.catch_warnings(),
+            ):
+                warnings.simplefilter("error")
+                with self.assertRaises(DeprecationWarning):
+                    simulation = Simulation(message, module)
+                    evidence._run_under_inductor_import_warning_filter(
+                        simulation.advance, 1
+                    )
+
     def test_installed_archive_requires_exact_pep610_url_and_sha(self):
         package = self._package("wheel-import").resolve()
         digest = hashlib.sha256(package.read_bytes()).hexdigest()
@@ -622,7 +671,9 @@ class MacOSCiEvidenceTest(unittest.TestCase):
         record = json.loads((self.records / f"{role}.json").read_text())
         self.assertEqual(record["exit_code"], 0)
         self.assertEqual(record["command"]["argv"], run.call_args.args[0])
-        self.assertIn("-I", record["command"]["argv"])
+        self.assertEqual(
+            record["command"]["argv"][:4], [sys.executable, "-I", "-W", "error"]
+        )
         self.assertEqual(
             set(record["command"]["environment"]), evidence.COMMAND_ENVIRONMENT_KEYS
         )

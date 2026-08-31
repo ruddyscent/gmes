@@ -15,6 +15,7 @@ import re
 import subprocess
 import sys
 import tarfile
+import warnings
 import zipfile
 from importlib import metadata
 from pathlib import Path
@@ -61,6 +62,10 @@ MEDIA_TYPE_ZIP = "application/zip"
 MEDIA_TYPE_WHEEL = "application/vnd.python.wheel+zip"
 MEDIA_TYPE_GZIP = "application/gzip"
 MEDIA_TYPE_TEXT = "text/plain; charset=utf-8"
+TORCH_JIT_SCRIPT_METHOD_PY314_WARNING = (
+    "`torch.jit.script_method` is not supported in Python 3.14+ and may break. "
+    "Please switch to `torch.compile` or `torch.export`."
+)
 
 
 class EvidenceError(ValueError):
@@ -1586,6 +1591,18 @@ def _counter_snapshot(torch_module: Any) -> dict[str, int]:
     }
 
 
+def _run_under_inductor_import_warning_filter(function: Any, *args: Any) -> Any:
+    """Run one Inductor import boundary under its known Python 3.14 warning."""
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=rf"\A{re.escape(TORCH_JIT_SCRIPT_METHOD_PY314_WARNING)}\Z",
+            category=DeprecationWarning,
+            module=r"\Atorch\.jit\._script\Z",
+        )
+        return function(*args)
+
+
 def _torch_result(
     gmes_module: Any,
     torch_module: Any,
@@ -1595,7 +1612,7 @@ def _torch_result(
     import numpy as np  # pylint: disable=import-outside-toplevel
 
     policy = "eager" if mode == "eager" else "compile"
-    torch_module._dynamo.reset()
+    _run_under_inductor_import_warning_filter(torch_module._dynamo.reset)
     torch_module._dynamo.utils.counters.clear()
     runtime = gmes_module.TorchRuntimeConfig(
         device="cpu",
@@ -1620,7 +1637,10 @@ def _torch_result(
     )
     before = _counter_snapshot(torch_module)
     initial_step = int(simulation.state.step_count.detach().cpu())
-    simulation.advance(1)
+    if mode == "compile":
+        _run_under_inductor_import_warning_filter(simulation.advance, 1)
+    else:
+        simulation.advance(1)
     warmup_step = int(simulation.state.step_count.detach().cpu())
     warmup_addresses = _allocated_addresses(
         simulation.buffer_addresses(), "captured Torch warmup addresses"

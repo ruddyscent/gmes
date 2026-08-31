@@ -11,6 +11,11 @@ import numpy as np
 import torch
 
 import gmes
+from gmes.torch_dm2 import (
+    DM2_ITERATIONS_PER_CHUNK,
+    DM2_MAX_ITERATIONS,
+    DM2_PACKED_ITERATIONS_PER_CONDITION,
+)
 from gmes.torch_fdtd import (
     BOUNDARY_SYNC_REPRESENTATION,
     DEFAULT_VIEW_MUTATION_REPRESENTATION,
@@ -173,6 +178,9 @@ class TorchRuntimeConfigTest(unittest.TestCase):
             )
 
     def test_compile_cache_key_tracks_execution_specialization(self):
+        self.assertEqual(TORCH_SOLVER_ABI, "torch-fdtd-regions-v11")
+        self.assertEqual(PACKED_DM2_REPRESENTATION, "single-carry-packed-loop-v2")
+        self.assertEqual(DM2_PACKED_ITERATIONS_PER_CONDITION, 3)
         common = {
             "space": gmes.Cartesian((2, 2, 0), 2),
             "geometry": _geometry(),
@@ -216,6 +224,14 @@ class TorchRuntimeConfigTest(unittest.TestCase):
         self.assertEqual(first._compile_cache_key_preimage[0], TORCH_SOLVER_ABI)
         self.assertEqual(
             first._compile_cache_key_preimage[6], LOCAL_COMPILED_REGION_TOPOLOGY
+        )
+        self.assertEqual(
+            first._compile_cache_key_preimage[21][1:4],
+            (
+                DM2_MAX_ITERATIONS,
+                DM2_ITERATIONS_PER_CHUNK,
+                DM2_PACKED_ITERATIONS_PER_CONDITION,
+            ),
         )
         self.assertEqual(
             first.diagnostics()["view_mutation_representation"],

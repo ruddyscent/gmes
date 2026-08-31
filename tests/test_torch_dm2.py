@@ -6,6 +6,12 @@ import numpy as np
 import torch
 
 import gmes
+from gmes import torch_dm2
+from gmes.torch_dm2 import (
+    DM2_ITERATIONS_PER_CHUNK,
+    DM2_MAX_ITERATIONS,
+    DM2_PACKED_ITERATIONS_PER_CONDITION,
+)
 
 
 def _geometry(material):
@@ -117,6 +123,11 @@ class TorchDm2Test(unittest.TestCase):
                 int(np.prod(simulation.plan.shapes[metadata.component])),
             )
 
+    def test_packed_cpu_iteration_schedule_is_public_and_exact(self):
+        self.assertEqual(DM2_ITERATIONS_PER_CHUNK, 10)
+        self.assertEqual(DM2_PACKED_ITERATIONS_PER_CONDITION, 3)
+        self.assertIn("DM2_PACKED_ITERATIONS_PER_CONDITION", torch_dm2.__all__)
+
     def test_packed_cpu_workspace_is_exact_nonpersistent_and_fixed(self):
         material = gmes.Dm2(
             eps_inf=1.4,
@@ -161,6 +172,14 @@ class TorchDm2Test(unittest.TestCase):
         self.assertFalse(
             any("_packed_loop_state" in name for name in simulation.state.state_dict())
         )
+
+    def test_compiled_packed_corrector_preserves_early_convergence(self):
+        _, simulation = _simulations(gmes.Dm2(), compile_policy="compile")
+
+        simulation.step()
+
+        self.assertTrue(torch.all(simulation.state._dm2_status == 0))
+        self.assertTrue(torch.all(simulation.state._dm2_iterations == 1))
 
     def test_complete_fields_match_native_from_nonzero_input(self):
         material = gmes.Dm2(
@@ -333,7 +352,7 @@ class TorchDm2Test(unittest.TestCase):
                 err_msg=component.__name__,
             )
 
-    def test_preconditioned_nonzero_state_matches_at_fixed_capture_steps(self):
+    def test_compiled_preconditioned_state_matches_at_fixed_capture_steps(self):
         material = gmes.Dm2(
             omega=(0.7,),
             n_atom=(0.2,),
@@ -342,7 +361,7 @@ class TorchDm2Test(unittest.TestCase):
             t2=1.7,
             rtol=1e-8,
         )
-        native, simulation = _simulations(material)
+        native, simulation = _simulations(material, compile_policy="compile")
         rng = np.random.default_rng(125)
         for native_field in native.field.values():
             native_field[...] = rng.normal(size=native_field.shape) * 1e-3
@@ -525,7 +544,7 @@ class TorchDm2Test(unittest.TestCase):
         self.assertEqual(errors[1], errors[0])
         self._assert_simulation_state_matches(compiled, eager)
         self.assertTrue(torch.all(compiled.state._dm2_status == 2))
-        self.assertTrue(torch.all(compiled.state._dm2_iterations == 100))
+        self.assertTrue(torch.all(compiled.state._dm2_iterations == DM2_MAX_ITERATIONS))
 
     def test_compiled_fullgraph_matches_native(self):
         material = gmes.Dm2(
@@ -606,7 +625,9 @@ class TorchDm2Test(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, r"failed to converge.*Ex/width=1:\["):
             simulation.step()
-        self.assertTrue(torch.all(simulation.state._dm2_iterations == 100))
+        self.assertTrue(
+            torch.all(simulation.state._dm2_iterations == DM2_MAX_ITERATIONS)
+        )
         self.assertEqual(int(simulation.state.step_count), 0)
 
     def test_real_field_restriction_is_explicit(self):

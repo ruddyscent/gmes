@@ -38,6 +38,7 @@ from .torch_dispersive import (
 from .torch_dm2 import (
     DM2_ITERATIONS_PER_CHUNK,
     DM2_MAX_ITERATIONS,
+    DM2_PACKED_ITERATIONS_PER_CONDITION,
     Dm2BucketMetadata,
     TorchDm2BucketState,
 )
@@ -74,7 +75,7 @@ class TorchConfigurationError(ValueError):
 
 
 COMPILE_MODES = ("default", "reduce-overhead", "max-autotune")
-TORCH_SOLVER_ABI = "torch-fdtd-regions-v10"
+TORCH_SOLVER_ABI = "torch-fdtd-regions-v11"
 LOCAL_COMPILED_REGION_TOPOLOGY = (
     "local-two-static-half-step-regions+external-cached-two-stage-foreach-"
     "boundary-sync-v2"
@@ -82,7 +83,7 @@ LOCAL_COMPILED_REGION_TOPOLOGY = (
 BOUNDARY_SYNC_REPRESENTATION = "cached-two-stage-foreach-v1"
 DIRECT_VIEW_MUTATION_REPRESENTATION = "direct-nonoverlapping-as-strided-v1"
 DEFAULT_VIEW_MUTATION_REPRESENTATION = "slice-views-v1"
-PACKED_DM2_REPRESENTATION = "single-carry-packed-loop-v1"
+PACKED_DM2_REPRESENTATION = "single-carry-packed-loop-v2"
 FUNCTIONAL_DM2_REPRESENTATION = "functional-multi-carry-loop-v1"
 FUSED_SOURCE_REPRESENTATION = "fused-half-step-v1"
 EXTERNAL_SOURCE_REPRESENTATION = "external-v1"
@@ -2014,6 +2015,7 @@ class TorchSimulation:
                 self._has_dm2,
                 DM2_MAX_ITERATIONS,
                 DM2_ITERATIONS_PER_CHUNK,
+                DM2_PACKED_ITERATIONS_PER_CONDITION,
                 self._has_electric_constants,
                 self._has_magnetic_constants,
                 self._has_pml,

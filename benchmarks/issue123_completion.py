@@ -36,7 +36,7 @@ OUTPUT_KIND = "issue-123-completion-evaluation"
 DIFFERENTIAL_KIND = "issue-123-differential-evidence"
 MACOS_INDEX_KIND = "issue-123-macos-evidence-index"
 FAILURE_RUN_KIND = "two-gpu-failure-run"
-TORCH_SOLVER_ABI = "torch-fdtd-regions-v10"
+TORCH_SOLVER_ABI = "torch-fdtd-regions-v11"
 LOCAL_COMPILED_REGION_TOPOLOGY = (
     "local-two-static-half-step-regions+external-cached-two-stage-foreach-"
     "boundary-sync-v2"

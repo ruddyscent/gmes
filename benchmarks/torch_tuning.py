@@ -1272,6 +1272,7 @@ def _native_gate(reference, name, threads, candidate, manifest):
         "candidate_raw_seconds_per_step": [
             value / contract["steps_per_repeat"] for value in candidate_raw
         ],
+        "comparison_role": acceptance["native_comparison"],
         "torch_to_native_ratio": ratio,
         "comparison_valid": not errors,
         "contract_errors": errors,

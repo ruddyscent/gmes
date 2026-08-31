@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import importlib.metadata
 import json
+import math
 import os
 import platform
 import resource
@@ -21,6 +22,7 @@ ROOT = Path(__file__).resolve().parent
 DEFAULT_MANIFEST = ROOT / "native_oracle_workloads.json"
 COMPONENT_NAMES = ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")
 FIELD_INITIALIZER = "native-affine-ramp-v1"
+ARCHIVE_SCHEMA_VERSION = 2
 
 
 def load_manifest(path=DEFAULT_MANIFEST):
@@ -52,42 +54,189 @@ def load_manifest(path=DEFAULT_MANIFEST):
         if not isinstance(reference.get(name), int) or reference[name] < 1:
             raise ValueError(f"{name} must be a positive integer")
     acceptance = data.get("performance_gates", {}).get("cpu_acceptance", {})
+    if acceptance.get("contract_id") != "cpu-acceptance-v2":
+        raise ValueError("unsupported cpu_acceptance contract")
+    timing_reference = acceptance.get("timing_reference", {})
+    if timing_reference.get("backend") != "torch":
+        raise ValueError("cpu_acceptance timing reference must use Torch")
+    root_commit = timing_reference.get("root_commit", "")
+    if len(root_commit) != 40 or any(
+        character not in "0123456789abcdef" for character in root_commit
+    ):
+        raise ValueError(
+            "cpu_acceptance timing reference root_commit must be a full "
+            "lowercase Git commit"
+        )
+    slice_artifacts = timing_reference.get("slice_artifacts")
+    if not isinstance(slice_artifacts, list) or len(slice_artifacts) != 2:
+        raise ValueError("cpu_acceptance requires two pinned Torch slice artifacts")
+    expected_modes = (("one", 1), ("physical", 4))
+    for artifact, (expected_mode, expected_threads) in zip(
+        slice_artifacts, expected_modes, strict=True
+    ):
+        if not isinstance(artifact, dict) or set(artifact) != {
+            "thread_mode",
+            "threads",
+            "repository_path",
+            "size_bytes",
+            "sha256",
+        }:
+            raise ValueError("cpu_acceptance Torch slice artifact schema is invalid")
+        if (
+            artifact["thread_mode"] != expected_mode
+            or type(artifact["threads"]) is not int
+            or artifact["threads"] != expected_threads
+            or not isinstance(artifact["repository_path"], str)
+            or not artifact["repository_path"].startswith(
+                "benchmarks/evidence/issue-123/"
+            )
+            or type(artifact["size_bytes"]) is not int
+            or artifact["size_bytes"] < 1
+        ):
+            raise ValueError("cpu_acceptance Torch slice artifact modes are invalid")
+        digest = artifact["sha256"]
+        if (
+            not isinstance(digest, str)
+            or len(digest) != 64
+            or any(character not in "0123456789abcdef" for character in digest)
+        ):
+            raise ValueError(
+                "cpu_acceptance Torch slice artifact must have a lowercase "
+                "SHA-256 digest"
+            )
+    legacy_evidence = timing_reference.get("legacy_evidence", {})
+    if legacy_evidence.get("evidence_contract_id") != "torch-cpu-acceptance-v7":
+        raise ValueError("unsupported legacy CPU evidence contract")
+    if legacy_evidence.get("cpu_contract_id") != "cpu-acceptance-v1":
+        raise ValueError("unsupported legacy CPU acceptance contract")
+    for name in ("manifest_sha256", "runner_sha256", "solver_sha256"):
+        digest = legacy_evidence.get(name, "")
+        if len(digest) != 64 or any(
+            character not in "0123456789abcdef" for character in digest
+        ):
+            raise ValueError(
+                f"cpu_acceptance legacy {name} must be a lowercase SHA-256 digest"
+            )
+    if legacy_evidence.get("solver_abi") != "torch-fdtd-regions-v8":
+        raise ValueError("unsupported legacy CPU solver ABI")
+    expected_timing_reference = {
+        "backend": "torch",
+        "root_commit": "821c075b9328e02c3f3e5d16488a44b64ff08c04",
+        "slice_artifacts": [
+            {
+                "thread_mode": "one",
+                "threads": 1,
+                "repository_path": (
+                    "benchmarks/evidence/issue-123/" "torch-cpu-baseline-one.json"
+                ),
+                "size_bytes": 314181,
+                "sha256": (
+                    "e6e765fcd0b0ff1fff1919ff06f95c155beed6ce2c51c3c58cf8dccfcca3387f"
+                ),
+            },
+            {
+                "thread_mode": "physical",
+                "threads": 4,
+                "repository_path": (
+                    "benchmarks/evidence/issue-123/" "torch-cpu-baseline-physical.json"
+                ),
+                "size_bytes": 314460,
+                "sha256": (
+                    "27bc2f3f0a880b0faf25480d926f8b3885c33b7571f14bb47130880f2105fa9a"
+                ),
+            },
+        ],
+        "legacy_evidence": {
+            "evidence_contract_id": "torch-cpu-acceptance-v7",
+            "cpu_contract_id": "cpu-acceptance-v1",
+            "manifest_sha256": (
+                "6d7fe084c558cf69771f0c3928bc9be96fc6bb5b55ba777d674151fbbe6cbe19"
+            ),
+            "runner_sha256": (
+                "fee6d418bb50729ddb26ff14e931a4f51bb8d2a92cb0ad537c2757846247a770"
+            ),
+            "solver_sha256": (
+                "9cd8decc801a6f9d93551c6e6f427afeff1c65e3092e54b03e5abe0a3e9192d5"
+            ),
+            "solver_abi": "torch-fdtd-regions-v8",
+        },
+    }
+    if timing_reference != expected_timing_reference:
+        raise ValueError("cpu_acceptance timing reference is not the frozen baseline")
     known_cases = {
         case["name"]
         for group in ("correctness", "benchmarks")
         for case in data.get(group, ())
     }
     cases = acceptance.get("cases")
-    if (
-        not isinstance(cases, list)
-        or not cases
-        or len(cases) != len(set(cases))
-        or any(case not in known_cases for case in cases)
-    ):
-        raise ValueError("cpu_acceptance cases must be unique known workloads")
+    expected_cases = [
+        "cpu-crossover-2d",
+        "cpu-crossover-3d",
+        "cpu-large-2d",
+        "cpu-large-3d",
+        "bloch-2d",
+        "bloch-3d",
+    ]
+    if cases != expected_cases or any(case not in known_cases for case in cases):
+        raise ValueError("cpu_acceptance cases must match the frozen workload matrix")
     if acceptance.get("thread_modes") != ["one", "physical"]:
         raise ValueError("cpu_acceptance thread_modes must be one and physical")
     if acceptance.get("precision") != "float64":
         raise ValueError("cpu_acceptance precision must be float64")
     ratio = acceptance.get("max_individual_ratio")
-    if not isinstance(ratio, (int, float)) or ratio < 1:
-        raise ValueError("cpu_acceptance max_individual_ratio must be at least one")
+    if type(ratio) not in (int, float) or not math.isfinite(ratio) or ratio != 1.05:
+        raise ValueError("cpu_acceptance max_individual_ratio must be exactly 1.05")
+    if acceptance.get("native_comparison") != "informational":
+        raise ValueError("cpu_acceptance native comparison must be informational")
+    allocation = acceptance.get("allocation_contract", {})
+    if allocation.get("method") != "reviewed-fixed-temporary-provenance-v1":
+        raise ValueError("unsupported cpu_acceptance allocation contract")
+    fixed_temporaries = allocation.get("fixed_temporaries", {})
+    if fixed_temporaries.get("allowed") is not True:
+        raise ValueError("cpu_acceptance must allow reviewed fixed temporaries")
+    if fixed_temporaries.get("reviewed_provenance_required") is not True:
+        raise ValueError(
+            "cpu_acceptance fixed temporaries must require reviewed provenance"
+        )
+    for name in (
+        "max_net_live_growth_bytes",
+        "max_final_live_growth_bytes",
+        "max_full_field_or_domain_clones",
+    ):
+        if type(allocation.get(name)) is not int or allocation[name] != 0:
+            raise ValueError(f"cpu_acceptance {name} must be zero")
+    if allocation.get("rss_growth") != "bounded":
+        raise ValueError("cpu_acceptance RSS growth must be bounded")
+    if allocation.get("public_upstream_issue_required") is not True:
+        raise ValueError(
+            "cpu_acceptance fixed temporaries must require a public upstream issue"
+        )
     statistics = acceptance.get("statistics", {})
     if statistics.get("method") != "independent-stratified-bootstrap-log-geomean-v1":
         raise ValueError("unsupported cpu_acceptance statistics method")
-    if not isinstance(statistics.get("resamples"), int) or statistics["resamples"] < 1:
+    if type(statistics.get("resamples")) is not int or statistics["resamples"] < 1:
         raise ValueError("cpu_acceptance resamples must be a positive integer")
-    if not isinstance(statistics.get("seed"), int):
+    if type(statistics.get("seed")) is not int:
         raise ValueError("cpu_acceptance seed must be an integer")
     confidence = statistics.get("one_sided_confidence")
-    if not isinstance(confidence, (int, float)) or not 0 < confidence < 1:
+    if type(confidence) not in (int, float) or not 0 < confidence < 1:
         raise ValueError("cpu_acceptance confidence must be between zero and one")
     regression_ratio = statistics.get("regression_ratio")
-    if not isinstance(regression_ratio, (int, float)) or regression_ratio <= 0:
+    if type(regression_ratio) not in (int, float) or regression_ratio <= 0:
         raise ValueError("cpu_acceptance regression_ratio must be positive")
     relative_mad = statistics.get("max_relative_mad")
-    if not isinstance(relative_mad, (int, float)) or not 0 <= relative_mad < 1:
+    if type(relative_mad) not in (int, float) or not 0 <= relative_mad < 1:
         raise ValueError("cpu_acceptance max_relative_mad must be in [0, 1)")
+    expected_statistics = {
+        "method": "independent-stratified-bootstrap-log-geomean-v1",
+        "resamples": 20000,
+        "seed": 123,
+        "one_sided_confidence": 0.95,
+        "regression_ratio": 1.0,
+        "max_relative_mad": 0.05,
+    }
+    if statistics != expected_statistics:
+        raise ValueError("cpu_acceptance statistics do not match the frozen contract")
     if reference["capture_steps"] != sorted(set(reference["capture_steps"])):
         raise ValueError("capture_steps must be unique and increasing")
     cases = (
@@ -146,6 +295,51 @@ def _command_output(command):
         ).stdout.strip()
     except FileNotFoundError, subprocess.CalledProcessError:
         return None
+
+
+def _git_output(checkout, *arguments):
+    """Return required Git metadata or fail instead of emitting weak evidence."""
+    try:
+        return subprocess.run(
+            ["git", "-C", str(checkout), *arguments],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    except (FileNotFoundError, subprocess.CalledProcessError) as error:
+        raise RuntimeError(
+            f"cannot determine Git provenance for {Path(checkout).resolve()}"
+        ) from error
+
+
+def _git_checkout(path):
+    source = Path(path).resolve(strict=True)
+    checkout = Path(_git_output(source.parent, "rev-parse", "--show-toplevel"))
+    return checkout.resolve(strict=True)
+
+
+def _checkout_provenance(checkout, source):
+    checkout = Path(checkout).resolve(strict=True)
+    source = Path(source).resolve(strict=True)
+    if not source.is_relative_to(checkout):
+        raise RuntimeError(f"provenance source is outside its checkout: {source}")
+    actual_checkout = Path(
+        _git_output(checkout, "rev-parse", "--show-toplevel")
+    ).resolve(strict=True)
+    if actual_checkout != checkout:
+        raise RuntimeError(
+            f"requested checkout {checkout} resolves to Git checkout {actual_checkout}"
+        )
+    commit = _git_output(checkout, "rev-parse", "HEAD")
+    status = _git_output(checkout, "status", "--short", "--untracked-files=all")
+    return {
+        "checkout": str(checkout),
+        "commit": commit,
+        "git_status": status,
+        "clean": status == "",
+        "source": str(source),
+        "source_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+    }
 
 
 def _timing_summary(samples):
@@ -639,6 +833,11 @@ def _source_records(simulation, step, arrays):
         aux_fdtd = getattr(source, "aux_fdtd", None)
         if aux_fdtd is None:
             continue
+        # GaussianBeam wraps the actual auxiliary FDTD in a source-time
+        # adapter.  Serialize the solver state, not that adapter object.
+        nested = getattr(aux_fdtd, "aux_fdtd", None)
+        if not hasattr(aux_fdtd, "time_step") and nested is not None:
+            aux_fdtd = nested
         aux_prefix = f"step/{step}/source_aux/{ordinal}-{type(source).__name__}"
         arrays[f"{aux_prefix}/time"] = np.asarray(
             [aux_fdtd.time_step.n, aux_fdtd.time_step.t, aux_fdtd.time_step.dt]
@@ -709,13 +908,23 @@ def capture_case(spec, manifest, output):
 
     reference_source = Path(gmes.__file__).resolve()
     expected_checkout = os.environ.get("GMES_ORACLE_EXPECTED_CHECKOUT")
-    if expected_checkout and not reference_source.is_relative_to(
+    source_checkout = (
         Path(expected_checkout).resolve()
-    ):
+        if expected_checkout
+        else _git_checkout(reference_source)
+    )
+    if not reference_source.is_relative_to(source_checkout):
         raise RuntimeError(
             "isolated oracle imported gmes outside the requested checkout: "
             f"{reference_source}"
         )
+    controller_source = Path(__file__).resolve()
+    provenance = {
+        "source": _checkout_provenance(source_checkout, reference_source),
+        "controller": _checkout_provenance(
+            _git_checkout(controller_source), controller_source
+        ),
+    }
     simulation = build_simulation(spec, gmes)
     simulation.init()
     reference = manifest["reference"]
@@ -750,7 +959,7 @@ def capture_case(spec, manifest, output):
         for geometry in simulation.geom_list
     ]
     metadata = {
-        "schema_version": 1,
+        "schema_version": ARCHIVE_SCHEMA_VERSION,
         "backend": "native",
         "workload": spec,
         "reference": reference,
@@ -775,6 +984,7 @@ def capture_case(spec, manifest, output):
             record["state_values"] == 0 or record["state_nonzero_values"] > 0
             for record in all_records
         ),
+        "provenance": provenance,
         "reference_source": str(reference_source),
     }
     arrays["metadata.json"] = np.asarray(json.dumps(metadata, sort_keys=True))
@@ -784,8 +994,702 @@ def capture_case(spec, manifest, output):
     return metadata
 
 
+def _reject_json_constant(value):
+    raise ValueError(f"non-finite JSON constant is not allowed: {value}")
+
+
+def _object_without_duplicate_keys(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON key is not allowed: {key!r}")
+        result[key] = value
+    return result
+
+
 def read_metadata(archive):
-    return json.loads(str(archive["metadata.json"]))
+    if archive.files.count("metadata.json") != 1:
+        raise ValueError("archive must contain exactly one metadata.json")
+    encoded = archive["metadata.json"]
+    if encoded.shape != () or encoded.dtype.kind not in {"U", "S"}:
+        raise ValueError("metadata.json must be a scalar string array")
+    metadata = json.loads(
+        str(encoded),
+        object_pairs_hook=_object_without_duplicate_keys,
+        parse_constant=_reject_json_constant,
+    )
+    if not isinstance(metadata, dict):
+        raise ValueError("metadata.json must decode to an object")
+    return metadata
+
+
+def _contract(condition, message):
+    if not condition:
+        raise ValueError(message)
+
+
+def _same_json_value(actual, expected):
+    """Compare decoded JSON values without bool/int or signed-zero aliases."""
+    if type(actual) is not type(expected):
+        return False
+    if isinstance(expected, dict):
+        return set(actual) == set(expected) and all(
+            _same_json_value(actual[key], value) for key, value in expected.items()
+        )
+    if isinstance(expected, list):
+        return len(actual) == len(expected) and all(
+            _same_json_value(left, right)
+            for left, right in zip(actual, expected, strict=True)
+        )
+    if isinstance(expected, float):
+        return actual == expected and math.copysign(1.0, actual) == math.copysign(
+            1.0, expected
+        )
+    return actual == expected
+
+
+def _finite_json_value(value):
+    """Return whether a decoded metadata value is finite, canonical JSON."""
+    if value is None or type(value) in (bool, int, str):
+        return True
+    if type(value) is float:
+        return math.isfinite(value)
+    if isinstance(value, list):
+        return all(_finite_json_value(item) for item in value)
+    if isinstance(value, dict):
+        return all(
+            isinstance(key, str) and _finite_json_value(item)
+            for key, item in value.items()
+        )
+    return False
+
+
+def _exact_keys(value, expected, label, optional=()):
+    _contract(isinstance(value, dict), f"{label} must be an object")
+    actual = set(value)
+    expected = set(expected)
+    optional = set(optional)
+    _contract(
+        expected <= actual <= expected | optional,
+        f"{label} keys are invalid: missing={sorted(expected - actual)}, "
+        f"unexpected={sorted(actual - expected - optional)}",
+    )
+
+
+def _full_commit(value):
+    return (
+        isinstance(value, str)
+        and len(value) == 40
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _sha256_digest(value):
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _validate_archive_provenance(metadata, manifest, role):
+    provenance = metadata["provenance"]
+    _exact_keys(provenance, {"source", "controller"}, "provenance")
+    for name in ("source", "controller"):
+        record = provenance[name]
+        _exact_keys(
+            record,
+            {
+                "checkout",
+                "commit",
+                "git_status",
+                "clean",
+                "source",
+                "source_sha256",
+            },
+            f"provenance.{name}",
+        )
+        _contract(_full_commit(record["commit"]), f"{name} commit is not full")
+        _contract(
+            isinstance(record["git_status"], str),
+            f"{name} git_status must be a string",
+        )
+        _contract(
+            record["clean"] is (record["git_status"] == ""),
+            f"{name} clean flag disagrees with git_status",
+        )
+        _contract(record["clean"] is True, f"{name} checkout is not clean")
+        checkout = Path(record["checkout"])
+        source = Path(record["source"])
+        _contract(checkout.is_absolute(), f"{name} checkout must be absolute")
+        _contract(source.is_absolute(), f"{name} source must be absolute")
+        _contract(
+            source.is_relative_to(checkout),
+            f"{name} source is outside its checkout",
+        )
+        _contract(
+            _sha256_digest(record["source_sha256"]),
+            f"{name} source_sha256 is invalid",
+        )
+    if role == "reference":
+        _contract(
+            provenance["source"]["commit"] == manifest["reference"]["observer_commit"],
+            "reference checkout does not match reference.observer_commit",
+        )
+    _contract(
+        metadata["reference_source"] == provenance["source"]["source"],
+        "reference_source disagrees with source provenance",
+    )
+
+
+def _close_number(actual, expected):
+    return math.isclose(float(actual), float(expected), rel_tol=1e-12, abs_tol=1e-15)
+
+
+def _validate_material_records(
+    archive, records, step, prefix, field_shapes, required_keys
+):
+    _contract(isinstance(records, list), f"step/{step}/{prefix} must be a list")
+    ordinals = {component: 0 for component in COMPONENT_NAMES}
+    signatures = []
+    required_record_keys = {
+        "component",
+        "strategy",
+        "strategies",
+        "native_type",
+        "cells",
+        "coverage",
+        "fragmentation_runs",
+        "fragmentation_ratio",
+        "state_values",
+        "state_nonzero_values",
+        "state_width",
+        "state_key",
+        "state_bytes",
+        "plan_bytes",
+        "index_bytes",
+        "parameter_bytes",
+        "live_updater_bytes",
+        "plan_runs",
+        "bucket_signature",
+    }
+    for record in records:
+        _exact_keys(
+            record,
+            required_record_keys,
+            f"step/{step}/{prefix} material record",
+            optional={"backend_metadata"},
+        )
+        component = record["component"]
+        _contract(component in COMPONENT_NAMES, "material component is unknown")
+        strategies = record["strategies"]
+        _contract(
+            isinstance(strategies, list)
+            and strategies
+            and all(isinstance(value, str) and value for value in strategies),
+            "material strategies are invalid",
+        )
+        _contract(
+            record["strategy"] == "+".join(strategies),
+            "material strategy is not canonical",
+        )
+        cells = record["cells"]
+        state_values = record["state_values"]
+        _contract(type(cells) is int and cells >= 0, "material cells is invalid")
+        _contract(
+            type(state_values) is int and state_values >= 0,
+            "material state_values is invalid",
+        )
+        ordinal = ordinals[component]
+        ordinals[component] += 1
+        record_prefix = (
+            f"step/{step}/{prefix}/{component}/{ordinal}-{record['strategy']}"
+        )
+        index_key = f"{record_prefix}/indices"
+        state_key = f"{record_prefix}/values"
+        _contract(record["state_key"] == state_key, "material state_key is invalid")
+        _contract(index_key in archive.files, f"missing required array: {index_key}")
+        _contract(state_key in archive.files, f"missing required array: {state_key}")
+        required_keys.update((index_key, state_key))
+        indices = archive[index_key]
+        state = archive[state_key]
+        _contract(
+            np.issubdtype(indices.dtype, np.integer) and indices.shape == (cells, 3),
+            "material indices shape or dtype is invalid",
+        )
+        _contract(
+            state.shape == (state_values,)
+            and np.issubdtype(state.dtype, np.number)
+            and bool(np.isfinite(state).all()),
+            "material state shape, dtype, or finiteness is invalid",
+        )
+        _contract(
+            record["state_nonzero_values"] == int(np.count_nonzero(state)),
+            "material state_nonzero_values is inaccurate",
+        )
+        shape = field_shapes[component]
+        expected_coverage = cells / int(np.prod(shape))
+        _contract(
+            _close_number(record["coverage"], expected_coverage),
+            "material coverage is inaccurate",
+        )
+        runs = _linear_run_count(indices, shape)
+        _contract(
+            record["fragmentation_runs"] == runs
+            and _close_number(
+                record["fragmentation_ratio"], runs / cells if cells else 0.0
+            )
+            and _close_number(
+                record["state_width"], state_values / cells if cells else 0.0
+            ),
+            "material fragmentation or state width is inaccurate",
+        )
+        for name in (
+            "state_bytes",
+            "plan_bytes",
+            "index_bytes",
+            "parameter_bytes",
+            "live_updater_bytes",
+            "plan_runs",
+        ):
+            _contract(
+                type(record[name]) is int and record[name] >= 0,
+                f"material {name} is invalid",
+            )
+        _contract(
+            record["live_updater_bytes"]
+            == record["plan_bytes"] + record["index_bytes"] + record["parameter_bytes"],
+            "material live_updater_bytes is inaccurate",
+        )
+        signature = [
+            component,
+            record["strategy"],
+            record["native_type"],
+            cells,
+            state_values,
+        ]
+        _contract(
+            record["bucket_signature"] == signature,
+            "material bucket_signature is inaccurate",
+        )
+        signatures.append(tuple(signature))
+    return signatures
+
+
+def _validate_source_arrays(archive, sources, step, required_keys):
+    _exact_keys(sources, {"updaters", "auxiliary"}, f"step/{step}/sources")
+    ordinals = {component: 0 for component in COMPONENT_NAMES}
+    for record in sources["updaters"]:
+        _exact_keys(
+            record,
+            {"component", "native_type", "cells", "state_values"},
+            "source updater record",
+            optional={"backend_metadata"},
+        )
+        component = record["component"]
+        _contract(component in COMPONENT_NAMES, "source component is unknown")
+        _contract(
+            isinstance(record["native_type"], str) and record["native_type"],
+            "source native_type is invalid",
+        )
+        _contract(
+            type(record["cells"]) is int and record["cells"] >= 0,
+            "source cells is invalid",
+        )
+        _contract(
+            type(record["state_values"]) is int and record["state_values"] >= 0,
+            "source state_values is invalid",
+        )
+        ordinal = ordinals[component]
+        ordinals[component] += 1
+        prefix = f"step/{step}/source/{component}/{ordinal}-{record['native_type']}"
+        for suffix in ("indices", "values"):
+            key = f"{prefix}/{suffix}"
+            _contract(key in archive.files, f"missing required array: {key}")
+            required_keys.add(key)
+        indices = archive[f"{prefix}/indices"]
+        values = archive[f"{prefix}/values"]
+        _contract(
+            indices.shape == (record["cells"], 3)
+            and np.issubdtype(indices.dtype, np.integer),
+            "source updater indices are invalid",
+        )
+        _contract(
+            values.shape == (record["state_values"],)
+            and np.issubdtype(values.dtype, np.number)
+            and bool(np.isfinite(values).all()),
+            "source updater state is invalid",
+        )
+    for ordinal, record in enumerate(sources["auxiliary"]):
+        _exact_keys(
+            record,
+            {"source", "fields", "materials"},
+            "source auxiliary record",
+            optional={"backend_metadata"},
+        )
+        _exact_keys(record["fields"], COMPONENT_NAMES, "auxiliary fields")
+        _contract(
+            isinstance(record["source"], str) and record["source"],
+            "auxiliary source is invalid",
+        )
+        prefix = f"step/{step}/source_aux/{ordinal}-{record['source']}"
+        time_key = f"{prefix}/time"
+        _contract(time_key in archive.files, f"missing required array: {time_key}")
+        required_keys.add(time_key)
+        auxiliary_time = archive[time_key]
+        _contract(
+            auxiliary_time.shape == (3,)
+            and np.issubdtype(auxiliary_time.dtype, np.number)
+            and bool(np.isfinite(auxiliary_time).all())
+            and float(auxiliary_time[2]) > 0,
+            "auxiliary time is invalid",
+        )
+        shapes = {}
+        for component, shape in record["fields"].items():
+            _contract(
+                isinstance(shape, list)
+                and shape
+                and all(type(length) is int and length > 0 for length in shape),
+                "auxiliary field shape metadata is invalid",
+            )
+            key = f"{prefix}/field/{component}"
+            _contract(key in archive.files, f"missing required array: {key}")
+            required_keys.add(key)
+            field = archive[key]
+            _contract(
+                list(field.shape) == shape
+                and np.issubdtype(field.dtype, np.number)
+                and bool(np.isfinite(field).all()),
+                "auxiliary field is invalid",
+            )
+            shapes[component] = tuple(shape)
+        _validate_material_records(
+            archive,
+            record["materials"],
+            step,
+            f"source_aux_material/{ordinal}",
+            shapes,
+            required_keys,
+        )
+
+
+def _validate_physical_arrays(archive, physical, step, fields, required_keys):
+    names = (
+        "energy",
+        "maximum_abs_field",
+        "boundary_low_energy",
+        "boundary_high_energy",
+        "finite",
+    )
+    _exact_keys(physical, names, f"step/{step}/physical")
+    prefix = f"step/{step}/physical"
+    summary_key = f"{prefix}/summary"
+    _contract(summary_key in archive.files, f"missing required array: {summary_key}")
+    required_keys.add(summary_key)
+    summary = archive[summary_key]
+    _contract(summary.shape == (5,), "physical summary shape is invalid")
+    calculated = [0.0, 0.0, 0.0, 0.0, 1.0]
+    low_precision = False
+    for component in COMPONENT_NAMES:
+        field = fields[component]
+        low_precision = low_precision or field.dtype.itemsize <= 4
+        magnitude = np.abs(field)
+        calculated[0] += float(np.sum(magnitude * magnitude))
+        calculated[1] = max(calculated[1], float(np.max(magnitude)))
+        calculated[2] += float(np.sum(magnitude[0] * magnitude[0]))
+        calculated[3] += float(np.sum(magnitude[-1] * magnitude[-1]))
+        calculated[4] = float(bool(calculated[4]) and np.isfinite(field).all())
+        axes = tuple(range(1, field.ndim))
+        line = np.mean(field, axis=axes) if axes else field
+        expected = np.abs(np.fft.fft(line))
+        key = f"{prefix}/spectrum/{component}"
+        _contract(key in archive.files, f"missing required array: {key}")
+        required_keys.add(key)
+        tolerance = 2e-5 if low_precision else 2e-12
+        _contract(
+            archive[key].shape == expected.shape
+            and np.allclose(archive[key], expected, rtol=tolerance, atol=0),
+            f"physical spectrum is inconsistent for {component}",
+        )
+    tolerance = 2e-5 if low_precision else 2e-12
+    recorded = [physical[name] for name in names[:-1]] + [float(physical["finite"])]
+    _contract(
+        physical["finite"] is True
+        and np.allclose(summary, calculated, rtol=tolerance, atol=0)
+        and np.allclose(summary, recorded, rtol=tolerance, atol=0),
+        "physical summary is inconsistent with complete fields",
+    )
+
+
+def _validate_archive(archive, manifest, role):
+    _contract(
+        len(archive.files) == len(set(archive.files)),
+        "archive array names must be unique",
+    )
+    metadata = read_metadata(archive)
+    _exact_keys(
+        metadata,
+        {
+            "schema_version",
+            "backend",
+            "workload",
+            "reference",
+            "capture_steps",
+            "input_state",
+            "maps",
+            "steps",
+            "geometry_and_coefficients",
+            "active_cells",
+            "state_bytes",
+            "plan_bytes",
+            "index_bytes",
+            "parameter_bytes",
+            "live_updater_bytes",
+            "archive_array_bytes",
+            "nonzero_seed",
+            "nonzero_persistent_state",
+            "provenance",
+            "reference_source",
+        },
+        "archive metadata",
+        optional={"backend_metadata"},
+    )
+    _contract(
+        metadata["schema_version"] == ARCHIVE_SCHEMA_VERSION,
+        "unsupported correctness archive schema",
+    )
+    backend = metadata["backend"]
+    _contract(
+        isinstance(backend, str) and backend in manifest["tolerances"],
+        "archive backend is unknown",
+    )
+    if role == "reference":
+        _contract(backend == "native", "reference archive backend must be native")
+    if "backend_metadata" in metadata:
+        _contract(
+            isinstance(metadata["backend_metadata"], dict),
+            "backend_metadata must be an object",
+        )
+    workload = metadata["workload"]
+    _contract(isinstance(workload, dict), "workload must be an object")
+    _contract(
+        workload == find_case(manifest, workload.get("name")),
+        "workload does not exactly match the manifest",
+    )
+    _contract(
+        metadata["reference"] == manifest["reference"],
+        "reference contract does not exactly match the manifest",
+    )
+    expected_steps = workload.get(
+        "capture_steps", manifest["reference"]["capture_steps"]
+    )
+    _contract(
+        isinstance(expected_steps, list)
+        and expected_steps
+        and all(type(step) is int and step > 0 for step in expected_steps)
+        and expected_steps == sorted(set(expected_steps)),
+        "capture step contract is invalid",
+    )
+    _contract(
+        metadata["capture_steps"] == expected_steps,
+        "capture_steps do not exactly match the manifest workload",
+    )
+    _contract(
+        metadata["input_state"]
+        == {
+            "archive_prefix": "step/0",
+            "precondition_steps": manifest["reference"]["precondition_steps"],
+            "relative_capture_steps": True,
+        },
+        "input_state contract is invalid",
+    )
+    _validate_archive_provenance(metadata, manifest, role)
+
+    maps = metadata["maps"]
+    _exact_keys(maps, COMPONENT_NAMES, "maps")
+    required_keys = set()
+    field_shapes = {}
+    map_record_keys = {
+        "shape",
+        "dtype",
+        "active_cells",
+        "material_regions",
+        "underlying_regions",
+    }
+    for component in COMPONENT_NAMES:
+        record = maps[component]
+        _exact_keys(record, map_record_keys, f"maps.{component}")
+        shape = record["shape"]
+        _contract(
+            isinstance(shape, list)
+            and shape
+            and all(type(length) is int and length > 0 for length in shape),
+            f"maps.{component}.shape is invalid",
+        )
+        _contract(
+            isinstance(record["dtype"], str)
+            and np.issubdtype(np.dtype(record["dtype"]), np.number),
+            f"maps.{component}.dtype is invalid",
+        )
+        _contract(
+            all(
+                type(record[name]) is int and record[name] >= 0
+                for name in (
+                    "active_cells",
+                    "material_regions",
+                    "underlying_regions",
+                )
+            ),
+            f"maps.{component} counts are invalid",
+        )
+        field_shapes[component] = tuple(shape)
+        material_key = f"map/{component}/material_ids"
+        underlying_key = f"map/{component}/underlying_ids"
+        for key in (material_key, underlying_key):
+            _contract(key in archive.files, f"missing required array: {key}")
+            required_keys.add(key)
+        material_ids = archive[material_key]
+        underlying_ids = archive[underlying_key]
+        _contract(
+            material_ids.shape == underlying_ids.shape
+            and material_ids.shape == (int(np.prod(shape)),)
+            and np.issubdtype(material_ids.dtype, np.integer)
+            and np.issubdtype(underlying_ids.dtype, np.integer),
+            f"map arrays are invalid for {component}",
+        )
+        _contract(
+            record["active_cells"] == material_ids.size
+            and record["material_regions"] == int(np.unique(material_ids).size),
+            f"map metadata is inaccurate for {component}",
+        )
+        underlying = underlying_ids[underlying_ids >= 0]
+        _contract(
+            record["underlying_regions"] == int(np.unique(underlying).size),
+            f"underlying map metadata is inaccurate for {component}",
+        )
+
+    steps = metadata["steps"]
+    expected_step_names = {"0"} | {str(step) for step in expected_steps}
+    _exact_keys(steps, expected_step_names, "steps")
+    baseline_signatures = None
+    all_material_records = []
+    for step in (0, *expected_steps):
+        step_name = str(step)
+        snapshot = steps[step_name]
+        _exact_keys(
+            snapshot,
+            {"materials", "sources", "physical"},
+            f"step/{step_name}",
+        )
+        fields = {}
+        for component in COMPONENT_NAMES:
+            key = f"step/{step_name}/field/{component}"
+            _contract(key in archive.files, f"missing required array: {key}")
+            required_keys.add(key)
+            field = archive[key]
+            _contract(
+                field.shape == field_shapes[component]
+                and str(field.dtype) == maps[component]["dtype"]
+                and np.issubdtype(field.dtype, np.number)
+                and bool(np.isfinite(field).all()),
+                f"complete field array is invalid: {key}",
+            )
+            fields[component] = field
+        time_key = f"step/{step_name}/time"
+        _contract(time_key in archive.files, f"missing required array: {time_key}")
+        required_keys.add(time_key)
+        time = archive[time_key]
+        expected_time_step = manifest["reference"]["precondition_steps"] + step
+        _contract(
+            time.shape == (3,)
+            and np.issubdtype(time.dtype, np.number)
+            and bool(np.isfinite(time).all())
+            and float(time[2]) > 0
+            and float(time[0]) == expected_time_step
+            and _close_number(time[1], expected_time_step * time[2]),
+            f"time array does not match relative step contract: {time_key}",
+        )
+        signatures = _validate_material_records(
+            archive,
+            snapshot["materials"],
+            step_name,
+            "state",
+            field_shapes,
+            required_keys,
+        )
+        _contract(signatures, f"step/{step_name} has no material state records")
+        if baseline_signatures is None:
+            baseline_signatures = signatures
+        else:
+            _contract(
+                signatures == baseline_signatures,
+                f"step/{step_name} material topology changed",
+            )
+        all_material_records.extend(snapshot["materials"])
+        _validate_source_arrays(archive, snapshot["sources"], step_name, required_keys)
+        _validate_physical_arrays(
+            archive, snapshot["physical"], step_name, fields, required_keys
+        )
+
+    geometry_and_coefficients = metadata["geometry_and_coefficients"]
+    _contract(
+        isinstance(geometry_and_coefficients, list) and geometry_and_coefficients,
+        "geometry_and_coefficients must be a nonempty list",
+    )
+    for record in geometry_and_coefficients:
+        _exact_keys(
+            record,
+            {"geometry", "material"},
+            "geometry_and_coefficients",
+        )
+        _contract(
+            isinstance(record["geometry"], str) and record["geometry"],
+            "geometry_and_coefficients geometry is invalid",
+        )
+        _contract(
+            _finite_json_value(record["material"]),
+            "geometry_and_coefficients material is invalid",
+        )
+    final_records = steps[str(expected_steps[-1])]["materials"]
+    totals = {
+        "active_cells": sum(record["cells"] for record in final_records),
+        "state_bytes": sum(record["state_bytes"] for record in final_records),
+        "plan_bytes": sum(record["plan_bytes"] for record in final_records),
+        "index_bytes": sum(record["index_bytes"] for record in final_records),
+        "parameter_bytes": sum(record["parameter_bytes"] for record in final_records),
+    }
+    totals["live_updater_bytes"] = (
+        totals["plan_bytes"] + totals["index_bytes"] + totals["parameter_bytes"]
+    )
+    for name, expected in totals.items():
+        _contract(
+            type(metadata[name]) is int and metadata[name] == expected,
+            f"{name} byte or cell accounting is inaccurate",
+        )
+    _contract(metadata["nonzero_seed"] is True, "nonzero_seed must be true")
+    expected_nonzero_state = all(
+        record["state_values"] == 0 or record["state_nonzero_values"] > 0
+        for record in all_material_records
+    )
+    _contract(
+        metadata["nonzero_persistent_state"] is expected_nonzero_state
+        and expected_nonzero_state,
+        "nonzero_persistent_state is inaccurate",
+    )
+    actual_keys = set(archive.files) - {"metadata.json"}
+    _contract(
+        actual_keys == required_keys,
+        "archive array keys are invalid: "
+        f"missing={sorted(required_keys - actual_keys)}, "
+        f"unexpected={sorted(actual_keys - required_keys)}",
+    )
+    archive_bytes = sum(archive[key].nbytes for key in required_keys)
+    _contract(
+        type(metadata["archive_array_bytes"]) is int
+        and metadata["archive_array_bytes"] == archive_bytes,
+        "archive_array_bytes is inaccurate",
+    )
+    return metadata
 
 
 def compare_archives(reference_path, candidate_path, manifest):
@@ -795,8 +1699,42 @@ def compare_archives(reference_path, candidate_path, manifest):
         np.load(reference_path, allow_pickle=False) as reference,
         np.load(candidate_path, allow_pickle=False) as candidate,
     ):
-        candidate_metadata = read_metadata(candidate)
-        backend = candidate_metadata.get("backend", "native")
+        reference_metadata = None
+        candidate_metadata = None
+        for role, archive in (("reference", reference), ("candidate", candidate)):
+            try:
+                metadata = _validate_archive(archive, manifest, role)
+            except (
+                KeyError,
+                TypeError,
+                ValueError,
+                IndexError,
+                OverflowError,
+            ) as error:
+                failures.append(
+                    {
+                        "key": f"{role}/archive-contract",
+                        "error": str(error),
+                    }
+                )
+            else:
+                if role == "reference":
+                    reference_metadata = metadata
+                else:
+                    candidate_metadata = metadata
+        if reference_metadata is None or candidate_metadata is None:
+            return {"passed": False, "failures": failures}
+        if not _same_json_value(
+            candidate_metadata["geometry_and_coefficients"],
+            reference_metadata["geometry_and_coefficients"],
+        ):
+            failures.append(
+                {
+                    "key": "geometry_and_coefficients",
+                    "error": "candidate geometry and coefficients differ from reference",
+                }
+            )
+        backend = candidate_metadata["backend"]
         reference_keys = set(reference.files) - {"metadata.json"}
         candidate_keys = set(candidate.files) - {"metadata.json"}
         if reference_keys != candidate_keys:
@@ -818,7 +1756,7 @@ def compare_archives(reference_path, candidate_path, manifest):
                     actual,
                     rtol=tolerance["rtol"],
                     atol=tolerance["atol"],
-                    equal_nan=True,
+                    equal_nan=False,
                 )
             else:
                 equal = same_shape and np.array_equal(expected, actual)
@@ -858,6 +1796,8 @@ def tolerance_for_key(manifest, backend, key, dtype):
         "dielectric",
     ):
         if model in normalized:
+            if model == "dm2" and dtype == "complex128":
+                dtype = "float64"
             return backend_tolerances[model].get(dtype, {"rtol": 0.0, "atol": 0.0})
     return backend_tolerances["mixed"].get(dtype, {"rtol": 0.0, "atol": 0.0})
 

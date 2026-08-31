@@ -16,7 +16,7 @@ import json
 import math
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from statistics import median
+from statistics import median, pstdev
 from urllib.parse import urlsplit
 
 _EXPECTED_CASE_COUNT = 6
@@ -67,6 +67,17 @@ _RAW_HOST_IDENTITY_KEYS = (
 )
 _PUBLIC_HOST_IDENTITY_KEYS = ("schema", "salt", "sha256")
 _PUBLIC_ENVIRONMENT_KEYS = ("hostname", "host_identity", "thread_environment")
+_LOADED_BASELINE_ENVIRONMENT_KEYS = (
+    "hostname",
+    "host_identity",
+    "timing_runtime_identity",
+)
+_TIMING_RUNTIME_IDENTITY_KEYS = ("schema_version", "torch", "cuda_runtime")
+_FROZEN_TIMING_RUNTIME_IDENTITY = {
+    "schema_version": 1,
+    "torch": "2.13.0+cpu",
+    "cuda_runtime": None,
+}
 _RUNTIME_CONTRACT_KEYS = (
     "device",
     "precision",
@@ -95,6 +106,12 @@ _PUBLIC_ADVANCE_KEYS = (
     "repetitions",
     "steps_per_repeat",
     "seconds_per_step",
+)
+_CANDIDATE_ADVANCE_KEYS = (
+    *_PUBLIC_ADVANCE_KEYS,
+    "p95_seconds",
+    "population_stdev_seconds",
+    "steps_per_second",
 )
 _PUBLIC_PROFILER_KEYS = (
     "positive_allocation_events",
@@ -208,6 +225,66 @@ def _normalized_torch_version(value):
     return public
 
 
+def public_torch_version(value):
+    """Return the public part of a full PyTorch version identity."""
+    return _normalized_torch_version(value)
+
+
+def _validate_timing_runtime_identity(value):
+    if not isinstance(value, Mapping) or set(value) != set(
+        _TIMING_RUNTIME_IDENTITY_KEYS
+    ):
+        raise ValueError("CPU baseline timing runtime identity schema is invalid")
+    if not _is_integer(value["schema_version"]) or value["schema_version"] != 1:
+        raise ValueError("CPU baseline timing runtime identity version is invalid")
+    _normalized_torch_version(value["torch"])
+    torch_version = str(value["torch"])
+    cuda_runtime = value["cuda_runtime"]
+    if cuda_runtime is not None and (
+        not isinstance(cuda_runtime, str) or not cuda_runtime
+    ):
+        raise ValueError("CPU baseline timing CUDA runtime identity is invalid")
+    return {
+        "schema_version": 1,
+        "torch": torch_version,
+        "cuda_runtime": None if cuda_runtime is None else str(cuda_runtime),
+    }
+
+
+def timing_runtime_identity(environment):
+    """Return the exact Torch build and CUDA runtime used for CPU timing."""
+    if not isinstance(environment, Mapping):
+        raise ValueError("CPU baseline timing environment must be an object")
+    if set(environment) == set(_TIMING_RUNTIME_IDENTITY_KEYS):
+        identity = environment
+    elif "timing_runtime_identity" in environment:
+        if set(environment) != set(_LOADED_BASELINE_ENVIRONMENT_KEYS):
+            raise ValueError("CPU baseline loaded environment schema is invalid")
+        identity = environment["timing_runtime_identity"]
+    else:
+        try:
+            identity = {
+                "schema_version": 1,
+                "torch": environment["torch"],
+                "cuda_runtime": environment["cuda_runtime"],
+            }
+        except KeyError as error:
+            raise ValueError(
+                "CPU baseline timing environment identity is incomplete"
+            ) from error
+    return _validate_timing_runtime_identity(identity)
+
+
+def timing_runtime_identity_matches(reference_environment, candidate_environment):
+    """Return whether two environments have the same exact timing runtime."""
+    try:
+        reference = timing_runtime_identity(reference_environment)
+        candidate = timing_runtime_identity(candidate_environment)
+    except TypeError, ValueError:
+        return False
+    return _json_equal(reference, candidate)
+
+
 def _canonical_json_bytes(value):
     try:
         return json.dumps(
@@ -294,6 +371,7 @@ def privacy_preserving_host_identity(environment, *, salt=None):
         allowed = {
             frozenset({"hostname", "host_identity"}),
             frozenset(_PUBLIC_ENVIRONMENT_KEYS),
+            frozenset(_LOADED_BASELINE_ENVIRONMENT_KEYS),
         }
         if frozenset(environment) not in allowed:
             raise ValueError("CPU baseline public environment schema is invalid")
@@ -317,6 +395,14 @@ def _manifest_contract(manifest):
             "manifest is missing the Torch CPU baseline contract"
         ) from error
 
+    if not isinstance(timing_reference, dict) or set(timing_reference) != {
+        "backend",
+        "root_commit",
+        "timing_runtime_identity",
+        "slice_artifacts",
+        "legacy_evidence",
+    }:
+        raise ValueError("manifest CPU timing reference schema is invalid")
     if acceptance.get("contract_id") != "cpu-acceptance-v2":
         raise ValueError("manifest CPU acceptance contract must be version 2")
     if timing_reference.get("backend") != "torch":
@@ -324,6 +410,11 @@ def _manifest_contract(manifest):
     root_commit = timing_reference.get("root_commit")
     if root_commit != _FROZEN_TIMING_ROOT_COMMIT:
         raise ValueError("manifest timing reference must use the frozen root commit")
+    timing_identity = _validate_timing_runtime_identity(
+        timing_reference["timing_runtime_identity"]
+    )
+    if not _json_equal(timing_identity, _FROZEN_TIMING_RUNTIME_IDENTITY):
+        raise ValueError("manifest CPU timing runtime identity is not frozen")
     if not isinstance(slice_artifacts, list) or len(slice_artifacts) != 2:
         raise ValueError("manifest must pin two Torch CPU baseline artifacts")
     expected_artifacts = {}
@@ -465,6 +556,7 @@ def _manifest_contract(manifest):
     return {
         "acceptance": acceptance,
         "timing_reference": copy.deepcopy(timing_reference),
+        "timing_runtime_identity": timing_identity,
         "slice_artifacts": expected_artifacts,
         "evidence": evidence,
         "case_names": tuple(case_names),
@@ -576,6 +668,39 @@ def _normalize_advance(advance, benchmark_contract, max_relative_mad):
         "repetitions": repetitions,
         "steps_per_repeat": steps,
     }
+
+
+def _linear_percentile(values, percentile):
+    ordered = sorted(values)
+    position = (len(ordered) - 1) * percentile / 100.0
+    lower = math.floor(position)
+    upper = math.ceil(position)
+    if lower == upper:
+        return ordered[lower]
+    weight = position - lower
+    return ordered[lower] + (ordered[upper] - ordered[lower]) * weight
+
+
+def _normalize_candidate_advance(advance, benchmark_contract, max_relative_mad):
+    if not isinstance(advance, dict) or set(advance) != set(_CANDIDATE_ADVANCE_KEYS):
+        raise ValueError("candidate advance measurement schema is invalid")
+    normalized = _normalize_advance(
+        {name: advance[name] for name in _PUBLIC_ADVANCE_KEYS},
+        benchmark_contract,
+        max_relative_mad,
+    )
+    raw = normalized["raw_seconds"]
+    expected = {
+        "p95_seconds": _linear_percentile(raw, 95),
+        "population_stdev_seconds": pstdev(raw),
+        "steps_per_second": (
+            benchmark_contract["steps_per_repeat"] / normalized["median_seconds"]
+        ),
+    }
+    for name, value in expected.items():
+        if not _reported_float(advance.get(name), value):
+            raise ValueError(f"candidate advance {name} is inconsistent")
+    return normalized
 
 
 def _nonnegative_integer(mapping, name):
@@ -849,6 +974,9 @@ def load_torch_cpu_baseline(artifacts, manifest):
         host_identity = {
             "hostname": environment["hostname"],
             "host_identity": copy.deepcopy(environment["host_identity"]),
+            "timing_runtime_identity": copy.deepcopy(
+                contract["timing_runtime_identity"]
+            ),
         }
         if common_environment is None:
             common_environment = host_identity
@@ -991,7 +1119,7 @@ def compare_candidate_to_baseline(baseline, candidate, name=None, threads=None):
                 measurements = candidate.get("measurements")
                 if not isinstance(measurements, dict):
                     raise ValueError("candidate measurements are missing")
-                advance = _normalize_advance(
+                advance = _normalize_candidate_advance(
                     measurements.get("advance"),
                     reference["benchmark_contract"],
                     baseline["max_relative_mad"],

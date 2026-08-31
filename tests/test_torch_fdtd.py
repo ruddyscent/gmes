@@ -12,6 +12,7 @@ import torch
 
 import gmes
 from gmes.torch_fdtd import (
+    BOUNDARY_SYNC_REPRESENTATION,
     DEFAULT_VIEW_MUTATION_REPRESENTATION,
     DIRECT_VIEW_MUTATION_REPRESENTATION,
     EXTERNAL_SOURCE_REPRESENTATION,
@@ -228,6 +229,10 @@ class TorchRuntimeConfigTest(unittest.TestCase):
             first.diagnostics()["sources"]["execution_representation"],
             FUSED_SOURCE_REPRESENTATION,
         )
+        self.assertEqual(
+            first.diagnostics()["boundaries"]["execution_representation"],
+            BOUNDARY_SYNC_REPRESENTATION,
+        )
 
         three_dimensional = {
             "space": gmes.Cartesian((2, 2, 2), 1),
@@ -370,6 +375,145 @@ class TorchStateTest(unittest.TestCase):
                     self.assertTrue(torch.equal(actual, expected))
                     self.assertEqual(actual.storage_offset(), expected.storage_offset())
                     self.assertEqual(actual.stride(), expected.stride())
+
+    def test_fixed_state_rejects_buffer_replacement_or_conversion(self):
+        simulation = _simulation(bloch=(0.07, 0.11, 0.13))
+        addresses = {
+            name: value.data_ptr() for name, value in simulation.state.named_buffers()
+        }
+        with self.assertRaisesRegex(ValueError, "assign=True.*fixed"):
+            simulation.state.load_state_dict(simulation.state.state_dict(), assign=True)
+        with self.assertRaisesRegex(TorchConfigurationError, "fixed device and dtype"):
+            simulation.state.to(dtype=torch.float32)
+        self.assertEqual(
+            addresses,
+            {
+                name: value.data_ptr()
+                for name, value in simulation.state.named_buffers()
+            },
+        )
+
+    def test_batched_boundary_sync_preserves_order_and_skips_collapsed_axes(self):
+        bloch = (0.07, 0.11, 0.13)
+        rng = np.random.default_rng(37)
+        families = (
+            (("Ex", "Ey", "Ez"), True, "_sync_electric_boundaries"),
+            (("Hx", "Hy", "Hz"), False, "_sync_magnetic_boundaries"),
+        )
+
+        cases = (
+            ((3, 2, 2), None),
+            ((3, 2, 0), None),
+            ((3, 2, 2), 0),
+            ((3, 2, 2), 1),
+            ((3, 2, 2), 2),
+        )
+        for precision in ("float32", "float64"):
+            for active_bloch in (None, bloch):
+                for size, skip_axis in cases:
+                    with self.subTest(
+                        precision=precision,
+                        bloch=active_bloch is not None,
+                        size=size,
+                        skip_axis=skip_axis,
+                    ):
+                        self._assert_boundary_sync_matches_scalar_reference(
+                            rng=rng,
+                            families=families,
+                            precision=precision,
+                            bloch=active_bloch,
+                            size=size,
+                            skip_axis=skip_axis,
+                        )
+
+    def _assert_boundary_sync_matches_scalar_reference(
+        self, *, rng, families, precision, bloch, size, skip_axis
+    ):
+        simulation = _simulation(
+            size=size,
+            resolution=2,
+            precision=precision,
+            bloch=bloch,
+        )
+        values = {
+            name: (
+                rng.normal(size=simulation.plan.shapes[name])
+                if bloch is None
+                else rng.normal(size=simulation.plan.shapes[name])
+                + 1j * rng.normal(size=simulation.plan.shapes[name])
+            )
+            for name in _COMPONENTS
+        }
+        simulation.load_host_fields(values)
+        expected = {
+            name: field.clone() for name, field in simulation.state.fields().items()
+        }
+
+        for names, high_from_low, method_name in families:
+            for name in names:
+                component_axis = ("x", "y", "z").index(name[1].lower())
+                field = expected[name]
+                for axis in range(3):
+                    if (
+                        axis == component_axis
+                        or axis == skip_axis
+                        or simulation.plan.shapes[name][axis] <= 1
+                    ):
+                        continue
+                    destination_index = -1 if high_from_low else 0
+                    source_index = 0 if high_from_low else -1
+                    direction = 1 if high_from_low else -1
+                    destination = field.select(axis, destination_index)
+                    source = field.select(axis, source_index).clone()
+                    if bloch is None:
+                        destination.copy_(source)
+                    else:
+                        length = (
+                            simulation.plan.shapes[name][axis] - 1
+                        ) * simulation.plan.dr[axis]
+                        angle = direction * bloch[axis] * length
+                        cosine = float(np.cos(angle))
+                        sine = float(np.sin(angle))
+                        destination[..., 0].copy_(source[..., 0]).mul_(cosine)
+                        destination[..., 0].add_(source[..., 1], alpha=-sine)
+                        destination[..., 1].copy_(source[..., 0]).mul_(sine)
+                        destination[..., 1].add_(source[..., 1], alpha=cosine)
+
+            getattr(simulation, method_name)(skip_axis=skip_axis)
+            stages = simulation._boundary_sync_stages(
+                names,
+                high_from_low=high_from_low,
+                skip_axis=skip_axis,
+            )
+            self.assertIs(
+                stages,
+                simulation._boundary_sync_stages(
+                    names,
+                    high_from_low=high_from_low,
+                    skip_axis=skip_axis,
+                ),
+            )
+            expected_operations = sum(
+                simulation.state.field(name).numel() > 0
+                and axis != ("x", "y", "z").index(name[1].lower())
+                and axis != skip_axis
+                and simulation.plan.shapes[name][axis] > 1
+                for name in names
+                for axis in range(3)
+            )
+            self.assertEqual(
+                sum(len(stage[0]) for stage in stages), expected_operations
+            )
+            for destinations, sources, phases in stages:
+                if bloch is None:
+                    self.assertIsNone(phases)
+                else:
+                    self.assertIsNotNone(phases)
+                for destination, source in zip(destinations, sources):
+                    self.assertNotEqual(destination.data_ptr(), source.data_ptr())
+
+        for name, field in simulation.state.fields().items():
+            torch.testing.assert_close(field, expected[name])
 
     def test_yee_shapes_cover_collapsed_1d_2d_3d(self):
         for size in ((8, 0, 0), (8, 6, 0), (6, 5, 4), (0, 0, 0)):

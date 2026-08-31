@@ -161,6 +161,11 @@ def load_manifest(path=DEFAULT_MANIFEST):
     expected_timing_reference = {
         "backend": "torch",
         "root_commit": "821c075b9328e02c3f3e5d16488a44b64ff08c04",
+        "timing_runtime_identity": {
+            "schema_version": 1,
+            "torch": "2.13.0+cpu",
+            "cuda_runtime": None,
+        },
         "slice_artifacts": [
             {
                 "thread_mode": "one",

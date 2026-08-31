@@ -36,10 +36,12 @@ OUTPUT_KIND = "issue-123-completion-evaluation"
 DIFFERENTIAL_KIND = "issue-123-differential-evidence"
 MACOS_INDEX_KIND = "issue-123-macos-evidence-index"
 FAILURE_RUN_KIND = "two-gpu-failure-run"
-TORCH_SOLVER_ABI = "torch-fdtd-regions-v9"
+TORCH_SOLVER_ABI = "torch-fdtd-regions-v10"
 LOCAL_COMPILED_REGION_TOPOLOGY = (
-    "local-two-static-half-step-regions+external-boundary-sync-v1"
+    "local-two-static-half-step-regions+external-cached-two-stage-foreach-"
+    "boundary-sync-v2"
 )
+BOUNDARY_SYNC_REPRESENTATION = "cached-two-stage-foreach-v1"
 
 INDEX_SCHEMA_VERSION = 2
 BUNDLE_SPEC_SCHEMA_VERSION = 1
@@ -1466,6 +1468,22 @@ def _validate_tuning_acceptance(
     allow_allocation_override: bool = False,
 ) -> None:
     _require(isinstance(result, dict), f"{label} must be an object")
+    diagnostics = result.get("diagnostics")
+    boundaries = (
+        diagnostics.get("boundaries") if isinstance(diagnostics, dict) else None
+    )
+    _exact_keys(
+        boundaries,
+        {"scheduling", "execution_representation", "paired_real_scratch_bytes"},
+        f"{label} boundary execution diagnostics",
+    )
+    _require(
+        boundaries["scheduling"] == "external"
+        and boundaries.get("execution_representation") == BOUNDARY_SYNC_REPRESENTATION
+        and type(boundaries.get("paired_real_scratch_bytes")) is int
+        and boundaries["paired_real_scratch_bytes"] >= 0,
+        f"{label} boundary execution diagnostics differ from the solver ABI",
+    )
     acceptance = result.get("acceptance")
     _exact_keys(acceptance, TUNING_ACCEPTANCE_FIELDS, f"{label} acceptance")
     expected_pass = all(
@@ -2215,7 +2233,10 @@ def _require_frozen_baseline_host(
     label: str,
 ) -> None:
     try:
-        from benchmarks.torch_cpu_baseline import privacy_preserving_host_identity
+        from benchmarks.torch_cpu_baseline import (
+            privacy_preserving_host_identity,
+            timing_runtime_identity_matches,
+        )
 
         baseline_identity = privacy_preserving_host_identity(baseline_environment)
         candidate = privacy_preserving_host_identity(
@@ -2227,12 +2248,23 @@ def _require_frozen_baseline_host(
         ) from error
     _require(
         _type_exact_equal(candidate, baseline_identity)
+        and timing_runtime_identity_matches(baseline_environment, environment)
         and _type_exact_equal(
             environment.get("thread_environment"),
             baseline_thread_environment,
         ),
-        f"{label} differs from the exact frozen Torch baseline host or thread environment",
+        f"{label} differs from the exact frozen Torch baseline host, timing runtime, "
+        "or thread environment",
     )
+
+
+def _public_torch_versions_match(first: Any, second: Any) -> bool:
+    try:
+        from benchmarks.torch_cpu_baseline import public_torch_version
+
+        return public_torch_version(first) == public_torch_version(second)
+    except ImportError, TypeError, ValueError:
+        return False
 
 
 def _require_raw_match(actual: list[float], expected: list[float], label: str) -> None:
@@ -2702,7 +2734,9 @@ def _validate_cpu_scope(
         and common_host["os"]["release"] == native_environment["os"]["release"]
         and common_host["os"]["machine"] == native_environment["os"]["machine"]
         and isinstance(native_torch, dict)
-        and native_torch.get("version") == cpu_runtime["torch"],
+        and _public_torch_versions_match(
+            native_torch.get("version"), cpu_runtime["torch"]
+        ),
         "candidate CPU and pinned native evidence use different hosts or toolchains",
     )
 

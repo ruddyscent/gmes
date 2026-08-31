@@ -263,9 +263,18 @@ serialization does not expose or lose the physical sparse layout.
 
 Periodic/Bloch boundary synchronization remains outside compiled material
 kernels and runs immediately before its next static electric or magnetic
-compute region. Every active Yee component applies phase directly to
-paired-real tensors using persistent boundary scratch, including collapsed axes
-where source and destination slices alias.
+compute region. Boundary views are cached and grouped into two ordered stages:
+the first periodic axis of each field is updated before its second axis, so
+corner values retain the composed Bloch phase while independent components can
+use batched `torch._foreach_copy_` and `torch._foreach_mul_` calls. Paired-real
+phase scalars live in fixed registered, non-checkpoint boundary storage. Empty
+fields and axes with at most one plane are skipped, so a boundary update never
+uses aliased source and destination views. The diagnostic compatibility name
+`paired_real_scratch_bytes` reports this reserved boundary workspace even though
+the cached implementation only uses its first paired-real element for phase
+storage. State buffers cannot be replaced with `load_state_dict(assign=True)` or
+moved/converted after construction; create a new simulation for another device
+or dtype.
 
 ## Install a wheel variant
 

@@ -276,6 +276,11 @@ class Issue123CompletionTest(unittest.TestCase):
             "host_identity": _host_identity_token_from_raw_environment(
                 environment, salt
             ),
+            "timing_runtime_identity": {
+                "schema_version": 1,
+                "torch": "2.13.0+cpu",
+                "cuda_runtime": None,
+            },
         }
         completion._require_frozen_baseline_host(
             environment, baseline, thread, "CPU one"
@@ -288,6 +293,12 @@ class Issue123CompletionTest(unittest.TestCase):
             {"index": 1, "name": "synthetic device"},
         ]
         environment["gpu_topology"] = "synthetic topology"
+        with self.assertRaises(completion.EvidenceError):
+            completion._require_frozen_baseline_host(
+                environment, baseline, thread, "CPU one"
+            )
+        environment["torch"] = "2.13.0+cpu"
+        environment["cuda_runtime"] = None
         completion._require_frozen_baseline_host(
             environment, baseline, thread, "CPU one"
         )
@@ -296,7 +307,7 @@ class Issue123CompletionTest(unittest.TestCase):
             completion._require_frozen_baseline_host(
                 environment, baseline, thread, "CPU one"
             )
-        environment["torch"] = "2.13.0+cu130"
+        environment["torch"] = "2.13.0+cpu"
         environment["cpu_model"] = "different"
         with self.assertRaises(completion.EvidenceError):
             completion._require_frozen_baseline_host(
@@ -308,6 +319,26 @@ class Issue123CompletionTest(unittest.TestCase):
             completion._require_frozen_baseline_host(
                 environment, baseline, thread, "CPU one"
             )
+        environment["thread_environment"] = thread
+        malformed = copy.deepcopy(baseline)
+        malformed["timing_runtime_identity"]["schema_version"] = True
+        with self.assertRaises(completion.EvidenceError):
+            completion._require_frozen_baseline_host(
+                environment, malformed, thread, "CPU one"
+            )
+
+    def test_native_summary_torch_comparison_uses_strict_public_version(self):
+        self.assertTrue(
+            completion._public_torch_versions_match("2.13.0+cu130", "2.13.0+cpu")
+        )
+        self.assertFalse(
+            completion._public_torch_versions_match("2.13.1+cu130", "2.13.0+cpu")
+        )
+        for value in (None, "", "2.13.0+", "2.13.0+cu130+other"):
+            with self.subTest(value=value):
+                self.assertFalse(
+                    completion._public_torch_versions_match(value, "2.13.0+cpu")
+                )
 
     def test_pinned_release_baseline_artifacts_are_bundle_bound(self):
         manifest = copy.deepcopy(self.manifest)
@@ -669,6 +700,55 @@ class Issue123CompletionTest(unittest.TestCase):
                 "test",
             )
 
+    def test_tuning_acceptance_binds_boundary_execution_representation(self):
+        counters = {name: 0 for name in completion.COMPILER_COUNTER_FIELDS}
+        result = {
+            "diagnostics": {
+                "boundaries": {
+                    "scheduling": "external",
+                    "execution_representation": (
+                        completion.BOUNDARY_SYNC_REPRESENTATION
+                    ),
+                    "paired_real_scratch_bytes": 0,
+                }
+            },
+            "acceptance": {name: True for name in completion.TUNING_ACCEPTANCE_FIELDS},
+            "compiler": {
+                "after_cold": dict(counters),
+                "after_warmup": dict(counters),
+                "after_steady": dict(counters),
+                "steady_state_delta": dict(counters),
+                "fullgraph_clean": True,
+            },
+            "memory": {
+                "storage_addresses_before": {"state.ex": 1},
+                "storage_addresses_after": {"state.ex": 1},
+                "storage_addresses_stable": True,
+                "bounded": True,
+            },
+            "allocation_contract": {"satisfied": True},
+        }
+        completion._validate_tuning_acceptance(result, "test")
+        for malformed in (None, []):
+            with (
+                self.subTest(diagnostics=malformed),
+                self.assertRaisesRegex(
+                    completion.EvidenceError, "boundary execution diagnostics"
+                ),
+            ):
+                invalid = copy.deepcopy(result)
+                invalid["diagnostics"] = malformed
+                completion._validate_tuning_acceptance(invalid, "test")
+        extra = copy.deepcopy(result)
+        extra["diagnostics"]["boundaries"]["extra"] = True
+        with self.assertRaisesRegex(
+            completion.EvidenceError, "boundary execution diagnostics"
+        ):
+            completion._validate_tuning_acceptance(extra, "test")
+        result["diagnostics"]["boundaries"]["execution_representation"] = "tampered"
+        with self.assertRaisesRegex(completion.EvidenceError, "boundary execution"):
+            completion._validate_tuning_acceptance(result, "test")
+
     def policy_run(self, policy="dense", *, trace_policy=None, extra_trace_op=None):
         trace_policy = policy if trace_policy is None else trace_policy
         case_name = completion.POLICY_CASES[0]
@@ -714,6 +794,13 @@ class Issue123CompletionTest(unittest.TestCase):
             "diagnostics": {
                 "compile_solver_abi": completion.TORCH_SOLVER_ABI,
                 "compiled_region_topology": completion.LOCAL_COMPILED_REGION_TOPOLOGY,
+                "boundaries": {
+                    "scheduling": "external",
+                    "execution_representation": (
+                        completion.BOUNDARY_SYNC_REPRESENTATION
+                    ),
+                    "paired_real_scratch_bytes": 0,
+                },
                 "dispersive": {
                     "execution_representation": top_representation,
                     "policy_executions": executions,

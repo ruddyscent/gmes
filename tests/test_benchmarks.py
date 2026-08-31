@@ -1,3 +1,4 @@
+import copy
 import hashlib
 import importlib.util
 import json
@@ -403,6 +404,54 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
     def setUpClass(cls):
         cls.benchmark = load_torch_tuning()
         cls.manifest = cls.benchmark.load_manifest(cls.benchmark.MANIFEST)
+
+    def test_cpu_baseline_environment_requires_exact_timing_runtime(self):
+        environment = {
+            "hostname": "host",
+            "platform": "platform",
+            "python": "3.14",
+            "torch": "2.13.0+cpu",
+            "cuda_runtime": None,
+            "cpu_count": 4,
+            "cpu_affinity": [0, 1, 2, 3],
+            "cpu_count_physical_affinity": 4,
+            "cpu_topology": "topology",
+            "cpu_model": "model",
+        }
+        baseline = {
+            "environment": {
+                "hostname": "redacted",
+                "host_identity": self.benchmark.privacy_preserving_host_identity(
+                    environment, salt="a" * 64
+                ),
+                "timing_runtime_identity": {
+                    "schema_version": 1,
+                    "torch": "2.13.0+cpu",
+                    "cuda_runtime": None,
+                },
+            }
+        }
+        self.assertTrue(
+            self.benchmark._torch_baseline_environment_matches(baseline, environment)
+        )
+        for name, value in (
+            ("torch", "2.13.0+cu126"),
+            ("cuda_runtime", "12.6"),
+            ("torch", "2.13.1+cpu"),
+        ):
+            candidate = copy.deepcopy(environment)
+            candidate[name] = value
+            with self.subTest(name=name, value=value):
+                self.assertFalse(
+                    self.benchmark._torch_baseline_environment_matches(
+                        baseline, candidate
+                    )
+                )
+        malformed = copy.deepcopy(baseline)
+        malformed["environment"]["timing_runtime_identity"]["schema_version"] = True
+        self.assertFalse(
+            self.benchmark._torch_baseline_environment_matches(malformed, environment)
+        )
 
     def test_timer_restores_the_post_warmup_checkpoint_for_hidden_runs(self):
         import torch
@@ -1780,6 +1829,11 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
                 "host_identity": self.benchmark.privacy_preserving_host_identity(
                     environment(), salt=baseline_salt
                 ),
+                "timing_runtime_identity": {
+                    "schema_version": 1,
+                    "torch": "2.13",
+                    "cuda_runtime": None,
+                },
             },
             "source_artifacts": [
                 {
@@ -1921,6 +1975,13 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
                             "execution_representation": (
                                 self.benchmark.gmes.torch_fdtd.FUSED_SOURCE_REPRESENTATION
                             )
+                        },
+                        "boundaries": {
+                            "scheduling": "external",
+                            "execution_representation": (
+                                self.benchmark.gmes.torch_fdtd.BOUNDARY_SYNC_REPRESENTATION
+                            ),
+                            "paired_real_scratch_bytes": 0,
                         },
                         "pml": {"active_cells": 1 if requirements["pml"] else 0},
                         "dispersive": {
@@ -2319,6 +2380,9 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
                 "material diagnostics": lambda case: case["diagnostics"][
                     "pml"
                 ].__setitem__("active_cells", 0),
+                "boundary execution": lambda case: case["diagnostics"][
+                    "boundaries"
+                ].__setitem__("execution_representation", "tampered"),
             }
             raw_evidence_results = {}
             for label, mutate in raw_evidence_mutations.items():
@@ -2403,7 +2467,8 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             runtime_preimage[4] = "compile"
             runtime_preimage[5] = "default"
             runtime_preimage[6] = (
-                "local-two-static-half-step-regions+external-boundary-sync-v1"
+                "local-two-static-half-step-regions+external-cached-two-stage-"
+                "foreach-boundary-sync-v2"
             )
             runtime_preimage[8] = expected_representation
             runtime_preimage[18] = False
@@ -2424,6 +2489,13 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
                     ).hexdigest(),
                 },
                 "diagnostics": {
+                    "boundaries": {
+                        "scheduling": "external",
+                        "execution_representation": (
+                            self.benchmark.gmes.torch_fdtd.BOUNDARY_SYNC_REPRESENTATION
+                        ),
+                        "paired_real_scratch_bytes": 0,
+                    },
                     "dispersive": {
                         "execution_representation": expected_representation,
                         "policy_executions": [
@@ -2435,7 +2507,7 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
                                 "targets": 12,
                             }
                         ],
-                    }
+                    },
                 },
                 "acceptance": {"passed": True},
                 "measurements": {"advance": {"seconds_per_step": seconds}},
@@ -2481,6 +2553,16 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             self.assertTrue(result["all_acceptance_passed"])
             self.assertTrue(result["passed"])
 
+            samples["compact"]["diagnostics"]["boundaries"][
+                "execution_representation"
+            ] = "tampered"
+            boundary_tamper = self.benchmark._policy_matrix(
+                args, "cpu-crossover-2d", self.manifest
+            )
+            self.assertFalse(boundary_tamper["comparison_valid"])
+            self.assertFalse(boundary_tamper["passed"])
+
+            samples["compact"] = sample("compact", 1.2)
             samples["compact"]["diagnostics"]["dispersive"]["policy_executions"][0][
                 "execution_representation"
             ] = representations["dense"]
@@ -2584,6 +2666,15 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
                 "host_to_device_events": 0,
                 "device_to_host_events": 0,
             },
+            "diagnostics": {
+                "boundaries": {
+                    "scheduling": "external",
+                    "execution_representation": (
+                        self.benchmark.gmes.torch_fdtd.BOUNDARY_SYNC_REPRESENTATION
+                    ),
+                    "paired_real_scratch_bytes": 0,
+                }
+            },
             "acceptance": {"passed": True},
         }
         if region_count is not None:
@@ -2593,9 +2684,10 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
                     "geometry_object_count": region_count + 1,
                 }
             )
-            result["diagnostics"] = {
-                "material_plan": [{"launches": 3}, {"launches": 3}]
-            }
+            result["diagnostics"]["material_plan"] = [
+                {"launches": 3},
+                {"launches": 3},
+            ]
             result["region_equivalence"] = {
                 "contract_id": "material-region-launch-invariance-v1",
                 "equivalence_group": "overlapping-identical-drude-block-v1",
@@ -2634,6 +2726,14 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             representation_tamper[0]["runtime"]["paired_real"] = False
             self.assertFalse(
                 self.benchmark._paired_real_cuda_gate(representation_tamper)["passed"]
+            )
+
+            boundary_tamper = json.loads(json.dumps(results))
+            boundary_tamper[0]["diagnostics"]["boundaries"][
+                "execution_representation"
+            ] = "tampered"
+            self.assertFalse(
+                self.benchmark._paired_real_cuda_gate(boundary_tamper)["passed"]
             )
 
     def test_region_invariance_gate_binds_raw_plans_and_profiled_launches(self):
@@ -2962,6 +3062,11 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
                 "host_identity": self.benchmark.privacy_preserving_host_identity(
                     environment, salt="b" * 64
                 ),
+                "timing_runtime_identity": {
+                    "schema_version": 1,
+                    "torch": "2.13",
+                    "cuda_runtime": None,
+                },
             },
             "source_artifacts": [
                 {

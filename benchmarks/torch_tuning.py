@@ -47,6 +47,7 @@ from benchmarks.torch_cpu_baseline import (
     compare_candidate_to_baseline,
     load_torch_cpu_baseline,
     privacy_preserving_host_identity,
+    timing_runtime_identity_matches,
 )
 from benchmarks.torch_dm2 import build_case as build_dm2_case
 
@@ -810,17 +811,21 @@ def _normalized_cpu_model_identity(value):
 
 
 def _torch_baseline_environment_matches(baseline, environment):
-    reference = baseline.get("environment") if isinstance(baseline, dict) else None
-    if not isinstance(reference, dict) or not isinstance(environment, dict):
+    reference_environment = (
+        baseline.get("environment") if isinstance(baseline, dict) else None
+    )
+    if not isinstance(reference_environment, dict) or not isinstance(environment, dict):
         return False
     try:
-        reference = privacy_preserving_host_identity(reference)
+        reference = privacy_preserving_host_identity(reference_environment)
         candidate = privacy_preserving_host_identity(
             environment, salt=reference["salt"]
         )
     except KeyError, TypeError, ValueError:
         return False
-    return candidate == reference
+    return candidate == reference and timing_runtime_identity_matches(
+        reference_environment, environment
+    )
 
 
 def _torch_baseline_thread_environment_matches(baseline, environment, threads):
@@ -1394,13 +1399,35 @@ def _positive_finite(value):
     )
 
 
+def _boundary_execution_diagnostics_match(result):
+    diagnostics = result.get("diagnostics")
+    boundaries = (
+        diagnostics.get("boundaries") if isinstance(diagnostics, dict) else None
+    )
+    return (
+        isinstance(boundaries, dict)
+        and set(boundaries)
+        == {"scheduling", "execution_representation", "paired_real_scratch_bytes"}
+        and boundaries["scheduling"] == "external"
+        and boundaries["execution_representation"]
+        == gmes.torch_fdtd.BOUNDARY_SYNC_REPRESENTATION
+        and type(boundaries["paired_real_scratch_bytes"]) is int
+        and boundaries["paired_real_scratch_bytes"] >= 0
+    )
+
+
 def _tuning_timing_errors(result, label):
     errors = []
+    if not _boundary_execution_diagnostics_match(result):
+        errors.append(
+            f"{label} boundary execution diagnostics differ from the solver ABI"
+        )
     contract = result.get("benchmark_contract")
     measurements = result.get("measurements")
     summary = measurements.get("advance") if isinstance(measurements, dict) else None
     if not isinstance(contract, dict) or not isinstance(summary, dict):
-        return [f"{label} timing contract is absent"]
+        errors.append(f"{label} timing contract is absent")
+        return errors
     raw = summary.get("raw_seconds")
     repetitions = contract.get("repetitions")
     steps = contract.get("steps_per_repeat")
@@ -1413,7 +1440,8 @@ def _tuning_timing_errors(result, label):
         or len(raw) != repetitions
         or not all(_positive_finite(value) for value in raw)
     ):
-        return [f"{label} raw timing samples are invalid"]
+        errors.append(f"{label} raw timing samples are invalid")
+        return errors
     middle = median(raw)
     relative_mad = median(abs(value - middle) for value in raw) / middle
     expected = {
@@ -2581,6 +2609,8 @@ def _recompute_cpu_runtime_acceptance(candidate, manifest, expected_evidence):
     )
     transfers_zero = all(type(value) is int and value == 0 for value in transfer_counts)
     source_diagnostics = diagnostics.get("sources")
+    if not _boundary_execution_diagnostics_match(candidate):
+        errors.append("CPU boundary execution diagnostics differ from the solver ABI")
     expected_external_writes = {}
     external_indexed_writes_clean = (
         isinstance(source_diagnostics, dict)
@@ -4415,6 +4445,10 @@ def _policy_matrix(args, name, manifest, allocation_document=None):
     forced_compile_cache_keys = {}
     forced_topologies = {}
     for policy, result in results.items():
+        if not _boundary_execution_diagnostics_match(result):
+            errors.append(
+                f"{policy} boundary execution diagnostics differ from the solver ABI"
+            )
         if not _compile_cache_key_evidence_matches(result, name, policy):
             errors.append(f"{policy} compile cache preimage evidence is invalid")
     for policy, expected_representation in POLICY_EXECUTION_REPRESENTATIONS.items():

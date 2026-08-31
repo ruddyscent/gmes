@@ -136,6 +136,15 @@ class SingleGpuCudaSuiteTest(unittest.TestCase):
                 "host_to_device_events": 0,
                 "device_to_host_events": 0,
             },
+            "diagnostics": {
+                "boundaries": {
+                    "scheduling": "external",
+                    "execution_representation": (
+                        torch_tuning.gmes.torch_fdtd.BOUNDARY_SYNC_REPRESENTATION
+                    ),
+                    "paired_real_scratch_bytes": 0,
+                }
+            },
             "acceptance": {name: True for name in torch_tuning.RUNTIME_ACCEPTANCE_KEYS},
         }
 

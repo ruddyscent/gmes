@@ -220,6 +220,13 @@ contracts. It still binds the platform, Python version, PyTorch public version,
 CPU counts, affinity, topology, and normalized model. This is a public equality
 commitment, not a guarantee that a party with an independently captured
 candidate fingerprint cannot test equality.
+CPU timing adds a separate fail-closed runtime identity in the manifest. Both
+candidate slices must use exactly PyTorch `2.13.0+cpu` with no CUDA runtime;
+switching to a CUDA-enabled wheel, changing the local build suffix, or reporting
+a CUDA runtime invalidates the comparison even when the privacy-preserving host
+commitment still matches. The pinned native summary is informational and may
+use a different local PyTorch build suffix, but its public PyTorch version must
+remain exactly `2.13.0`.
 The legacy artifacts remain timing references only: their recurring allocations
 are reported, while the revised fixed-temporary and full-field-clone rules apply
 to the candidate rather than retroactively to the baseline. Neither asset is
@@ -505,6 +512,10 @@ zero final live growth and bounded repeated RSS. Every allocation matching a
 live field/domain buffer fails. Direct, registered, nonpersistent
 `state._boundary_*` scratch is inventoried and bound into the sidecar, but it
 is preallocated before profiling and never authorizes a dynamic allocation.
+The cached paired-real boundary plan stores its zero-dimensional phase views in
+that reserved fixed workspace, avoiding per-step scalar tensor allocation. The
+`paired_real_scratch_bytes` key is retained as a diagnostic compatibility name;
+it inventories reserved boundary storage rather than recurring scratch writes.
 Generated-source review must still record zero full-field/domain clone events.
 
 ```json

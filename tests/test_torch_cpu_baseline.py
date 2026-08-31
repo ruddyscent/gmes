@@ -9,6 +9,8 @@ from pathlib import Path
 from statistics import median
 from unittest.mock import patch
 
+import torch
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -211,6 +213,13 @@ class TorchCpuBaselineTest(unittest.TestCase):
     def _candidate(self, ratio=1.0):
         candidate = copy.deepcopy(self._artifact(1)["cases"][0])
         candidate["measurements"]["advance"] = self._advance([100.0 * ratio] * 15)
+        candidate["measurements"]["advance"].update(
+            {
+                "p95_seconds": 100.0 * ratio,
+                "population_stdev_seconds": 0.0,
+                "steps_per_second": 1.0 / ratio,
+            }
+        )
         candidate["profiler"]["field_buffer_sizes_bytes"] = {
             "state.Ex": 4096,
             "state.Ey": 4096,
@@ -267,6 +276,11 @@ class TorchCpuBaselineTest(unittest.TestCase):
                 "host_identity": self.baseline_module._host_identity_token_from_raw_environment(
                     self._environment(1), self._HOST_IDENTITY_SALT
                 ),
+                "timing_runtime_identity": {
+                    "schema_version": 1,
+                    "torch": "2.13.0+cpu",
+                    "cuda_runtime": None,
+                },
             },
         )
         json.dumps(baseline, allow_nan=False)
@@ -319,6 +333,117 @@ class TorchCpuBaselineTest(unittest.TestCase):
             {artifact["thread_mode"]: artifact for artifact in artifacts},
             self.baseline_module._FROZEN_SLICE_ARTIFACTS,
         )
+
+    def test_timing_runtime_identity_contract_is_exact_and_fail_closed(self):
+        expected = {
+            "schema_version": 1,
+            "torch": "2.13.0+cpu",
+            "cuda_runtime": None,
+        }
+        contract = self.baseline_module._manifest_contract(self.manifest)
+        self.assertEqual(contract["timing_runtime_identity"], expected)
+        self.assertEqual(
+            self.baseline_module.timing_runtime_identity(self._environment(1)),
+            expected,
+        )
+        torch_version_environment = self._environment(1)
+        torch_version_environment["torch"] = type(torch.__version__)("2.13.0+cpu")
+        normalized = self.baseline_module.timing_runtime_identity(
+            torch_version_environment
+        )
+        self.assertEqual(normalized, expected)
+        self.assertIs(type(normalized["torch"]), str)
+        baseline, _paths = self._load()
+        self.assertTrue(
+            self.baseline_module.timing_runtime_identity_matches(
+                baseline["environment"], self._environment(1)
+            )
+        )
+
+        cuda_build = self._environment(1)
+        cuda_build["torch"] = "2.13.0+cu126"
+        self.assertFalse(
+            self.baseline_module.timing_runtime_identity_matches(
+                baseline["environment"], cuda_build
+            )
+        )
+        cuda_runtime = self._environment(1)
+        cuda_runtime["cuda_runtime"] = "12.6"
+        self.assertFalse(
+            self.baseline_module.timing_runtime_identity_matches(
+                baseline["environment"], cuda_runtime
+            )
+        )
+        malformed = self._environment(1)
+        del malformed["cuda_runtime"]
+        self.assertFalse(
+            self.baseline_module.timing_runtime_identity_matches(
+                baseline["environment"], malformed
+            )
+        )
+        tampered = copy.deepcopy(baseline["environment"])
+        tampered["timing_runtime_identity"]["torch"] = "2.13.0+cu126"
+        self.assertFalse(
+            self.baseline_module.timing_runtime_identity_matches(
+                tampered, self._environment(1)
+            )
+        )
+
+    def test_manifest_rejects_malformed_or_different_timing_runtime_identity(self):
+        invalid_identities = (
+            None,
+            {
+                "schema_version": True,
+                "torch": "2.13.0+cpu",
+                "cuda_runtime": None,
+            },
+            {
+                "schema_version": 2,
+                "torch": "2.13.0+cpu",
+                "cuda_runtime": None,
+            },
+            {
+                "schema_version": 1,
+                "torch": "2.13.0+cpu",
+            },
+            {
+                "schema_version": 1,
+                "torch": "2.13.0+cpu",
+                "cuda_runtime": None,
+                "unexpected": False,
+            },
+            {
+                "schema_version": 1,
+                "torch": "2.13.0+cu126",
+                "cuda_runtime": None,
+            },
+            {
+                "schema_version": 1,
+                "torch": "2.13.0+cpu",
+                "cuda_runtime": "12.6",
+            },
+        )
+        for identity in invalid_identities:
+            manifest = copy.deepcopy(self.manifest)
+            manifest["performance_gates"]["cpu_acceptance"]["timing_reference"][
+                "timing_runtime_identity"
+            ] = identity
+            with self.subTest(identity=identity), self.assertRaises(ValueError):
+                self.baseline_module._manifest_contract(manifest)
+
+        missing = copy.deepcopy(self.manifest)
+        del missing["performance_gates"]["cpu_acceptance"]["timing_reference"][
+            "timing_runtime_identity"
+        ]
+        with self.assertRaisesRegex(ValueError, "timing reference schema"):
+            self.baseline_module._manifest_contract(missing)
+
+        extra = copy.deepcopy(self.manifest)
+        extra["performance_gates"]["cpu_acceptance"]["timing_reference"][
+            "unexpected"
+        ] = None
+        with self.assertRaisesRegex(ValueError, "timing reference schema"):
+            self.baseline_module._manifest_contract(extra)
 
     def test_rejects_incomplete_or_noncanonical_release_asset_schema(self):
         missing_size = copy.deepcopy(self.manifest)
@@ -563,6 +688,17 @@ class TorchCpuBaselineTest(unittest.TestCase):
             baseline,
         )
 
+    def test_public_torch_version_ignores_only_the_local_build_suffix(self):
+        self.assertEqual(
+            self.baseline_module.public_torch_version("2.13.0+cpu"), "2.13.0"
+        )
+        self.assertEqual(
+            self.baseline_module.public_torch_version("2.13.0+cu130"), "2.13.0"
+        )
+        for value in (None, "", "+cpu", "2.13.0+", "2.13.0+cpu+other"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                self.baseline_module.public_torch_version(value)
+
     def test_host_identity_rejects_stable_host_field_changes(self):
         environment = self._environment(1)
         baseline = self.baseline_module._host_identity_token_from_raw_environment(
@@ -678,6 +814,50 @@ class TorchCpuBaselineTest(unittest.TestCase):
         )
         self.assertFalse(invalid["comparison_valid"])
         self.assertTrue(invalid["contract_errors"])
+
+    def test_candidate_comparison_recomputes_full_timing_summary(self):
+        baseline, _paths = self._load()
+        candidate = self._candidate()
+        self.assertTrue(
+            self.baseline_module.compare_candidate_to_baseline(baseline, candidate)[
+                "comparison_valid"
+            ]
+        )
+        for name in (
+            "p95_seconds",
+            "population_stdev_seconds",
+            "steps_per_second",
+        ):
+            tampered = copy.deepcopy(candidate)
+            tampered["measurements"]["advance"][name] += 1.0
+            with self.subTest(name=name):
+                result = self.baseline_module.compare_candidate_to_baseline(
+                    baseline, tampered
+                )
+                self.assertFalse(result["comparison_valid"])
+                self.assertTrue(result["contract_errors"])
+
+        unexpected = copy.deepcopy(candidate)
+        unexpected["measurements"]["advance"]["unexpected"] = 1.0
+        self.assertFalse(
+            self.baseline_module.compare_candidate_to_baseline(baseline, unexpected)[
+                "comparison_valid"
+            ]
+        )
+
+        missing = copy.deepcopy(candidate)
+        del missing["measurements"]["advance"]["p95_seconds"]
+        self.assertFalse(
+            self.baseline_module.compare_candidate_to_baseline(baseline, missing)[
+                "comparison_valid"
+            ]
+        )
+
+    def test_public_baseline_advance_schema_remains_minimal(self):
+        one = self._artifact(1)
+        one["cases"][0]["measurements"]["advance"]["p95_seconds"] = 100.0
+        with self.assertRaisesRegex(ValueError, "advance measurement schema"):
+            self._load(one=one)
 
 
 if __name__ == "__main__":

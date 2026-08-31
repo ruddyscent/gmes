@@ -118,19 +118,19 @@ jobs:
           python="$GITHUB_WORKSPACE/.venv/bin/python"
           helper="$CANDIDATE_DIR/benchmarks/macos_ci_evidence.py"
           record_probe() {
+            probe_args=(record --role "$1")
             if [[ -n "$2" ]]; then
-              mode_args=(--mode "$2")
-            else
-              mode_args=()
+              probe_args+=(--mode "$2")
             fi
-            "$python" -I "$helper" record \
-              --role "$1" "${mode_args[@]}" \
-              --repository "$CANDIDATE_DIR" \
-              --forbidden-root "$CANDIDATE_DIR" \
-              --expected-package "$3" \
-              --evidence-dir "$EVIDENCE_DIR" \
-              --records-dir "$RECORDS_DIR" \
+            probe_args+=(
+              --repository "$CANDIDATE_DIR"
+              --forbidden-root "$CANDIDATE_DIR"
+              --expected-package "$3"
+              --evidence-dir "$EVIDENCE_DIR"
+              --records-dir "$RECORDS_DIR"
               --working-directory "$WORK_DIR"
+            )
+            "$python" -I "$helper" "${probe_args[@]}"
           }
           GMES_ENABLE_OPENMP=auto UV_NO_CACHE=1 uv pip install \
             --python "$python" --reinstall --no-deps "${wheels[0]}"

@@ -165,6 +165,14 @@ class NativeOracleTest(unittest.TestCase):
             "821c075b9328e02c3f3e5d16488a44b64ff08c04",
         )
         self.assertEqual(
+            timing_reference["timing_runtime_identity"],
+            {
+                "schema_version": 1,
+                "torch": "2.13.0+cpu",
+                "cuda_runtime": None,
+            },
+        )
+        self.assertEqual(
             timing_reference["slice_artifacts"],
             [
                 {
@@ -315,6 +323,50 @@ class NativeOracleTest(unittest.TestCase):
                 path.write_text(json.dumps(manifest))
                 with self.assertRaises(ValueError):
                     self.oracle.load_manifest(path)
+
+    def test_manifest_rejects_timing_runtime_identity_tampering(self):
+        mutations = (
+            None,
+            {
+                "schema_version": 1,
+                "torch": "2.13.0+cu126",
+                "cuda_runtime": None,
+            },
+            {
+                "schema_version": 1,
+                "torch": "2.13.0+cpu",
+                "cuda_runtime": "12.6",
+            },
+            {
+                "schema_version": 1,
+                "torch": "2.13.0+cpu",
+                "cuda_runtime": None,
+                "unexpected": False,
+            },
+        )
+        for identity in mutations:
+            manifest = json.loads(json.dumps(self.manifest))
+            manifest["performance_gates"]["cpu_acceptance"]["timing_reference"][
+                "timing_runtime_identity"
+            ] = identity
+            with (
+                self.subTest(identity=identity),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                path = Path(directory) / "manifest.json"
+                path.write_text(json.dumps(manifest))
+                with self.assertRaisesRegex(ValueError, "frozen baseline"):
+                    self.oracle.load_manifest(path)
+
+        manifest = json.loads(json.dumps(self.manifest))
+        del manifest["performance_gates"]["cpu_acceptance"]["timing_reference"][
+            "timing_runtime_identity"
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "manifest.json"
+            path.write_text(json.dumps(manifest))
+            with self.assertRaisesRegex(ValueError, "frozen baseline"):
+                self.oracle.load_manifest(path)
 
     def test_manifest_rejects_noncanonical_cpu_artifact_release_url(self):
         manifest = json.loads(json.dumps(self.manifest))

@@ -96,6 +96,9 @@ class CiConfigurationTest(unittest.TestCase):
             "sdist-serial-suite",
         ):
             self.assertIn(f"record_probe {role}", self.ci_workflow)
+        self.assertIn('probe_args=(record --role "$1")', self.ci_workflow)
+        self.assertIn('probe_args+=(--mode "$2")', self.ci_workflow)
+        self.assertNotIn("mode_args=(", self.ci_workflow)
         self.assertIn('"$python" -I "$helper" capture', self.ci_workflow)
         self.assertIn(upload, self.ci_workflow)
         self.assertIn(

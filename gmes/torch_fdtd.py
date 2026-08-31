@@ -74,10 +74,12 @@ class TorchConfigurationError(ValueError):
 
 
 COMPILE_MODES = ("default", "reduce-overhead", "max-autotune")
-TORCH_SOLVER_ABI = "torch-fdtd-regions-v9"
+TORCH_SOLVER_ABI = "torch-fdtd-regions-v10"
 LOCAL_COMPILED_REGION_TOPOLOGY = (
-    "local-two-static-half-step-regions+external-boundary-sync-v1"
+    "local-two-static-half-step-regions+external-cached-two-stage-foreach-"
+    "boundary-sync-v2"
 )
+BOUNDARY_SYNC_REPRESENTATION = "cached-two-stage-foreach-v1"
 DIRECT_VIEW_MUTATION_REPRESENTATION = "direct-nonoverlapping-as-strided-v1"
 DEFAULT_VIEW_MUTATION_REPRESENTATION = "slice-views-v1"
 PACKED_DM2_REPRESENTATION = "single-carry-packed-loop-v1"
@@ -886,15 +888,23 @@ class TorchSimulationState(nn.Module):
         strict: bool = True,
         assign: bool = False,
     ) -> _IncompatibleKeys:
-        """Restore grouped logical state without replacing its physical arena."""
-        if assign and hasattr(self, "_grouped_dispersive_state_names"):
+        """Restore logical state without replacing its fixed execution storage."""
+        if assign:
             raise ValueError(
-                "assign=True would detach grouped dispersive state from its fixed "
-                "execution arena; use assign=False"
+                "assign=True would replace fixed Torch simulation storage; use "
+                "assign=False"
             )
         return cast(
             _IncompatibleKeys,
             super().load_state_dict(state_dict, strict=strict, assign=assign),
+        )
+
+    def _apply(self, fn: Any, recurse: bool = True) -> Any:
+        """Reject post-construction device or dtype changes to fixed storage."""
+        del fn, recurse
+        raise TorchConfigurationError(
+            "Torch simulation state has a fixed device and dtype; construct a new "
+            "TorchSimulation instead of moving or converting its state"
         )
 
     def field(self, component: str | type[object]) -> torch.Tensor:
@@ -1724,6 +1734,7 @@ class TorchSimulation:
             if self._direct_view_mutations
             else DEFAULT_VIEW_MUTATION_REPRESENTATION
         )
+        self._boundary_sync_stage_cache: dict[tuple[Any, ...], Any] = {}
         z_collapsed = (
             shapes["Ez"][2] == 1
             and bloch is None
@@ -2188,29 +2199,24 @@ class TorchSimulation:
         length = (self.plan.shapes[name][axis] - 1) * self.plan.dr[axis]
         return direction * self.plan.bloch[axis] * length
 
-    @staticmethod
-    def _rotate_or_copy(destination: Any, source: Any, angle: Any, scratch: Any) -> Any:
-        if scratch is not None:
-            scratch.copy_(source)
-            source = scratch
-        if angle is None:
-            destination.copy_(source)
-            return
-        cosine = float(np.cos(angle))
-        sine = float(np.sin(angle))
-        destination[..., 0].copy_(source[..., 0]).mul_(cosine)
-        destination[..., 0].add_(source[..., 1], alpha=-sine)
-        destination[..., 1].copy_(source[..., 0]).mul_(sine)
-        destination[..., 1].add_(source[..., 1], alpha=cosine)
-
-    def _sync_boundary_family(
+    def _boundary_sync_stages(
         self, names: Any, *, high_from_low: Any, skip_axis: Any = None
     ) -> Any:
+        key = (tuple(names), bool(high_from_low), skip_axis)
+        cached = self._boundary_sync_stage_cache.get(key)
+        if cached is not None:
+            return cached
+        stages: list[list[tuple[Any, Any, Any]]] = [[], []]
         for name in names:
             component_axis = ("x", "y", "z").index(name[1].lower())
             field = self.state.field(name)
+            if field.numel() == 0:
+                continue
+            stage = 0
             for axis in range(3):
                 if axis == component_axis or axis == skip_axis:
+                    continue
+                if self.plan.shapes[name][axis] <= 1:
                     continue
                 destination_index = -1 if high_from_low else 0
                 source_index = 0 if high_from_low else -1
@@ -2225,12 +2231,53 @@ class TorchSimulation:
                     source_slice[axis] = source_index
                     destination = field[tuple(destination_slice)]
                     source = field[tuple(source_slice)]
-                self._rotate_or_copy(
-                    destination,
-                    source,
-                    self._boundary_angle(name, axis, direction),
-                    getattr(self.state, f"_boundary_{name.lower()}_{axis}", None),
+                angle = self._boundary_angle(name, axis, direction)
+                if angle is not None:
+                    destination = torch.view_as_complex(destination)
+                    source = torch.view_as_complex(source)
+                    phase_storage = getattr(
+                        self.state, f"_boundary_{name.lower()}_{axis}"
+                    ).reshape(-1, 2)[0]
+                    phase_storage[0].fill_(float(np.cos(angle)))
+                    phase_storage[1].fill_(float(np.sin(angle)))
+                    phase = torch.view_as_complex(phase_storage)
+                else:
+                    phase = None
+                stages[stage].append(
+                    (
+                        destination,
+                        source,
+                        phase,
+                    )
                 )
+                stage += 1
+        cached = tuple(
+            (
+                tuple(operation[0] for operation in stage),
+                tuple(operation[1] for operation in stage),
+                (
+                    tuple(operation[2] for operation in stage)
+                    if stage[0][2] is not None
+                    else None
+                ),
+            )
+            for stage in stages
+            if stage
+        )
+        self._boundary_sync_stage_cache[key] = cached
+        return cached
+
+    def _sync_boundary_family(
+        self, names: Any, *, high_from_low: Any, skip_axis: Any = None
+    ) -> Any:
+        for destinations, sources, phases in self._boundary_sync_stages(
+            names,
+            high_from_low=high_from_low,
+            skip_axis=skip_axis,
+        ):
+            torch._foreach_copy_(destinations, sources)
+            if phases is not None:
+                torch._foreach_mul_(destinations, phases)
 
     def _sync_electric_boundaries(self, *, skip_axis: Any = None) -> Any:
         self._sync_boundary_family(
@@ -2793,6 +2840,7 @@ class TorchSimulation:
         }
         result["boundaries"] = {
             "scheduling": "external",
+            "execution_representation": BOUNDARY_SYNC_REPRESENTATION,
             "paired_real_scratch_bytes": sum(
                 value.numel() * value.element_size()
                 for name, value in self.state.named_buffers()

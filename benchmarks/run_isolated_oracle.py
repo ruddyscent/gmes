@@ -8,6 +8,11 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+_NATIVE_PROGRESS_PREFIXES = (
+    "Estimated time of completion:",
+    "Elapsed time:",
+)
+
 
 def sanitized_environment():
     """Prevent imports from the controller checkout or user site packages."""
@@ -17,6 +22,26 @@ def sanitized_environment():
     environment["PYTHONNOUSERSITE"] = "1"
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
     return environment
+
+
+def load_capture_stdout(stdout):
+    """Load the final JSON document after known native progress messages."""
+    lines = stdout.splitlines()
+    try:
+        document_start = lines.index("{")
+    except ValueError as error:
+        raise ValueError("native capture stdout has no JSON document") from error
+    unexpected = [
+        line
+        for line in lines[:document_start]
+        if line and not line.startswith(_NATIVE_PROGRESS_PREFIXES)
+    ]
+    if unexpected:
+        raise ValueError(f"unexpected native capture stdout: {unexpected[0]!r}")
+    document = json.loads("\n".join(lines[document_start:]))
+    if not isinstance(document, dict):
+        raise ValueError("native capture stdout JSON is not an object")
+    return document
 
 
 def run_capture(checkout, python, manifest, case, output):
@@ -60,7 +85,7 @@ def run_capture(checkout, python, manifest, case, output):
         "case": case,
         "output": str(output),
         "command": command,
-        "capture": json.loads(result.stdout),
+        "capture": load_capture_stdout(result.stdout),
     }
 
 

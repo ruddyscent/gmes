@@ -1029,6 +1029,18 @@ class NativeOracleTest(unittest.TestCase):
             )
             self.assertTrue(output.is_file())
 
+    def test_isolated_runner_accepts_known_native_progress_before_json(self):
+        document = self.isolated.load_capture_stdout(
+            "Estimated time of completion: 0:00:00\n"
+            "Elapsed time: 0:00:00.01 (455 timesteps)\n"
+            '{\n  "schema_version": 2\n}\n'
+        )
+        self.assertEqual(document, {"schema_version": 2})
+
+    def test_isolated_runner_rejects_unexpected_stdout_before_json(self):
+        with self.assertRaisesRegex(ValueError, "unexpected native capture stdout"):
+            self.isolated.load_capture_stdout('untrusted output\n{\n  "ok": true\n}\n')
+
     def test_capture_rejects_import_outside_requested_checkout(self):
         spec = dict(self.oracle.find_case(self.manifest, "dielectric-1d"))
         manifest = json.loads(json.dumps(self.manifest))

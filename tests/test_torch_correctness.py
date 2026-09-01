@@ -251,6 +251,65 @@ class TorchCorrectnessTest(unittest.TestCase):
         self.assertFalse(result["passed"])
         self.assertEqual(result["failures"][0]["key"], "candidate/archive-contract")
 
+    def test_live_source_clock_corruption_fails_closed(self):
+        manifest = self._small_manifest(("gaussian-auxiliary",))
+        with tempfile.TemporaryDirectory() as directory:
+            reference, candidate = self._capture_pair(
+                directory, manifest, "gaussian-auxiliary"
+            )
+            keys = (
+                "torch/step/1/state/source_time",
+                "torch/step/1/auxiliary/0/state/source_time",
+            )
+            for ordinal, key in enumerate(keys):
+                with self.subTest(key=key):
+                    output = Path(directory) / f"corrupted-clock-{ordinal}.npz"
+                    with np.load(candidate, allow_pickle=False) as archive:
+                        arrays = {name: archive[name].copy() for name in archive.files}
+                        metadata = native_oracle.read_metadata(archive)
+                    arrays[key] = arrays[key] + np.asarray(1, dtype=arrays[key].dtype)
+                    metadata["backend_metadata"]["torch_arrays"][key] = (
+                        torch_correctness._array_descriptor(arrays[key])
+                    )
+                    arrays["metadata.json"] = np.asarray(
+                        json.dumps(metadata, sort_keys=True)
+                    )
+                    np.savez_compressed(output, **arrays)
+                    result = torch_correctness.compare_torch_archives(
+                        reference, output, manifest
+                    )
+                    self.assertFalse(result["passed"])
+                    self.assertEqual(
+                        result["failures"][0]["key"],
+                        "candidate/archive-contract",
+                    )
+
+            output = Path(directory) / "corrupted-consistent-clock.npz"
+            with np.load(candidate, allow_pickle=False) as archive:
+                arrays = {name: archive[name].copy() for name in archive.files}
+                metadata = native_oracle.read_metadata(archive)
+            prefix = "torch/step/1/state"
+            count_key = f"{prefix}/step_count"
+            source_time_key = f"{prefix}/source_time"
+            time_step_key = f"{prefix}/time_step"
+            arrays[count_key] += 1
+            arrays[source_time_key] = np.multiply(
+                arrays[count_key].astype(arrays[source_time_key].dtype),
+                arrays[time_step_key],
+                dtype=arrays[source_time_key].dtype,
+            )
+            for key in (count_key, source_time_key):
+                metadata["backend_metadata"]["torch_arrays"][key] = (
+                    torch_correctness._array_descriptor(arrays[key])
+                )
+            arrays["metadata.json"] = np.asarray(json.dumps(metadata, sort_keys=True))
+            np.savez_compressed(output, **arrays)
+            result = torch_correctness.compare_torch_archives(
+                reference, output, manifest
+            )
+            self.assertFalse(result["passed"])
+            self.assertEqual(result["failures"][0]["key"], "candidate/archive-contract")
+
     def test_native_step_zero_descriptor_corruption_fails_closed(self):
         manifest = self._small_manifest(("dcp-plrc-bloch",))
         with tempfile.TemporaryDirectory() as directory:

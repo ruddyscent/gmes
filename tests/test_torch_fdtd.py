@@ -11,6 +11,7 @@ import numpy as np
 import torch
 
 import gmes
+from benchmarks import issue123_completion
 from gmes.torch_dm2 import (
     DM2_ITERATIONS_PER_CHUNK,
     DM2_MAX_ITERATIONS,
@@ -178,7 +179,8 @@ class TorchRuntimeConfigTest(unittest.TestCase):
             )
 
     def test_compile_cache_key_tracks_execution_specialization(self):
-        self.assertEqual(TORCH_SOLVER_ABI, "torch-fdtd-regions-v11")
+        self.assertEqual(TORCH_SOLVER_ABI, "torch-fdtd-regions-v12")
+        self.assertEqual(issue123_completion.TORCH_SOLVER_ABI, TORCH_SOLVER_ABI)
         self.assertEqual(PACKED_DM2_REPRESENTATION, "single-carry-packed-loop-v2")
         self.assertEqual(DM2_PACKED_ITERATIONS_PER_CONDITION, 3)
         common = {

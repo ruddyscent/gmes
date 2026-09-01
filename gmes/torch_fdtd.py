@@ -75,7 +75,7 @@ class TorchConfigurationError(ValueError):
 
 
 COMPILE_MODES = ("default", "reduce-overhead", "max-autotune")
-TORCH_SOLVER_ABI = "torch-fdtd-regions-v11"
+TORCH_SOLVER_ABI = "torch-fdtd-regions-v12"
 LOCAL_COMPILED_REGION_TOPOLOGY = (
     "local-two-static-half-step-regions+external-cached-two-stage-foreach-"
     "boundary-sync-v2"
@@ -2508,8 +2508,13 @@ class TorchSimulation:
                     electric=False,
                     time=self.state.source_time + self.state.time_step,
                 )
-            self.state.source_time.add_(self.state.time_step)
             self.state.step_count.add_(self.state._step_increment)
+            # Native TimeStep derives time from the integer step after every
+            # half-step. Recompute it here instead of accumulating roundoff in
+            # long-running source oscillators and nested auxiliary solvers.
+            self.state.source_time.copy_(self.state.step_count).mul_(
+                self.state.time_step
+            )
         return self
 
     def step(self) -> Self:
@@ -2576,6 +2581,11 @@ class TorchSimulation:
             self.sources.auxiliaries, auxiliaries, strict=True
         ):
             auxiliary.load_checkpoint(values)
+        # Version 1 checkpoints may have been produced by runtimes that
+        # accumulated source_time. Canonicalize before any restored source is
+        # evaluated so the first resumed step uses the native n * dt clock.
+        # Nested auxiliaries normalize themselves in their load calls above.
+        self.state.source_time.copy_(self.state.step_count).mul_(self.state.time_step)
         self.probes.load_checkpoint(checkpoint["probes"])
         return self
 

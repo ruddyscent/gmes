@@ -1108,6 +1108,37 @@ def _input_step_zero_contract_complete(contract, manifest):
         return False
 
 
+def _validate_live_clock(archive, prefix, precision, canonical_time):
+    step_count = np.asarray(archive[f"{prefix}/step_count"])
+    source_time = np.asarray(archive[f"{prefix}/source_time"])
+    time_step = np.asarray(archive[f"{prefix}/time_step"])
+    clock_dtype = np.dtype(precision)
+    if (
+        step_count.shape != ()
+        or step_count.dtype != np.dtype("int64")
+        or int(step_count) < 0
+        or source_time.shape != ()
+        or time_step.shape != ()
+        or source_time.dtype != clock_dtype
+        or time_step.dtype != clock_dtype
+        or not bool(np.isfinite(source_time))
+        or not bool(np.isfinite(time_step))
+        or float(time_step) <= 0.0
+    ):
+        raise ValueError(f"Torch live clock is invalid: {prefix}")
+    expected = np.multiply(step_count.astype(clock_dtype), time_step, dtype=clock_dtype)
+    canonical_time = np.asarray(canonical_time)
+    if canonical_time.shape != (3,):
+        raise ValueError(f"Torch canonical clock is invalid: {prefix}")
+    canonical_dt = np.asarray(canonical_time[2], dtype=clock_dtype)
+    if (
+        float(canonical_time[0]) != int(step_count)
+        or not np.array_equal(time_step, canonical_dt)
+        or not np.array_equal(source_time, expected)
+    ):
+        raise ValueError(f"Torch live clock differs from canonical n * dt: {prefix}")
+
+
 def _validate_torch_candidate_archive(archive, manifest):
     metadata = native_oracle._validate_archive(
         _BaseArchiveView(archive), manifest, "candidate"
@@ -1226,6 +1257,20 @@ def _validate_torch_candidate_archive(archive, manifest):
     for step in expected_steps:
         if not any(key.startswith(f"torch/step/{step}/state/") for key in torch_keys):
             raise ValueError(f"Torch raw state arrays are absent for step {step}")
+        _validate_live_clock(
+            archive,
+            f"torch/step/{step}/state",
+            backend["precision"],
+            archive[f"step/{step}/time"],
+        )
+        auxiliaries = metadata["steps"][step]["sources"]["auxiliary"]
+        for ordinal, record in enumerate(auxiliaries):
+            _validate_live_clock(
+                archive,
+                f"torch/step/{step}/auxiliary/{ordinal}/state",
+                backend["precision"],
+                archive[f"step/{step}/source_aux/{ordinal}-{record['source']}/time"],
+            )
         for component in COMPONENT_NAMES:
             if archive[f"step/{step}/field/{component}"].dtype != expected_field_dtype:
                 raise ValueError(

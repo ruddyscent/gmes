@@ -111,9 +111,11 @@ class TorchPointSourceTest(unittest.TestCase):
         native, simulation = _native_and_torch(_point_sources, size=(2, 2, 2))
         _assert_fields(self, native, simulation, 5)
         self.assertEqual(int(simulation.state.step_count), 5)
-        self.assertAlmostEqual(
-            float(simulation.state.source_time), 5 * simulation.plan.dt
-        )
+        source_time_address = simulation.state.source_time.data_ptr()
+        simulation.advance(95)
+        self.assertEqual(int(simulation.state.step_count), 100)
+        self.assertEqual(float(simulation.state.source_time), 100 * simulation.plan.dt)
+        self.assertEqual(simulation.state.source_time.data_ptr(), source_time_address)
 
     def test_compiled_material_phases_keep_source_storage_fixed(self):
         native, simulation = _native_and_torch(
@@ -124,6 +126,7 @@ class TorchPointSourceTest(unittest.TestCase):
         addresses = simulation.buffer_addresses()
         _assert_fields(self, native, simulation, 4)
         self.assertEqual(addresses, simulation.buffer_addresses())
+        self.assertEqual(float(simulation.state.source_time), 4 * simulation.plan.dt)
         self.assertEqual(
             simulation.diagnostics()["sources"]["execution_representation"],
             FUSED_SOURCE_REPRESENTATION,
@@ -303,7 +306,20 @@ class TorchTransparentSourceTest(unittest.TestCase):
         simulation.advance(2)
         expected_fields = simulation.host_snapshot()
         expected_auxiliary = auxiliary.host_snapshot()
-        simulation.load_checkpoint(checkpoint).advance(2)
+        checkpoint["state"]["source_time"] = checkpoint["state"]["source_time"] + 1
+        checkpoint["auxiliaries"][0]["state"]["source_time"] = (
+            checkpoint["auxiliaries"][0]["state"]["source_time"] - 1
+        )
+        simulation.load_checkpoint(checkpoint)
+        self.assertEqual(
+            float(simulation.state.source_time),
+            int(simulation.state.step_count) * simulation.plan.dt,
+        )
+        self.assertEqual(
+            float(auxiliary.state.source_time),
+            int(auxiliary.state.step_count) * auxiliary.plan.dt,
+        )
+        simulation.advance(2)
         for name in _COMPONENTS:
             np.testing.assert_array_equal(
                 simulation.host_snapshot()[name], expected_fields[name]
@@ -342,7 +358,24 @@ class TorchTransparentSourceTest(unittest.TestCase):
     def test_gaussian_mode_prewarm_and_envelope_match_native(self):
         native, simulation = _native_and_torch(lambda: [_gaussian()], size=(3, 3, 3))
         self.assertGreater(int(simulation.sources.auxiliaries[0].state.step_count), 0)
-        _assert_fields(self, native, simulation, 3)
+        _assert_fields(self, native, simulation, 100)
+
+        native_auxiliary = native.src_list[0].aux_fdtd.aux_fdtd
+        torch_auxiliary = simulation.sources.auxiliaries[0]
+        actual = torch_auxiliary.host_snapshot()
+        for name in ("Ex", "Hy"):
+            np.testing.assert_allclose(
+                actual[name],
+                native_auxiliary.field[getattr(gmes, name)],
+                rtol=2e-12,
+                atol=1e-12,
+                err_msg=name,
+            )
+        step_count = int(torch_auxiliary.state.step_count)
+        self.assertEqual(
+            float(torch_auxiliary.state.source_time),
+            step_count * torch_auxiliary.plan.dt,
+        )
 
 
 class TorchBoundaryTest(unittest.TestCase):

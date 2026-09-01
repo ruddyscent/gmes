@@ -237,7 +237,10 @@ The first 16 windows are a fixed stabilization phase. The remaining 12 windows
 form two non-overlapping six-window evaluation blocks. A run is bounded only
 when its upward excursion from the first evaluation sample is at most 1 MiB
 and an exact one-sided permutation test does not report a positive-order trend
-in both blocks. Downward returns remain in the absolute-envelope diagnostics;
+in both blocks. Linux probes use the `proc-self-statm-preadv-v1` provider,
+which keeps `/proc/self/statm` open and reuses one fixed buffer and iovec for
+every window after one prevalidation read outside the measured windows.
+Downward returns remain in the absolute-envelope diagnostics;
 they are not treated as leaks, and unavailable measurements fail closed.
 Linux reads `/proc/self/statm`; Darwin uses `proc_pid_rusage` only after its
 byte value is validated against a `ps` KiB reference within the same 1 MiB bound.

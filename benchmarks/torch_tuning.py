@@ -21,6 +21,7 @@ import time
 from collections import Counter
 from pathlib import Path
 from statistics import median, pstdev
+from threading import Lock
 
 import numpy as np
 import torch
@@ -127,6 +128,8 @@ CPU_RSS_LIMIT_BYTES = 1024 * 1024
 CPU_RSS_STABILIZATION_WINDOWS = 16
 CPU_RSS_EVALUATION_BLOCK_WINDOWS = 6
 CPU_RSS_EVALUATION_BLOCKS = 2
+LINUX_PROC_STATM_BUFFER_BYTES = 256
+INT64_MAX = (1 << 63) - 1
 RUNTIME_ACCEPTANCE_KEYS = (
     "compiler_clean",
     "compiled_hot_path_complete",
@@ -231,24 +234,170 @@ def _current_rss_bytes():
     """Return current resident memory on supported CPU acceptance hosts."""
     system = platform.system()
     if system == "Linux":
+        reader = _LinuxProcStatmReader()
         try:
-            fields = Path("/proc/self/statm").read_text(encoding="ascii").split()
-            return int(fields[1]) * int(os.sysconf("SC_PAGE_SIZE"))
-        except IndexError, OSError, ValueError:
-            return None
+            return reader()
+        finally:
+            reader.close()
     if system == "Darwin":
         return _darwin_proc_pid_rusage_bytes()
     return None
+
+
+class _LinuxProcStatmReader:
+    """Read Linux RSS with probe-scoped, allocation-stable storage."""
+
+    _WHITESPACE = (9, 10, 11, 12, 13, 32)
+
+    def __init__(self):
+        self._buffer = bytearray(LINUX_PROC_STATM_BUFFER_BYTES)
+        self._view = memoryview(self._buffer)
+        self._iov = (self._view,)
+        self._lock = Lock()
+        self._pid = os.getpid()
+        self._fd = None
+        self._closed = False
+        preadv = getattr(os, "preadv", None)
+        self._preadv = preadv if callable(preadv) else None
+        try:
+            page_size = os.sysconf("SC_PAGE_SIZE")
+        except OSError, ValueError:
+            page_size = None
+        self._page_size = (
+            page_size if type(page_size) is int and page_size > 0 else None
+        )
+        maximum_resident_pages = (
+            INT64_MAX // self._page_size if self._page_size is not None else None
+        )
+        if maximum_resident_pages is None:
+            self._maximum_resident_pages_tens = None
+            self._maximum_resident_pages_ones = None
+        else:
+            (
+                self._maximum_resident_pages_tens,
+                self._maximum_resident_pages_ones,
+            ) = divmod(maximum_resident_pages, 10)
+        if self._page_size is not None and self._preadv is not None:
+            self._open()
+
+    def _open(self):
+        read_only = getattr(os, "O_RDONLY", None)
+        close_on_exec = getattr(os, "O_CLOEXEC", None)
+        if type(read_only) is not int or type(close_on_exec) is not int:
+            self._fd = None
+            return
+        try:
+            self._fd = os.open(
+                "/proc/self/statm",
+                read_only | close_on_exec,
+            )
+        except AttributeError, OSError:
+            self._fd = None
+
+    def _close_fd(self):
+        fd = self._fd
+        self._fd = None
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+    def _reset_for_pid(self, pid):
+        self._pid = pid
+        self._lock = Lock()
+        self._close_fd()
+        if (
+            not self._closed
+            and self._page_size is not None
+            and self._preadv is not None
+        ):
+            self._open()
+
+    @staticmethod
+    def _resident_pages(buffer, length, maximum_tens, maximum_ones):
+        index = 0
+        while index < length and buffer[index] in _LinuxProcStatmReader._WHITESPACE:
+            index += 1
+        first_start = index
+        while index < length and 48 <= buffer[index] <= 57:
+            index += 1
+        if (
+            index == first_start
+            or index == length
+            or buffer[index] not in _LinuxProcStatmReader._WHITESPACE
+        ):
+            return None
+        while index < length and buffer[index] in _LinuxProcStatmReader._WHITESPACE:
+            index += 1
+        second_start = index
+        value = 0
+        while index < length and 48 <= buffer[index] <= 57:
+            digit = buffer[index] - 48
+            if value > maximum_tens or (value == maximum_tens and digit > maximum_ones):
+                return None
+            value = value * 10 + digit
+            index += 1
+        if index == second_start:
+            return None
+        if index == length or buffer[index] not in _LinuxProcStatmReader._WHITESPACE:
+            return None
+        return value
+
+    def __call__(self):
+        pid = os.getpid()
+        if pid != self._pid:
+            self._reset_for_pid(pid)
+        with self._lock:
+            if (
+                self._closed
+                or self._fd is None
+                or self._page_size is None
+                or self._preadv is None
+            ):
+                return None
+            try:
+                length = self._preadv(self._fd, self._iov, 0)
+            except AttributeError, OSError:
+                self._close_fd()
+                return None
+            if type(length) is not int or length <= 0 or length >= len(self._buffer):
+                self._close_fd()
+                return None
+            resident_pages = _LinuxProcStatmReader._resident_pages(
+                self._buffer,
+                length,
+                self._maximum_resident_pages_tens,
+                self._maximum_resident_pages_ones,
+            )
+            if resident_pages is None:
+                self._close_fd()
+                return None
+            return resident_pages * self._page_size
+
+    def close(self):
+        """Close the probe-scoped descriptor once without raising."""
+        pid = os.getpid()
+        if pid != self._pid:
+            self._pid = pid
+            self._lock = Lock()
+        with self._lock:
+            self._closed = True
+            self._close_fd()
 
 
 def _current_rss_provider():
     """Select and document a current-RSS provider for one probe process."""
     system = platform.system()
     if system == "Linux":
-        return _current_rss_bytes, {
-            "name": "proc-self-statm",
+        reader = _LinuxProcStatmReader()
+        validated = reader() is not None
+        if not validated:
+            reader.close()
+        return reader, {
+            "name": "proc-self-statm-preadv-v1",
             "units": "bytes",
-            "validated": True,
+            "validated": validated,
         }
     if system == "Darwin":
         direct_before = _darwin_proc_pid_rusage_bytes()
@@ -418,21 +567,26 @@ def _cpu_memory_plateau_probe(simulation, steps):
     )
     readings = np.empty((window_count, 2), dtype=np.int64)
     read_rss, provider = _current_rss_provider()
-    for index in range(window_count):
-        before = read_rss()
-        if before is None:
-            result = _evaluate_cpu_rss_plateau(())
-            result["measurement_provider"] = provider
-            return result
-        simulation.advance(probe_steps)
-        _synchronize(simulation.device)
-        after = read_rss()
-        if after is None:
-            result = _evaluate_cpu_rss_plateau(())
-            result["measurement_provider"] = provider
-            return result
-        readings[index, 0] = before
-        readings[index, 1] = after
+    try:
+        for index in range(window_count):
+            before = read_rss()
+            if before is None:
+                result = _evaluate_cpu_rss_plateau(())
+                result["measurement_provider"] = provider
+                return result
+            simulation.advance(probe_steps)
+            _synchronize(simulation.device)
+            after = read_rss()
+            if after is None:
+                result = _evaluate_cpu_rss_plateau(())
+                result["measurement_provider"] = provider
+                return result
+            readings[index, 0] = before
+            readings[index, 1] = after
+    finally:
+        close = getattr(read_rss, "close", None)
+        if close is not None:
+            close()
     samples = [
         {"before_bytes": int(before), "after_bytes": int(after)}
         for before, after in readings
@@ -2292,7 +2446,7 @@ def _rss_provider_valid(provider):
     if not isinstance(provider, dict):
         return False
     common = provider.get("units") == "bytes" and provider.get("validated") is True
-    if provider.get("name") == "proc-self-statm":
+    if provider.get("name") == "proc-self-statm-preadv-v1":
         return common and set(provider) == {"name", "units", "validated"}
     if provider.get("name") != "proc-pid-rusage-v0" or not common:
         return False

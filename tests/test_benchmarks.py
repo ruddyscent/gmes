@@ -517,16 +517,375 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
         self.assertEqual(simulation.sample_starts, [0, 5] * 3)
 
     def test_current_rss_reads_linux_proc_resident_pages(self):
+        class Reader:
+            closed = False
+
+            def __call__(self):
+                return 42 * 4096
+
+            def close(self):
+                self.closed = True
+
+        reader = Reader()
         with (
             patch.object(self.benchmark.platform, "system", return_value="Linux"),
             patch.object(
-                self.benchmark.Path,
-                "read_text",
-                return_value="1000 42 7 0 0 0 0\n",
-            ),
-            patch.object(self.benchmark.os, "sysconf", return_value=4096),
+                self.benchmark,
+                "_LinuxProcStatmReader",
+                return_value=reader,
+            ) as reader_type,
         ):
             self.assertEqual(self.benchmark._current_rss_bytes(), 42 * 4096)
+        reader_type.assert_called_once_with()
+        self.assertTrue(reader.closed)
+
+    def test_linux_proc_statm_reader_reuses_fd_buffer_and_zero_offset(self):
+        payloads = iter(
+            (
+                b"1000 42 7 0 0 0 0\n",
+                b"\t1000 \t 0  7 0 0 0 0\n",
+            )
+        )
+        calls = []
+
+        def preadv(fd, iov, offset):
+            payload = next(payloads)
+            calls.append((fd, iov, iov[0], offset))
+            iov[0][: len(payload)] = payload
+            return len(payload)
+
+        with (
+            patch.object(self.benchmark.os, "getpid", return_value=321),
+            patch.object(self.benchmark.os, "sysconf", return_value=4096),
+            patch.object(self.benchmark.os, "open", return_value=17) as open_file,
+            patch.object(
+                self.benchmark.os,
+                "preadv",
+                side_effect=preadv,
+                create=True,
+            ),
+            patch.object(self.benchmark.os, "close") as close_file,
+        ):
+            reader = self.benchmark._LinuxProcStatmReader()
+            self.assertEqual(reader(), 42 * 4096)
+            self.assertEqual(reader(), 0)
+            reader.close()
+            reader.close()
+
+        open_file.assert_called_once_with(
+            "/proc/self/statm",
+            self.benchmark.os.O_RDONLY | self.benchmark.os.O_CLOEXEC,
+        )
+        self.assertEqual([item[0] for item in calls], [17, 17])
+        self.assertEqual([item[3] for item in calls], [0, 0])
+        self.assertIs(calls[0][1], calls[1][1])
+        self.assertIs(calls[0][2], calls[1][2])
+        close_file.assert_called_once_with(17)
+
+    def test_linux_proc_statm_reader_repeats_real_proc_reads(self):
+        if platform.system() != "Linux" or not hasattr(self.benchmark.os, "preadv"):
+            self.skipTest("Linux preadv is required")
+        reader = self.benchmark._LinuxProcStatmReader()
+        fd = reader._fd
+        iov = reader._iov
+        try:
+            first = reader()
+            second = reader()
+            self.assertEqual(reader._fd, fd)
+            self.assertIs(reader._iov, iov)
+        finally:
+            reader.close()
+        self.assertIs(type(first), int)
+        self.assertIs(type(second), int)
+        self.assertGreaterEqual(first, 0)
+        self.assertGreaterEqual(second, 0)
+
+    def test_linux_proc_statm_reader_rejects_malformed_or_truncated_data(self):
+        cases = (
+            ("empty", b""),
+            ("missing-resident", b"1000\n"),
+            ("empty-resident", b"1000 \t\n"),
+            ("truncated-resident", b"1000 42"),
+            ("signed-size", b"-1000 42\n"),
+            ("signed-resident", b"1000 -42\n"),
+            ("positive-sign", b"1000 +42\n"),
+            ("nondigit", b"1000 nope\n"),
+            ("trailing-nondigit", b"1000 42x\n"),
+            (
+                "full-buffer",
+                b"1" * self.benchmark.LINUX_PROC_STATM_BUFFER_BYTES,
+            ),
+        )
+        for name, payload in cases:
+            with self.subTest(name=name):
+
+                def preadv(_fd, iov, _offset):
+                    iov[0][: len(payload)] = payload
+                    return len(payload)
+
+                with (
+                    patch.object(self.benchmark.os, "getpid", return_value=321),
+                    patch.object(self.benchmark.os, "sysconf", return_value=4096),
+                    patch.object(self.benchmark.os, "open", return_value=17),
+                    patch.object(
+                        self.benchmark.os,
+                        "preadv",
+                        side_effect=preadv,
+                        create=True,
+                    ),
+                    patch.object(self.benchmark.os, "close") as close_file,
+                ):
+                    reader = self.benchmark._LinuxProcStatmReader()
+                    self.assertIsNone(reader())
+                    reader.close()
+                close_file.assert_called_once_with(17)
+
+    def test_linux_proc_statm_reader_fails_closed_for_provider_errors(self):
+        with (
+            patch.object(self.benchmark.os, "getpid", return_value=321),
+            patch.object(self.benchmark.os, "sysconf", side_effect=OSError),
+            patch.object(self.benchmark.os, "open") as open_file,
+        ):
+            reader = self.benchmark._LinuxProcStatmReader()
+            self.assertIsNone(reader())
+            reader.close()
+        open_file.assert_not_called()
+
+        for page_size in (0, -1):
+            with self.subTest(page_size=page_size):
+                with (
+                    patch.object(self.benchmark.os, "getpid", return_value=321),
+                    patch.object(
+                        self.benchmark.os,
+                        "sysconf",
+                        return_value=page_size,
+                    ),
+                    patch.object(self.benchmark.os, "open") as open_file,
+                ):
+                    reader = self.benchmark._LinuxProcStatmReader()
+                    self.assertIsNone(reader())
+                    reader.close()
+                open_file.assert_not_called()
+
+        with (
+            patch.object(self.benchmark.os, "getpid", return_value=321),
+            patch.object(self.benchmark.os, "sysconf", return_value=4096),
+            patch.object(
+                self.benchmark.os,
+                "preadv",
+                return_value=0,
+                create=True,
+            ),
+            patch.object(self.benchmark.os, "open", side_effect=OSError),
+        ):
+            reader = self.benchmark._LinuxProcStatmReader()
+            self.assertIsNone(reader())
+            reader.close()
+
+        with (
+            patch.object(self.benchmark.os, "getpid", return_value=321),
+            patch.object(self.benchmark.os, "sysconf", return_value=4096),
+            patch.object(
+                self.benchmark.os,
+                "preadv",
+                None,
+                create=True,
+            ),
+            patch.object(self.benchmark.os, "open") as open_file,
+        ):
+            reader = self.benchmark._LinuxProcStatmReader()
+            self.assertIsNone(reader())
+            reader.close()
+        open_file.assert_not_called()
+
+        with (
+            patch.object(self.benchmark.os, "getpid", return_value=321),
+            patch.object(self.benchmark.os, "sysconf", return_value=4096),
+            patch.object(
+                self.benchmark.os,
+                "preadv",
+                return_value=0,
+                create=True,
+            ),
+            patch.object(
+                self.benchmark.os,
+                "O_CLOEXEC",
+                None,
+                create=True,
+            ),
+            patch.object(self.benchmark.os, "open") as open_file,
+        ):
+            reader = self.benchmark._LinuxProcStatmReader()
+            self.assertIsNone(reader())
+            reader.close()
+        open_file.assert_not_called()
+
+        for error in (OSError, AttributeError):
+            with self.subTest(preadv_error=error.__name__):
+                with (
+                    patch.object(self.benchmark.os, "getpid", return_value=321),
+                    patch.object(self.benchmark.os, "sysconf", return_value=4096),
+                    patch.object(self.benchmark.os, "open", return_value=17),
+                    patch.object(
+                        self.benchmark.os,
+                        "preadv",
+                        side_effect=error,
+                        create=True,
+                    ),
+                    patch.object(
+                        self.benchmark.os,
+                        "close",
+                        side_effect=OSError if error is OSError else None,
+                    ) as close_file,
+                ):
+                    reader = self.benchmark._LinuxProcStatmReader()
+                    self.assertIsNone(reader())
+                    reader.close()
+                    reader.close()
+                close_file.assert_called_once_with(17)
+
+    def test_linux_proc_statm_reader_rejects_int64_overflow(self):
+        maximum_pages = self.benchmark.INT64_MAX // 4096
+        payloads = iter(
+            (
+                f"1000 {maximum_pages}\n".encode("ascii"),
+                f"1000 {maximum_pages + 1}\n".encode("ascii"),
+            )
+        )
+
+        def preadv(_fd, iov, _offset):
+            payload = next(payloads)
+            iov[0][: len(payload)] = payload
+            return len(payload)
+
+        with (
+            patch.object(self.benchmark.os, "getpid", return_value=321),
+            patch.object(self.benchmark.os, "sysconf", return_value=4096),
+            patch.object(self.benchmark.os, "open", return_value=17),
+            patch.object(
+                self.benchmark.os,
+                "preadv",
+                side_effect=preadv,
+                create=True,
+            ),
+            patch.object(self.benchmark.os, "close"),
+        ):
+            reader = self.benchmark._LinuxProcStatmReader()
+            self.assertEqual(reader(), maximum_pages * 4096)
+            self.assertIsNone(reader())
+            reader.close()
+
+    def test_linux_proc_statm_reader_reopens_before_locking_after_fork(self):
+        payload = b"1000 42 7 0 0 0 0\n"
+
+        def preadv(_fd, iov, _offset):
+            iov[0][: len(payload)] = payload
+            return len(payload)
+
+        with (
+            patch.object(
+                self.benchmark.os,
+                "getpid",
+                side_effect=(321, 321, 654, 654),
+            ),
+            patch.object(self.benchmark.os, "sysconf", return_value=4096),
+            patch.object(
+                self.benchmark.os,
+                "open",
+                side_effect=(17, 23),
+            ) as open_file,
+            patch.object(
+                self.benchmark.os,
+                "preadv",
+                side_effect=preadv,
+                create=True,
+            ),
+            patch.object(self.benchmark.os, "close") as close_file,
+        ):
+            reader = self.benchmark._LinuxProcStatmReader()
+            original_lock = reader._lock
+            original_iov = reader._iov
+            self.assertEqual(reader(), 42 * 4096)
+            self.assertEqual(reader(), 42 * 4096)
+            self.assertIsNot(reader._lock, original_lock)
+            self.assertIs(reader._iov, original_iov)
+            reader.close()
+
+        self.assertEqual(open_file.call_count, 2)
+        self.assertEqual(
+            [item.args[0] for item in close_file.call_args_list],
+            [17, 23],
+        )
+
+    def test_linux_rss_provider_uses_versioned_exact_schema(self):
+        payload = b"1000 42 7 0 0 0 0\n"
+
+        def preadv(_fd, iov, _offset):
+            iov[0][: len(payload)] = payload
+            return len(payload)
+
+        with (
+            patch.object(self.benchmark.platform, "system", return_value="Linux"),
+            patch.object(self.benchmark.os, "getpid", return_value=321),
+            patch.object(self.benchmark.os, "sysconf", return_value=4096),
+            patch.object(self.benchmark.os, "open", return_value=17) as open_file,
+            patch.object(
+                self.benchmark.os,
+                "preadv",
+                side_effect=preadv,
+                create=True,
+            ) as preadv_file,
+            patch.object(self.benchmark.os, "close") as close_file,
+        ):
+            reader, provider = self.benchmark._current_rss_provider()
+            self.assertEqual(
+                provider,
+                {
+                    "name": "proc-self-statm-preadv-v1",
+                    "units": "bytes",
+                    "validated": True,
+                },
+            )
+            self.assertTrue(self.benchmark._rss_provider_valid(provider))
+            self.assertFalse(
+                self.benchmark._rss_provider_valid(
+                    {
+                        "name": "proc-self-statm",
+                        "units": "bytes",
+                        "validated": True,
+                    }
+                )
+            )
+            reader.close()
+        open_file.assert_called_once_with(
+            "/proc/self/statm",
+            self.benchmark.os.O_RDONLY | self.benchmark.os.O_CLOEXEC,
+        )
+        preadv_file.assert_called_once()
+        self.assertEqual(preadv_file.call_args.args[2], 0)
+        close_file.assert_called_once_with(17)
+
+    def test_linux_rss_provider_fails_closed_when_prevalidation_fails(self):
+        with (
+            patch.object(self.benchmark.platform, "system", return_value="Linux"),
+            patch.object(self.benchmark.os, "getpid", return_value=321),
+            patch.object(self.benchmark.os, "sysconf", return_value=4096),
+            patch.object(self.benchmark.os, "open", return_value=17),
+            patch.object(
+                self.benchmark.os,
+                "preadv",
+                side_effect=OSError,
+                create=True,
+            ) as preadv_file,
+            patch.object(self.benchmark.os, "close") as close_file,
+        ):
+            reader, provider = self.benchmark._current_rss_provider()
+            self.assertFalse(provider["validated"])
+            self.assertFalse(self.benchmark._rss_provider_valid(provider))
+            self.assertIsNone(reader())
+            reader.close()
+        preadv_file.assert_called_once()
+        close_file.assert_called_once_with(17)
 
     def test_current_rss_reads_macos_direct_provider(self):
         with (
@@ -559,11 +918,27 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
     def test_current_rss_fails_closed_when_measurement_is_unavailable(self):
         with patch.object(self.benchmark.platform, "system", return_value="Windows"):
             self.assertIsNone(self.benchmark._current_rss_bytes())
+
+        class Reader:
+            closed = False
+
+            def __call__(self):
+                return None
+
+            def close(self):
+                self.closed = True
+
+        reader = Reader()
         with (
             patch.object(self.benchmark.platform, "system", return_value="Linux"),
-            patch.object(self.benchmark.Path, "read_text", side_effect=OSError),
+            patch.object(
+                self.benchmark,
+                "_LinuxProcStatmReader",
+                return_value=reader,
+            ),
         ):
             self.assertIsNone(self.benchmark._current_rss_bytes())
+        self.assertTrue(reader.closed)
 
     def test_cpu_memory_probe_measures_growth_and_restores_warm_checkpoint(self):
         import torch
@@ -693,6 +1068,92 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
         result = self.benchmark._evaluate_cpu_rss_plateau(malformed)
         self.assertFalse(result["bounded"])
         self.assertIn("unavailable", result["error"])
+
+    def test_cpu_memory_plateau_probe_closes_reader_after_success(self):
+        class Reader:
+            def __init__(self):
+                self.calls = 0
+                self.closed = False
+
+            def __call__(self):
+                self.calls += 1
+                return 10_000
+
+            def close(self):
+                self.closed = True
+
+        reader = Reader()
+        simulation = SimpleNamespace(
+            device=SimpleNamespace(type="cpu"),
+            advance=lambda _steps: None,
+        )
+        provider = {
+            "name": "proc-self-statm-preadv-v1",
+            "units": "bytes",
+            "validated": True,
+        }
+        with patch.object(
+            self.benchmark,
+            "_current_rss_provider",
+            return_value=(reader, provider),
+        ):
+            result = self.benchmark._cpu_memory_plateau_probe(simulation, 5)
+        self.assertTrue(result["bounded"])
+        self.assertEqual(reader.calls, 56)
+        self.assertTrue(reader.closed)
+
+    def test_cpu_memory_plateau_probe_closes_reader_after_early_failure(self):
+        class Reader:
+            closed = False
+
+            def __call__(self):
+                return None
+
+            def close(self):
+                self.closed = True
+
+        reader = Reader()
+        simulation = SimpleNamespace(
+            device=SimpleNamespace(type="cpu"),
+            advance=lambda _steps: self.fail("advance must not be called"),
+        )
+        with patch.object(
+            self.benchmark,
+            "_current_rss_provider",
+            return_value=(reader, {}),
+        ):
+            result = self.benchmark._cpu_memory_plateau_probe(simulation, 5)
+        self.assertFalse(result["bounded"])
+        self.assertTrue(reader.closed)
+
+    def test_cpu_memory_plateau_probe_closes_reader_after_advance_exception(self):
+        class Reader:
+            closed = False
+
+            def __call__(self):
+                return 10_000
+
+            def close(self):
+                self.closed = True
+
+        def raise_advance(_steps):
+            raise RuntimeError("advance failed")
+
+        reader = Reader()
+        simulation = SimpleNamespace(
+            device=SimpleNamespace(type="cpu"),
+            advance=raise_advance,
+        )
+        with (
+            patch.object(
+                self.benchmark,
+                "_current_rss_provider",
+                return_value=(reader, {}),
+            ),
+            self.assertRaisesRegex(RuntimeError, "advance failed"),
+        ):
+            self.benchmark._cpu_memory_plateau_probe(simulation, 5)
+        self.assertTrue(reader.closed)
 
     def test_darwin_rss_provider_validates_direct_bytes_against_ps(self):
         with (
@@ -1881,7 +2342,7 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             plateau = self.benchmark._evaluate_cpu_rss_plateau(rss_samples)
             plateau["probe_steps_per_window"] = 5
             plateau["measurement_provider"] = {
-                "name": "proc-self-statm",
+                "name": "proc-self-statm-preadv-v1",
                 "units": "bytes",
                 "validated": True,
             }

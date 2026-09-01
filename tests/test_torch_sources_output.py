@@ -10,6 +10,7 @@ import torch
 
 import gmes
 from gmes.torch_fdtd import FUSED_SOURCE_REPRESENTATION
+from gmes.torch_source import TorchTransparentBatch
 
 _COMPONENTS = ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")
 
@@ -48,9 +49,9 @@ def _tfsf(source_time=None):
     )
 
 
-def _gaussian():
+def _gaussian(*, width=0.2):
     return gmes.GaussianBeam(
-        gmes.Continuous(0.2, width=0.2),
+        gmes.Continuous(0.2, width=width),
         directivity=gmes.PlusX,
         center=(0, 0, 0),
         size=(1, 1, 1),
@@ -68,6 +69,9 @@ def _native_and_torch(
     bloch=None,
     probes=(),
     compile_policy="eager",
+    compile_mode="default",
+    device="cpu",
+    precision="float64",
 ):
     native = gmes.FDTD(
         gmes.Cartesian(size, 2),
@@ -83,7 +87,11 @@ def _native_and_torch(
         sources=source_factory(),
         probes=probes,
         runtime=gmes.TorchRuntimeConfig(
-            device="cpu", cpu_threads=2, compile_policy=compile_policy
+            device=device,
+            precision=precision,
+            cpu_threads=2,
+            compile_policy=compile_policy,
+            compile_mode=compile_mode,
         ),
         dt=native.time_step.dt,
         bloch=bloch,
@@ -284,6 +292,119 @@ class TorchPointSourceTest(unittest.TestCase):
 
 
 class TorchTransparentSourceTest(unittest.TestCase):
+    def test_float32_tfsf_uses_double_auxiliary_and_fixed_cast_storage(self):
+        native, simulation = _native_and_torch(lambda: [_tfsf()], precision="float32")
+        self.assertEqual(simulation.dtype, torch.float32)
+        self.assertEqual(len(simulation.sources.auxiliaries), 1)
+        auxiliary = simulation.sources.auxiliaries[0]
+        self.assertEqual(auxiliary.dtype, torch.float64)
+        self.assertEqual(auxiliary.runtime.precision, "float64")
+        self.assertEqual(
+            simulation.diagnostics()["sources"]["auxiliary_precisions"],
+            ("float64",),
+        )
+        for label, module in (
+            ("plan", auxiliary.plan),
+            ("state", auxiliary.state),
+            ("source", auxiliary.sources),
+        ):
+            for name, value in module.named_buffers():
+                if value.is_floating_point():
+                    with self.subTest(module=label, buffer=name):
+                        self.assertEqual(value.dtype, torch.float64)
+
+        transparent = tuple(
+            batch
+            for batch in simulation.sources.batches
+            if isinstance(batch, TorchTransparentBatch)
+        )
+        self.assertTrue(transparent)
+        for batch in transparent:
+            self.assertEqual(batch.weights.dtype, torch.float64)
+            self.assertEqual(batch._sample_values.dtype, torch.float64)
+            self.assertEqual(batch._values.dtype, torch.float64)
+            self.assertEqual(batch._outer_values.dtype, torch.float32)
+
+        addresses = simulation.buffer_addresses()
+        for _ in range(100):
+            native.step()
+            simulation.step()
+        self.assertEqual(addresses, simulation.buffer_addresses())
+        for state in (simulation.state, auxiliary.state):
+            expected_time = state.step_count.to(state.source_time.dtype).mul(
+                state.time_step
+            )
+            self.assertTrue(torch.equal(state.source_time, expected_time))
+
+        actual = simulation.host_snapshot()
+        for name in _COMPONENTS:
+            np.testing.assert_allclose(
+                actual[name],
+                native.field[getattr(gmes, name)],
+                rtol=5e-5,
+                atol=5e-6,
+                err_msg=name,
+            )
+        native_auxiliary = native.src_list[0].aux_fdtd
+        actual_auxiliary = auxiliary.host_snapshot()
+        for name in ("Ex", "Hy"):
+            np.testing.assert_allclose(
+                actual_auxiliary[name],
+                native_auxiliary.field[getattr(gmes, name)],
+                rtol=2e-12,
+                atol=2e-13,
+                err_msg=name,
+            )
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is unavailable")
+    def test_cuda_float32_tfsf_eager_and_graph_keep_double_auxiliary(self):
+        torch._dynamo.reset()
+        modes = (
+            ("eager", "default", False),
+            ("compile", "reduce-overhead", True),
+        )
+        for compile_policy, compile_mode, capture_graphs in modes:
+            with self.subTest(compile_policy=compile_policy, compile_mode=compile_mode):
+                native, simulation = _native_and_torch(
+                    lambda: [_tfsf()],
+                    device="cuda:0",
+                    precision="float32",
+                    compile_policy=compile_policy,
+                    compile_mode=compile_mode,
+                )
+                auxiliary = simulation.sources.auxiliaries[0]
+                self.assertEqual(simulation.dtype, torch.float32)
+                self.assertEqual(auxiliary.dtype, torch.float64)
+                addresses = simulation.buffer_addresses()
+                if capture_graphs:
+                    simulation.capture_cuda_graphs()
+                    self.assertTrue(simulation.diagnostics()["cuda_graph_regions"])
+                for _ in range(100):
+                    native.step()
+                    simulation.step()
+                torch.cuda.synchronize(simulation.device)
+                self.assertEqual(addresses, simulation.buffer_addresses())
+
+                actual = simulation.host_snapshot()
+                for name in _COMPONENTS:
+                    np.testing.assert_allclose(
+                        actual[name],
+                        native.field[getattr(gmes, name)],
+                        rtol=5e-5,
+                        atol=5e-6,
+                        err_msg=name,
+                    )
+                native_auxiliary = native.src_list[0].aux_fdtd
+                actual_auxiliary = auxiliary.host_snapshot()
+                for name in ("Ex", "Hy"):
+                    np.testing.assert_allclose(
+                        actual_auxiliary[name],
+                        native_auxiliary.field[getattr(gmes, name)],
+                        rtol=2e-12,
+                        atol=2e-13,
+                        err_msg=name,
+                    )
+
     def test_all_tfsf_faces_and_paired_real_auxiliary_match_native(self):
         native, simulation = _native_and_torch(
             lambda: [_tfsf()],
@@ -376,6 +497,133 @@ class TorchTransparentSourceTest(unittest.TestCase):
             float(torch_auxiliary.state.source_time),
             step_count * torch_auxiliary.plan.dt,
         )
+
+    def test_float32_gaussian_envelope_uses_exact_auxiliary_step_offset(self):
+        native, simulation = _native_and_torch(
+            lambda: [_gaussian()], size=(3, 3, 3), precision="float32"
+        )
+        auxiliary = simulation.sources.auxiliaries[0]
+        gaussian_batches = tuple(
+            batch
+            for batch in simulation.sources.batches
+            if isinstance(batch, TorchTransparentBatch)
+            and batch.gaussian_width is not None
+        )
+        self.assertTrue(gaussian_batches)
+        initial_auxiliary_step = int(auxiliary.state.step_count)
+        for batch in gaussian_batches:
+            self.assertEqual(int(batch._envelope_step_offset), initial_auxiliary_step)
+            self.assertEqual(batch._envelope.dtype, torch.float64)
+
+        initial_checkpoint = simulation.checkpoint()
+        unrelated_outer_time = torch.tensor(
+            12345.0, device=simulation.device, dtype=torch.float32
+        )
+        electric = next(
+            batch for batch in gaussian_batches if batch.component.startswith("E")
+        )
+        electric.apply(
+            torch.zeros_like(simulation.state.field(electric.component)),
+            unrelated_outer_time,
+        )
+        self.assertEqual(float(electric._envelope), 0.0)
+
+        auxiliary.step()
+        magnetic = next(
+            batch for batch in gaussian_batches if batch.component.startswith("H")
+        )
+        magnetic.apply(
+            torch.zeros_like(simulation.state.field(magnetic.component)),
+            unrelated_outer_time,
+        )
+        envelope_time = min(auxiliary.plan.dt, magnetic.gaussian_width)
+        expected_envelope = (
+            np.sin(0.5 * np.pi * envelope_time / magnetic.gaussian_width) ** 2
+        )
+        self.assertAlmostEqual(float(magnetic._envelope), expected_envelope)
+
+        simulation.load_checkpoint(initial_checkpoint)
+        self.assertEqual(int(auxiliary.state.step_count), initial_auxiliary_step)
+        addresses = simulation.buffer_addresses()
+        for _ in range(7):
+            native.step()
+            simulation.step()
+        checkpoint = simulation.checkpoint()
+        for _ in range(3):
+            native.step()
+            simulation.step()
+        expected_fields = simulation.host_snapshot()
+        expected_auxiliary = auxiliary.host_snapshot()
+        simulation.load_checkpoint(checkpoint).advance(3)
+        for name in _COMPONENTS:
+            np.testing.assert_array_equal(
+                simulation.host_snapshot()[name], expected_fields[name]
+            )
+            np.testing.assert_array_equal(
+                auxiliary.host_snapshot()[name], expected_auxiliary[name]
+            )
+
+        for _ in range(90):
+            native.step()
+            simulation.step()
+        self.assertEqual(addresses, simulation.buffer_addresses())
+        self.assertEqual(int(simulation.state.step_count), 100)
+        self.assertEqual(
+            int(auxiliary.state.step_count) - initial_auxiliary_step,
+            100,
+        )
+        expected_auxiliary_time = auxiliary.state.step_count.to(
+            auxiliary.state.source_time.dtype
+        ).mul(auxiliary.state.time_step)
+        self.assertTrue(
+            torch.equal(auxiliary.state.source_time, expected_auxiliary_time)
+        )
+        native_wrapper = native.src_list[0].aux_fdtd
+        self.assertEqual(native_wrapper.n, 100)
+        self.assertEqual(native_wrapper.t, 100 * auxiliary.plan.dt)
+
+        actual = simulation.host_snapshot()
+        for name in _COMPONENTS:
+            np.testing.assert_allclose(
+                actual[name],
+                native.field[getattr(gmes, name)],
+                rtol=5e-5,
+                atol=5e-6,
+                err_msg=name,
+            )
+        actual_auxiliary = auxiliary.host_snapshot()
+        for name in ("Ex", "Hy"):
+            np.testing.assert_allclose(
+                actual_auxiliary[name],
+                native_wrapper.aux_fdtd.field[getattr(gmes, name)],
+                rtol=2e-12,
+                atol=1e-12,
+                err_msg=name,
+            )
+
+    def test_gaussian_zero_width_is_unwindowed(self):
+        native, simulation = _native_and_torch(
+            lambda: [_gaussian(width=0.0)],
+            size=(3, 3, 3),
+            precision="float32",
+        )
+        gaussian_batches = tuple(
+            batch
+            for batch in simulation.sources.batches
+            if isinstance(batch, TorchTransparentBatch)
+            and batch.gaussian_width is not None
+        )
+        self.assertTrue(gaussian_batches)
+        unrelated_outer_time = torch.tensor(
+            12345.0, device=simulation.device, dtype=torch.float32
+        )
+        for batch in gaussian_batches:
+            batch.apply(
+                torch.zeros_like(simulation.state.field(batch.component)),
+                unrelated_outer_time,
+            )
+            self.assertEqual(float(batch._envelope), 1.0)
+        _assert_fields(self, native, simulation, 5, tolerance=5e-5)
 
 
 class TorchBoundaryTest(unittest.TestCase):

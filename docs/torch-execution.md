@@ -220,9 +220,12 @@ and current targets are normalized once with the native last-source-wins
 overlap rule, then grouped by Yee component. Continuous, bandpass, and
 differentiated-Gaussian oscillators execute from tensor parameters at the
 native electric and magnetic half-step times. TFSF faces are consolidated by
-unique target; their auxiliary Torch solver uses the parent's device, real
-precision, timestep, and paired-real layout. Gaussian modes are lowered during
-construction and their envelope remains tensor-native.
+unique target; their auxiliary Torch solver uses the parent's device,
+timestep, and paired-real layout, but retains the native incident solver's
+float64 state and arithmetic even for a float32 outer field. Interpolation is
+performed in float64 and cast once immediately before the outer field update.
+Gaussian modes are lowered during construction, and their envelope derives
+from the exact post-prewarm auxiliary integer step and float64 timestep.
 
 A third-party source must implement `lower_torch_source(context)` and return
 `TorchPointSourceRecord` values. The lowering hook runs once during

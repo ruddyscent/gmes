@@ -110,6 +110,315 @@ class TorchCorrectnessTest(unittest.TestCase):
                         "step/0",
                     )
 
+    def test_float32_tfsf_long_capture_uses_strict_float64_auxiliary(self):
+        capture_steps = [1, 2, 5, 20, 100]
+        manifest = self._small_manifest(("tfsf-transparent",))
+        manifest["reference"]["capture_steps"] = capture_steps
+        manifest["correctness"][0]["capture_steps"] = capture_steps
+        with tempfile.TemporaryDirectory() as directory:
+            reference, candidate = self._capture_pair(
+                directory,
+                manifest,
+                "tfsf-transparent",
+                precision="float32",
+            )
+            result = torch_correctness.compare_torch_archives(
+                reference,
+                candidate,
+                manifest,
+                include_tolerances=True,
+            )
+            self.assertTrue(result["passed"], result["failures"])
+            with np.load(candidate, allow_pickle=False) as archive:
+                metadata = native_oracle.read_metadata(archive)
+                self.assertEqual(
+                    metadata["backend_metadata"]["auxiliary_precisions"],
+                    ["float64"],
+                )
+                for step in ("0", *(str(value) for value in capture_steps)):
+                    with self.subTest(step=step):
+                        auxiliary = metadata["steps"][step]["sources"]["auxiliary"][0]
+                        self.assertEqual(
+                            auxiliary["backend_metadata"]["precision"], "float64"
+                        )
+                        main_prefix = f"torch/step/{step}/state"
+                        auxiliary_prefix = f"torch/step/{step}/auxiliary/0/state"
+                        self.assertEqual(
+                            archive[f"{main_prefix}/source_time"].dtype,
+                            np.dtype("float32"),
+                        )
+                        self.assertEqual(
+                            archive[f"{auxiliary_prefix}/source_time"].dtype,
+                            np.dtype("float64"),
+                        )
+                        for prefix in (main_prefix, auxiliary_prefix):
+                            count = archive[f"{prefix}/step_count"]
+                            source_time = archive[f"{prefix}/source_time"]
+                            time_step = archive[f"{prefix}/time_step"]
+                            expected_time = np.multiply(
+                                count.astype(source_time.dtype),
+                                time_step,
+                                dtype=source_time.dtype,
+                            )
+                            self.assertTrue(
+                                np.array_equal(source_time, expected_time), prefix
+                            )
+                        for component in ("Ex", "Hy"):
+                            key = (
+                                f"step/{step}/source_aux/"
+                                f"0-TotalFieldScatteredField/field/{component}"
+                            )
+                            self.assertEqual(archive[key].dtype, np.dtype("float64"))
+
+            tolerances = {
+                record["key"]: record for record in result["tolerance_results"]
+            }
+            self.assertEqual(
+                {
+                    name: tolerances[
+                        "step/100/source_aux/" "0-TotalFieldScatteredField/field/Hy"
+                    ][name]
+                    for name in ("rtol", "atol", "scope")
+                },
+                {
+                    "rtol": 2e-12,
+                    "atol": 2e-13,
+                    "scope": "strategies/dielectric,pml/float64",
+                },
+            )
+            self.assertEqual(
+                {
+                    name: tolerances["step/100/field/Hy"][name]
+                    for name in ("rtol", "atol", "scope")
+                },
+                {
+                    "rtol": 5e-5,
+                    "atol": 5e-6,
+                    "scope": "strategies/dielectric,pml/float32",
+                },
+            )
+
+    def test_auxiliary_precision_metadata_corruption_fails_closed(self):
+        manifest = self._small_manifest(("tfsf-transparent",))
+        with tempfile.TemporaryDirectory() as directory:
+            reference, candidate = self._capture_pair(
+                directory,
+                manifest,
+                "tfsf-transparent",
+                precision="float32",
+            )
+            with np.load(candidate, allow_pickle=False) as archive:
+                base_arrays = {name: archive[name].copy() for name in archive.files}
+                base_metadata = native_oracle.read_metadata(archive)
+
+            def assert_rejected(label, arrays, metadata, expected_error=None):
+                corrupted = Path(directory) / f"corrupted-{label}.npz"
+                torch_arrays = metadata["backend_metadata"]["torch_arrays"]
+                metadata["backend_metadata"]["torch_array_bytes"] = sum(
+                    descriptor["size_bytes"] for descriptor in torch_arrays.values()
+                )
+                arrays["metadata.json"] = np.asarray(
+                    json.dumps(metadata, sort_keys=True)
+                )
+                np.savez_compressed(corrupted, **arrays)
+                result = torch_correctness.compare_torch_archives(
+                    reference, corrupted, manifest
+                )
+                self.assertFalse(result["passed"])
+                self.assertEqual(
+                    result["failures"][0]["key"], "candidate/archive-contract"
+                )
+                if expected_error is not None:
+                    self.assertIn(expected_error, result["failures"][0]["error"])
+
+            arrays = {name: value.copy() for name, value in base_arrays.items()}
+            metadata = copy.deepcopy(base_metadata)
+            metadata["backend_metadata"]["auxiliary_precisions"] = ["float32"]
+            for step in ("0", "1"):
+                metadata["steps"][step]["sources"]["auxiliary"][0]["backend_metadata"][
+                    "precision"
+                ] = "float32"
+            assert_rejected("auxiliary-precision", arrays, metadata)
+
+            arrays = {name: value.copy() for name, value in base_arrays.items()}
+            key = "step/1/source_aux/0-TotalFieldScatteredField/field/Hy"
+            arrays[key] = arrays[key].astype(np.float32)
+            assert_rejected(
+                "auxiliary-canonical-field",
+                arrays,
+                copy.deepcopy(base_metadata),
+            )
+
+            arrays = {name: value.copy() for name, value in base_arrays.items()}
+            metadata = copy.deepcopy(base_metadata)
+            key = "torch/step/1/auxiliary/0/state/hy"
+            arrays[key] = arrays[key].astype(np.float32)
+            metadata["backend_metadata"]["torch_arrays"][key] = (
+                torch_correctness._array_descriptor(arrays[key])
+            )
+            assert_rejected(
+                "auxiliary-raw-field",
+                arrays,
+                metadata,
+                "Torch auxiliary raw precision differs",
+            )
+
+            for dtype in (np.complex128, np.int64):
+                arrays = {name: value.copy() for name, value in base_arrays.items()}
+                metadata = copy.deepcopy(base_metadata)
+                key = "torch/step/1/auxiliary/0/state/hy"
+                arrays[key] = arrays[key].astype(dtype)
+                metadata["backend_metadata"]["torch_arrays"][key] = (
+                    torch_correctness._array_descriptor(arrays[key])
+                )
+                assert_rejected(
+                    f"auxiliary-raw-field-{np.dtype(dtype).name}",
+                    arrays,
+                    metadata,
+                    "Torch auxiliary raw precision differs",
+                )
+
+            arrays = {name: value.copy() for name, value in base_arrays.items()}
+            metadata = copy.deepcopy(base_metadata)
+            prefix = "torch/step/1/auxiliary/0/state"
+            for suffix in ("source_time", "time_step"):
+                key = f"{prefix}/{suffix}"
+                arrays[key] = arrays[key].astype(np.float32)
+                metadata["backend_metadata"]["torch_arrays"][key] = (
+                    torch_correctness._array_descriptor(arrays[key])
+                )
+            assert_rejected(
+                "auxiliary-raw-clock",
+                arrays,
+                metadata,
+                "Torch auxiliary raw precision differs",
+            )
+
+            arrays = {name: value.copy() for name, value in base_arrays.items()}
+            metadata = copy.deepcopy(base_metadata)
+            source_batch_root = "torch/step/1/sources/batches/"
+            key = next(
+                name
+                for name in arrays
+                if name.startswith(source_batch_root)
+                and len(name.removeprefix(source_batch_root).split("/")) == 2
+                and name.endswith("/weights")
+            )
+            arrays[key] = arrays[key].astype(np.float32)
+            metadata["backend_metadata"]["torch_arrays"][key] = (
+                torch_correctness._array_descriptor(arrays[key])
+            )
+            assert_rejected(
+                "transparent-raw-weights",
+                arrays,
+                metadata,
+                "Torch transparent raw precision differs",
+            )
+
+    def test_float32_gaussian_long_capture_uses_strict_float64_auxiliary(self):
+        capture_steps = [1, 2, 5, 20, 100]
+        manifest = self._small_manifest(("gaussian-auxiliary",))
+        manifest["reference"]["capture_steps"] = capture_steps
+        manifest["correctness"][0]["capture_steps"] = capture_steps
+        with tempfile.TemporaryDirectory() as directory:
+            reference, candidate = self._capture_pair(
+                directory,
+                manifest,
+                "gaussian-auxiliary",
+                precision="float32",
+            )
+            result = torch_correctness.compare_torch_archives(
+                reference,
+                candidate,
+                manifest,
+                include_tolerances=True,
+            )
+            self.assertTrue(result["passed"], result["failures"])
+            with np.load(candidate, allow_pickle=False) as archive:
+                metadata = native_oracle.read_metadata(archive)
+                self.assertEqual(
+                    metadata["backend_metadata"]["auxiliary_precisions"],
+                    ["float64"],
+                )
+                for step in ("0", *(str(value) for value in capture_steps)):
+                    main_time = archive[f"torch/step/{step}/state/source_time"]
+                    auxiliary_prefix = f"torch/step/{step}/auxiliary/0/state"
+                    auxiliary_time = archive[f"{auxiliary_prefix}/source_time"]
+                    self.assertEqual(main_time.dtype, np.dtype("float32"))
+                    self.assertEqual(auxiliary_time.dtype, np.dtype("float64"))
+                    expected_auxiliary_time = np.multiply(
+                        archive[f"{auxiliary_prefix}/step_count"].astype(
+                            auxiliary_time.dtype
+                        ),
+                        archive[f"{auxiliary_prefix}/time_step"],
+                        dtype=auxiliary_time.dtype,
+                    )
+                    self.assertTrue(
+                        np.array_equal(auxiliary_time, expected_auxiliary_time)
+                    )
+            tolerances = {
+                record["key"]: record for record in result["tolerance_results"]
+            }
+            self.assertEqual(
+                {
+                    name: tolerances["step/100/source_aux/0-GaussianBeam/field/Hy"][
+                        name
+                    ]
+                    for name in ("rtol", "atol", "scope")
+                },
+                {
+                    "rtol": 2e-12,
+                    "atol": 1e-12,
+                    "scope": "source_auxiliary/gaussian-auxiliary/float64",
+                },
+            )
+
+    def test_gaussian_envelope_raw_state_removal_fails_closed(self):
+        manifest = self._small_manifest(("gaussian-auxiliary",))
+        with tempfile.TemporaryDirectory() as directory:
+            reference, candidate = self._capture_pair(
+                directory,
+                manifest,
+                "gaussian-auxiliary",
+                precision="float32",
+            )
+            with np.load(candidate, allow_pickle=False) as archive:
+                arrays = {name: archive[name].copy() for name in archive.files}
+                metadata = native_oracle.read_metadata(archive)
+            source_batch_root = "torch/step/1/sources/batches/"
+            envelope_key = next(
+                name
+                for name in arrays
+                if name.startswith(source_batch_root)
+                and len(name.removeprefix(source_batch_root).split("/")) == 2
+                and name.endswith("/_envelope")
+            )
+            batch_prefix = envelope_key.removesuffix("/_envelope")
+            torch_arrays = metadata["backend_metadata"]["torch_arrays"]
+            for name in (
+                "_envelope_step",
+                "_envelope_step_offset",
+                "_envelope",
+            ):
+                key = f"{batch_prefix}/{name}"
+                arrays.pop(key)
+                torch_arrays.pop(key)
+            metadata["backend_metadata"]["torch_array_bytes"] = sum(
+                descriptor["size_bytes"] for descriptor in torch_arrays.values()
+            )
+            arrays["metadata.json"] = np.asarray(json.dumps(metadata, sort_keys=True))
+            corrupted = Path(directory) / "gaussian-envelope-removed.npz"
+            np.savez_compressed(corrupted, **arrays)
+            result = torch_correctness.compare_torch_archives(
+                reference, corrupted, manifest
+            )
+            self.assertFalse(result["passed"])
+            self.assertEqual(result["failures"][0]["key"], "candidate/archive-contract")
+            self.assertIn(
+                "Torch Gaussian envelope raw state is incomplete",
+                result["failures"][0]["error"],
+            )
+
     def test_compiled_dummy_long_capture_covers_topology_and_tolerance(self):
         capture_steps = [1, 2, 5, 20, 100]
         manifest = self._small_manifest(("dummy",))

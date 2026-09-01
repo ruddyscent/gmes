@@ -657,6 +657,7 @@ def _independent_source_records(simulation, step, arrays):
                 "backend_metadata": {
                     "producer": PRODUCER,
                     "canonical_components": list(active_components),
+                    "precision": auxiliary.runtime.precision,
                     "raw_state_origin": "torch-named-buffers",
                     "representation": "live-torch-auxiliary-simulation-v1",
                 },
@@ -937,6 +938,10 @@ def capture_torch_candidate(
             **mode,
             "resolved_device": str(simulation.device),
             "paired_real": bool(simulation.state.paired_real),
+            "auxiliary_precisions": [
+                auxiliary.runtime.precision
+                for auxiliary in simulation.sources.auxiliaries
+            ],
             "manifest_contract_sha256": _canonical_sha256(manifest),
             "input_archive": {
                 "sha256": _sha256(reference_path),
@@ -1158,6 +1163,7 @@ def _validate_torch_candidate_archive(archive, manifest):
             "compile_mode",
             "resolved_device",
             "paired_real",
+            "auxiliary_precisions",
             "manifest_contract_sha256",
             "input_archive",
             "input_step_zero_contract",
@@ -1196,6 +1202,11 @@ def _validate_torch_candidate_archive(archive, manifest):
         or not backend["compile_cache_key"]
     ):
         raise ValueError("Torch correctness backend identity is invalid")
+    auxiliary_precisions = backend["auxiliary_precisions"]
+    if not isinstance(auxiliary_precisions, list) or any(
+        precision != "float64" for precision in auxiliary_precisions
+    ):
+        raise ValueError("Torch auxiliary precision metadata is invalid")
     _exact_keys(
         backend["input_archive"],
         {"sha256", "size_bytes", "media_type", "prefix"},
@@ -1264,13 +1275,115 @@ def _validate_torch_candidate_archive(archive, manifest):
             archive[f"step/{step}/time"],
         )
         auxiliaries = metadata["steps"][step]["sources"]["auxiliary"]
+        if len(auxiliaries) != len(auxiliary_precisions):
+            raise ValueError("Torch auxiliary precision count is inconsistent")
         for ordinal, record in enumerate(auxiliaries):
+            auxiliary_precision = record["backend_metadata"]["precision"]
+            if auxiliary_precision != auxiliary_precisions[ordinal]:
+                raise ValueError("Torch auxiliary precision is inconsistent")
+            expected_auxiliary_dtype = np.dtype(auxiliary_precision)
+            state_prefix = f"torch/step/{step}/auxiliary/{ordinal}/state"
+            required_state_fields = {
+                f"{state_prefix}/{component.lower()}" for component in COMPONENT_NAMES
+            }
+            if not required_state_fields.issubset(torch_keys):
+                raise ValueError("Torch auxiliary raw state fields are incomplete")
+            for key in required_state_fields:
+                if archive[key].dtype != expected_auxiliary_dtype:
+                    raise ValueError(f"Torch auxiliary raw precision differs for {key}")
+            for raw_prefix in (
+                f"{state_prefix}/",
+                f"torch/step/{step}/auxiliary/{ordinal}/sources/",
+            ):
+                for key in torch_keys:
+                    if not key.startswith(raw_prefix):
+                        continue
+                    dtype = archive[key].dtype
+                    if np.issubdtype(dtype, np.inexact) and dtype != (
+                        expected_auxiliary_dtype
+                    ):
+                        raise ValueError(
+                            f"Torch auxiliary raw precision differs for {key}"
+                        )
             _validate_live_clock(
                 archive,
-                f"torch/step/{step}/auxiliary/{ordinal}/state",
-                backend["precision"],
+                state_prefix,
+                auxiliary_precision,
                 archive[f"step/{step}/source_aux/{ordinal}-{record['source']}/time"],
             )
+            auxiliary_field_dtype = np.dtype(
+                "complex128" if backend["paired_real"] else auxiliary_precision
+            )
+            for component in COMPONENT_NAMES:
+                key = (
+                    f"step/{step}/source_aux/{ordinal}-{record['source']}/"
+                    f"field/{component}"
+                )
+                if archive[key].dtype != auxiliary_field_dtype:
+                    raise ValueError(
+                        f"Torch auxiliary field precision differs for {key}"
+                    )
+        source_batch_root = f"torch/step/{step}/sources/batches/"
+        transparent_batch_prefixes = set()
+        for key in torch_keys:
+            if not key.startswith(source_batch_root):
+                continue
+            remainder = key.removeprefix(source_batch_root)
+            parts = remainder.split("/")
+            if (
+                len(parts) == 2
+                and parts[0].isdigit()
+                and parts[0] == str(int(parts[0]))
+                and parts[1] == "weights"
+            ):
+                transparent_batch_prefixes.add(f"{source_batch_root}{parts[0]}")
+        transparent_updaters = sum(
+            record["native_type"].startswith("Transparent")
+            for record in metadata["steps"][step]["sources"]["updaters"]
+        )
+        if len(transparent_batch_prefixes) != transparent_updaters:
+            raise ValueError("Torch transparent raw batch count is inconsistent")
+        for batch_prefix in transparent_batch_prefixes:
+            expected_dtypes = {
+                "targets": np.dtype("int64"),
+                "samples": np.dtype("int64"),
+                "weights": np.dtype("float64"),
+                "_sample_values": np.dtype("float64"),
+                "_values": np.dtype("float64"),
+                "_outer_values": np.dtype(backend["precision"]),
+            }
+            for name, expected_dtype in expected_dtypes.items():
+                key = f"{batch_prefix}/{name}"
+                if key not in torch_keys:
+                    raise ValueError(
+                        f"Torch transparent raw batch is incomplete: {batch_prefix}"
+                    )
+                if archive[key].dtype != expected_dtype:
+                    raise ValueError(
+                        f"Torch transparent raw precision differs for {key}"
+                    )
+            envelope_dtypes = {
+                "_envelope_step": np.dtype("int64"),
+                "_envelope_step_offset": np.dtype("int64"),
+                "_envelope": np.dtype("float64"),
+            }
+            envelope_keys = {f"{batch_prefix}/{name}" for name in envelope_dtypes}
+            present_envelope_keys = envelope_keys & torch_keys
+            expected_envelope_keys = (
+                envelope_keys
+                if metadata["workload"].get("source") == "gaussian"
+                else set()
+            )
+            if present_envelope_keys != expected_envelope_keys:
+                raise ValueError(
+                    f"Torch Gaussian envelope raw state is incomplete: {batch_prefix}"
+                )
+            for name, expected_dtype in envelope_dtypes.items():
+                key = f"{batch_prefix}/{name}"
+                if key in torch_keys and archive[key].dtype != expected_dtype:
+                    raise ValueError(
+                        f"Torch Gaussian envelope raw precision differs for {key}"
+                    )
         for component in COMPONENT_NAMES:
             if archive[f"step/{step}/field/{component}"].dtype != expected_field_dtype:
                 raise ValueError(
@@ -1327,6 +1440,7 @@ def _candidate_source_metadata_complete(metadata, torch_keys):
                         "producer",
                         "representation",
                         "canonical_components",
+                        "precision",
                         "raw_state_origin",
                     },
                     "Torch auxiliary backend_metadata",
@@ -1335,6 +1449,7 @@ def _candidate_source_metadata_complete(metadata, torch_keys):
                 if (
                     backend["producer"] != PRODUCER
                     or backend["representation"] != "live-torch-auxiliary-simulation-v1"
+                    or backend["precision"] != "float64"
                     or backend["raw_state_origin"] != "torch-named-buffers"
                     or not isinstance(components, list)
                     or components
@@ -1545,8 +1660,24 @@ def _source_topology_matches(reference_metadata, candidate_metadata):
     return True
 
 
-def _comparison_dtype(candidate_metadata, expected, actual):
-    if candidate_metadata["backend_metadata"]["precision"] == "float32":
+def _comparison_precision(candidate_metadata, key):
+    parts = key.split("/")
+    if (
+        len(parts) > 3
+        and parts[0] == "step"
+        and parts[2] in {"source_aux", "source_aux_material"}
+    ):
+        ordinal_value = parts[3].split("-", 1)[0]
+        if ordinal_value.isdigit():
+            auxiliaries = candidate_metadata["steps"][parts[1]]["sources"]["auxiliary"]
+            ordinal = int(ordinal_value)
+            if ordinal < len(auxiliaries):
+                return auxiliaries[ordinal]["backend_metadata"]["precision"]
+    return candidate_metadata["backend_metadata"]["precision"]
+
+
+def _comparison_dtype(candidate_metadata, key, expected, actual):
+    if _comparison_precision(candidate_metadata, key) == "float32":
         return "float32"
     if np.iscomplexobj(expected) or np.iscomplexobj(actual):
         return "complex128"
@@ -1723,7 +1854,7 @@ def _compare_torch_archives_loaded(
                 }
                 dtype_label = str(expected.dtype)
             else:
-                dtype = _comparison_dtype(candidate_metadata, expected, actual)
+                dtype = _comparison_dtype(candidate_metadata, key, expected, actual)
                 dtype_label = dtype
                 try:
                     tolerance = _manifest_tolerance(

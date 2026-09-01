@@ -179,7 +179,7 @@ class TorchRuntimeConfigTest(unittest.TestCase):
             )
 
     def test_compile_cache_key_tracks_execution_specialization(self):
-        self.assertEqual(TORCH_SOLVER_ABI, "torch-fdtd-regions-v12")
+        self.assertEqual(TORCH_SOLVER_ABI, "torch-fdtd-regions-v13")
         self.assertEqual(issue123_completion.TORCH_SOLVER_ABI, TORCH_SOLVER_ABI)
         self.assertEqual(PACKED_DM2_REPRESENTATION, "single-carry-packed-loop-v2")
         self.assertEqual(DM2_PACKED_ITERATIONS_PER_CONDITION, 3)

@@ -75,7 +75,7 @@ class TorchConfigurationError(ValueError):
 
 
 COMPILE_MODES = ("default", "reduce-overhead", "max-autotune")
-TORCH_SOLVER_ABI = "torch-fdtd-regions-v12"
+TORCH_SOLVER_ABI = "torch-fdtd-regions-v13"
 LOCAL_COMPILED_REGION_TOPOLOGY = (
     "local-two-static-half-step-regions+external-cached-two-stage-foreach-"
     "boundary-sync-v2"
@@ -2836,6 +2836,9 @@ class TorchSimulation:
                 if name.endswith("targets")
             ),
             "auxiliaries": len(self.sources.auxiliaries),
+            "auxiliary_precisions": tuple(
+                auxiliary.runtime.precision for auxiliary in self.sources.auxiliaries
+            ),
             "plan_bytes": sum(
                 value.numel() * value.element_size() for value in self.sources.buffers()
             ),

@@ -2439,7 +2439,13 @@ class TorchSimulation:
             self._dm2_updates = self._dm2_graph_updates
         graphs: dict[str, torch.cuda.CUDAGraph] = {}
         try:
-            if self._electric_half is not None:
+            electric_half = self._electric_half
+            magnetic_half = self._magnetic_half
+            if electric_half is not None:
+                if magnetic_half is None:
+                    raise TorchConfigurationError(
+                        "fused local phases require both half-step functions"
+                    )
                 if graph_safe_dm2:
                     regions = [
                         ("electric_half", self._electric_cuda_graph_update),
@@ -2447,8 +2453,8 @@ class TorchSimulation:
                     ]
                 else:
                     regions = [
-                        ("electric_half", self._electric_half),
-                        ("magnetic_half", self._magnetic_half),
+                        ("electric_half", electric_half),
+                        ("magnetic_half", magnetic_half),
                     ]
             else:
                 electric = self._electric

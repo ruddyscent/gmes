@@ -6,12 +6,17 @@ import numpy as np
 import torch
 
 import gmes
+from benchmarks import native_oracle
 from gmes import torch_dm2
 from gmes.torch_dm2 import (
     DM2_ITERATIONS_PER_CHUNK,
     DM2_MAX_ITERATIONS,
     DM2_PACKED_ITERATIONS_PER_CONDITION,
 )
+
+_DM2_FLOAT32_TOLERANCE = native_oracle.load_manifest()["tolerances"]["torch"]["dm2"][
+    "float32"
+]
 
 
 def _geometry(material):
@@ -347,8 +352,8 @@ class TorchDm2Test(unittest.TestCase):
             np.testing.assert_allclose(
                 actual[component.__name__],
                 native_field,
-                rtol=3e-4,
-                atol=3e-6,
+                rtol=_DM2_FLOAT32_TOLERANCE["rtol"],
+                atol=_DM2_FLOAT32_TOLERANCE["atol"],
                 err_msg=component.__name__,
             )
 

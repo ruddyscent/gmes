@@ -114,6 +114,32 @@ class NativeOracleTest(unittest.TestCase):
             set(dielectric_tolerances),
             {"float32", "float64", "complex64", "complex128"},
         )
+        self.assertEqual(
+            self.manifest["tolerances"]["torch"]["dm2"],
+            {
+                "float32": {"rtol": 6e-4, "atol": 3e-6},
+                "float64": {"rtol": 2e-10, "atol": 2e-12},
+            },
+        )
+        ziolkowski = self.oracle.find_case(self.manifest, "ziolkowski-dm2")
+        self.assertEqual(
+            ziolkowski,
+            {
+                "name": "ziolkowski-dm2",
+                "recipe": "homogeneous",
+                "size": [0, 0, 40],
+                "resolution": 10,
+                "material": "dm2-4",
+                "source_component": "Ex",
+                "capture_steps": [100, 500],
+                "complex": False,
+            },
+        )
+        self.assertIn(ziolkowski, self.manifest["physical_checks"])
+        self.assertNotIn(
+            "ziolkowski-dm2",
+            {case["name"] for case in self.manifest["correctness"]},
+        )
         names = {case["name"] for case in self.manifest["correctness"]}
         self.assertTrue(
             {

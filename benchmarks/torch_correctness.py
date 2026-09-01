@@ -935,6 +935,9 @@ def capture_torch_candidate(
         "backend_metadata": {
             "producer": PRODUCER,
             "solver_abi": gmes.torch_fdtd.TORCH_SOLVER_ABI,
+            "cuda_graph_execution_representation": (
+                gmes.torch_fdtd.CUDA_GRAPH_EXECUTION_REPRESENTATION
+            ),
             **mode,
             "resolved_device": str(simulation.device),
             "paired_real": bool(simulation.state.paired_real),
@@ -1156,6 +1159,7 @@ def _validate_torch_candidate_archive(archive, manifest):
         {
             "producer",
             "solver_abi",
+            "cuda_graph_execution_representation",
             "device",
             "precision",
             "graph_mode",
@@ -1190,6 +1194,8 @@ def _validate_torch_candidate_archive(archive, manifest):
     if (
         backend["producer"] != PRODUCER
         or backend["solver_abi"] != gmes.torch_fdtd.TORCH_SOLVER_ABI
+        or backend["cuda_graph_execution_representation"]
+        != gmes.torch_fdtd.CUDA_GRAPH_EXECUTION_REPRESENTATION
         or backend["resolved_device"] != backend["device"]
         or type(backend["paired_real"]) is not bool
         or backend["paired_real"] is not bool(metadata["workload"].get("complex"))

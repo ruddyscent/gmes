@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
+import torch
 
 import gmes
 import gmes.torch_fdtd
@@ -531,6 +532,32 @@ class TorchCorrectnessTest(unittest.TestCase):
         self.assertFalse(result["passed"])
         self.assertEqual(result["failures"][0]["key"], "candidate/archive-contract")
 
+    def test_cuda_graph_execution_representation_corruption_fails_closed(self):
+        manifest = self._small_manifest(("dcp-plrc-bloch",))
+        with tempfile.TemporaryDirectory() as directory:
+            reference, candidate = self._capture_pair(
+                directory, manifest, "dcp-plrc-bloch"
+            )
+            corrupted = Path(directory) / "corrupted-cuda-graph-representation.npz"
+            with np.load(candidate, allow_pickle=False) as archive:
+                arrays = {name: archive[name].copy() for name in archive.files}
+                metadata = native_oracle.read_metadata(archive)
+            self.assertEqual(
+                metadata["backend_metadata"]["cuda_graph_execution_representation"],
+                gmes.torch_fdtd.CUDA_GRAPH_EXECUTION_REPRESENTATION,
+            )
+            metadata["backend_metadata"][
+                "cuda_graph_execution_representation"
+            ] = "external-standard-regions+tampered"
+            arrays["metadata.json"] = np.asarray(json.dumps(metadata, sort_keys=True))
+            np.savez_compressed(corrupted, **arrays)
+            result = torch_correctness.compare_torch_archives(
+                reference, corrupted, manifest
+            )
+        self.assertFalse(result["passed"])
+        self.assertEqual(result["failures"][0]["key"], "candidate/archive-contract")
+        self.assertIn("backend identity is invalid", result["failures"][0]["error"])
+
     def test_raw_planner_corruption_fails_closed(self):
         manifest = self._small_manifest(("dcp-plrc-bloch",))
         with tempfile.TemporaryDirectory() as directory:
@@ -769,6 +796,175 @@ class TorchCorrectnessTest(unittest.TestCase):
             "complex128",
         )
         self.assertEqual(actual, self.manifest["tolerances"]["torch"]["dm2"]["float64"])
+
+    def test_dm2_float32_500_step_tolerance_is_exact_and_fails_outside_bound(self):
+        key = "step/500/state/Ex/0-Dm2/values"
+        tolerance = torch_correctness._manifest_tolerance(
+            self.manifest,
+            key,
+            "float32",
+            {"Dm2"},
+            "ziolkowski-dm2",
+        )
+        self.assertEqual(
+            tolerance,
+            {
+                "rtol": 6e-4,
+                "atol": 3e-6,
+                "scope": "strategies/dm2/float32",
+            },
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            reference = Path(directory) / "reference.npz"
+            candidate = Path(directory) / "candidate.npz"
+            np.savez_compressed(reference, **{key: np.asarray([10.0])})
+            np.savez_compressed(
+                candidate,
+                **{key: np.asarray([10.0 * (1.0 + 6.1e-4)])},
+            )
+            reference_metadata = {
+                "workload": {"name": "ziolkowski-dm2"},
+                "geometry_and_coefficients": {},
+            }
+            candidate_metadata = {
+                "backend_metadata": {
+                    "precision": "float32",
+                    "input_archive": {
+                        "sha256": torch_correctness._sha256(reference),
+                        "size_bytes": reference.stat().st_size,
+                    },
+                    "input_step_zero_contract": {
+                        "arrays": {},
+                        "array_bytes": 0,
+                    },
+                },
+                "geometry_and_coefficients": {},
+            }
+            with (
+                patch.object(
+                    native_oracle,
+                    "_validate_archive",
+                    return_value=reference_metadata,
+                ),
+                patch.object(
+                    torch_correctness,
+                    "_validate_torch_candidate_archive",
+                    return_value=candidate_metadata,
+                ),
+                patch.object(
+                    torch_correctness,
+                    "_source_topology_matches",
+                    return_value=True,
+                ),
+                patch.object(
+                    torch_correctness,
+                    "_material_topology_matches",
+                    return_value=True,
+                ),
+                patch.object(
+                    torch_correctness,
+                    "_reference_strategies",
+                    return_value={"Dm2"},
+                ),
+            ):
+                result = torch_correctness.compare_torch_archives(
+                    reference,
+                    candidate,
+                    self.manifest,
+                    include_tolerances=True,
+                )
+
+        self.assertFalse(result["passed"])
+        failure = next(item for item in result["failures"] if item["key"] == key)
+        self.assertEqual(
+            {name: failure[name] for name in ("rtol", "atol", "scope")},
+            tolerance,
+        )
+        tolerance_result = next(
+            item for item in result["tolerance_results"] if item["key"] == key
+        )
+        self.assertEqual(
+            {name: tolerance_result[name] for name in ("rtol", "atol", "scope")},
+            tolerance,
+        )
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is unavailable")
+    def test_cuda_float32_ziolkowski_500_step_eager_and_graph_archives(self):
+        spec = native_oracle.find_case(self.manifest, "ziolkowski-dm2")
+        key = "step/500/state/Ex/0-Dm2/values"
+        expected_tolerance = {
+            "rtol": 6e-4,
+            "atol": 3e-6,
+            "scope": "strategies/dm2/float32",
+        }
+        observer_commit = self.manifest["reference"]["observer_commit"]
+        with tempfile.TemporaryDirectory() as directory:
+            reference = Path(directory) / "ziolkowski-dm2-native.npz"
+            with patch.object(
+                native_oracle,
+                "_checkout_provenance",
+                side_effect=self._provenance(observer_commit),
+            ):
+                native_oracle.capture_case(spec, self.manifest, reference)
+
+            with np.load(reference, allow_pickle=False) as archive:
+                reference_metadata = native_oracle.read_metadata(archive)
+                self.assertIn(key, archive.files)
+            self.assertEqual(reference_metadata["capture_steps"], [100, 500])
+
+            modes = (("eager", "default"), ("graph", "reduce-overhead"))
+            for graph_mode, compile_mode in modes:
+                with self.subTest(
+                    graph_mode=graph_mode,
+                    compile_mode=compile_mode,
+                ):
+                    torch._dynamo.reset()
+                    candidate = (
+                        Path(directory)
+                        / f"ziolkowski-dm2-cuda-float32-{graph_mode}.npz"
+                    )
+                    with patch.object(
+                        native_oracle,
+                        "_checkout_provenance",
+                        side_effect=self._provenance("b" * 40),
+                    ):
+                        torch_correctness.capture_torch_candidate(
+                            reference,
+                            self.manifest,
+                            candidate,
+                            device="cuda:0",
+                            precision="float32",
+                            graph_mode=graph_mode,
+                            compile_mode=compile_mode,
+                        )
+                    result = torch_correctness.compare_torch_archives(
+                        reference,
+                        candidate,
+                        self.manifest,
+                        include_tolerances=True,
+                    )
+                    self.assertTrue(result["passed"], result["failures"])
+                    self.assertEqual(result["failures"], [])
+                    records = {
+                        item["key"]: item for item in result["tolerance_results"]
+                    }
+                    self.assertEqual(
+                        {
+                            name: records[key][name]
+                            for name in ("rtol", "atol", "scope")
+                        },
+                        expected_tolerance,
+                    )
+                    with np.load(candidate, allow_pickle=False) as archive:
+                        metadata = native_oracle.read_metadata(archive)
+                        self.assertIn(key, archive.files)
+                    backend = metadata["backend_metadata"]
+                    self.assertEqual(metadata["capture_steps"], [100, 500])
+                    self.assertEqual(backend["device"], "cuda:0")
+                    self.assertEqual(backend["precision"], "float32")
+                    self.assertEqual(backend["graph_mode"], graph_mode)
+                    self.assertEqual(backend["compile_mode"], compile_mode)
 
     def test_dummy_source_numerics_reuse_nondispersive_tolerance(self):
         for dtype, expected in self.manifest["tolerances"]["torch"][

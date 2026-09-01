@@ -36,12 +36,15 @@ OUTPUT_KIND = "issue-123-completion-evaluation"
 DIFFERENTIAL_KIND = "issue-123-differential-evidence"
 MACOS_INDEX_KIND = "issue-123-macos-evidence-index"
 FAILURE_RUN_KIND = "two-gpu-failure-run"
-TORCH_SOLVER_ABI = "torch-fdtd-regions-v13"
+TORCH_SOLVER_ABI = "torch-fdtd-regions-v14"
 LOCAL_COMPILED_REGION_TOPOLOGY = (
     "local-two-static-half-step-regions+external-cached-two-stage-foreach-"
     "boundary-sync-v2"
 )
 BOUNDARY_SYNC_REPRESENTATION = "cached-two-stage-foreach-v1"
+CUDA_GRAPH_EXECUTION_REPRESENTATION = (
+    "external-standard-regions+dm2-raw-fixed-masked-v1"
+)
 
 INDEX_SCHEMA_VERSION = 2
 BUNDLE_SPEC_SCHEMA_VERSION = 1
@@ -3115,6 +3118,8 @@ def _validate_compile_cache_key_evidence(
         and diagnostics.get("compile_solver_abi") == TORCH_SOLVER_ABI
         and diagnostics.get("compiled_region_topology")
         == LOCAL_COMPILED_REGION_TOPOLOGY
+        and diagnostics.get("cuda_graph_execution_representation")
+        == CUDA_GRAPH_EXECUTION_REPRESENTATION
         and payload[3] == runtime["field_storage_dtype"]
         and payload[4] == runtime["compile_policy"]
         and payload[5] == runtime["compile_mode"]
@@ -3124,6 +3129,13 @@ def _validate_compile_cache_key_evidence(
         and payload[19] is True
         and payload[20] is None,
         f"{label} cache preimage differs from the runtime policy/configuration",
+    )
+    graph_contract = payload[21]
+    _require(
+        isinstance(graph_contract, tuple)
+        and len(graph_contract) == 8
+        and graph_contract[-1] == CUDA_GRAPH_EXECUTION_REPRESENTATION,
+        f"{label} cache preimage differs from the CUDA graph execution contract",
     )
     expected_config = _policy_config_preimage(result, case_name, policy, executions)
     _require(

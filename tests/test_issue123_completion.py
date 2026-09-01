@@ -776,6 +776,16 @@ class Issue123CompletionTest(unittest.TestCase):
         runtime_preimage[18] = False
         runtime_preimage[19] = True
         runtime_preimage[20] = None
+        runtime_preimage[21] = [
+            False,
+            100,
+            10,
+            3,
+            False,
+            False,
+            False,
+            completion.CUDA_GRAPH_EXECUTION_REPRESENTATION,
+        ]
         result = {
             "workload": copy.deepcopy(workload),
             "runtime": {
@@ -788,12 +798,19 @@ class Issue123CompletionTest(unittest.TestCase):
                 "execution_policy": policy,
                 "paired_real": False,
                 "compile_cache_key": hashlib.sha256(
-                    repr(tuple(runtime_preimage)).encode()
+                    repr(
+                        completion._tuple_cache_preimage(
+                            runtime_preimage, "test cache preimage"
+                        )
+                    ).encode()
                 ).hexdigest(),
             },
             "diagnostics": {
                 "compile_solver_abi": completion.TORCH_SOLVER_ABI,
                 "compiled_region_topology": completion.LOCAL_COMPILED_REGION_TOPOLOGY,
+                "cuda_graph_execution_representation": (
+                    completion.CUDA_GRAPH_EXECUTION_REPRESENTATION
+                ),
                 "boundaries": {
                     "scheduling": "external",
                     "execution_representation": (
@@ -917,7 +934,11 @@ class Issue123CompletionTest(unittest.TestCase):
         ]
         runtime_preimage[6] = "local-eager-stencil-and-material-phases"
         rehashed_preimage_tamper["runtime"]["compile_cache_key"] = hashlib.sha256(
-            repr(tuple(runtime_preimage)).encode()
+            repr(
+                completion._tuple_cache_preimage(
+                    runtime_preimage, "test cache preimage"
+                )
+            ).encode()
         ).hexdigest()
         with self.assertRaisesRegex(completion.EvidenceError, "configuration"):
             self.validate_policy_run(rehashed_preimage_tamper)
@@ -927,10 +948,36 @@ class Issue123CompletionTest(unittest.TestCase):
         runtime_preimage[0] = "torch-fdtd-regions-v8"
         abi_tamper["diagnostics"]["compile_solver_abi"] = "torch-fdtd-regions-v8"
         abi_tamper["runtime"]["compile_cache_key"] = hashlib.sha256(
-            repr(tuple(runtime_preimage)).encode()
+            repr(
+                completion._tuple_cache_preimage(
+                    runtime_preimage, "test cache preimage"
+                )
+            ).encode()
         ).hexdigest()
         with self.assertRaisesRegex(completion.EvidenceError, "configuration"):
             self.validate_policy_run(abi_tamper)
+
+        graph_preimage_tamper = self.policy_run("dense")
+        runtime_preimage = graph_preimage_tamper["compile_cache_key_evidence"][
+            "runtime_preimage"
+        ]
+        runtime_preimage[21][-1] = "external-standard-regions+tampered"
+        graph_preimage_tamper["runtime"]["compile_cache_key"] = hashlib.sha256(
+            repr(
+                completion._tuple_cache_preimage(
+                    runtime_preimage, "test cache preimage"
+                )
+            ).encode()
+        ).hexdigest()
+        with self.assertRaisesRegex(completion.EvidenceError, "CUDA graph"):
+            self.validate_policy_run(graph_preimage_tamper)
+
+        graph_diagnostic_tamper = self.policy_run("dense")
+        graph_diagnostic_tamper["diagnostics"][
+            "cuda_graph_execution_representation"
+        ] = "external-standard-regions+tampered"
+        with self.assertRaisesRegex(completion.EvidenceError, "configuration"):
+            self.validate_policy_run(graph_diagnostic_tamper)
 
     def test_failure_reason_contract_matches_producer(self):
         self.assertEqual(

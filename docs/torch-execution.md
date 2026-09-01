@@ -156,13 +156,27 @@ ordinary dielectric path.
 The corrector uses a device bool mask. Eager execution performs ten chunks of
 ten masked iterations; compiled CPU execution packs the carry and performs
 three masked iterations per `torch.while_loop` body, amortizing each lowered
-condition evaluation. Both paths preserve the exact native maximum of 100
-iterations. Converged targets retain their field and state while unconverged
-targets continue, with zero-reference relative error, NaN handling, and
-tolerance semantics preserved. The solver does not call `.item()` or branch
-on convergence in Python. Current CPU Inductor lowers each `while_loop`
-condition through a scalar conversion, which the three-iteration body
-amortizes.
+condition evaluation. Normal compiled CUDA execution keeps the functional
+device `torch.while_loop` and exits when all targets converge or the native
+100-iteration limit is reached.
+
+Explicit external CUDA Graph capture uses a separate fixed graph-only path.
+During capture, raw graph-safe stencil and material tensor regions call the
+preallocated DM2 prepare, ten masked chunks, and finalize operations. This
+records exactly 100 masked iterations without nesting Inductor control flow or
+an internal CUDA graph inside the external graph. The normal functional DM2
+update list is restored before `capture_cuda_graphs()` returns. Capture failure
+therefore leaves the ordinary path intact, and the latent non-graph path retains
+device-side early exit; after successful capture, `advance()` replays the fixed
+captured operations. Diagnostics and the compile-cache preimage identify this
+graph execution representation explicitly.
+
+All paths preserve the exact native maximum of 100 iterations. Converged
+targets retain their field and state while unconverged targets continue, with
+zero-reference relative error, NaN handling, and tolerance semantics
+preserved. The solver does not call `.item()` or branch on convergence in
+Python. Current CPU Inductor lowers each `while_loop` condition through a
+scalar conversion, which the three-iteration body amortizes.
 Device-side asynchronous assertions validate each bucket's status without
 transferring a status tensor during successful advancement; failures identify
 the component and transition-width bucket without overwriting failed state.

@@ -19,6 +19,7 @@ from gmes.torch_dm2 import (
 )
 from gmes.torch_fdtd import (
     BOUNDARY_SYNC_REPRESENTATION,
+    CUDA_GRAPH_EXECUTION_REPRESENTATION,
     DEFAULT_VIEW_MUTATION_REPRESENTATION,
     DIRECT_VIEW_MUTATION_REPRESENTATION,
     EXTERNAL_SOURCE_REPRESENTATION,
@@ -179,9 +180,13 @@ class TorchRuntimeConfigTest(unittest.TestCase):
             )
 
     def test_compile_cache_key_tracks_execution_specialization(self):
-        self.assertEqual(TORCH_SOLVER_ABI, "torch-fdtd-regions-v13")
+        self.assertEqual(TORCH_SOLVER_ABI, "torch-fdtd-regions-v14")
         self.assertEqual(issue123_completion.TORCH_SOLVER_ABI, TORCH_SOLVER_ABI)
         self.assertEqual(PACKED_DM2_REPRESENTATION, "single-carry-packed-loop-v2")
+        self.assertEqual(
+            CUDA_GRAPH_EXECUTION_REPRESENTATION,
+            "external-standard-regions+dm2-raw-fixed-masked-v1",
+        )
         self.assertEqual(DM2_PACKED_ITERATIONS_PER_CONDITION, 3)
         common = {
             "space": gmes.Cartesian((2, 2, 0), 2),
@@ -224,6 +229,7 @@ class TorchRuntimeConfigTest(unittest.TestCase):
         )
         self.assertEqual(first.diagnostics()["compile_solver_abi"], TORCH_SOLVER_ABI)
         self.assertEqual(first._compile_cache_key_preimage[0], TORCH_SOLVER_ABI)
+        self.assertEqual(len(first._compile_cache_key_preimage), 31)
         self.assertEqual(
             first._compile_cache_key_preimage[6], LOCAL_COMPILED_REGION_TOPOLOGY
         )
@@ -234,6 +240,14 @@ class TorchRuntimeConfigTest(unittest.TestCase):
                 DM2_ITERATIONS_PER_CHUNK,
                 DM2_PACKED_ITERATIONS_PER_CONDITION,
             ),
+        )
+        self.assertEqual(
+            first._compile_cache_key_preimage[21][-1],
+            CUDA_GRAPH_EXECUTION_REPRESENTATION,
+        )
+        self.assertEqual(
+            first.diagnostics()["cuda_graph_execution_representation"],
+            CUDA_GRAPH_EXECUTION_REPRESENTATION,
         )
         self.assertEqual(
             first.diagnostics()["view_mutation_representation"],
@@ -641,6 +655,82 @@ class TorchStateTest(unittest.TestCase):
             torch.any(torch.isclose(values, torch.tensor(1 / 1.7, dtype=values.dtype)))
         )
         self.assertEqual(simulation.plan.material_ids_ex.dtype, torch.int32)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is unavailable")
+    def test_cuda_graph_capture_failure_rolls_back_state_and_registry(self):
+        simulation = TorchSimulation(
+            space=gmes.Cartesian((2, 2, 2), 2),
+            geometry=_geometry()
+            + [
+                gmes.Block(
+                    gmes.Dm2(
+                        eps_inf=1.4,
+                        mu_inf=1.1,
+                        omega=(0.7, 1.1),
+                        n_atom=(0.2, 0.4),
+                        rho30=-0.8,
+                        gamma=0.15,
+                        t1=2.5,
+                        t2=1.7,
+                        hbar=1.2,
+                        rtol=1e-4,
+                    ),
+                    center=(0, 0, 0),
+                    size=(1, 1, 1),
+                )
+            ],
+            runtime=TorchRuntimeConfig(
+                device="cuda:0",
+                precision="float32",
+                compile_policy="compile",
+                cpu_threads=1,
+            ),
+            dt=0.025,
+        )
+        rng = np.random.default_rng(123)
+        simulation.load_host_fields(
+            {
+                name: rng.normal(size=tuple(field.shape)).astype(np.float32) * 1e-3
+                for name, field in simulation.state.fields().items()
+            }
+        )
+        expected = simulation.checkpoint()
+        addresses = simulation.buffer_addresses()
+        normal_dm2_updates = simulation._dm2_updates
+        original_load_checkpoint = simulation.load_checkpoint
+        restore_calls = 0
+
+        def fail_first_restore(checkpoint):
+            nonlocal restore_calls
+            restore_calls += 1
+            if restore_calls == 1:
+                raise RuntimeError("injected CUDA graph checkpoint restore failure")
+            return original_load_checkpoint(checkpoint)
+
+        with (
+            mock.patch.object(
+                simulation,
+                "load_checkpoint",
+                side_effect=fail_first_restore,
+            ),
+            self.assertRaisesRegex(
+                RuntimeError,
+                "injected CUDA graph checkpoint restore failure",
+            ),
+        ):
+            simulation.capture_cuda_graphs()
+
+        self.assertEqual(restore_calls, 2)
+        self.assertEqual(simulation._cuda_graphs, {})
+        self.assertIs(simulation._dm2_updates, normal_dm2_updates)
+        self.assertEqual(simulation.buffer_addresses(), addresses)
+        actual = simulation.checkpoint()
+        self.assertEqual(actual["metadata"], expected["metadata"])
+        self.assertEqual(actual["auxiliaries"], expected["auxiliaries"])
+        for name, value in expected["state"].items():
+            self.assertTrue(torch.equal(actual["state"][name], value), name)
+        for name, value in expected["probes"].items():
+            self.assertTrue(torch.equal(actual["probes"][name], value), name)
 
 
 class TorchOracleTest(unittest.TestCase):

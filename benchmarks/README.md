@@ -70,6 +70,9 @@ manifest's observer commit, unknown backends, workload/capture-contract drift,
 missing or extra arrays, reshaped maps, inconsistent physical summaries, and
 incorrect byte accounting. A native archive compared with itself is only a
 validator smoke test and does not satisfy the Torch evidence requirement.
+Every source-free mixed archive must also keep field energy below 100 times
+its `step/0` value at every capture, so a finite but numerically runaway
+reference cannot become an acceptance oracle.
 
 Each archive includes a `step/0` canonical input checkpoint. It contains the
 fixed-seed nonzero fields and the complete state after the manifest's
@@ -86,8 +89,11 @@ adjacent dispersive volumes reach a 3-D DM2 volume. The 3-D mixed case therefore
 keeps a normal, nonzero-state DM2 updater on one Ex Yee point and fixes a long
 x-domain that isolates it for the 100-step differential window. This preserves
 all material dispatcher and state-storage coverage without redefining the DM2
-corrector or weakening its tolerance. DM2 transition-count and coverage
-performance is measured in 2-D; 3-D coverage gates exclude volumetric DM2.
+corrector or weakening its tolerance. Its background matches the instantaneous
+dispersive coefficients, and both PML shells are capped by the shortest active
+domain dimension so their opposite faces remain disjoint. DM2 transition-count
+and coverage performance is measured in 2-D; 3-D coverage gates exclude
+volumetric DM2.
 
 ## Measurements and gates
 

@@ -439,6 +439,113 @@ class NativeOracleTest(unittest.TestCase):
             )
         )
 
+    def test_mixed_3d_geometry_preserves_families_without_pml_overlap(self):
+        spec = self.oracle.find_case(self.manifest, "mixed-3d")
+        simulation = self.oracle.build_simulation(spec, self.gmes)
+        background = simulation.geom_list[0].material
+        self.assertEqual((background.eps_inf, background.mu_inf), (1.2, 1.0))
+
+        shells = [
+            geometry
+            for geometry in simulation.geom_list
+            if isinstance(geometry, self.gmes.Shell)
+        ]
+        self.assertEqual([shell.d for shell in shells], [0.5, 1.0])
+        face_names = (
+            ("minus_x", "plus_x"),
+            ("minus_y", "plus_y"),
+            ("minus_z", "plus_z"),
+        )
+        for shell in shells:
+            for axis, names in enumerate(face_names):
+                active_faces = [getattr(shell, name) for name in names]
+                self.assertTrue(all(active_faces))
+                self.assertLess(shell.d, shell.half_size[axis])
+                self.assertTrue(np.isfinite(shell.material.half_size[axis]))
+
+        expected = {
+            "Dielectric",
+            "Upml",
+            "Cpml",
+            "Drude",
+            "Lorentz",
+            "DcpAde",
+            "DcpPlrc",
+            "DcpRc",
+            "Dm2",
+        }
+        active = set()
+        offsets = {
+            self.gmes.Ex: (0, 1, 1),
+            self.gmes.Ey: (1, 0, 1),
+            self.gmes.Ez: (1, 1, 0),
+            self.gmes.Hx: (0, 1, 1),
+            self.gmes.Hy: (1, 0, 1),
+            self.gmes.Hz: (1, 1, 0),
+        }
+        pml_ids = {
+            index
+            for index, geometry in enumerate(simulation.geom_list)
+            if type(geometry.material).__name__ in {"Upml", "Cpml"}
+        }
+        for component, offset in offsets.items():
+            shape = tuple(simulation.space.my_field_size + np.asarray(offset))
+            axes = simulation.space.component_coordinate_axes(component, shape)
+            lowered = simulation.geom_tree.lower_grid(
+                *axes, 0, int(np.prod(shape)), component=component
+            )
+            active.update(
+                type(lowered.geometries[index].material).__name__
+                for index in np.unique(lowered.material_ids)
+            )
+            pml_on_pml = np.isin(lowered.material_ids, tuple(pml_ids)) & np.isin(
+                lowered.underlying_ids, tuple(pml_ids)
+            )
+            self.assertFalse(pml_on_pml.any(), component.__name__)
+        self.assertEqual(active, expected)
+
+    def test_mixed_3d_source_free_energy_remains_bounded(self):
+        spec = self.oracle.find_case(self.manifest, "mixed-3d")
+        simulation = self.oracle.build_simulation(spec, self.gmes)
+        simulation.init()
+        reference = self.manifest["reference"]
+        self.oracle.initialize_fields(
+            simulation, reference["seed"], reference["field_scale"]
+        )
+        for _ in range(reference["precondition_steps"]):
+            simulation.step()
+        initial_energy = sum(
+            float(np.square(np.abs(field)).sum()) for field in simulation.field.values()
+        )
+        self.assertGreater(initial_energy, 0)
+        current_step = 0
+        for target_step in spec.get("capture_steps", reference["capture_steps"]):
+            while current_step < target_step:
+                simulation.step()
+                current_step += 1
+            energy = sum(
+                float(np.square(np.abs(field)).sum())
+                for field in simulation.field.values()
+            )
+            self.assertTrue(
+                all(np.isfinite(field).all() for field in simulation.field.values())
+            )
+            self.assertLess(
+                energy,
+                initial_energy * self.oracle.MIXED_SOURCE_FREE_MAX_ENERGY_RATIO,
+                target_step,
+            )
+
+    def test_mixed_source_free_stability_contract_rejects_runaway_energy(self):
+        workload = {"recipe": "mixed", "source": "none"}
+        bounded = {"0": 1.0, "20": 2.0, "100": 3.0}
+        self.oracle._validate_mixed_source_free_stability(workload, bounded, [20, 100])
+        runaway = dict(bounded, **{"20": 100.0})
+        with self.assertRaisesRegex(ValueError, "unstable at step 20"):
+            self.oracle._validate_mixed_source_free_stability(
+                workload, runaway, [20, 100]
+            )
+
     def test_field_initializer_is_backend_neutral_and_canonical(self):
         shapes = {
             name: (2 + index % 2, 3, 1)

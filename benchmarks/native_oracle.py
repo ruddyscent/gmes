@@ -24,6 +24,7 @@ DEFAULT_MANIFEST = ROOT / "native_oracle_workloads.json"
 COMPONENT_NAMES = ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")
 FIELD_INITIALIZER = "native-affine-ramp-v1"
 ARCHIVE_SCHEMA_VERSION = 2
+MIXED_SOURCE_FREE_MAX_ENERGY_RATIO = 100.0
 PERFORMANCE_ONLY_REFERENCE_FIELDS = frozenset(
     {"performance_observer_tag", "performance_observer_commit"}
 )
@@ -465,8 +466,9 @@ def material_from_name(name, gmes):
 
 
 def _mixed_geometry(spec, gmes):
-    size = spec["size"]
+    size = tuple(float(value) for value in spec["size"])
     width = float(size[0]) / 9
+    active_size = min(value for value in size if value > 0)
     names = (
         "upml",
         "drude-1",
@@ -476,11 +478,16 @@ def _mixed_geometry(spec, gmes):
         "dcp-rc",
         "dm2-1",
     )
-    geometry = [gmes.DefaultMedium(material_from_name("dielectric", gmes))]
+    background = material_from_name("dielectric", gmes)
+    if size[2] > 0:
+        # Match the instantaneous dispersive coefficients so the fixed,
+        # source-free seed does not excite a nonphysical interface mode.
+        background = gmes.Dielectric(eps_inf=1.2, mu_inf=1.0)
+    geometry = [gmes.DefaultMedium(background)]
     geometry.append(
         gmes.Shell(
             material=material_from_name("cpml", gmes),
-            thickness=max(0.25, width / 4),
+            thickness=min(max(0.25, width / 4), active_size / 8),
         )
     )
     z_size = max(float(size[2]) * 0.65, 1.0)
@@ -505,7 +512,7 @@ def _mixed_geometry(spec, gmes):
                     material=material_from_name(name, gmes),
                     center=(center_x, 0, 0),
                     size=region_size,
-                    thickness=max(0.25, width * 0.2),
+                    thickness=min(max(0.25, width * 0.2), active_size / 4),
                 )
             )
         else:
@@ -1467,6 +1474,29 @@ def _validate_physical_arrays(archive, physical, step, fields, required_keys):
         and np.allclose(summary, recorded, rtol=tolerance, atol=0),
         "physical summary is inconsistent with complete fields",
     )
+    return calculated[0]
+
+
+def _validate_mixed_source_free_stability(workload, field_energies, capture_steps):
+    if workload.get("recipe") != "mixed" or workload.get("source") != "none":
+        return
+    initial_energy = field_energies["0"]
+    _contract(
+        isinstance(initial_energy, (int, float))
+        and not isinstance(initial_energy, bool)
+        and math.isfinite(initial_energy)
+        and initial_energy > 0,
+        "mixed source-free initial energy is invalid",
+    )
+    for step in capture_steps:
+        energy = field_energies[str(step)]
+        _contract(
+            isinstance(energy, (int, float))
+            and not isinstance(energy, bool)
+            and math.isfinite(energy)
+            and 0 <= energy < initial_energy * MIXED_SOURCE_FREE_MAX_ENERGY_RATIO,
+            f"mixed source-free energy is unstable at step {step}",
+        )
 
 
 def _validate_archive(archive, manifest, role):
@@ -1621,6 +1651,7 @@ def _validate_archive(archive, manifest, role):
     _exact_keys(steps, expected_step_names, "steps")
     baseline_signatures = None
     all_material_records = []
+    field_energies = {}
     for step in (0, *expected_steps):
         step_name = str(step)
         snapshot = steps[step_name]
@@ -1675,9 +1706,11 @@ def _validate_archive(archive, manifest, role):
             )
         all_material_records.extend(snapshot["materials"])
         _validate_source_arrays(archive, snapshot["sources"], step_name, required_keys)
-        _validate_physical_arrays(
+        field_energies[step_name] = _validate_physical_arrays(
             archive, snapshot["physical"], step_name, fields, required_keys
         )
+
+    _validate_mixed_source_free_stability(workload, field_energies, expected_steps)
 
     geometry_and_coefficients = metadata["geometry_and_coefficients"]
     _contract(

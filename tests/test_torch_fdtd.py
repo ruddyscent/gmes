@@ -33,6 +33,7 @@ from gmes.torch_fdtd import (
     TorchRuntimeConfig,
     TorchSimulation,
     _boundary_plane,
+    _compile_fullgraph,
     _field_region,
     torch_runtime_diagnostics,
 )
@@ -165,6 +166,72 @@ class TorchRuntimeConfigTest(unittest.TestCase):
                     runtime=config,
                 )
 
+    def test_cuda_graph_compile_explicitly_disables_inner_cudagraphs(self):
+        cases = (
+            ("default", {"triton.cudagraphs": False}),
+            ("reduce-overhead", {"triton.cudagraphs": False}),
+            (
+                "max-autotune",
+                {
+                    "triton.cudagraphs": False,
+                    "max_autotune": True,
+                    "coordinate_descent_tuning": True,
+                },
+            ),
+        )
+        for compile_mode, expected_options in cases:
+            with (
+                self.subTest(compile_mode=compile_mode),
+                mock.patch(
+                    "gmes.torch_fdtd.torch.compile",
+                    return_value=mock.sentinel.compiled,
+                ) as compile_function,
+            ):
+                function = mock.sentinel.function
+                result = _compile_fullgraph(
+                    function,
+                    TorchRuntimeConfig(
+                        device="cuda:0",
+                        compile_policy="compile",
+                        compile_mode=compile_mode,
+                        cpu_threads=1,
+                    ),
+                    torch.device("cuda:0"),
+                    dynamic=False,
+                    disable_cuda_graphs=True,
+                )
+
+            self.assertIs(result, mock.sentinel.compiled)
+            compile_function.assert_called_once_with(
+                function,
+                fullgraph=True,
+                dynamic=False,
+                options=expected_options,
+            )
+
+        runtime = TorchRuntimeConfig(
+            device="cuda:0",
+            compile_policy="compile",
+            compile_mode="reduce-overhead",
+            cpu_threads=1,
+        )
+        with mock.patch(
+            "gmes.torch_fdtd.torch.compile",
+            return_value=mock.sentinel.compiled,
+        ) as compile_function:
+            _compile_fullgraph(
+                mock.sentinel.function,
+                runtime,
+                torch.device("cuda:0"),
+                dynamic=False,
+            )
+        compile_function.assert_called_once_with(
+            mock.sentinel.function,
+            fullgraph=True,
+            dynamic=False,
+            mode="reduce-overhead",
+        )
+
     def test_oversubscribed_process_metadata_is_rejected(self):
         processors = os.cpu_count() or 1
         config = TorchRuntimeConfig(
@@ -180,12 +247,12 @@ class TorchRuntimeConfigTest(unittest.TestCase):
             )
 
     def test_compile_cache_key_tracks_execution_specialization(self):
-        self.assertEqual(TORCH_SOLVER_ABI, "torch-fdtd-regions-v14")
+        self.assertEqual(TORCH_SOLVER_ABI, "torch-fdtd-regions-v15")
         self.assertEqual(issue123_completion.TORCH_SOLVER_ABI, TORCH_SOLVER_ABI)
         self.assertEqual(PACKED_DM2_REPRESENTATION, "single-carry-packed-loop-v2")
         self.assertEqual(
             CUDA_GRAPH_EXECUTION_REPRESENTATION,
-            "external-standard-regions+dm2-raw-fixed-masked-v1",
+            "external-no-inner-cudagraph-regions+dm2-raw-fixed-masked-v1",
         )
         self.assertEqual(DM2_PACKED_ITERATIONS_PER_CONDITION, 3)
         common = {
@@ -655,6 +722,72 @@ class TorchStateTest(unittest.TestCase):
             torch.any(torch.isclose(values, torch.tensor(1 / 1.7, dtype=values.dtype)))
         )
         self.assertEqual(simulation.plan.material_ids_ex.dtype, torch.int32)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is unavailable")
+    def test_reduce_overhead_cuda_graph_uses_non_nested_half_steps(self):
+        torch._dynamo.reset()
+        self.addCleanup(torch._dynamo.reset)
+        poles = tuple(
+            gmes.DrudePole(
+                omega=0.6 + 0.1 * index,
+                gamma=0.03 + 0.01 * index,
+            )
+            for index in range(4)
+        )
+        simulation = TorchSimulation(
+            space=gmes.Cartesian((6, 5, 4), 3),
+            geometry=[
+                gmes.DefaultMedium(gmes.Dielectric(eps_inf=1.2)),
+                gmes.Block(
+                    gmes.Drude(eps_inf=1.2, dps=poles),
+                    center=(0, 0, 0),
+                    size=(6, 5, 4),
+                ),
+            ],
+            runtime=TorchRuntimeConfig(
+                device="cuda:0",
+                precision="float32",
+                compile_policy="compile",
+                compile_mode="reduce-overhead",
+                cpu_threads=1,
+            ),
+            bloch=(0.07, 0.11, 0.13),
+        )
+        rng = np.random.default_rng(123)
+        simulation.load_host_fields(
+            {
+                name: rng.normal(size=tuple(field.shape)).astype(np.float32) * 1e-3
+                for name, field in simulation.state.fields().items()
+            }
+        )
+        simulation.advance(1)
+        checkpoint = simulation.checkpoint()
+        addresses = simulation.buffer_addresses()
+
+        simulation.capture_cuda_graphs()
+        self.assertEqual(
+            sorted(simulation._cuda_graphs), ["electric_half", "magnetic_half"]
+        )
+        self.assertIsNot(
+            simulation._electric_cuda_graph_half, simulation._electric_half
+        )
+        self.assertIsNot(
+            simulation._magnetic_cuda_graph_half, simulation._magnetic_half
+        )
+        self.assertEqual(addresses, simulation.buffer_addresses())
+        restored = simulation.checkpoint()
+        for name, value in checkpoint["state"].items():
+            self.assertTrue(torch.equal(restored["state"][name], value), name)
+
+        simulation.advance(2)
+        captured = simulation.state.checkpoint()
+        simulation._cuda_graphs.clear()
+        torch.cuda.synchronize(simulation.device)
+        simulation.load_checkpoint(checkpoint).advance(2)
+        normal = simulation.state.checkpoint()
+        self.assertEqual(addresses, simulation.buffer_addresses())
+        for name, value in normal.items():
+            torch.testing.assert_close(captured[name], value, msg=name)
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA is unavailable")
     def test_cuda_graph_capture_failure_rolls_back_state_and_registry(self):

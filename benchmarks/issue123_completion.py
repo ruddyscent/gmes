@@ -36,14 +36,14 @@ OUTPUT_KIND = "issue-123-completion-evaluation"
 DIFFERENTIAL_KIND = "issue-123-differential-evidence"
 MACOS_INDEX_KIND = "issue-123-macos-evidence-index"
 FAILURE_RUN_KIND = "two-gpu-failure-run"
-TORCH_SOLVER_ABI = "torch-fdtd-regions-v14"
+TORCH_SOLVER_ABI = "torch-fdtd-regions-v15"
 LOCAL_COMPILED_REGION_TOPOLOGY = (
     "local-two-static-half-step-regions+external-cached-two-stage-foreach-"
     "boundary-sync-v2"
 )
 BOUNDARY_SYNC_REPRESENTATION = "cached-two-stage-foreach-v1"
 CUDA_GRAPH_EXECUTION_REPRESENTATION = (
-    "external-standard-regions+dm2-raw-fixed-masked-v1"
+    "external-no-inner-cudagraph-regions+dm2-raw-fixed-masked-v1"
 )
 
 INDEX_SCHEMA_VERSION = 2

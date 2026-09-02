@@ -75,14 +75,14 @@ class TorchConfigurationError(ValueError):
 
 
 COMPILE_MODES = ("default", "reduce-overhead", "max-autotune")
-TORCH_SOLVER_ABI = "torch-fdtd-regions-v14"
+TORCH_SOLVER_ABI = "torch-fdtd-regions-v15"
 LOCAL_COMPILED_REGION_TOPOLOGY = (
     "local-two-static-half-step-regions+external-cached-two-stage-foreach-"
     "boundary-sync-v2"
 )
 BOUNDARY_SYNC_REPRESENTATION = "cached-two-stage-foreach-v1"
 CUDA_GRAPH_EXECUTION_REPRESENTATION = (
-    "external-standard-regions+dm2-raw-fixed-masked-v1"
+    "external-no-inner-cudagraph-regions+dm2-raw-fixed-masked-v1"
 )
 DIRECT_VIEW_MUTATION_REPRESENTATION = "direct-nonoverlapping-as-strided-v1"
 DEFAULT_VIEW_MUTATION_REPRESENTATION = "slice-views-v1"
@@ -266,12 +266,26 @@ def torch_runtime_diagnostics(
 
 
 def _compile_fullgraph(
-    function: Any, runtime: Any, device: Any, *, dynamic: Any
+    function: Any,
+    runtime: Any,
+    device: Any,
+    *,
+    dynamic: Any,
+    disable_cuda_graphs: bool = False,
 ) -> Any:
     """Compile one fixed solver region under the explicit runtime policy."""
     arguments = {"fullgraph": True, "dynamic": dynamic}
     if device.type == "cuda":
-        arguments["mode"] = runtime.compile_mode
+        if disable_cuda_graphs:
+            options = {"triton.cudagraphs": False}
+            if runtime.compile_mode == "max-autotune":
+                options.update(
+                    max_autotune=True,
+                    coordinate_descent_tuning=True,
+                )
+            arguments["options"] = options
+        else:
+            arguments["mode"] = runtime.compile_mode
     return torch.compile(function, **arguments)
 
 
@@ -1464,6 +1478,12 @@ class TorchSimulation:
     _magnetic_pml: tuple[tuple[Callable[..., Any], tuple[Any, ...]], ...]
     _electric_graph_function: Callable[..., Any]
     _magnetic_graph_function: Callable[..., Any]
+    _electric_cuda_graph_function: Callable[..., Any]
+    _magnetic_cuda_graph_function: Callable[..., Any]
+    _electric_cuda_graph_material: Callable[..., Any]
+    _magnetic_cuda_graph_material: Callable[..., Any]
+    _electric_cuda_graph_half: Callable[[], Any] | None
+    _magnetic_cuda_graph_half: Callable[[], Any] | None
     _dm2_updates: list[Any]
     _dm2_graph_updates: list[Any]
     _dm2_iterations_host: torch.Tensor
@@ -1763,6 +1783,11 @@ class TorchSimulation:
         self._magnetic = magnetic_function
         self._electric_graph_function = electric_function
         self._magnetic_graph_function = magnetic_function
+        separate_cuda_graph_regions = (
+            runtime.compile_policy == "compile" and device.type == "cuda"
+        )
+        self._electric_cuda_graph_function = self._electric
+        self._magnetic_cuda_graph_function = self._magnetic
         if runtime.compile_policy == "compile" and not self._fused_local_phases:
             self._electric = _compile_fullgraph(
                 electric_function,
@@ -1776,6 +1801,24 @@ class TorchSimulation:
                 device,
                 dynamic=False,
             )
+            if separate_cuda_graph_regions:
+                self._electric_cuda_graph_function = _compile_fullgraph(
+                    electric_function,
+                    runtime,
+                    device,
+                    dynamic=False,
+                    disable_cuda_graphs=True,
+                )
+                self._magnetic_cuda_graph_function = _compile_fullgraph(
+                    magnetic_function,
+                    runtime,
+                    device,
+                    dynamic=False,
+                    disable_cuda_graphs=True,
+                )
+            else:
+                self._electric_cuda_graph_function = self._electric
+                self._magnetic_cuda_graph_function = self._magnetic
         self._electric_args = self._electric_arguments()
         self._magnetic_args = self._magnetic_arguments()
         pml_functions: dict[str, Callable[..., Any]] = {
@@ -1866,6 +1909,8 @@ class TorchSimulation:
         self._dispersive = self._apply_dispersive
         self._electric_material = self._electric_material_update
         self._magnetic_material = self._magnetic_material_update
+        self._electric_cuda_graph_material = self._electric_material
+        self._magnetic_cuda_graph_material = self._magnetic_material
         if runtime.compile_policy == "compile" and not self._fused_local_phases:
             if (
                 self._electric_pml
@@ -1885,10 +1930,36 @@ class TorchSimulation:
                     device,
                     dynamic=False,
                 )
+            if separate_cuda_graph_regions:
+                if (
+                    self._electric_pml
+                    or self._dispersive_buckets
+                    or self._has_electric_constants
+                ):
+                    self._electric_cuda_graph_material = _compile_fullgraph(
+                        self._electric_material_update,
+                        runtime,
+                        device,
+                        dynamic=False,
+                        disable_cuda_graphs=True,
+                    )
+                if self._magnetic_pml or self._has_magnetic_constants:
+                    self._magnetic_cuda_graph_material = _compile_fullgraph(
+                        self._magnetic_material_update,
+                        runtime,
+                        device,
+                        dynamic=False,
+                        disable_cuda_graphs=True,
+                    )
+            else:
+                self._electric_cuda_graph_material = self._electric_material
+                self._magnetic_cuda_graph_material = self._magnetic_material
         self._distributed_partition = _distributed_partition
         self._distributed_exchange = None
         self._electric_half = None
         self._magnetic_half = None
+        self._electric_cuda_graph_half = None
+        self._magnetic_cuda_graph_half = None
         if self._fused_local_phases:
             self._electric_half = _compile_fullgraph(
                 self._electric_half_update,
@@ -1902,6 +1973,24 @@ class TorchSimulation:
                 device,
                 dynamic=False,
             )
+            if separate_cuda_graph_regions:
+                self._electric_cuda_graph_half = _compile_fullgraph(
+                    self._electric_half_update,
+                    runtime,
+                    device,
+                    dynamic=False,
+                    disable_cuda_graphs=True,
+                )
+                self._magnetic_cuda_graph_half = _compile_fullgraph(
+                    self._magnetic_half_update,
+                    runtime,
+                    device,
+                    dynamic=False,
+                    disable_cuda_graphs=True,
+                )
+            else:
+                self._electric_cuda_graph_half = self._electric_half
+                self._magnetic_cuda_graph_half = self._magnetic_half
         simulation_factory = (
             type(self) if _auxiliary_factory is None else _auxiliary_factory
         )
@@ -2452,15 +2541,21 @@ class TorchSimulation:
                         ("magnetic_half", self._magnetic_cuda_graph_update),
                     ]
                 else:
+                    cuda_electric_half = self._electric_cuda_graph_half
+                    cuda_magnetic_half = self._magnetic_cuda_graph_half
+                    if cuda_electric_half is None or cuda_magnetic_half is None:
+                        raise TorchConfigurationError(
+                            "fused local phases require CUDA Graph half-step functions"
+                        )
                     regions = [
-                        ("electric_half", electric_half),
-                        ("magnetic_half", magnetic_half),
+                        ("electric_half", cuda_electric_half),
+                        ("magnetic_half", cuda_magnetic_half),
                     ]
             else:
-                electric = self._electric
-                magnetic = self._magnetic
-                electric_post = self._electric_post_update
-                magnetic_post = self._magnetic_post_update
+                electric = self._electric_cuda_graph_function
+                magnetic = self._magnetic_cuda_graph_function
+                electric_post = self._electric_cuda_graph_material
+                magnetic_post = self._magnetic_cuda_graph_material
                 if graph_safe_dm2:
                     electric = self._electric_graph_function
                     magnetic = self._magnetic_graph_function

@@ -171,6 +171,15 @@ device-side early exit; after successful capture, `advance()` replays the fixed
 captured operations. Diagnostics and the compile-cache preimage identify this
 graph execution representation explicitly.
 
+For ordinary non-DM2 regions, a non-default CUDA compile mode may itself enable
+an internal Inductor CUDA Graph. Launching or lazily recording that graph while
+an explicit outer graph is capturing is unsupported. The explicit graph path
+therefore uses parallel `fullgraph=True`, `dynamic=False` region callables
+compiled with `triton.cudagraphs=False`, while normal non-graph stepping
+retains the requested compile mode. The graph path also retains the kernel
+tuning options of `max-autotune`. The outer graph still captures the compiled
+kernels, without nesting an internal graph.
+
 All paths preserve the exact native maximum of 100 iterations. Converged
 targets retain their field and state while unconverged targets continue, with
 zero-reference relative error, NaN handling, and tolerance semantics

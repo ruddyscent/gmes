@@ -1721,7 +1721,9 @@ class TorchCorrectnessTest(unittest.TestCase):
             )
             refreshed_index = copy.deepcopy(index)
             refreshed_index["runtime_receipt"] = (
-                torch_correctness._runtime_receipt_descriptor(receipt, directory)
+                torch_correctness._runtime_receipt_descriptor(
+                    receipt, Path(directory).resolve()
+                )
             )
             index_path.write_text(
                 json.dumps(refreshed_index, indent=2, sort_keys=True) + "\n"
@@ -1993,7 +1995,7 @@ class TorchCorrectnessTest(unittest.TestCase):
             real_load = np.load
 
             def fail_candidate(handle, *args, **kwargs):
-                if getattr(handle, "name", None) == str(clean_candidate):
+                if getattr(handle, "name", None) == str(clean_candidate.resolve()):
                     raise MemoryError("synthetic allocation failure")
                 return real_load(handle, *args, **kwargs)
 

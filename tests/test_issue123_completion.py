@@ -201,6 +201,7 @@ class Issue123CompletionTest(unittest.TestCase):
         }
         external_path = self.external_directory / f"{name}-runtime-receipt.json"
         external_path.write_bytes(raw)
+        external_path = external_path.resolve()
         return path_independent, completion.LoadedArtifact(
             path_independent,
             external_path,
@@ -1324,7 +1325,7 @@ class Issue123CompletionTest(unittest.TestCase):
                 self.assertRaises(completion.EvidenceError),
             ):
                 completion._create_private_live_directory(candidate, roots)
-            if candidate not in roots:
+            if candidate.resolve() not in roots:
                 self.assertFalse(candidate.exists())
         alias = self.directory / "protected-source-alias"
         alias.symlink_to(source, target_is_directory=True)

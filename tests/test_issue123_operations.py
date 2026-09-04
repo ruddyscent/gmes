@@ -1147,8 +1147,8 @@ class Issue123OperationsTest(unittest.TestCase):
             mock.patch.object(
                 operations, "candidate_evidence", return_value=self.candidate
             ),
-            mock.patch.object(operations, "_require_authenticated_gh") as authenticated,
             mock.patch.object(operations, "_github_api_capture", side_effect=capture),
+            mock.patch.object(operations.subprocess, "run") as run,
         ):
             index, scope = operations.capture_operations(
                 repository=operations.REPOSITORY,
@@ -1159,7 +1159,7 @@ class Issue123OperationsTest(unittest.TestCase):
                 publication_receipt=self.publication_receipt_path,
                 output_directory=output,
             )
-        authenticated.assert_called_once_with()
+        run.assert_not_called()
         return output, index, scope
 
     def test_capture_and_completion_recompute_raw_api_evidence(self):
@@ -2253,7 +2253,6 @@ class Issue123OperationsTest(unittest.TestCase):
             mock.patch.object(
                 operations, "candidate_evidence", return_value=self.candidate
             ),
-            mock.patch.object(operations, "_require_authenticated_gh") as auth,
             self.assertRaisesRegex(operations.EvidenceError, "not authenticated"),
         ):
             operations.verify_operations_live(
@@ -2268,7 +2267,6 @@ class Issue123OperationsTest(unittest.TestCase):
                 receipt_output=receipt_output,
                 post_bundle_lease={},
             )
-        auth.assert_not_called()
         self.assertFalse(receipt_output.exists())
 
     def test_live_receipt_preflight_uses_authenticated_b1_roots_not_cli_aliases(self):
@@ -2316,7 +2314,6 @@ class Issue123OperationsTest(unittest.TestCase):
                 "_baseline_authority_set",
                 return_value=operations.PRODUCTION_BASELINE_AUTHORITY_SET,
             ),
-            mock.patch.object(operations, "_require_authenticated_gh") as auth,
             mock.patch.object(
                 operations,
                 "_capture_production_baseline_authority",
@@ -2343,10 +2340,71 @@ class Issue123OperationsTest(unittest.TestCase):
                         post_bundle_lease=lease,
                     ):
                         self.fail("overlapping receipt path was accepted")
-        auth.assert_not_called()
         baseline.assert_not_called()
         self.assertEqual(list(source.iterdir()), [])
         self.assertEqual(list(reopened.iterdir()), [])
+
+    def test_live_initial_authority_failure_leaves_no_receipt(self):
+        source = self.root / "initial-authority-source-b1"
+        reopened = self.root / "initial-authority-reopened-b1"
+        index_root = self.root / "initial-authority-index-root"
+        public_root = self.root / "initial-authority-public-assets"
+        for directory in (source, reopened, index_root, public_root):
+            directory.mkdir()
+        expectation = operations.AuthenticatedPostBundleExpectation(
+            checked_lines=operations.FINAL_CHECKLIST_CHECKED,
+            o0_canonical_response_sha256="0" * 64,
+            o1_canonical_response_sha256="1" * 64,
+            o1_body_sha256="2" * 64,
+            o1_updated_at="2026-09-03T01:31:00Z",
+            b0_inventory_root="3" * 64,
+            b0_reopen_receipt_sha256="4" * 64,
+            b0_reopened_at="2026-09-03T01:30:00Z",
+            checklist_transition_sha256="5" * 64,
+        )
+        lease = object.__new__(completion.AuthenticatedPostBundleLease)
+        lease._snapshots = SimpleNamespace(
+            source_bundle=SimpleNamespace(root=source.resolve()),
+            reopened_bundle=SimpleNamespace(root=reopened.resolve()),
+        )
+        lease._chain = {"post_bundle_expectation": expectation}
+        lease.expectation = expectation
+        lease._closed = False
+        receipt_output = self.private_root / "initial-authority-failure.json"
+        with (
+            mock.patch.object(
+                completion.AuthenticatedPostBundleLease,
+                "require_unchanged",
+                return_value=None,
+            ),
+            mock.patch.object(
+                completion.AuthenticatedPostBundleLease,
+                "_baseline_authority_set",
+                return_value=operations.PRODUCTION_BASELINE_AUTHORITY_SET,
+            ),
+            mock.patch.object(
+                operations,
+                "_capture_production_baseline_authority",
+                side_effect=operations.EvidenceError("GitHub API request failed"),
+            ),
+            self.assertRaisesRegex(
+                operations.EvidenceError, "GitHub API request failed"
+            ),
+        ):
+            with operations.open_verified_operations_live(
+                index_path=index_root / "index.json",
+                manifest=operations.DEFAULT_MANIFEST,
+                publication_policy=self.root / "policy.json",
+                publication_policy_sha256="e" * 64,
+                publication_assets={
+                    role: public_root / name
+                    for role, name in operations.TECHNICAL_RELEASE_ASSETS.items()
+                },
+                receipt_output=receipt_output,
+                post_bundle_lease=lease,
+            ):
+                self.fail("initial authority failure was accepted")
+        self.assertFalse(receipt_output.exists())
 
     def test_live_verification_is_same_process_authority_and_canonical_provenance(self):
         self._use_checked_final_issue()
@@ -2382,7 +2440,6 @@ class Issue123OperationsTest(unittest.TestCase):
             mock.patch.object(
                 operations, "candidate_evidence", return_value=self.candidate
             ),
-            mock.patch.object(operations, "_require_authenticated_gh") as auth,
             mock.patch.object(
                 operations,
                 "_fresh_github_capture",
@@ -2414,7 +2471,6 @@ class Issue123OperationsTest(unittest.TestCase):
                 reopened_bundle_root=reopened_bundle_root,
                 baseline_lease=baseline_lease,
             )
-        auth.assert_not_called()
         fresh.assert_called_once_with(document)
         publication_check.assert_called_once()
         self.assertGreaterEqual(baseline_lease.require_count, 4)
@@ -2480,7 +2536,6 @@ class Issue123OperationsTest(unittest.TestCase):
                 mock.patch.object(
                     operations, "candidate_evidence", return_value=self.candidate
                 ),
-                mock.patch.object(operations, "_require_authenticated_gh"),
                 mock.patch.object(
                     operations,
                     "_fresh_github_capture",
@@ -2731,6 +2786,128 @@ class Issue123OperationsTest(unittest.TestCase):
         self.assertIn("X-GitHub-Api-Version: 2022-11-28", command)
         self.assertEqual(command[command.index("--jq") + 1], ".")
         self.assertNotIn("--slurp", command)
+
+    def test_github_api_direct_success_ignores_stale_secondary_auth_status(self):
+        completed = mock.Mock(
+            stdout=(
+                "HTTP/2.0 200 OK\r\n"
+                "content-type: application/json; charset=utf-8\r\n"
+                'etag: "single-page"\r\n'
+                "x-github-api-version-selected: 2022-11-28\r\n"
+                "x-github-media-type: github.v3; format=json\r\n\r\n"
+                '{"id":1}\n'
+            ).encode()
+        )
+        stale_secondary_status = operations.subprocess.CalledProcessError(
+            1,
+            ["gh", "auth", "status", "--hostname", "github.com"],
+            stderr=b"stale secondary account",
+        )
+        with mock.patch.object(
+            operations.subprocess,
+            "run",
+            side_effect=(completed, stale_secondary_status),
+        ) as run:
+            raw, _capture = operations._github_api_capture(
+                "repos/ruddyscent/gmes/issues/123"
+            )
+        self.assertEqual(json.loads(raw), {"id": 1})
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(run.call_args.args[0][:2], ["gh", "api"])
+
+    def test_github_api_auth_diagnostic_preserves_initial_failure(self):
+        api_error = operations.subprocess.CalledProcessError(
+            1,
+            ["gh", "api"],
+            stderr=b"gh: Bad credentials (HTTP 401)",
+        )
+        diagnostic_error = operations.subprocess.CalledProcessError(
+            1,
+            ["gh", "auth", "status", "--hostname", "github.com"],
+            stderr=b"stale secondary account",
+        )
+        endpoint = "repos/ruddyscent/gmes/issues/123"
+        with (
+            mock.patch.object(
+                operations.subprocess,
+                "run",
+                side_effect=(api_error, diagnostic_error),
+            ) as run,
+            self.assertRaisesRegex(
+                operations.EvidenceError, "GitHub API request failed"
+            ) as raised,
+        ):
+            operations._github_api_capture(endpoint)
+        self.assertIs(raised.exception.__cause__, api_error)
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(run.call_args_list[0].args[0][:2], ["gh", "api"])
+        self.assertEqual(
+            run.call_args_list[0].kwargs,
+            {"check": True, "capture_output": True},
+        )
+        self.assertEqual(
+            run.call_args_list[1].args[0],
+            ["gh", "auth", "status", "--hostname", "github.com"],
+        )
+        self.assertEqual(
+            run.call_args_list[1].kwargs,
+            {"check": False, "capture_output": True},
+        )
+
+    def test_github_api_non_auth_failure_skips_status_diagnosis(self):
+        endpoint = "repos/ruddyscent/gmes/issues/123"
+        for detail in (
+            b"gh: Not Found (HTTP 404)",
+            b"gh: API rate limit exceeded (HTTP 403)",
+            b"gh: endpoint policy denied (HTTP 403)",
+        ):
+            with (
+                self.subTest(detail=detail),
+                mock.patch.object(
+                    operations.subprocess,
+                    "run",
+                    side_effect=operations.subprocess.CalledProcessError(
+                        1, ["gh", "api"], stderr=detail
+                    ),
+                ) as run,
+                self.assertRaisesRegex(
+                    operations.EvidenceError, "GitHub API request failed"
+                ),
+            ):
+                operations._github_api_capture(endpoint)
+            self.assertEqual(run.call_count, 1)
+
+    def test_capture_initial_api_failure_leaves_no_partial_output(self):
+        output = self.root / "initial-api-failure-output"
+        api_error = operations.subprocess.CalledProcessError(
+            1,
+            ["gh", "api"],
+            stderr=b"gh: Bad credentials (HTTP 401)",
+        )
+        with (
+            mock.patch.object(
+                operations, "candidate_evidence", return_value=self.candidate
+            ),
+            mock.patch.object(
+                operations.subprocess,
+                "run",
+                side_effect=(api_error, OSError("status unavailable")),
+            ) as run,
+            self.assertRaisesRegex(
+                operations.EvidenceError, "GitHub API request failed"
+            ),
+        ):
+            operations.capture_operations(
+                repository=operations.REPOSITORY,
+                pull_request_number=self.number,
+                ci_run_id=10,
+                codeql_run_id=20,
+                technical_release_tag=self.release_tag,
+                publication_receipt=self.publication_receipt_path,
+                output_directory=output,
+            )
+        self.assertEqual(run.call_count, 2)
+        self.assertFalse(output.exists())
 
     def test_github_api_graphql_command_pins_query_and_typed_pr(self):
         response = {
@@ -3268,7 +3445,6 @@ class Issue123OperationsTest(unittest.TestCase):
             mock.patch.object(
                 operations, "candidate_evidence", return_value=self.candidate
             ),
-            mock.patch.object(operations, "_require_authenticated_gh") as auth,
             mock.patch.object(
                 operations,
                 "_fresh_github_capture",
@@ -3295,7 +3471,6 @@ class Issue123OperationsTest(unittest.TestCase):
         ):
             status = operations.main(arguments)
         self.assertEqual(status, 0)
-        auth.assert_called_once_with()
         receipt = json.loads(receipt_path.read_bytes())
         self.assertEqual(
             receipt["schema_version"],
@@ -3310,7 +3485,6 @@ class Issue123OperationsTest(unittest.TestCase):
         stderr = io.StringIO()
         stdout = io.StringIO()
         with (
-            mock.patch.object(operations, "_require_authenticated_gh") as old_auth,
             mock.patch("sys.stderr", new=stderr),
             mock.patch("sys.stdout", new=stdout),
         ):
@@ -3318,7 +3492,6 @@ class Issue123OperationsTest(unittest.TestCase):
                 [*arguments, "--post-bundle-expectation", "forbidden.json"]
             )
         self.assertEqual(old_status, 2)
-        old_auth.assert_not_called()
         self.assertEqual(stderr.getvalue(), "issue123-operations-usage-failed\n")
         self.assertEqual(stdout.getvalue(), "")
 

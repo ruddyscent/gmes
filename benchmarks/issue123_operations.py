@@ -595,7 +595,11 @@ def _github_api_capture(
             command.extend((flag, f"{key}={value}"))
     try:
         completed = subprocess.run(command, check=True, capture_output=True)
-    except (OSError, subprocess.CalledProcessError) as error:
+    except subprocess.CalledProcessError as error:
+        if _github_authentication_failure(error):
+            _diagnose_github_authentication_failure()
+        raise EvidenceError(f"GitHub API request failed: {endpoint}") from error
+    except OSError as error:
         raise EvidenceError(f"GitHub API request failed: {endpoint}") from error
     label = f"GitHub API response {endpoint}"
     frames = _included_response_frames(completed.stdout, label)
@@ -605,6 +609,41 @@ def _github_api_capture(
         graphql=graphql_variables is not None,
         label=label,
     )
+
+
+def _github_authentication_failure(error: subprocess.CalledProcessError) -> bool:
+    stderr = error.stderr
+    if isinstance(stderr, bytes):
+        detail = stderr.decode("utf-8", "replace").casefold()
+    elif isinstance(stderr, str):
+        detail = stderr.casefold()
+    else:
+        return False
+    if "rate limit" in detail:
+        return False
+    return any(
+        marker in detail
+        for marker in (
+            "http 401",
+            "bad credentials",
+            "authentication required",
+            "requires authentication",
+            "must be authenticated",
+            "resource not accessible by integration",
+            "insufficient scopes",
+        )
+    )
+
+
+def _diagnose_github_authentication_failure() -> None:
+    try:
+        subprocess.run(
+            ["gh", "auth", "status", "--hostname", "github.com"],
+            check=False,
+            capture_output=True,
+        )
+    except Exception:
+        pass
 
 
 def _github_api_raw(
@@ -707,29 +746,37 @@ def capture_operations(
     publication_receipt_record = _publication_receipt_envelope(
         publication_receipt, candidate
     )
-    _require_authenticated_gh()
     output_directory = output_directory.resolve()
     _require(not output_directory.exists(), "operations output already exists")
+    technical_release_endpoint = (
+        f"repos/{repository}/releases/tags/{technical_release_tag}"
+    )
+    technical_release_raw, technical_release_capture = _github_api_capture(
+        technical_release_endpoint
+    )
+    technical_release = _strict_json(technical_release_raw, "technical_release")
+    _require(isinstance(technical_release, dict), "technical release response differs")
+    technical_release_id = technical_release.get("id")
+    _require(
+        type(technical_release_id) is int and technical_release_id > 0,
+        "technical release id differs",
+    )
     output_directory.mkdir(parents=True)
     raw_directory = output_directory / "raw"
     raw_directory.mkdir()
     records: dict[str, dict[str, Any]] = {}
     response_captures: dict[str, dict[str, Any]] = {}
 
-    def capture(
+    def record(
         role: str,
         endpoint: str,
         *,
+        raw: bytes,
+        response_capture: dict[str, Any],
         parameters: dict[str, str] | None = None,
         paginated: bool = False,
         graphql_variables: dict[str, str | int] | None = None,
     ) -> Any:
-        raw, response_capture = _github_api_capture(
-            endpoint,
-            parameters=parameters,
-            paginated=paginated,
-            graphql_variables=graphql_variables,
-        )
         path = raw_directory / f"{role}.json"
         path.write_bytes(raw)
         records[role] = {
@@ -753,15 +800,35 @@ def capture_operations(
         response_captures[role] = response_capture
         return _strict_json(raw, role)
 
-    technical_release = capture(
+    def capture(
+        role: str,
+        endpoint: str,
+        *,
+        parameters: dict[str, str] | None = None,
+        paginated: bool = False,
+        graphql_variables: dict[str, str | int] | None = None,
+    ) -> Any:
+        raw, response_capture = _github_api_capture(
+            endpoint,
+            parameters=parameters,
+            paginated=paginated,
+            graphql_variables=graphql_variables,
+        )
+        return record(
+            role,
+            endpoint,
+            raw=raw,
+            response_capture=response_capture,
+            parameters=parameters,
+            paginated=paginated,
+            graphql_variables=graphql_variables,
+        )
+
+    record(
         "technical_release",
-        f"repos/{repository}/releases/tags/{technical_release_tag}",
-    )
-    _require(isinstance(technical_release, dict), "technical release response differs")
-    technical_release_id = technical_release.get("id")
-    _require(
-        type(technical_release_id) is int and technical_release_id > 0,
-        "technical release id differs",
+        technical_release_endpoint,
+        raw=technical_release_raw,
+        response_capture=technical_release_capture,
     )
     capture(
         "technical_release_assets",
@@ -3154,17 +3221,6 @@ def _load_operations_capture(
     return index, index_raw, document, raw_responses, candidate
 
 
-def _require_authenticated_gh() -> None:
-    try:
-        subprocess.run(
-            ["gh", "auth", "status", "--hostname", "github.com"],
-            check=True,
-            capture_output=True,
-        )
-    except (OSError, subprocess.CalledProcessError) as error:
-        raise EvidenceError("authenticated GitHub CLI access is required") from error
-
-
 def _fresh_github_capture(
     document: Mapping[str, Any],
 ) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -4462,7 +4518,6 @@ def open_verified_operations_live(
         raise EvidenceError(
             "live-verification receipt overlaps protected evidence"
         ) from None
-    _require_authenticated_gh()
     baseline = _capture_production_baseline_authority(
         manifest,
         authority=baseline_authority,

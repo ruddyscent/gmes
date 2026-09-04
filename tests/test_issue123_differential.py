@@ -808,7 +808,7 @@ class Issue123DifferentialEvidenceTest(unittest.TestCase):
 
         def validate_record(value):
             return differential._regenerate_record_projections(
-                self.root,
+                self.root.resolve(),
                 value,
                 self.manifest,
                 self.candidate,
@@ -2262,8 +2262,8 @@ class Issue123DifferentialEvidenceTest(unittest.TestCase):
             references.append(reference)
             candidates.append(candidate)
             workload = differential._workload(self.manifest, case)
-            metadata[reference] = {"workload": workload}
-            metadata[candidate] = {
+            metadata[reference.resolve()] = {"workload": workload}
+            metadata[candidate.resolve()] = {
                 "workload": workload,
                 "backend_metadata": {"device": "cuda:0"},
                 "provenance": {
@@ -2273,7 +2273,7 @@ class Issue123DifferentialEvidenceTest(unittest.TestCase):
             }
 
         def archive_record(path, _manifest, _role):
-            path = Path(path)
+            path = Path(path).resolve()
             return path, metadata[path]
 
         def source_preflight(path, _label):

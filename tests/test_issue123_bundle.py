@@ -536,7 +536,10 @@ class Issue123BundleTest(unittest.TestCase):
         self.assertIs(caught.exception, primary)
         self.assertEqual(
             closed_roots,
-            [inputs["reopened"].parent, inputs["source"].parent],
+            [
+                inputs["reopened"].parent.resolve(),
+                inputs["source"].parent.resolve(),
+            ],
         )
         self.assertIsNone(caught.exception.__context__)
 

@@ -19,7 +19,7 @@ import subprocess
 import sys
 import time
 from collections import Counter
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from statistics import median, pstdev
 from threading import Lock
 
@@ -41,8 +41,11 @@ from benchmarks.native_oracle import (
     material_from_name,
 )
 from benchmarks.torch_correctness import (
+    TRUSTED_MANIFEST_SHA256,
+    _runtime_receipt_candidates,
     correctness_binding_complete,
     load_correctness_evidence_index,
+    load_runtime_publication_receipt,
 )
 from benchmarks.torch_cpu_baseline import (
     compare_candidate_to_baseline,
@@ -62,7 +65,45 @@ CUDA_GATES = (
     "single-gpu-2d",
     "single-gpu-3d",
 )
-CUDA_SUITE_CONTRACT_ID = "single-gpu-cuda-closure-v1"
+CUDA_SUITE_CONTRACT_ID = "single-gpu-cuda-closure-v2"
+CUDA_PERFORMANCE_PRECISION_BY_CASE = {
+    "cpu-crossover-2d": "float32",
+    "cpu-crossover-3d": "float32",
+    "cpu-large-2d": "float32",
+    "cpu-large-3d": "float32",
+    "single-gpu-2d": "float32",
+    "single-gpu-3d": "float64",
+}
+CUDA_PRECISION_LIMITATION_REVIEW = {
+    "contract_id": "single-gpu-3d-float32-dynamic-range-review-v1",
+    "case": "single-gpu-3d",
+    "rejected_precision": "float32",
+    "accepted_precision": "float64",
+    "reason": "native-step-100-magnitude-exceeds-float32-range",
+}
+STATE_FINITENESS_CONTRACT_ID = "dynamic-checkpoint-finite-v1"
+STATE_FINITENESS_STAGES = (
+    "initial",
+    "post_warmup",
+    "post_one_step",
+    "post_timed",
+    "post_profile",
+)
+SIMULATION_CHECKPOINT_KEYS = {
+    "format",
+    "version",
+    "metadata",
+    "state",
+    "auxiliaries",
+    "probes",
+}
+CPU_CORRECTNESS_RUNTIME_MODE = {
+    "device": "cpu",
+    "precision": "float64",
+    "graph_mode": "eager",
+    "compile_policy": "eager",
+    "compile_mode": "default",
+}
 CUDA_CORRECTNESS_RUNTIME_MODES = (
     {
         "device": "cuda:0",
@@ -78,6 +119,18 @@ CUDA_CORRECTNESS_RUNTIME_MODES = (
         "compile_policy": "compile",
         "compile_mode": "reduce-overhead",
     },
+)
+CUDA_CORRECTNESS_SOURCE_DESCRIPTOR_KEYS = (
+    "path",
+    "sha256",
+    "size_bytes",
+    "media_type",
+    "candidate_evidence",
+)
+CUDA_CORRECTNESS_SOURCE_CANDIDATE_KEYS = (
+    "candidate_git_commit",
+    "candidate_git_status",
+    "manifest_sha256",
 )
 POLICY_GATES = (
     "coverage-1-contiguous",
@@ -780,6 +833,22 @@ def _memory_growth_bounded(device, cuda_growth, cpu_rss_growth):
     return False
 
 
+def _cuda_memory_bounded(
+    device,
+    memory_growth,
+    allocated_before,
+    allocated_after,
+    peak_allocated,
+):
+    return (
+        _memory_growth_bounded(device, memory_growth, None)
+        and type(allocated_before) is int
+        and type(allocated_after) is int
+        and type(peak_allocated) is int
+        and peak_allocated >= max(allocated_before, allocated_after)
+    )
+
+
 def _percentile(values, value):
     return float(np.percentile(np.asarray(values, dtype=np.float64), value))
 
@@ -1220,7 +1289,273 @@ def _checksum(simulation):
     value = torch.zeros((), dtype=torch.float64, device=simulation.device)
     for field in simulation.state.fields().values():
         value.add_(field.detach().to(dtype=torch.float64).abs().sum())
-    return float(value.cpu())
+    result = float(value.cpu())
+    if not math.isfinite(result):
+        raise ValueError("simulation fields contain non-finite values")
+    return result
+
+
+def _add_checkpoint_values(value, prefix, tensors):
+    if isinstance(value, torch.Tensor):
+        if prefix in tensors:
+            raise ValueError("checkpoint tensor path is duplicated")
+        tensors[prefix] = value
+    elif isinstance(value, dict):
+        for name, item in value.items():
+            if not isinstance(name, str) or not name:
+                raise ValueError("checkpoint tensor path is malformed")
+            _add_checkpoint_values(
+                item, f"{prefix}.{name}" if prefix else str(name), tensors
+            )
+    elif isinstance(value, (tuple, list)):
+        for index, item in enumerate(value):
+            _add_checkpoint_values(item, f"{prefix}[{index}]", tensors)
+    else:
+        raise ValueError("checkpoint dynamic state contains a non-tensor leaf")
+
+
+def _add_simulation_checkpoint_tensors(value, prefix, tensors):
+    if (
+        not isinstance(value, dict)
+        or set(value) != SIMULATION_CHECKPOINT_KEYS
+        or value.get("format") != "gmes.torch.simulation"
+        or value.get("version") != 1
+        or not isinstance(value.get("metadata"), dict)
+        or not isinstance(value.get("state"), dict)
+        or not isinstance(value.get("auxiliaries"), tuple)
+        or not isinstance(value.get("probes"), dict)
+    ):
+        raise ValueError("checkpoint dynamic state closure differs")
+    dynamic_state_names = {
+        name
+        for name in value["state"]
+        if isinstance(name, str) and not name.startswith("plan.")
+    }
+    if not STATE_FIELD_NAMES <= dynamic_state_names:
+        raise ValueError("checkpoint field closure differs")
+    for name, tensor in value["state"].items():
+        if not isinstance(name, str) or not name:
+            raise ValueError("checkpoint state name is malformed")
+        if name.startswith("plan."):
+            continue
+        qualified = name if not prefix else f"{prefix}.state.{name}"
+        count = len(tensors)
+        _add_checkpoint_values(tensor, qualified, tensors)
+        if len(tensors) == count:
+            raise ValueError("checkpoint dynamic state entry has no tensors")
+    auxiliaries = value["auxiliaries"]
+    for index, auxiliary in enumerate(auxiliaries):
+        qualified = f"{prefix}.auxiliaries" if prefix else "auxiliaries"
+        _add_simulation_checkpoint_tensors(auxiliary, f"{qualified}[{index}]", tensors)
+    qualified = f"{prefix}.probes" if prefix else "probes"
+    _add_checkpoint_values(value["probes"], qualified, tensors)
+
+
+def _add_live_simulation_tensor_names(simulation, prefix, names):
+    state = simulation.state.state_dict()
+    probes = simulation.probes.state_dict()
+    auxiliaries = simulation.sources.auxiliaries
+    if (
+        not isinstance(state, dict)
+        or not isinstance(probes, dict)
+        or not isinstance(auxiliaries, tuple)
+    ):
+        raise ValueError("live simulation dynamic state closure differs")
+    dynamic_state_names = {
+        name for name in state if isinstance(name, str) and not name.startswith("plan.")
+    }
+    if not STATE_FIELD_NAMES <= dynamic_state_names:
+        raise ValueError("live simulation field closure differs")
+    for name, tensor in state.items():
+        if not isinstance(name, str) or not name:
+            raise ValueError("live simulation state name is malformed")
+        if name.startswith("plan."):
+            continue
+        if not isinstance(tensor, torch.Tensor):
+            raise ValueError("live simulation state contains a non-tensor")
+        qualified = name if not prefix else f"{prefix}.state.{name}"
+        if qualified in names:
+            raise ValueError("live simulation tensor path is duplicated")
+        names.add(qualified)
+    probe_prefix = f"{prefix}.probes" if prefix else "probes"
+    for name, tensor in probes.items():
+        if (
+            not isinstance(name, str)
+            or not name
+            or not isinstance(tensor, torch.Tensor)
+        ):
+            raise ValueError("live simulation probe state is malformed")
+        qualified = f"{probe_prefix}.{name}"
+        if qualified in names:
+            raise ValueError("live simulation tensor path is duplicated")
+        names.add(qualified)
+    for index, auxiliary in enumerate(auxiliaries):
+        auxiliary_prefix = f"{prefix}.auxiliaries" if prefix else "auxiliaries"
+        _add_live_simulation_tensor_names(
+            auxiliary, f"{auxiliary_prefix}[{index}]", names
+        )
+
+
+def _simulation_dynamic_tensor_names(simulation):
+    names = set()
+    _add_live_simulation_tensor_names(simulation, "", names)
+    return sorted(names)
+
+
+def _checkpoint_dynamic_tensors(checkpoint):
+    tensors = {}
+    _add_simulation_checkpoint_tensors(checkpoint, "", tensors)
+    return tensors
+
+
+def _dynamic_state_finiteness(checkpoints, changed_buffers, expected_buffers):
+    field_names = {name.lower() for name in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")}
+    if (
+        not isinstance(expected_buffers, list)
+        or not all(isinstance(name, str) and bool(name) for name in expected_buffers)
+        or expected_buffers != sorted(set(expected_buffers))
+    ):
+        raise ValueError("expected dynamic tensor inventory is malformed")
+    states = {
+        stage: _checkpoint_dynamic_tensors(checkpoint)
+        for stage, checkpoint in checkpoints.items()
+    }
+    if not states:
+        raise ValueError("checkpoint dynamic state closure differs")
+    state_values = list(states.values())
+    state_keys = set(state_values[0])
+    if state_keys != set(expected_buffers):
+        raise ValueError("checkpoint dynamic tensor inventory differs")
+    if any(set(state) != state_keys for state in state_values[1:]):
+        raise ValueError("checkpoint dynamic tensor keys changed")
+    first = state_values[0]
+    observed_changed = {
+        name
+        for name in state_keys
+        if any(not torch.equal(first[name], state[name]) for state in state_values[1:])
+    }
+    if not set(changed_buffers) <= observed_changed:
+        raise ValueError(
+            "timed changed-buffer summary is outside observed dynamic state"
+        )
+    tracked = sorted(state_keys)
+    if not field_names <= set(tracked):
+        raise ValueError("checkpoint field closure differs")
+    stages = {}
+    for stage, state in states.items():
+        floating_buffers = 0
+        floating_elements = 0
+        nonfinite_elements = 0
+        for name in tracked:
+            value = state[name]
+            if not isinstance(value, torch.Tensor):
+                raise ValueError(f"{stage} checkpoint buffer {name!r} is not a tensor")
+            if value.is_floating_point() or value.is_complex():
+                floating_buffers += 1
+                floating_elements += value.numel()
+                nonfinite_elements += int(
+                    torch.count_nonzero(~torch.isfinite(value)).cpu()
+                )
+        stages[stage] = {
+            "floating_or_complex_buffer_count": floating_buffers,
+            "floating_or_complex_element_count": floating_elements,
+            "nonfinite_element_count": nonfinite_elements,
+            "finite": nonfinite_elements == 0,
+        }
+    return {
+        "contract_id": STATE_FINITENESS_CONTRACT_ID,
+        "tracked_buffers": tracked,
+        "stages": stages,
+        "passed": all(record["finite"] for record in stages.values()),
+    }
+
+
+def _cuda_state_finiteness_valid(result):
+    state_progress = result.get("state_progress")
+    finiteness = result.get("state_finiteness")
+    if not isinstance(state_progress, dict) or not isinstance(finiteness, dict):
+        return False
+    changed = state_progress.get("changed_buffers")
+    fields_changed = state_progress.get("fields_changed")
+    if (
+        not isinstance(changed, list)
+        or not all(isinstance(name, str) and bool(name) for name in changed)
+        or changed != sorted(set(changed))
+        or fields_changed != sorted(set(changed) & STATE_FIELD_NAMES)
+        or state_progress.get("all_fields_changed")
+        is not (STATE_FIELD_NAMES <= set(changed))
+        or state_progress.get("all_fields_changed") is not True
+        or set(finiteness) != {"contract_id", "tracked_buffers", "stages", "passed"}
+    ):
+        return False
+    tracked = finiteness["tracked_buffers"]
+    if (
+        finiteness["contract_id"] != STATE_FINITENESS_CONTRACT_ID
+        or not isinstance(tracked, list)
+        or not all(isinstance(name, str) and bool(name) for name in tracked)
+        or tracked != sorted(set(tracked))
+        or not tracked
+        or any(name.startswith("plan.") or ".state.plan." in name for name in tracked)
+        or not (set(changed) | STATE_FIELD_NAMES) <= set(tracked)
+        or finiteness["passed"] is not True
+    ):
+        return False
+    stages = finiteness["stages"]
+    if not isinstance(stages, dict) or set(stages) != set(STATE_FINITENESS_STAGES):
+        return False
+    runtime = result.get("runtime")
+    profiler = result.get("profiler")
+    field_sizes = (
+        profiler.get("field_buffer_sizes_bytes") if isinstance(profiler, dict) else None
+    )
+    precision = runtime.get("precision") if isinstance(runtime, dict) else None
+    try:
+        element_size = np.dtype(precision).itemsize
+    except TypeError, ValueError:
+        return False
+    field_size_keys = tuple(
+        f"state.{name}" for name in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")
+    )
+    if not isinstance(field_sizes, dict) or any(
+        type(field_sizes.get(name)) is not int
+        or field_sizes[name] <= 0
+        or field_sizes[name] % element_size != 0
+        for name in field_size_keys
+    ):
+        return False
+    minimum_field_elements = (
+        sum(field_sizes[name] for name in field_size_keys) // element_size
+    )
+    sizes = set()
+    for stage in STATE_FINITENESS_STAGES:
+        record = stages[stage]
+        if (
+            not isinstance(record, dict)
+            or set(record)
+            != {
+                "floating_or_complex_buffer_count",
+                "floating_or_complex_element_count",
+                "nonfinite_element_count",
+                "finite",
+            }
+            or type(record["floating_or_complex_buffer_count"]) is not int
+            or not len(STATE_FIELD_NAMES)
+            <= record["floating_or_complex_buffer_count"]
+            <= len(tracked)
+            or type(record["floating_or_complex_element_count"]) is not int
+            or record["floating_or_complex_element_count"] < minimum_field_elements
+            or type(record["nonfinite_element_count"]) is not int
+            or record["nonfinite_element_count"] != 0
+            or record["finite"] is not True
+        ):
+            return False
+        sizes.add(
+            (
+                record["floating_or_complex_buffer_count"],
+                record["floating_or_complex_element_count"],
+            )
+        )
+    return len(sizes) == 1
 
 
 def _canonical_sha256(value):
@@ -1669,6 +2004,7 @@ def _cuda_trace_memory_errors(result, label):
             or growth > 1024 * 1024
             or type(peak) is not int
             or peak <= 0
+            or peak < max(before, after)
             or type(reserved) is not int
             or reserved < peak
         ):
@@ -1736,16 +2072,123 @@ def _cuda_environment_errors(environment):
     return errors
 
 
-def _load_cuda_correctness_indexes(paths, manifest, expected_evidence):
+def _cuda_correctness_source_descriptor(index):
+    if not isinstance(index, dict):
+        return None
+    source = index.get("source_artifact")
+    evidence = index.get("candidate_evidence")
+    if (
+        not isinstance(source, dict)
+        or set(source) != set(CUDA_CORRECTNESS_SOURCE_DESCRIPTOR_KEYS)
+        or not isinstance(evidence, dict)
+    ):
+        return None
+    candidate = source.get("candidate_evidence")
+    expected_candidate = {
+        name: evidence.get(name) for name in CUDA_CORRECTNESS_SOURCE_CANDIDATE_KEYS
+    }
+    if (
+        not isinstance(candidate, dict)
+        or set(candidate) != set(CUDA_CORRECTNESS_SOURCE_CANDIDATE_KEYS)
+        or candidate != expected_candidate
+        or not isinstance(candidate["candidate_git_commit"], str)
+        or re.fullmatch(r"[0-9a-f]{40}", candidate["candidate_git_commit"]) is None
+        or candidate["candidate_git_status"] != ""
+        or not isinstance(candidate["manifest_sha256"], str)
+        or re.fullmatch(r"[0-9a-f]{64}", candidate["manifest_sha256"]) is None
+    ):
+        return None
+    path = source.get("path")
+    if (
+        not isinstance(path, str)
+        or not path
+        or "\\" in path
+        or "\x00" in path
+        or (len(path) >= 2 and path[0].isalpha() and path[1] == ":")
+        or any(part in {"", ".", ".."} for part in path.split("/"))
+        or PurePosixPath(path).is_absolute()
+        or PurePosixPath(path).as_posix() != path
+        or not isinstance(source.get("sha256"), str)
+        or re.fullmatch(r"[0-9a-f]{64}", source["sha256"]) is None
+        or type(source.get("size_bytes")) is not int
+        or source["size_bytes"] <= 0
+        or source.get("media_type") != "application/json"
+    ):
+        return None
+    try:
+        index_document = dict(index)
+        del index_document["source_artifact"]
+        source_bytes = (
+            json.dumps(
+                index_document,
+                allow_nan=False,
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n"
+        ).encode()
+    except KeyError, TypeError, ValueError:
+        return None
+    if (
+        source["size_bytes"] != len(source_bytes)
+        or source["sha256"] != hashlib.sha256(source_bytes).hexdigest()
+    ):
+        return None
+    return {
+        "path": path,
+        "sha256": source["sha256"],
+        "size_bytes": source["size_bytes"],
+        "media_type": source["media_type"],
+        "candidate_evidence": dict(candidate),
+    }
+
+
+def _cuda_correctness_descriptor_records(indexes):
+    records = []
+    errors = []
+    descriptors = []
+    if not isinstance(indexes, (list, tuple)):
+        return records, ["CUDA correctness descriptor index closure is invalid"]
+    for position, index in enumerate(indexes):
+        runtime_mode = index.get("runtime_mode") if isinstance(index, dict) else None
+        descriptor = _cuda_correctness_source_descriptor(index)
+        records.append(
+            {
+                "runtime_mode": runtime_mode,
+                "source_artifact": descriptor,
+            }
+        )
+        if descriptor is None:
+            errors.append(
+                f"CUDA correctness source artifact descriptor {position} is invalid"
+            )
+        else:
+            descriptors.append(descriptor)
+    if len(indexes) != len(CUDA_CORRECTNESS_RUNTIME_MODES):
+        errors.append("CUDA correctness descriptor index closure is invalid")
+    if len(descriptors) == len(CUDA_CORRECTNESS_RUNTIME_MODES):
+        if len({descriptor["path"] for descriptor in descriptors}) != len(descriptors):
+            errors.append("CUDA correctness source artifact paths are not distinct")
+        if len({descriptor["sha256"] for descriptor in descriptors}) != len(
+            descriptors
+        ):
+            errors.append("CUDA correctness source artifact digests are not distinct")
+    return records, errors
+
+
+def _load_cuda_correctness_indexes(paths, receipt_paths, manifest, expected_evidence):
     indexes = []
     errors = []
     if paths is None:
         return [], ["CUDA correctness eager/graph indexes are absent"]
     if not isinstance(paths, (list, tuple)) or len(paths) != 2:
         return [], ["CUDA correctness requires exactly eager and graph indexes"]
-    for expected_mode, path in zip(
+    if not isinstance(receipt_paths, (list, tuple)) or len(receipt_paths) != 2:
+        return [], ["CUDA correctness requires exactly eager and graph receipts"]
+    for expected_mode, path, receipt_path in zip(
         CUDA_CORRECTNESS_RUNTIME_MODES,
         paths,
+        receipt_paths,
         strict=True,
     ):
         try:
@@ -1754,6 +2197,7 @@ def _load_cuda_correctness_indexes(paths, manifest, expected_evidence):
                 manifest,
                 expected_evidence,
                 descriptor_root=Path(path).resolve().parent,
+                runtime_receipt=receipt_path,
             )
         except (KeyError, OSError, TypeError, ValueError) as error:
             errors.append(f"{expected_mode['graph_mode']} CUDA correctness: {error}")
@@ -1762,10 +2206,24 @@ def _load_cuda_correctness_indexes(paths, manifest, expected_evidence):
             errors.append(
                 f"{expected_mode['graph_mode']} CUDA correctness runtime mode differs"
             )
+        try:
+            receipt = load_runtime_publication_receipt(
+                receipt_path,
+                manifest,
+                expected_evidence,
+                index.get("runtime_mode"),
+                _runtime_receipt_candidates(index.get("artifacts", ())),
+            )
+        except (KeyError, OSError, TypeError, ValueError) as error:
+            errors.append(
+                f"{expected_mode['graph_mode']} CUDA correctness receipt: {error}"
+            )
+            continue
         if not correctness_binding_complete(
             index,
             manifest,
             expected_evidence,
+            runtime_receipt=receipt,
             require_source_artifact=True,
         ):
             errors.append(
@@ -1774,6 +2232,10 @@ def _load_cuda_correctness_indexes(paths, manifest, expected_evidence):
         indexes.append(index)
     if len(indexes) != len(CUDA_CORRECTNESS_RUNTIME_MODES):
         errors.append("CUDA correctness eager/graph index closure differs")
+    _records, descriptor_errors = _cuda_correctness_descriptor_records(indexes)
+    for error in descriptor_errors:
+        if error not in errors:
+            errors.append(error)
     return indexes, errors
 
 
@@ -1835,10 +2297,14 @@ def _cuda_suite_gate(
         compile_key = (
             runtime.get("compile_cache_key") if isinstance(runtime, dict) else None
         )
+        expected_precision = CUDA_PERFORMANCE_PRECISION_BY_CASE.get(name)
+        expected_storage_dtype = (
+            f"torch.{expected_precision}" if expected_precision is not None else None
+        )
         if (
             not isinstance(runtime, dict)
             or runtime.get("device") != "cuda:0"
-            or runtime.get("precision") != "float32"
+            or runtime.get("precision") != expected_precision
             or runtime.get("compile_policy") != "compile"
             or runtime.get("compile_mode") != "default"
             or runtime.get("explicit_cuda_graphs") is not False
@@ -1850,7 +2316,7 @@ def _cuda_suite_gate(
             or runtime.get("paired_real") is not False
             or runtime.get("field_storage_representation") != "real-v1"
             or runtime.get("field_storage_channels") != 1
-            or runtime.get("field_storage_dtype") != "torch.float32"
+            or runtime.get("field_storage_dtype") != expected_storage_dtype
             or not isinstance(compile_key, str)
             or len(compile_key) != 64
             or any(character not in "0123456789abcdef" for character in compile_key)
@@ -1861,6 +2327,8 @@ def _cuda_suite_gate(
             )
         ):
             errors.append(f"{label} official runtime/storage contract differs")
+        if not _cuda_state_finiteness_valid(result):
+            errors.append(f"{label} dynamic state finiteness contract failed")
         timing_errors = _tuning_timing_errors(result, label)
         errors.extend(timing_errors)
         summary = result.get("measurements", {}).get("advance", {})
@@ -1881,28 +2349,34 @@ def _cuda_suite_gate(
             or any(acceptance.get(name) is not True for name in RUNTIME_ACCEPTANCE_KEYS)
         ):
             errors.append(f"{label} runtime acceptance failed")
-    correctness_modes = [
-        index.get("runtime_mode")
-        for index in correctness_indexes
-        if isinstance(index, dict)
-    ]
-    correctness_bound = not correctness_errors and correctness_modes == list(
-        CUDA_CORRECTNESS_RUNTIME_MODES
+    correctness_records, descriptor_errors = _cuda_correctness_descriptor_records(
+        correctness_indexes
+    )
+    for error in descriptor_errors:
+        if error not in errors:
+            errors.append(error)
+    correctness_modes = [record["runtime_mode"] for record in correctness_records]
+    if correctness_modes != list(CUDA_CORRECTNESS_RUNTIME_MODES):
+        errors.append("CUDA correctness runtime mode closure differs")
+    correctness_bound = (
+        not correctness_errors
+        and not descriptor_errors
+        and len(correctness_records) == len(CUDA_CORRECTNESS_RUNTIME_MODES)
+        and correctness_modes == list(CUDA_CORRECTNESS_RUNTIME_MODES)
     )
     return {
         "contract_id": CUDA_SUITE_CONTRACT_ID,
         "required_cases": list(CUDA_GATES),
+        "required_case_precisions": [
+            {"case": name, "precision": CUDA_PERFORMANCE_PRECISION_BY_CASE[name]}
+            for name in CUDA_GATES
+        ],
+        "reviewed_precision_limitations": [dict(CUDA_PRECISION_LIMITATION_REVIEW)],
         "required_correctness_runtime_modes": list(CUDA_CORRECTNESS_RUNTIME_MODES),
         "case_closure_complete": names == list(CUDA_GATES),
         "environment_complete": not environment_errors,
         "correctness_index_count": len(correctness_indexes),
-        "correctness_indexes": [
-            {
-                "runtime_mode": index["runtime_mode"],
-                "sha256": index.get("source_artifact", {}).get("sha256"),
-            }
-            for index in correctness_indexes
-        ],
+        "correctness_indexes": correctness_records,
         "correctness_evidence_bound": correctness_bound,
         "timing_statistics": "raw-median-relative-mad-v1",
         "trace_contract": "sha256-bound-zero-transfer-kernel-count-v1",
@@ -3909,6 +4383,21 @@ def _evaluate_cpu_slice(
     }
 
 
+def _cpu_correctness_binding_complete(
+    index, manifest, expected_evidence, runtime_receipt
+):
+    return correctness_binding_complete(
+        index,
+        manifest,
+        expected_evidence,
+        runtime_receipt=runtime_receipt,
+        require_source_artifact=True,
+    ) and _json_contract_equal(
+        index.get("runtime_mode") if isinstance(index, dict) else None,
+        CPU_CORRECTNESS_RUNTIME_MODE,
+    )
+
+
 def _aggregate_cpu_slice_outputs(
     outputs,
     manifest,
@@ -3917,6 +4406,7 @@ def _aggregate_cpu_slice_outputs(
     allocation_document=None,
     expected_evidence=None,
     correctness_evidence=None,
+    correctness_runtime_receipt=None,
 ):
     """Accept two complete slices after a twelve-cell baseline bootstrap."""
     expected_evidence = expected_evidence or _current_evidence(manifest)
@@ -4000,11 +4490,11 @@ def _aggregate_cpu_slice_outputs(
     )
     if len(baseline_gates) != expected_cell_count or statistics["passed"] is not True:
         errors.append("the twelve-cell Torch baseline bootstrap gate failed")
-    correctness_evidence_bound = correctness_binding_complete(
+    correctness_evidence_bound = _cpu_correctness_binding_complete(
         correctness_evidence,
         manifest,
         expected_evidence,
-        require_source_artifact=True,
+        correctness_runtime_receipt,
     )
     cpu_correctness_satisfied = correctness_evidence_bound and not errors
     if correctness_evidence_bound:
@@ -4066,6 +4556,7 @@ def _aggregate_cpu_slice_files(
     torch_baseline_artifacts,
     allocation_document=None,
     correctness_evidence_index=None,
+    correctness_runtime_receipt=None,
 ):
     artifacts = []
     outputs = []
@@ -4077,16 +4568,44 @@ def _aggregate_cpu_slice_files(
         outputs.append(json.loads(content))
     torch_baseline = load_torch_cpu_baseline(torch_baseline_artifacts, manifest)
     expected_evidence = _current_evidence(manifest)
+    if (correctness_evidence_index is None) is not (
+        correctness_runtime_receipt is None
+    ):
+        raise ValueError(
+            "CPU correctness index and runtime publication receipt are both required"
+        )
     correctness_evidence = (
         load_correctness_evidence_index(
             correctness_evidence_index,
             manifest,
             expected_evidence,
             descriptor_root=Path(correctness_evidence_index).resolve().parent,
+            runtime_receipt=correctness_runtime_receipt,
         )
         if correctness_evidence_index is not None
         else None
     )
+    correctness_receipt = (
+        load_runtime_publication_receipt(
+            correctness_runtime_receipt,
+            manifest,
+            expected_evidence,
+            correctness_evidence.get("runtime_mode"),
+            _runtime_receipt_candidates(correctness_evidence.get("artifacts", ())),
+        )
+        if correctness_evidence is not None
+        else None
+    )
+    if correctness_evidence is not None and not _cpu_correctness_binding_complete(
+        correctness_evidence,
+        manifest,
+        expected_evidence,
+        correctness_receipt,
+    ):
+        raise ValueError(
+            "CPU correctness evidence must use CPU float64 eager execution "
+            "with default compile mode"
+        )
     result = _aggregate_cpu_slice_outputs(
         outputs,
         manifest,
@@ -4095,6 +4614,7 @@ def _aggregate_cpu_slice_files(
         allocation_document,
         expected_evidence,
         correctness_evidence,
+        correctness_receipt,
     )
     result["candidate_slice_artifacts"] = artifacts
     return result
@@ -4210,14 +4730,10 @@ def run_case(
         warmup,
     )
     _synchronize(simulation.device)
-    allocated_after = (
-        torch.cuda.memory_allocated(simulation.device)
-        if simulation.device.type == "cuda"
-        else None
-    )
     final_checksum = _checksum(simulation)
     timed_step_count = int(simulation.state.step_count.cpu())
     final_checkpoint = simulation.checkpoint()
+    one_step_count = int(one_step_checkpoint["state"]["step_count"].cpu())
     state_changes = _state_change_summary(
         one_step_checkpoint["state"], final_checkpoint["state"]
     )
@@ -4249,6 +4765,40 @@ def run_case(
         experimental_dispersive_grouping_scope=(experimental_dispersive_grouping_scope),
     )
     profiler = _profile(simulation, profile_steps, trace_path)
+    profile_checkpoint = simulation.checkpoint()
+    expected_dynamic_buffers = _simulation_dynamic_tensor_names(simulation)
+    state_finiteness = _dynamic_state_finiteness(
+        {
+            "initial": checkpoint,
+            "post_warmup": warm_checkpoint,
+            "post_one_step": one_step_checkpoint,
+            "post_timed": final_checkpoint,
+            "post_profile": profile_checkpoint,
+        },
+        state_changes["changed_buffers"],
+        expected_dynamic_buffers,
+    )
+    if state_finiteness["passed"] is not True:
+        raise ValueError("simulation dynamic state contains non-finite values")
+    # Evidence checkpoints are device clones, not persistent solver storage. Drop
+    # the clones created after the baseline before measuring steady-state growth.
+    del one_step_checkpoint, final_checkpoint, profile_checkpoint
+    _synchronize(simulation.device)
+    allocated_after = (
+        torch.cuda.memory_allocated(simulation.device)
+        if simulation.device.type == "cuda"
+        else None
+    )
+    cuda_peak_allocated = (
+        int(torch.cuda.max_memory_allocated(simulation.device))
+        if simulation.device.type == "cuda"
+        else None
+    )
+    cuda_peak_reserved = (
+        int(torch.cuda.max_memory_reserved(simulation.device))
+        if simulation.device.type == "cuda"
+        else None
+    )
     profiler["field_buffer_sizes_bytes"] = _field_buffer_sizes_bytes(simulation)
     profiler["fixed_boundary_buffer_sizes_bytes"] = _fixed_boundary_buffer_sizes_bytes(
         simulation
@@ -4313,15 +4863,18 @@ def run_case(
             "allocation_contract"
         ]["public_upstream_issue_required"],
     )
-    memory_bounded = (
-        cpu_memory["fresh_process"].get("plateau", {}).get("bounded") is True
-        if simulation.device.type == "cpu"
-        else _memory_growth_bounded(
+    if simulation.device.type == "cpu":
+        memory_bounded = (
+            cpu_memory["fresh_process"].get("plateau", {}).get("bounded") is True
+        )
+    else:
+        memory_bounded = _cuda_memory_bounded(
             simulation.device,
             memory_growth,
-            cpu_memory["growth_bytes"],
+            allocated_before,
+            allocated_after,
+            cuda_peak_allocated,
         )
-    )
     profiler_step_count = int(simulation.state.step_count.cpu())
     expected_one_step_count = warmup + 1
     expected_timed_step_count = warmup + steps
@@ -4435,16 +4988,8 @@ def run_case(
             "cuda_allocated_before_bytes": allocated_before,
             "cuda_allocated_after_bytes": allocated_after,
             "cuda_allocated_growth_bytes": memory_growth,
-            "cuda_peak_allocated_bytes": (
-                torch.cuda.max_memory_allocated(simulation.device)
-                if simulation.device.type == "cuda"
-                else None
-            ),
-            "cuda_peak_reserved_bytes": (
-                torch.cuda.max_memory_reserved(simulation.device)
-                if simulation.device.type == "cuda"
-                else None
-            ),
+            "cuda_peak_allocated_bytes": cuda_peak_allocated,
+            "cuda_peak_reserved_bytes": cuda_peak_reserved,
             "storage_addresses_before": addresses,
             "storage_addresses_after": final_addresses,
             "storage_addresses_stable": storage_stable,
@@ -4458,7 +5003,7 @@ def run_case(
             "post_one_step_checksum": one_step_checksum,
             "final_checksum": final_checksum,
             "changed_after_first_timed_step": one_step_checksum != final_checksum,
-            "one_step_count": int(one_step_checkpoint["state"]["step_count"].cpu()),
+            "one_step_count": one_step_count,
             "expected_one_step_count": expected_one_step_count,
             "timed_step_count": timed_step_count,
             "expected_timed_step_count": expected_timed_step_count,
@@ -4466,6 +5011,7 @@ def run_case(
             "expected_profiler_step_count": expected_profiler_step_count,
             **state_changes,
         },
+        "state_finiteness": state_finiteness,
         "diagnostics": simulation.diagnostics(),
         "acceptance": {
             "compiler_clean": compiler_clean,
@@ -4479,8 +5025,7 @@ def run_case(
             "state_progressed": (
                 state_changes["all_fields_changed"]
                 and material_state_progressed
-                and int(one_step_checkpoint["state"]["step_count"].cpu())
-                == expected_one_step_count
+                and one_step_count == expected_one_step_count
                 and timed_step_count == expected_timed_step_count
                 and profiler_step_count == expected_profiler_step_count
             ),
@@ -4502,13 +5047,19 @@ def run_case(
 
 
 def _allocation_provenance_for_run(
-    document, args, name, *, compile_mode=None, execution_policy=None
+    document,
+    args,
+    name,
+    *,
+    precision=None,
+    compile_mode=None,
+    execution_policy=None,
 ):
     return _select_allocation_provenance(
         document,
         workload=name,
         device=str(torch.device(args.device)),
-        precision=args.precision,
+        precision=precision or args.precision,
         compile_mode=compile_mode or args.compile_mode,
         execution_policy=execution_policy or args.policy,
         threads=args.threads,
@@ -4865,11 +5416,18 @@ def _arguments():
     )
     parser.add_argument("--allocation-provenance", type=Path)
     parser.add_argument("--correctness-evidence-index", type=Path)
+    parser.add_argument("--correctness-runtime-receipt", type=Path)
     parser.add_argument(
         "--cuda-correctness-index",
         type=Path,
         nargs=2,
         metavar=("EAGER_INDEX", "GRAPH_INDEX"),
+    )
+    parser.add_argument(
+        "--cuda-correctness-receipt",
+        type=Path,
+        nargs=2,
+        metavar=("EAGER_RECEIPT", "GRAPH_RECEIPT"),
     )
     parser.add_argument(
         "--cpu-slice-artifacts",
@@ -4901,7 +5459,7 @@ def main():
             profile_steps=args.profile_steps,
         )
         output = _run_cpu_rss_child(request, manifest)
-        rendered = json.dumps(output, indent=2, sort_keys=True) + "\n"
+        rendered = json.dumps(output, allow_nan=False, indent=2, sort_keys=True) + "\n"
         if args.output is not None:
             args.output.parent.mkdir(parents=True, exist_ok=True)
             args.output.write_text(rendered)
@@ -4931,8 +5489,9 @@ def main():
             torch_baseline_artifacts,
             allocation_document,
             getattr(args, "correctness_evidence_index", None),
+            getattr(args, "correctness_runtime_receipt", None),
         )
-        rendered = json.dumps(output, indent=2, sort_keys=True) + "\n"
+        rendered = json.dumps(output, allow_nan=False, indent=2, sort_keys=True) + "\n"
         if args.output is not None:
             args.output.parent.mkdir(parents=True, exist_ok=True)
             args.output.write_text(rendered)
@@ -4964,6 +5523,7 @@ def main():
     if args.policy == "matrix" and getattr(args, "descriptor_root", None) is None:
         raise ValueError("policy matrix evidence requires --descriptor-root")
     cuda_correctness_paths = getattr(args, "cuda_correctness_index", None)
+    cuda_correctness_receipts = getattr(args, "cuda_correctness_receipt", None)
     if cuda_correctness_paths is not None and args.case != "cuda-gates":
         raise ValueError("--cuda-correctness-index requires --case cuda-gates")
     if args.case in {"paired-real-gates", "region-invariance-gates"} and (
@@ -4993,9 +5553,11 @@ def main():
         or args.repeats != manifest["reference"]["performance_repetitions"]
         or args.profile_steps != manifest["reference"]["performance_profile_steps"]
         or cuda_correctness_paths is None
+        or cuda_correctness_receipts is None
     ):
         raise ValueError(
-            "the official CUDA suite requires cuda:0, float32, default "
+            "the official CUDA suite requires cuda:0, the float32 suite "
+            "selector with its pinned per-case precision contract, default "
             "compilation, auto policy, one intra/inter-op thread, frozen "
             "measurement settings, eager/graph correctness indexes, and no "
             "experimental grouping or explicit CUDA graphs"
@@ -5035,6 +5597,7 @@ def main():
     cuda_correctness_indexes, cuda_correctness_errors = (
         _load_cuda_correctness_indexes(
             cuda_correctness_paths,
+            cuda_correctness_receipts,
             manifest,
             evidence,
         )
@@ -5043,6 +5606,11 @@ def main():
     )
     results = []
     for name in cases:
+        effective_precision = (
+            CUDA_PERFORMANCE_PRECISION_BY_CASE[name]
+            if args.case == "cuda-gates"
+            else args.precision
+        )
         if args.compile_mode == "matrix":
             result = _variant_matrix(args, name, manifest, allocation_document)
         elif args.policy == "matrix":
@@ -5051,7 +5619,7 @@ def main():
             result = run_case(
                 name,
                 device=args.device,
-                precision=args.precision,
+                precision=effective_precision,
                 compile_mode=args.compile_mode,
                 capture_graphs=args.capture_graphs,
                 execution_policy=args.policy,
@@ -5073,6 +5641,7 @@ def main():
                     allocation_document,
                     args,
                     name,
+                    precision=effective_precision,
                 ),
             )
         if (
@@ -5339,7 +5908,7 @@ def main():
         output["suite_acceptance"]["cpu_thread_slice_passed"] = slice_evaluation[
             "passed"
         ]
-    rendered = json.dumps(output, indent=2, sort_keys=True) + "\n"
+    rendered = json.dumps(output, allow_nan=False, indent=2, sort_keys=True) + "\n"
     if args.output is not None:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(rendered)

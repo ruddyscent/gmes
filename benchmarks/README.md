@@ -216,17 +216,16 @@ and pass those local paths to `--torch-baseline-slice-artifacts`.
 
 The public copies retain only the data required to reproduce the timing and
 allocation checks. They omit hostname, PID values, raw CPU/GPU topology,
-compiler-cache metadata, RSS records, profiler traces, and local paths. A
-release-scoped, 32-byte-salted SHA-256 host commitment lets a local candidate
-prove equality with the frozen CPU host and upstream PyTorch release without
-publishing that identity directly; each Release uses a fresh salt shared by its
-two slices. The commitment ignores the PyTorch local-build suffix, CUDA runtime,
-device inventory, and GPU topology because those device-specific values differ
-between CPU and CUDA builds and are validated by the corresponding runtime
-contracts. It still binds the platform, Python version, PyTorch public version,
-CPU counts, affinity, topology, and normalized model. This is a public equality
-commitment, not a guarantee that a party with an independently captured
-candidate fingerprint cannot test equality.
+compiler-cache metadata, RSS records, profiler traces, local paths, and all
+private commitment material. A release-scoped host commitment lets a local
+candidate prove equality with the frozen CPU host and upstream PyTorch release
+without publishing that identity directly. It excludes the PyTorch local-build
+suffix, CUDA runtime, device inventory, and GPU topology because those
+device-specific values differ between CPU and CUDA builds and are validated by
+the corresponding runtime contracts. It still commits to the platform, Python
+version, PyTorch public version, CPU counts, affinity, topology, and normalized
+model. Public documentation and artifacts disclose only that safe commitment;
+the material required to open it remains protected.
 CPU timing adds a separate fail-closed runtime identity in the manifest. Both
 candidate slices must use exactly PyTorch `2.13.0+cpu` with no CUDA runtime;
 switching to a CUDA-enabled wheel, changing the local build suffix, or reporting
@@ -290,12 +289,35 @@ pre-created strict correctness indexes in fixed eager then compiled-graph
 order. Both indexes must bind the same clean candidate, manifest, solver ABI,
 complete case set, and raw candidate NPZ archives.
 
+The final completion bundle embeds all three correctness indexes as full
+artifact descriptors: the CPU scope owns the CPU index, and the single-GPU
+scope owns the two CUDA indexes in fixed eager then compiled-graph order.
+Bundle closure follows those descriptors into each index and then into every
+referenced raw NPZ, so neither an index hash nor a summarized pass flag can
+stand in for the CPU, eager, or compiled-graph correctness bytes.
+
+The `cuda-gates` command keeps `--precision float32` as the suite selector, but
+the v2 suite contract pins the effective precision per case. Five cases remain
+CUDA float32; `single-gpu-3d` alone runs in CUDA float64 because its fixed
+native step-100 magnitude exceeds the float32 range. The workload, initializer,
+five-step warm-up, 100 timed steps, 15 repetitions, and profiler contract are
+unchanged. Every recorded checkpoint must keep all six fields and every
+non-plan dynamic checkpoint tensor finite, including nested source auxiliaries
+and probe state. Static plan sentinels are not mistaken for dynamic state. The
+blocking CUDA memory measure is the net allocation before and after the
+steady-state run, after evidence-only checkpoint clones are released. Reported
+peak allocation is diagnostic and can include checkpoint and finiteness
+validation storage; it is not presented as the solver-only steady-state peak.
+The complete eager/compiled-graph correctness matrix remains CUDA float32.
+
 ~~~sh
 uv run --no-sync python -m benchmarks.torch_tuning \
   --case cuda-gates --device cuda:0 --precision float32 \
   --compile-mode default --policy auto --threads 1 --interop-threads 1 \
   --cuda-correctness-index /tmp/issue-123/correctness-eager.json \
     /tmp/issue-123/correctness-graph.json \
+  --cuda-correctness-receipt /trusted/issue-123-runtime-receipts/cuda-eager.json \
+    /trusted/issue-123-runtime-receipts/cuda-graph.json \
   --trace-directory /tmp/issue-123/cuda-traces \
   --output /tmp/issue-123/cuda.json --enforce
 
@@ -329,7 +351,7 @@ uv run --no-sync python -m benchmarks.torch_tuning \
   --trace-directory /tmp/gmes-tuning-traces --output /tmp/gmes-tuning.json
 
 uv run --no-sync python -m benchmarks.torch_tuning \
-  --case single-gpu-3d --device cuda:0 --precision float32 \
+  --case single-gpu-3d --device cuda:0 --precision float64 \
   --compile-mode matrix --capture-graphs \
   --trace-directory /tmp/gmes-tuning-traces --output /tmp/gmes-cuda.json
 ```
@@ -363,6 +385,7 @@ uv run --no-sync python -m benchmarks.torch_tuning \
   --cpu-slice-artifacts /tmp/cpu-one.json /tmp/cpu-physical.json \
   --allocation-provenance allocation-provenance.json \
   --correctness-evidence-index /tmp/torch-correctness-index.json \
+  --correctness-runtime-receipt /trusted/issue-123-runtime-receipts/cpu.json \
   --output /tmp/cpu-acceptance.json --enforce
 ```
 
@@ -377,30 +400,51 @@ uv run --no-sync python -m benchmarks.torch_correctness capture \
 uv run --no-sync python -m benchmarks.torch_correctness index \
   --references /tmp/native/*.npz --candidates /tmp/torch/*.npz \
   --candidate-evidence /tmp/cpu-one.json \
+  --runtime-receipt /tmp/runtime-receipts/cpu.json \
   --descriptor-root /tmp \
   --output /tmp/torch-correctness-index.json
 
 uv run --no-sync python -m benchmarks.torch_correctness validate-index \
   --index /tmp/torch-correctness-index.json \
   --descriptor-root /tmp \
-  --candidate-evidence /tmp/cpu-one.json
+  --candidate-evidence /tmp/cpu-one.json \
+  --runtime-receipt /trusted/issue-123-runtime-receipts/cpu.json
 ```
 
-The index command requires the ordered union of every manifest `correctness`
-and `physical_checks` case. It reopens both NPZ archives, compares complete
-fields and persistent/source/auxiliary state, and records the exact archive
-hashes. `validate-index` repeats that comparison; it does not trust an embedded
-`"passed": true`. Every nested archive descriptor is a canonical POSIX path
-relative to `--descriptor-root`, plus its exact byte size, media type, SHA-256,
-and candidate binding; absolute paths and path escapes fail closed.
+Correctness index schema 2 requires the ordered union of all 31 manifest
+`correctness` cases and all three `physical_checks` cases. It reopens both NPZ
+archives, compares complete fields and persistent/source/auxiliary state, and
+records the exact archive hashes. Repeat the index for the CPU, CUDA eager, and
+CUDA compiled-graph runtime modes. Each index has 34 native-reference and 34
+Torch-candidate descriptors. The final completion validator
+`_validate_global_correctness_archive_topology` requires one identical ordered
+34-reference set across CPU, CUDA eager, and CUDA graph, with every reference
+record identical by case, path, SHA-256, size, media type, and payload identity.
+CPU, CUDA eager, and CUDA graph must each use a distinct 34-candidate set. All
+three candidate sets must be mutually disjoint and disjoint from the shared
+references by path, digest, and payload identity. The resulting 204 descriptor
+occurrences therefore resolve to exactly 34 shared references plus 102
+candidates, for 136 globally unique archives. Do not replace this closure with
+summaries or grouped differential projections.
+
+The schema-2 contract is `complete-field-state-and-runtime-receipt-v2`.
+Construction embeds the descriptor of the matching canonical runtime receipt;
+`validate-index` additionally requires a caller-supplied, byte-identical copy
+outside `--descriptor-root`. It repeats every comparison and does not trust an
+embedded `"passed": true` or receipt assertion. Every nested archive descriptor
+is a canonical POSIX path relative to `--descriptor-root`, plus its exact byte
+size, media type, SHA-256, and candidate binding; absolute paths and path
+escapes fail closed.
 
 ### Candidate-bound differential evidence
 
-Create both differential scopes from a clean candidate checkout. The isolated
-runner must use the pinned `native-oracle-observer-v6` worktree for every native
-reference; running `native_oracle.py capture` in the candidate checkout is not
-an equivalent reference. Start with a fresh bundle directory so the producer's
-exact source and output closures cannot include stale files:
+Differential schema 5 retains a complete `reference_source` and
+`candidate_source` descriptor on every record in addition to the compact
+grouped projections. Create both scopes from a clean candidate checkout. The
+isolated runner must use the pinned `native-oracle-observer-v6` worktree for
+every native reference; running `native_oracle.py capture` in the candidate
+checkout is not an equivalent reference. Start with a fresh bundle directory
+so the producer's exact source and output closures cannot include stale files:
 
 ```sh
 GMES_CANDIDATE_CHECKOUT=$PWD
@@ -445,12 +489,15 @@ for GMES_CASE in bloch-2d bloch-3d upml-bloch cpml-bloch lorentz-bloch \
     --device cuda:0 --precision float32 --graph-mode eager --compile-mode default
 done
 
-for GMES_CASE in single-gpu-2d single-gpu-3d; do
-  uv run --no-sync python -m benchmarks.torch_correctness capture \
-    --reference "$GMES_ISSUE123_BUNDLE/sources/native/single/$GMES_CASE.npz" \
-    --output "$GMES_ISSUE123_BUNDLE/sources/torch/single/$GMES_CASE.npz" \
-    --device cuda:0 --precision float32 --graph-mode eager --compile-mode default
-done
+uv run --no-sync python -m benchmarks.torch_correctness capture \
+  --reference "$GMES_ISSUE123_BUNDLE/sources/native/single/single-gpu-2d.npz" \
+  --output "$GMES_ISSUE123_BUNDLE/sources/torch/single/single-gpu-2d.npz" \
+  --device cuda:0 --precision float32 --graph-mode eager --compile-mode default
+
+uv run --no-sync python -m benchmarks.torch_correctness capture \
+  --reference "$GMES_ISSUE123_BUNDLE/sources/native/single/single-gpu-3d.npz" \
+  --output "$GMES_ISSUE123_BUNDLE/sources/torch/single/single-gpu-3d.npz" \
+  --device cuda:0 --precision float64 --graph-mode eager --compile-mode default
 ```
 
 Build and then independently reopen each raw projection:
@@ -484,13 +531,66 @@ for GMES_SCOPE in paired-real single-gpu-cuda; do
 done
 ```
 
-The builder first validates every complete native/Torch source archive and its
-runtime/provenance contract, then writes final-step fields plus every persistent
-state/source array. Each NPZ descriptor has exactly the five bundle-relative
+The full schema-5 source topology is fixed. `paired-real` has eight native
+sources shared by CPU/CUDA records and 16 Torch sources (eight CPU float64 and
+eight CUDA eager float32), producing 16 records. Its source descriptors have
+32 occurrences over 24 unique source NPZs; the one group per role adds 32
+grouped NPZs, for 64 descriptor occurrences over 56 unique files.
+`single-gpu-cuda` has two native and two Torch sources. Across both scopes the
+exact 18-record index closure is 16 paired records plus two single-GPU records,
+and the complete source closure is exactly ten native plus 18 Torch NPZs. The
+32 paired and eight single-GPU grouped projections make 40 compact NPZs.
+
+The builder first validates every complete source archive and its
+runtime/provenance contract. It writes the final-step fields and an exact,
+case-derived inventory of persistent material state for ordinary records. The
+`single-gpu-3d` record instead preserves the fields, physical spectra and
+summary, and the same exact persistent inventory in exactly three groups per
+role: `[0, 1]`, `[2, 5]`, and `[20, 100]`. Step 0 is an implicit initialized
+capture; the frozen manifest `capture_steps` remains the positive list
+`[1, 2, 5, 20, 100]`. Together with the one final-step group per role for
+`single-gpu-2d`, the single-GPU index has eight grouped NPZs (two for 2-D and
+six for 3-D) plus four complete source NPZs, for an exact 12-file closure.
+Schema-5 validation byte-for-byte regenerates every canonical grouped NPZ and
+checks its complete ZIP member coverage and archive-comment identity. Raw
+native and Torch PointSource payloads intentionally use different
+representations, so they are not compared as if they were the same numerical
+state. Instead, the builder decodes every capture's live Torch targets, model,
+parameters, amplitude, and update mode, checks its evaluated waveform at the
+Yee half-step, and cross-checks those buffers against the packed nine-word
+Torch source record. It also verifies the native source indices, amplitude,
+source-cell `eps_inf` and `mu_inf`, and waveform at every capture against the
+frozen workload. The two representations are canonicalized independently into
+an exact semantic JSON record. A second canonical raw-proof record retains
+every capture's native time/indices/values and Torch time/packed values/all ten
+live buffers. It records a separate SHA-256 for each role's retained canonical
+preimage; the strict validator reconstructs and rehashes both preimages instead
+of claiming that the compact bundle contains or can rehash the complete source
+archives. Both records are stored byte-for-byte and independently reopened in
+every grouped NPZ by the strict validator.
+
+All differential records except `single-gpu-3d` retain the manifest's
+elementwise `rtol`/`atol` comparison. For `single-gpu-3d`, captures 0, 1, 2,
+and 5 must still pass those strict checks. Captures 20 and 100 use the
+case-scoped float64 residual contract because the fixed workload's unstable
+mode amplifies ULP-scale association differences and makes a late-step
+elementwise tolerance meaningless. For every floating field, physical
+observable, and persistent array, the builder requires
+`||candidate-reference||inf / max(||reference||inf, 2e-12)` and
+`||candidate-reference||2 / max(||reference||2, 2e-12*sqrt(N))` to be at most
+`1e-6`. The late group retains both steps and records both maxima
+for independent recomputation. It also recomputes the maximum absolute native
+step-100 field value and requires it to exceed the float32 finite range, binding
+the reviewed float64 exception to the evidence itself. An all-zero reference
+array, every integer array, topology, shape, dtype, and finiteness remain
+exact/fail-closed; the limit is pinned and is never calibrated from the
+candidate.
+
+Each NPZ descriptor has exactly the five bundle-relative
 keys `path`, `sha256`, `size_bytes`, `media_type`, and `candidate_evidence`.
-Validation derives workload/device dtype and tolerance from the manifest and
-recomputes every array comparison; recorded tolerances and pass flags cannot
-weaken the gate.
+Validation derives the workload/device dtype and comparison contract, reopens
+the canonical source bytes, and recomputes every array metric; recorded
+comparison values, metrics, and pass flags cannot weaken the gate.
 
 For a nonzero allocation trace, the sidecar is necessarily a second-stage
 review. First create and preserve the slice JSON, Chrome trace, and generated
@@ -837,15 +937,16 @@ The top-level `artifacts` object has exactly six scopes:
 - `policy_paired_real`: the CUDA float32 8x4 policy matrix, compiled and raw
   operation traces, paired-real differential, atomic tuning, and region
   invariance evidence;
-- `single_gpu`: all six CUDA gates, the two large-case differential index,
-  and six traces;
+- `single_gpu`: all six CUDA gates, the two-case differential index and its
+  eight grouped NPZ payloads, and six traces;
 - `two_gpu`: four scaling results, eager/graph schema-3 raw correctness
   matrices, four collective-failure wrappers, and eight rank traces;
 - `macos`: the schema-2 package/runtime index and raw Actions ZIP containing
   the sdist, CPython 3.14 arm64 wheel, and all 12 stdout/stderr logs;
-- `operations`: the descriptor-only index over exact GitHub API response
-  bytes for issue #115, the pull request, base comparison, CI and CodeQL,
-  ruleset, checks, reviews, requested reviewers, and review threads.
+- `operations`: the schema-2 descriptor-only index over the exact 22 GitHub
+  response roles described below, including issues #123 and #115 with all
+  comments, PR #167 comments and closing references, the signed candidate,
+  CI/CodeQL, reviews/threads, and the immutable technical publication.
 
 Single-GPU pass flags are not inputs. Every CUDA case reopens its exact trace
 and recomputes raw timing/MAD, kernel launches, zero H2D/D2H events, and
@@ -861,7 +962,10 @@ and GitHub operational requirements. Linux CPU, policy, single-GPU, and
 two-GPU evidence share one common host identity; CUDA scopes additionally
 share the exact runtime and GPU inventory. macOS is the only separate host.
 The operations scope cross-binds the macOS archive to the exact successful CI
-job. Completion is true only when all six scopes pass.
+job. Passing all six scopes establishes offline structural validity only. An
+offline evaluation always emits `issue_completion_satisfied=false` and
+`final_acceptance=false`; only the completion-level same-process live path
+described below can make either field true.
 
 Download the pull-request macOS artifact and assemble its schema-2 index:
 
@@ -874,43 +978,497 @@ uv run --no-sync python -m benchmarks.macos_ci_evidence assemble \
   --scope-output /tmp/issue-123-macos/scope.json
 ~~~
 
-Capture operational evidence only after issue #115 is closed, its final owner
-handoff comment exists, the pull request is current with `master`, required CI
-and CodeQL are complete, and all review requests and conversations are clear.
-Check runs are queried at the candidate head; CodeQL analyses and alerts remain
-bound to the synthetic merge:
+### Operations and publication closure
 
-~~~sh
-uv run --no-sync python -m benchmarks.issue123_operations \
-  --repository ruddyscent/gmes --pull-request <PR> \
-  --ci-run-id <CI> --codeql-run-id <CODEQL> \
-  --output-directory /tmp/issue-123-operations
+The final-SHA publication and release-dependent operations steps in this
+section are the six-item chain governed by the
+[Recommendation A OWNER amendment](https://github.com/ruddyscent/gmes/issues/123#issuecomment-5523144396) and deferred to open
+[#169](https://github.com/ruddyscent/gmes/issues/169).
+They are deferred, unperformed, unsatisfied, still required, and owned by
+that open issue; none is a prerequisite for #123 technical closure. Every
+retained non-deferred #123 gate remains mandatory.
+
+Publish the technical evidence before operations capture under the exact
+lightweight, non-version tag
+`issue-123-technical-evidence-<FINAL_SHA>`. Create the new tag through the
+release with `--target <FINAL_SHA>` so both `target_commitish` and the tag's Git
+commit object name the candidate. Use `--latest=false`. Immutable releases must
+be enabled before this future release is created; schema 2 rejects a mutable,
+draft, prerelease, annotated-tag, bot-authored, or wrong-target release.
+The repository's immutable-release policy is currently disabled, so enabling
+it is an explicit operator prerequisite rather than an action performed by the
+evaluator.
+
+The immutable release has exactly four OWNER-uploaded assets:
+
+- `issue-123-public-technical-evidence.zip`, containing the five
+  pre-operations public technical projections, event-complete
+  privacy-normalized traces, and public correctness commitments, but no private
+  correctness arrays;
+- `issue-123-technical-summary.json`;
+- `issue-115-raw-timing.json`, containing actual fixed-workload raw
+  `torch.utils.benchmark` timing evidence;
+- `issue-115-event-level-profiler.json`, containing actual fixed-workload
+  event-level profiler evidence.
+
+Every asset must be `uploaded`, have a unique positive ID, name, and SHA-256,
+and expose the canonical GitHub API and browser-download URLs. The paginated
+asset endpoint and the release's embedded asset ledger must agree exactly.
+Their sizes and GitHub `sha256:` digests are copied into the structured OWNER
+comments below. The public technical ZIP intentionally excludes the private
+correctness arrays; those remain in the local evaluator bundle while their
+commitments are public. The release must not contain the operations scope or
+the final six-scope bundle, because either would make operations publication
+circular.
+
+For the deferred release-dependent #123 record, post one OWNER comment,
+copying the following lines without the documentation fence, indentation,
+extra text, blank fields, or reordering:
+
+~~~text
+GMES_ISSUE_123_FINAL_CONTRACT_AMENDMENT_V2
+FINAL_SHA=<FINAL_SHA>
+PR=167
+TARGET_ISSUE=123
+TECHNICAL_RELEASE_URL=https://github.com/ruddyscent/gmes/releases/tag/issue-123-technical-evidence-<FINAL_SHA>
+BASELINE_V3_ROOT_COMMIT=821c075b9328e02c3f3e5d16488a44b64ff08c04
+BASELINE_V3_ONE_URL=https://github.com/ruddyscent/gmes/releases/download/issue-123-torch-cpu-baseline-v3/torch-cpu-baseline-one.json
+BASELINE_V3_ONE_SIZE_BYTES=18281
+BASELINE_V3_ONE_SHA256=c8eba3c17ccae5ba744a8fbc90b89d72a77dcf0624339cda1deb4d7f594395ed
+BASELINE_V3_PHYSICAL_URL=https://github.com/ruddyscent/gmes/releases/download/issue-123-torch-cpu-baseline-v3/torch-cpu-baseline-physical.json
+BASELINE_V3_PHYSICAL_SIZE_BYTES=18292
+BASELINE_V3_PHYSICAL_SHA256=b1a3c82a069c2475560468a7b8d0a237db89e857bdce96f8fc812449b5c35602
+BASELINE_V3_HOSTNAME=redacted
+BASELINE_V3_HOST_IDENTITY_SCHEMA=torch-cpu-host-identity-v2
+BASELINE_V3_HOST_COMMITMENT_SHA256=f7b3b1b0eb13531682ea0381698c60aa9a97c7a3a0dfffc5344b828772f67a56
+BASELINE_V3_DISPOSITION=authoritative-published-privacy-sanitized
+SUPERSEDES_BASELINE_ISSUE_COMMENT=<BASELINE_CLOSURE_COMMENT_ID>
+SUPERSEDES_DM2_ISSUE_COMMENT=<DM2_ISSUE_AMENDMENT_COMMENT_ID>
+SUPERSEDES_DM2_PR_COMMENT=<DM2_PR_INSIGHT_COMMENT_ID>
+SUPERSEDES_SINGLE_GPU_ISSUE_COMMENT=<SINGLE_GPU_AMENDMENT_COMMENT_ID>
+PRIOR_CONTRACT_DISPOSITION=superseded-by-this-amendment
+SOLVER_ABI=torch-fdtd-regions-v15
+EXECUTION_REPRESENTATION=external-no-inner-cudagraph-regions+dm2-raw-fixed-masked-v1
+DIFFERENTIAL_SCHEMA_VERSION=5
+DIFFERENTIAL_EARLY_STEPS=0,1,2,5
+DIFFERENTIAL_EARLY_CONTRACT=manifest-strict-elementwise
+DIFFERENTIAL_LATE_STEPS=20,100
+DIFFERENTIAL_LATE_CONTRACT=normalized-linf-l2-at-most-1e-6
+SINGLE_GPU_3D_CASE=single-gpu-3d
+SINGLE_GPU_3D_PRECISION=float64
+SINGLE_GPU_3D_LATE_STEPS=20,100
+SINGLE_GPU_3D_LATE_RESIDUAL_CONTRACT=normalized-linf-l2-at-most-1e-6
+SINGLE_GPU_3D_RESIDUAL_DENOMINATOR_FLOOR=2e-12
+SINGLE_GPU_3D_L2_DENOMINATOR_SCALE=sqrt(N)
+SINGLE_GPU_3D_ZERO_REFERENCE_CONTRACT=exact
+PUBLIC_TRACE_DISPOSITION=published-event-complete-privacy-normalized
+CORRECTNESS_ARRAY_DISPOSITION=private
+CORRECTNESS_COMMITMENT_DISPOSITION=published-in-technical-evidence
 ~~~
 
-The macOS archive has exactly 15 non-directory members: the runtime index, two
-packages, and 12 stdout/stderr logs. The operations producer stores the raw API
-responses and their digests; it emits no self-reported acceptance booleans.
-The evaluator derives the active ruleset's strict checks, squash-only merge,
-CodeQL `errors` quality threshold, `high_or_higher` security threshold,
-candidate/base/merge bindings, and unresolved-review count from those bytes.
+For the deferred #169 chain, after issue #115 has
+`state_reason=completed`, no unchecked boxes, and both exact runtime/profiler
+checklist lines checked, post its distinct OWNER handoff comment. Substitute
+values from the captured release ledger:
 
-Write a bundle specification with schema
-`issue-123-completion-bundle-specification` version 1. List every source as
-`{source_path, bundle_path, media_type}`, and make the six `artifacts`
-entries refer only to those bundle paths. Embedded descriptors, including
-nested correctness and differential NPZ files, must also name registered
-payloads. Then assemble once into a new destination and evaluate the generated
-index:
+~~~text
+GMES_ISSUE_115_FINAL_RUNTIME_HANDOFF_V2
+FINAL_SHA=<FINAL_SHA>
+PR=167
+TARGET_ISSUE=123
+HANDOFF_ISSUE=115
+TECHNICAL_RELEASE_URL=https://github.com/ruddyscent/gmes/releases/tag/issue-123-technical-evidence-<FINAL_SHA>
+RAW_TIMING_CONTRACT=torch-utils-benchmark-fixed-workloads
+RAW_TIMING_ASSET_NAME=issue-115-raw-timing.json
+RAW_TIMING_ASSET_URL=https://github.com/ruddyscent/gmes/releases/download/issue-123-technical-evidence-<FINAL_SHA>/issue-115-raw-timing.json
+RAW_TIMING_ASSET_SIZE_BYTES=<RAW_TIMING_SIZE>
+RAW_TIMING_ASSET_SHA256=<RAW_TIMING_SHA256>
+EVENT_PROFILER_CONTRACT=event-level-profiler-fixed-workloads
+EVENT_PROFILER_ASSET_NAME=issue-115-event-level-profiler.json
+EVENT_PROFILER_ASSET_URL=https://github.com/ruddyscent/gmes/releases/download/issue-123-technical-evidence-<FINAL_SHA>/issue-115-event-level-profiler.json
+EVENT_PROFILER_ASSET_SIZE_BYTES=<EVENT_PROFILER_SIZE>
+EVENT_PROFILER_ASSET_SHA256=<EVENT_PROFILER_SHA256>
+HANDOFF_DISPOSITION=complete
+~~~
+
+For the deferred #169 chain, post the independent PR #167 OWNER insight only
+after the exact CI and CodeQL runs have passed. It does not reuse or infer
+fields from the issue record:
+
+~~~text
+GMES_PR_167_FINAL_CANDIDATE_INSIGHT_V2
+FINAL_SHA=<FINAL_SHA>
+PR=167
+TARGET_ISSUE=123
+FINAL_COMMIT_URL=https://github.com/ruddyscent/gmes/commit/<FINAL_SHA>
+FINAL_COMMIT_VERIFICATION=verified:valid
+CI_RUN_URL=https://github.com/ruddyscent/gmes/actions/runs/<CI>
+CODEQL_RUN_URL=https://github.com/ruddyscent/gmes/actions/runs/<CODEQL>
+TEST_SUMMARY=required-ci-and-regression-tests-pass
+EVIDENCE_SUMMARY=five-technical-scopes-pass-private-arrays-commitment-published
+TECHNICAL_RELEASE_URL=https://github.com/ruddyscent/gmes/releases/tag/issue-123-technical-evidence-<FINAL_SHA>
+TECHNICAL_EVIDENCE_ASSET_NAME=issue-123-public-technical-evidence.zip
+TECHNICAL_EVIDENCE_ASSET_URL=https://github.com/ruddyscent/gmes/releases/download/issue-123-technical-evidence-<FINAL_SHA>/issue-123-public-technical-evidence.zip
+TECHNICAL_EVIDENCE_ASSET_SIZE_BYTES=<TECHNICAL_EVIDENCE_SIZE>
+TECHNICAL_EVIDENCE_ASSET_SHA256=<TECHNICAL_EVIDENCE_SHA256>
+TECHNICAL_SUMMARY_ASSET_NAME=issue-123-technical-summary.json
+TECHNICAL_SUMMARY_ASSET_URL=https://github.com/ruddyscent/gmes/releases/download/issue-123-technical-evidence-<FINAL_SHA>/issue-123-technical-summary.json
+TECHNICAL_SUMMARY_ASSET_SIZE_BYTES=<TECHNICAL_SUMMARY_SIZE>
+TECHNICAL_SUMMARY_ASSET_SHA256=<TECHNICAL_SUMMARY_SHA256>
+~~~
+
+The four superseded-comment fields are semantic roles, not labels alone.
+Operations resolves each typed placeholder to one exact captured
+issue-comment or pull-request-comment stream record, canonical API and HTML
+URL, repository-OWNER association, timestamp pair, role, and body
+digest/content contract. The private capture retains those exact identifiers;
+public documentation and publication assets do not reproduce account or
+comment identities.
+
+Chronology is fail-closed. Every GitHub object exposing both timestamps must
+have `created_at <= updated_at`. The deferred technical release must eventually
+precede the release-dependent #115 handoff, structured #123 record, and PR
+#167 insight. Issue #115 must satisfy issue creation <= closure <= issue
+`updated_at` (the completed checklist state) <= handoff comment; retained local
+chronology checks remain mandatory. Candidate commit `verified_at`, release
+publication, both selected workflow-run completions, and every selected CI and
+CodeQL job completion must precede the PR insight.
+
+Production binding readiness is currently fail-closed. Production
+evaluator-binding authority is intentionally deferred to
+[#169](https://github.com/ruddyscent/gmes/issues/169). That follow-up owns the
+six deferred items: (1) production-bound final-SHA generation of the four
+public assets; (2) actual-public-byte schema, cardinality, commitment, digest,
+recursive-privacy, Unicode-collision, and exact-byte validation; (3) the
+final-SHA immutable release, four OWNER uploads, and byte-for-byte read-back;
+(4) release link/tag/ID/URL/size/hash fields in the #115 handoff, structured
+#123 record, and PR #167 insight; (5) release-dependent O0/B0/ack/O1/B1,
+technical/live receipt, and amended/final aggregate chronology; and (6)
+production publication, cutover, a nonempty production registry, and the
+production-authority end state. These six items are deferred, unperformed,
+unsatisfied, still required, and owned by open #169; none is a #123 closure
+prerequisite.
+
+These deferrals change no runtime authority.
+`CODE_OWNED_LITERAL_TARGET_BINDINGS` remains empty, the production literal
+binding registry remains empty, and the current production policy contains
+targets with no code-owned evaluator binding. Publication preparation therefore
+remains unavailable for that production target closure, and completion live
+verification cannot set `final_acceptance` or `issue_completion_satisfied`
+through this path. Caller roles, selectors, paths, descriptors, digests,
+selected values, fixtures, and policy iteration are never substitutes for
+OWNER authority.
+
+Issue #123 may accept and close for its technical work only after every
+retained, non-deferred performance, correctness, evidence, operations, privacy,
+security, CI, CodeQL, review, and clean-candidate gate passes. Its closure
+record must state that all six items above remain deferred, unperformed,
+unsatisfied, and still required by open #169, and that no final-SHA public
+release, release-dependent receipt, production publication, cutover,
+production readiness, or production authority was established. That technical
+acceptance remains distinct from the deferred production-publication chain and
+does not claim production readiness. Production evaluator authority remains
+deferred, and production publication and cutover remain blocked on #169. The
+commands below document the executable fail-closed interface; they do not
+claim present production readiness.
+
+Once #169 discharges the deferred chain with exact-byte OWNER-adopted
+policy/profile bytes and its required tests, the adapter may become
+production-authoritative without changing the public
+schemas or cardinalities. It accepts one canonical private source specification
+and derives the five projection scopes from their exact completion-index
+descriptors. A source record's role and selector fields are redundant
+assertions: code owns the target-to-evaluator-role map, rejects unmapped targets,
+and never discovers authority by scope, path, digest, or selected value. Prepare
+the exact four public assets and the protected binding sidecar before the
+release. The sidecar output directory must already exist with mode `0700`; its
+file is mode `0600` and must remain outside every public asset and bundle
+directory:
+
+~~~sh
+mkdir -m 0700 /tmp/issue-123-private-authority
+
+uv run --no-sync python -m benchmarks.issue123_publication prepare \
+  --source-spec /trusted/issue-123-publication-source-spec.json \
+  --completion-index /tmp/issue-123-projection-source/completion-index.json \
+  --policy /trusted/issue-123-publication-policy.json \
+  --policy-sha256 <CALLER_OWNED_POLICY_SHA256> \
+  --runtime-receipt cpu=/trusted/issue-123-runtime-receipts/cpu.json \
+  --runtime-receipt cuda-eager=/trusted/issue-123-runtime-receipts/cuda-eager.json \
+  --runtime-receipt cuda-graph=/trusted/issue-123-runtime-receipts/cuda-graph.json \
+  --runtime-receipt single-gpu-2d=/trusted/issue-123-runtime-receipts/single-gpu-2d.json \
+  --runtime-receipt single-gpu-3d=/trusted/issue-123-runtime-receipts/single-gpu-3d.json \
+  --asset-output-directory /tmp/issue-123-publication/assets \
+  --private-openings-output /tmp/issue-123-private-authority/publication-openings.json
+~~~
+
+Successful stdout is exactly `issue123-publication-prepare-ok`; it contains no
+resolved path. Salts, openings, raw arrays, private paths, host/device
+identities, and source identities exist only in protected inputs or memory.
+Public v1 bytes contain safe commitments and descriptors only.
+
+The documented `main(argv)` boundary and the module process entry use the same
+fixed, path-free success and failure tokens. Expected publication path and OS
+failures reach direct library callers only as a fixed typed `PublicationError`
+without a path-bearing exception chain.
+
+After uploading those four bytes and independently capturing the immutable
+release identity and external asset ledger, finalize the private publication
+receipt:
+
+~~~sh
+uv run --no-sync python -m benchmarks.issue123_publication finalize \
+  --asset-directory /tmp/issue-123-publication/assets \
+  --release-capture /trusted/issue-123-release-capture.json \
+  --release-identity /trusted/issue-123-release-identity.json \
+  --policy /trusted/issue-123-publication-policy.json \
+  --policy-sha256 <CALLER_OWNED_POLICY_SHA256> \
+  --receipt-output /tmp/issue-123-private-authority/publication-receipt.json
+~~~
+
+Successful stdout is exactly `issue123-publication-finalize-ok`. The release
+identity and external byte ledger are caller-owned values, not values recovered
+from the receipt. Capture operations only after that receipt, the immutable
+release, and all three final semantic-role comments exist; PR #167 must be
+current with `master`, required CI and CodeQL must be complete, and all review
+requests and conversations must be clear:
+
+~~~sh
+gh auth status --hostname github.com
+
+uv run --no-sync python -m benchmarks.issue123_operations capture \
+  --repository ruddyscent/gmes --pull-request 167 \
+  --ci-run-id <CI> --codeql-run-id <CODEQL> \
+  --technical-release-tag issue-123-technical-evidence-<FINAL_SHA> \
+  --publication-receipt /tmp/issue-123-private-authority/publication-receipt.json \
+  --manifest benchmarks/native_oracle_workloads.json \
+  --output-directory /tmp/issue-123-operations-o0
+~~~
+
+`capture` repeats the authenticated `github.com` preflight internally. Both
+production modes pin every internal API request to `--hostname github.com`.
+
+The schema-v2 producer preserves the exact response roles, in canonical query
+order: `technical_release`, `technical_release_assets`,
+`technical_release_tag`, `issue_123`, `issue_123_comments`, `issue_115`,
+`issue_115_comments`, `pull_request`, `pull_request_comments`,
+`candidate_commit`, `base_compare`, `ci_run`, `ci_jobs`, `codeql_run`,
+`codeql_jobs`, `codeql_analyses`, `codeql_alerts`, `ruleset`, `check_runs`,
+`reviews`, `requested_reviewers`, and `review_threads`. Every role retains its
+raw canonical response and a page ledger containing ordinal, HTTP status,
+canonical page-body SHA-256 and size, item count, and the exact has-next/next
+relationship. The only retained response-header fields are `content-type`,
+`etag`, `last-modified`, canonicalized `link`,
+`x-github-api-version-selected`, and `x-github-media-type`; GraphQL records a
+null selected-version header when GitHub omits it. Authorization, cookie,
+OAuth-scope, token, and secret material is neither captured nor emitted.
+
+REST Link URLs must use the exact named repository route or GitHub's numeric
+`/repositories/<ID>/...` equivalent, preserve the closed request-filter set,
+and identify the next page for every intermediate page. GraphQL must identify
+the next cursor for every intermediate page. The terminal page must have no
+next relation, and any declared REST last page must equal the ledger's terminal
+ordinal. REST review count is independently matched to GraphQL
+`reviews.totalCount`; deleting the terminal reviews, CodeQL analyses, or CodeQL
+alerts page therefore fails.
+
+Ordinary `evaluate_operations` and a schema-v2 operations index with its
+embedded public schema-v1 publication receipt are structural checks only:
+their result always has `final_acceptance=false`. They cannot be replayed to
+authorize final acceptance. The non-circular recapture protocol has one stable
+fixed point and this exact chronology:
+
+`O0/B0 reopen -> authorized two-line acknowledgment -> O1 recapture -> B1 reopen -> offline evaluate -> live verify`
+
+O0 is the operations capture above while the issue has the exact two authorized
+checklist markers still unchecked. Create a six-scope B0 bundle whose first
+five artifact descriptors and ordered five runtime receipts are the protected
+frozen inventory, and whose operations scope contains O0. Reopen B0 as a
+distinct copy and authenticate the exact unchecked issue response, both bundle
+inventories, and the protected publication openings:
 
 ~~~sh
 uv run --no-sync python -m benchmarks.issue123_completion assemble \
-  --specification /tmp/gmes-issue123-spec.json \
-  --bundle /tmp/gmes-issue123-final
+  --specification /tmp/gmes-issue123-b0-spec.json \
+  --bundle /tmp/gmes-issue123-b0-source
 
-uv run --no-sync python -m benchmarks.issue123_completion evaluate \
-  --index /tmp/gmes-issue123-final/completion-index.json \
-  --output /tmp/gmes-issue123-evaluation.json --enforce
+cp -a /tmp/gmes-issue123-b0-source /tmp/gmes-issue123-b0-reopened
+
+uv run --no-sync python -m benchmarks.issue123_completion record-reopen \
+  --source-index /tmp/gmes-issue123-b0-source/completion-index.json \
+  --reopened-index /tmp/gmes-issue123-b0-reopened/completion-index.json \
+  --stage pre-acknowledgment \
+  --private-openings /tmp/issue-123-private-authority/publication-openings.json \
+  --pre-ack-response /tmp/issue-123-operations-o0/raw/issue_123.json \
+  --output /tmp/issue-123-private-authority/b0-reopen-receipt.json
 ~~~
+
+Only then may the authorized acknowledgment change the two designated checklist
+markers from unchecked to checked. The authenticated transition commits the
+complete canonical O0/O1 response projection: it neutralizes only those two
+exact marker tokens and the separately authenticated top-level `updated_at`;
+nested timestamps, every other field, all other body text, ordering, and line
+endings remain committed. Recapture all 22 operations roles as O1, then assemble
+B1 with O1 while preserving exactly the B0 first-five mappings and the same
+ordered five runtime receipts. Reopen B1 as a distinct copy and link it to the
+authenticated B0 transition:
+
+~~~sh
+uv run --no-sync python -m benchmarks.issue123_completion assemble \
+  --specification /tmp/gmes-issue123-b1-spec.json \
+  --bundle /tmp/gmes-issue123-b1-source
+
+cp -a /tmp/gmes-issue123-b1-source /tmp/gmes-issue123-b1-reopened
+
+uv run --no-sync python -m benchmarks.issue123_completion record-reopen \
+  --source-index /tmp/gmes-issue123-b1-source/completion-index.json \
+  --reopened-index /tmp/gmes-issue123-b1-reopened/completion-index.json \
+  --stage final \
+  --private-openings /tmp/issue-123-private-authority/publication-openings.json \
+  --pre-ack-receipt /tmp/issue-123-private-authority/b0-reopen-receipt.json \
+  --output /tmp/issue-123-private-authority/b1-reopen-receipt.json
+~~~
+
+This is the fixed point: there is no B2 and no third operations capture. Both
+reopen receipts and the publication openings are protected mode-`0600` private
+authority files and never public assets or bundle payloads. Receipt links are
+SHA-256 over exact canonical receipt bytes; the receipt bodies themselves are
+authenticated with the private binding key.
+
+Write each bundle specification with schema
+`issue-123-completion-bundle-specification` version 1. List every source as
+`{source_path, bundle_path, media_type}`, and make the six `artifacts` entries
+refer only to those bundle paths. Embedded descriptors, including nested
+correctness and differential NPZ files, must also name registered payloads.
+Run the offline structural preflight against B1:
+
+~~~sh
+uv run --no-sync python -m benchmarks.issue123_completion evaluate \
+  --index /tmp/gmes-issue123-b1-source/completion-index.json \
+  --manifest benchmarks/native_oracle_workloads.json \
+  --runtime-receipts \
+    /trusted/issue-123-runtime-receipts/cpu.json \
+    /trusted/issue-123-runtime-receipts/cuda-eager.json \
+    /trusted/issue-123-runtime-receipts/cuda-graph.json \
+    /trusted/issue-123-runtime-receipts/single-gpu-2d.json \
+    /trusted/issue-123-runtime-receipts/single-gpu-3d.json \
+  --output /tmp/gmes-issue123-evaluation.json --enforce-structural
+~~~
+
+For `evaluate`, `--enforce-structural` exits successfully only when the six
+scopes, their cross-scope bindings, and exactly five external runtime receipts
+are structurally valid. The fixed order is CPU, CUDA eager, CUDA graph,
+single-GPU 2-D, and single-GPU 3-D. The legacy `--enforce` name remains a
+final-acceptance gate and therefore always exits 2 in offline mode. The JSON
+field `structural_validation_satisfied` reports the structural result; both
+final-authority fields remain false even when it is true.
+
+Immediately before the production decision, download exactly the four immutable
+release assets into a clean directory. The policy file and
+`<CALLER_OWNED_POLICY_SHA256>` must remain outside every bundle and receipt; do
+not recover that digest from an untrusted artifact. A standalone operations
+check is available for diagnosis with authenticated B1 authority inputs:
+
+~~~sh
+mkdir -p /tmp/issue-123-publication/downloaded
+gh release download issue-123-technical-evidence-<FINAL_SHA> \
+  --repo ruddyscent/gmes \
+  --dir /tmp/issue-123-publication/downloaded
+
+uv run --no-sync python -m benchmarks.issue123_operations verify-live \
+  --index /tmp/issue-123-operations-o1/operations-index.json \
+  --manifest benchmarks/native_oracle_workloads.json \
+  --publication-policy /trusted/issue-123-publication-policy.json \
+  --publication-policy-sha256 <CALLER_OWNED_POLICY_SHA256> \
+  --technical-evidence-asset /tmp/issue-123-publication/downloaded/issue-123-public-technical-evidence.zip \
+  --technical-summary-asset /tmp/issue-123-publication/downloaded/issue-123-technical-summary.json \
+  --raw-timing-asset /tmp/issue-123-publication/downloaded/issue-115-raw-timing.json \
+  --event-profiler-asset /tmp/issue-123-publication/downloaded/issue-115-event-level-profiler.json \
+  --source-index /tmp/gmes-issue123-b1-source/completion-index.json \
+  --reopened-index /tmp/gmes-issue123-b1-reopened/completion-index.json \
+  --private-openings /tmp/issue-123-private-authority/publication-openings.json \
+  --pre-ack-bundle-reopen-receipt /tmp/issue-123-private-authority/b0-reopen-receipt.json \
+  --final-bundle-reopen-receipt /tmp/issue-123-private-authority/b1-reopen-receipt.json \
+  --runtime-receipts \
+    /trusted/issue-123-runtime-receipts/cpu.json \
+    /trusted/issue-123-runtime-receipts/cuda-eager.json \
+    /trusted/issue-123-runtime-receipts/cuda-graph.json \
+    /trusted/issue-123-runtime-receipts/single-gpu-2d.json \
+    /trusted/issue-123-runtime-receipts/single-gpu-3d.json \
+  --baseline-authority live-release \
+  --receipt-output /tmp/issue-123-private-authority/operations-only-live-receipt.json
+~~~
+
+Only `--baseline-authority live-release` is implemented. Immutable-mirror mode
+is rejected unless and until an authorized mirror-receipt contract is added.
+The standalone command derives its typed expectation from the authenticated B1
+inputs; no caller-supplied expectation JSON exists. Its schema-v3 receipt is
+non-replayable operations provenance and cannot set completion authority.
+Both protected B1 roots come from that retained authenticated lease, never raw
+CLI path spellings. Completion, standalone operations, and publication reject
+equal, nested, dot-segment, and symlink-alias output locations before creating a
+directory, temporary, sidecar, receipt, or result.
+
+The authoritative completion command consumes the protected openings, both
+ordered reopen receipts, both retained B1 trees, and the five runtime receipts:
+
+~~~sh
+umask 077
+uv run --no-sync python -m benchmarks.issue123_completion verify-live \
+  --index /tmp/gmes-issue123-b1-source/completion-index.json \
+  --reopened-index /tmp/gmes-issue123-b1-reopened/completion-index.json \
+  --private-openings /tmp/issue-123-private-authority/publication-openings.json \
+  --pre-ack-bundle-reopen-receipt /tmp/issue-123-private-authority/b0-reopen-receipt.json \
+  --final-bundle-reopen-receipt /tmp/issue-123-private-authority/b1-reopen-receipt.json \
+  --manifest benchmarks/native_oracle_workloads.json \
+  --runtime-receipts \
+    /trusted/issue-123-runtime-receipts/cpu.json \
+    /trusted/issue-123-runtime-receipts/cuda-eager.json \
+    /trusted/issue-123-runtime-receipts/cuda-graph.json \
+    /trusted/issue-123-runtime-receipts/single-gpu-2d.json \
+    /trusted/issue-123-runtime-receipts/single-gpu-3d.json \
+  --publication-policy /trusted/issue-123-publication-policy.json \
+  --publication-policy-sha256 <CALLER_OWNED_POLICY_SHA256> \
+  --technical-evidence-asset /tmp/issue-123-publication/downloaded/issue-123-public-technical-evidence.zip \
+  --technical-summary-asset /tmp/issue-123-publication/downloaded/issue-123-technical-summary.json \
+  --raw-timing-asset /tmp/issue-123-publication/downloaded/issue-115-raw-timing.json \
+  --event-profiler-asset /tmp/issue-123-publication/downloaded/issue-115-event-level-profiler.json \
+  --output-directory /tmp/gmes-issue123-production-verification \
+  --enforce
+~~~
+
+The completion-owned retained lease holds file descriptors and full registered
+file/directory-closure snapshots for both source and reopened B1 trees across
+the live operations call, durable receipt validation, final decision, and
+result serialization. It revalidates the shared frozen inventory and both trees
+at the final authority-elevation boundary immediately before the private result
+is atomically linked, leaving no fallible authority-producing gap. Append,
+same-size rewrite, inode replacement, and extra-file changes fail closed on
+either copy.
+
+The live operations step reruns all 22 fixed GitHub roles, revalidates exactly
+the four downloaded public assets, requires the provider's exact two-asset
+order, and retains the two downloaded baseline-v3 file identities and exact
+bytes across evaluation, receipt validation, the final barrier, the authority
+link, durability checks, and final reopen. Any reorder, rewrite, replacement,
+mode change, or extra file fails closed before either completion flag can be
+true. The private destination contains the schema-v3
+`operations-live-receipt.json` and `completion-live-result.json`; both have
+`receipt_replay_authority=false` and serialize no private paths, raw identities,
+keys, or openings. A later evaluator must rerun the complete live command with
+fresh responses and a new private destination.
+
+Pending private bytes, including serialized true claims, are not authority.
+The atomic no-replace link immediately after the last retained-input callback
+is the sole authority linearization point. The linked leaf is then durably
+checked and reopened while the retained baseline and both B1 leases remain
+open; a failure after the link is reported as a committed-authority custody
+failure and the final leaf is never silently removed.
+
+The preserved contracts are public projection/publication schema v1, bundle
+specification v1, completion index v2, exactly four ordered public assets,
+exactly five ordered runtime receipts, and exactly 22 operations roles. The
+completion live output and private operations live receipt advance to v3.
 
 Assembly refuses an existing destination and rejects absolute bundle paths as
 well as dotted, backslash, symlinked, duplicate, unused, or unregistered

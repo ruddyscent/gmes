@@ -83,6 +83,7 @@ class SingleGpuCudaSuiteTest(unittest.TestCase):
         repetitions = reference["performance_repetitions"]
         steps = reference["performance_steps_per_repeat"]
         profile_steps = reference["performance_profile_steps"]
+        precision = torch_tuning.CUDA_PERFORMANCE_PRECISION_BY_CASE[name]
         return {
             "schema_version": 2,
             "backend": "torch",
@@ -100,7 +101,7 @@ class SingleGpuCudaSuiteTest(unittest.TestCase):
             },
             "runtime": {
                 "device": "cuda:0",
-                "precision": "float32",
+                "precision": precision,
                 "compile_policy": "compile",
                 "compile_mode": "default",
                 "explicit_cuda_graphs": False,
@@ -112,7 +113,7 @@ class SingleGpuCudaSuiteTest(unittest.TestCase):
                 "paired_real": False,
                 "field_storage_representation": "real-v1",
                 "field_storage_channels": 1,
-                "field_storage_dtype": "torch.float32",
+                "field_storage_dtype": f"torch.{precision}",
                 "compile_cache_key": "c" * 64,
                 "cpu_topology_command_status": 0,
             },
@@ -135,6 +136,10 @@ class SingleGpuCudaSuiteTest(unittest.TestCase):
                 "kernel_launches": 10,
                 "host_to_device_events": 0,
                 "device_to_host_events": 0,
+                "field_buffer_sizes_bytes": {
+                    f"state.{component}": (40 if precision == "float32" else 80)
+                    for component in ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")
+                },
             },
             "diagnostics": {
                 "boundaries": {
@@ -144,6 +149,31 @@ class SingleGpuCudaSuiteTest(unittest.TestCase):
                     ),
                     "paired_real_scratch_bytes": 0,
                 }
+            },
+            "state_progress": {
+                "changed_buffers": ["ex", "ey", "ez", "hx", "hy", "hz"],
+                "fields_changed": ["ex", "ey", "ez", "hx", "hy", "hz"],
+                "all_fields_changed": True,
+            },
+            "state_finiteness": {
+                "contract_id": torch_tuning.STATE_FINITENESS_CONTRACT_ID,
+                "tracked_buffers": ["ex", "ey", "ez", "hx", "hy", "hz"],
+                "stages": {
+                    stage: {
+                        "floating_or_complex_buffer_count": 6,
+                        "floating_or_complex_element_count": 60,
+                        "nonfinite_element_count": 0,
+                        "finite": True,
+                    }
+                    for stage in (
+                        "initial",
+                        "post_warmup",
+                        "post_one_step",
+                        "post_timed",
+                        "post_profile",
+                    )
+                },
+                "passed": True,
             },
             "acceptance": {name: True for name in torch_tuning.RUNTIME_ACCEPTANCE_KEYS},
         }
@@ -163,13 +193,45 @@ class SingleGpuCudaSuiteTest(unittest.TestCase):
         }
 
     def correctness_indexes(self):
-        return [
-            {
+        candidate = {
+            "candidate_git_commit": "a" * 40,
+            "candidate_git_status": "",
+            "manifest_sha256": "f" * 64,
+        }
+        indexes = []
+        for mode in torch_tuning.CUDA_CORRECTNESS_RUNTIME_MODES:
+            index = {
+                "candidate_evidence": {
+                    **candidate,
+                    "solver_abi": "gmes-torch-v1",
+                },
                 "runtime_mode": copy.deepcopy(mode),
-                "source_artifact": {"sha256": str(index + 1) * 64},
             }
-            for index, mode in enumerate(torch_tuning.CUDA_CORRECTNESS_RUNTIME_MODES)
-        ]
+            raw = (json.dumps(index, indent=2, sort_keys=True) + "\n").encode()
+            index["source_artifact"] = {
+                "path": f"correctness/{mode['graph_mode']}.json",
+                "sha256": hashlib.sha256(raw).hexdigest(),
+                "size_bytes": len(raw),
+                "media_type": "application/json",
+                "candidate_evidence": copy.deepcopy(candidate),
+            }
+            indexes.append(index)
+        return indexes
+
+    def gate(self, indexes, correctness_errors=()):
+        results = [self.result(name) for name in torch_tuning.CUDA_GATES]
+        with mock.patch.object(
+            torch_tuning,
+            "_profiler_trace_matches",
+            return_value=True,
+        ):
+            return torch_tuning._cuda_suite_gate(
+                results,
+                indexes,
+                list(correctness_errors),
+                self.manifest,
+                self.environment(),
+            )
 
     def test_cuda_suite_requires_all_cases_raw_traces_and_two_runtime_modes(self):
         results = [self.result(name) for name in torch_tuning.CUDA_GATES]
@@ -188,6 +250,36 @@ class SingleGpuCudaSuiteTest(unittest.TestCase):
             self.assertTrue(gate["passed"])
             self.assertTrue(gate["case_closure_complete"])
             self.assertTrue(gate["correctness_evidence_bound"])
+            self.assertEqual(gate["contract_id"], "single-gpu-cuda-closure-v2")
+            self.assertEqual(
+                gate["correctness_indexes"],
+                [
+                    {
+                        "runtime_mode": index["runtime_mode"],
+                        "source_artifact": index["source_artifact"],
+                    }
+                    for index in self.correctness_indexes()
+                ],
+            )
+            self.assertTrue(
+                all(
+                    set(record) == {"runtime_mode", "source_artifact"}
+                    and set(record["source_artifact"])
+                    == set(torch_tuning.CUDA_CORRECTNESS_SOURCE_DESCRIPTOR_KEYS)
+                    for record in gate["correctness_indexes"]
+                )
+            )
+            self.assertEqual(
+                {
+                    mode["precision"]
+                    for mode in gate["required_correctness_runtime_modes"]
+                },
+                {"float32"},
+            )
+            self.assertEqual(
+                gate["required_case_precisions"][-1],
+                {"case": "single-gpu-3d", "precision": "float64"},
+            )
 
             failed_environment = self.environment()
             failed_environment["gpu_topology_command_status"] = 1
@@ -213,6 +305,33 @@ class SingleGpuCudaSuiteTest(unittest.TestCase):
                 )["passed"]
             )
 
+            undersized = copy.deepcopy(results)
+            for result in undersized:
+                for record in result["state_finiteness"]["stages"].values():
+                    record["floating_or_complex_buffer_count"] = 1
+                    record["floating_or_complex_element_count"] = 1
+            self.assertFalse(
+                torch_tuning._cuda_suite_gate(
+                    undersized,
+                    self.correctness_indexes(),
+                    [],
+                    self.manifest,
+                    self.environment(),
+                )["passed"]
+            )
+
+            mixed_names = copy.deepcopy(results)
+            mixed_names[0]["state_progress"]["changed_buffers"] = ["ex", 1]
+            self.assertFalse(
+                torch_tuning._cuda_suite_gate(
+                    mixed_names,
+                    self.correctness_indexes(),
+                    [],
+                    self.manifest,
+                    self.environment(),
+                )["passed"]
+            )
+
             incomplete = torch_tuning._cuda_suite_gate(
                 results[:-1],
                 self.correctness_indexes()[:1],
@@ -224,9 +343,181 @@ class SingleGpuCudaSuiteTest(unittest.TestCase):
             self.assertFalse(incomplete["case_closure_complete"])
             self.assertFalse(incomplete["correctness_evidence_bound"])
 
+            wrong_precision = copy.deepcopy(results)
+            wrong_precision[-1]["runtime"]["precision"] = "float32"
+            wrong_precision[-1]["runtime"]["field_storage_dtype"] = "torch.float32"
+            self.assertFalse(
+                torch_tuning._cuda_suite_gate(
+                    wrong_precision,
+                    self.correctness_indexes(),
+                    [],
+                    self.manifest,
+                    self.environment(),
+                )["passed"]
+            )
+
+            nonfinite = copy.deepcopy(results)
+            nonfinite[-1]["state_finiteness"]["stages"]["post_timed"][
+                "nonfinite_element_count"
+            ] = 1
+            nonfinite[-1]["state_finiteness"]["stages"]["post_timed"]["finite"] = False
+            nonfinite[-1]["state_finiteness"]["passed"] = False
+            self.assertFalse(
+                torch_tuning._cuda_suite_gate(
+                    nonfinite,
+                    self.correctness_indexes(),
+                    [],
+                    self.manifest,
+                    self.environment(),
+                )["passed"]
+            )
+
+            malformed = copy.deepcopy(results)
+            for result in malformed:
+                result["state_finiteness"]["tracked_buffers"] = ["not-a-real-buffer"]
+                for record in result["state_finiteness"]["stages"].values():
+                    record["floating_or_complex_buffer_count"] = 1
+                    record["floating_or_complex_element_count"] = 1
+                    record["nonfinite_element_count"] = False
+            self.assertFalse(
+                torch_tuning._cuda_suite_gate(
+                    malformed,
+                    self.correctness_indexes(),
+                    [],
+                    self.manifest,
+                    self.environment(),
+                )["passed"]
+            )
+
+    def test_cuda_correctness_source_descriptors_are_exact_and_distinct(self):
+        valid = self.correctness_indexes()
+        gate = self.gate(valid)
+        self.assertTrue(gate["correctness_evidence_bound"])
+        self.assertEqual(
+            [
+                record["source_artifact"]["sha256"]
+                for record in gate["correctness_indexes"]
+            ],
+            [
+                index["source_artifact"]["sha256"]
+                for index in self.correctness_indexes()
+            ],
+        )
+        self.assertEqual(
+            len(
+                {
+                    record["source_artifact"]["sha256"]
+                    for record in gate["correctness_indexes"]
+                }
+            ),
+            2,
+        )
+
+        mutations = {}
+        extra = copy.deepcopy(valid)
+        extra[0]["source_artifact"]["unexpected"] = True
+        mutations["extra descriptor key"] = extra
+        missing = copy.deepcopy(valid)
+        del missing[0]["source_artifact"]["size_bytes"]
+        mutations["missing descriptor key"] = missing
+        extra_candidate = copy.deepcopy(valid)
+        extra_candidate[0]["source_artifact"]["candidate_evidence"]["unexpected"] = True
+        mutations["extra candidate key"] = extra_candidate
+        mismatched_candidate = copy.deepcopy(valid)
+        mismatched_candidate[0]["source_artifact"]["candidate_evidence"][
+            "candidate_git_commit"
+        ] = ("b" * 40)
+        mutations["mismatched candidate"] = mismatched_candidate
+        for name, indexes in mutations.items():
+            with self.subTest(name=name):
+                invalid = self.gate(indexes)
+                self.assertFalse(invalid["correctness_evidence_bound"])
+                self.assertFalse(invalid["passed"])
+                self.assertTrue(
+                    any(
+                        "source artifact descriptor" in error
+                        for error in invalid["errors"]
+                    )
+                )
+
+        duplicate = copy.deepcopy(valid)
+        duplicate[1]["source_artifact"] = copy.deepcopy(duplicate[0]["source_artifact"])
+        reused = self.gate(duplicate)
+        self.assertFalse(reused["correctness_evidence_bound"])
+        self.assertFalse(reused["passed"])
+        self.assertTrue(
+            any("source artifact descriptor" in error for error in reused["errors"])
+        )
+
+        same_digest = copy.deepcopy(valid)
+        same_digest[1]["source_artifact"]["sha256"] = same_digest[0]["source_artifact"][
+            "sha256"
+        ]
+        reused_digest = self.gate(same_digest)
+        self.assertFalse(reused_digest["correctness_evidence_bound"])
+        self.assertTrue(
+            any(
+                "source artifact descriptor" in error
+                for error in reused_digest["errors"]
+            )
+        )
+
+        same_path = copy.deepcopy(valid)
+        same_path[1]["source_artifact"]["path"] = same_path[0]["source_artifact"][
+            "path"
+        ]
+        reused_path = self.gate(same_path)
+        self.assertFalse(reused_path["correctness_evidence_bound"])
+        self.assertTrue(
+            any("paths are not distinct" in error for error in reused_path["errors"])
+        )
+
+        reordered = self.gate(list(reversed(valid)))
+        self.assertFalse(reordered["correctness_evidence_bound"])
+        self.assertFalse(reordered["passed"])
+        self.assertIn(
+            "CUDA correctness runtime mode closure differs",
+            reordered["errors"],
+        )
+
+        relabeled = copy.deepcopy(valid)
+        relabeled[0]["runtime_mode"] = copy.deepcopy(relabeled[1]["runtime_mode"])
+        duplicate_mode = self.gate(relabeled)
+        self.assertFalse(duplicate_mode["correctness_evidence_bound"])
+        self.assertIn(
+            "CUDA correctness runtime mode closure differs",
+            duplicate_mode["errors"],
+        )
+
+        swapped_descriptors = copy.deepcopy(valid)
+        (
+            swapped_descriptors[0]["source_artifact"],
+            swapped_descriptors[1]["source_artifact"],
+        ) = (
+            swapped_descriptors[1]["source_artifact"],
+            swapped_descriptors[0]["source_artifact"],
+        )
+        swapped = self.gate(swapped_descriptors)
+        self.assertFalse(swapped["correctness_evidence_bound"])
+        self.assertFalse(swapped["passed"])
+        self.assertTrue(
+            any("source artifact descriptor" in error for error in swapped["errors"])
+        )
+
     def test_cuda_correctness_loader_revalidates_ordered_eager_and_graph_indexes(
         self,
     ):
+        missing, missing_errors = torch_tuning._load_cuda_correctness_indexes(
+            (Path("eager.json"), Path("graph.json")),
+            None,
+            self.manifest,
+            {"candidate_git_commit": "a" * 40},
+        )
+        self.assertEqual(missing, [])
+        self.assertEqual(
+            missing_errors,
+            ["CUDA correctness requires exactly eager and graph receipts"],
+        )
         indexes = self.correctness_indexes()
         with (
             mock.patch.object(
@@ -239,16 +530,52 @@ class SingleGpuCudaSuiteTest(unittest.TestCase):
                 "correctness_binding_complete",
                 return_value=True,
             ) as binding,
+            mock.patch.object(
+                torch_tuning,
+                "load_runtime_publication_receipt",
+                side_effect=({}, {}),
+            ) as receipt_loader,
         ):
             loaded, errors = torch_tuning._load_cuda_correctness_indexes(
                 (Path("eager.json"), Path("graph.json")),
+                (Path("eager-receipt.json"), Path("graph-receipt.json")),
                 self.manifest,
                 {"candidate_git_commit": "a" * 40},
             )
         self.assertEqual(errors, [])
         self.assertEqual(loaded, indexes)
         self.assertEqual(loader.call_count, 2)
+        self.assertEqual(receipt_loader.call_count, 2)
         self.assertEqual(binding.call_count, 2)
+
+        duplicate = copy.deepcopy(indexes)
+        duplicate[1]["source_artifact"] = copy.deepcopy(duplicate[0]["source_artifact"])
+        with (
+            mock.patch.object(
+                torch_tuning,
+                "load_correctness_evidence_index",
+                side_effect=duplicate,
+            ),
+            mock.patch.object(
+                torch_tuning,
+                "correctness_binding_complete",
+                return_value=True,
+            ),
+            mock.patch.object(
+                torch_tuning,
+                "load_runtime_publication_receipt",
+                side_effect=({}, {}),
+            ),
+        ):
+            _loaded, duplicate_errors = torch_tuning._load_cuda_correctness_indexes(
+                (Path("eager.json"), Path("graph.json")),
+                (Path("eager-receipt.json"), Path("graph-receipt.json")),
+                self.manifest,
+                {"candidate_git_commit": "a" * 40},
+            )
+        self.assertTrue(
+            any("source artifact descriptor" in error for error in duplicate_errors)
+        )
 
 
 class TwoGpuEvidenceContractTest(unittest.TestCase):

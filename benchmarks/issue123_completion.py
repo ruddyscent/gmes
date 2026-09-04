@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import copy
 import datetime as dt
 import hashlib
+import hmac
 import io
 import json
 import math
@@ -15,24 +17,42 @@ import platform
 import re
 import shutil
 import stat
-import tarfile
+import sys
 import tempfile
 import zipfile
+import zlib
 from collections import Counter
+from collections.abc import Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from statistics import median
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlsplit
 
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MANIFEST = ROOT / "benchmarks" / "native_oracle_workloads.json"
+TRUSTED_MANIFEST_SHA256 = (
+    "0766dbf932882dfec7a40abfbcd78eb67978ed8cd65e38625193a16502cc29a9"
+)
 
 INDEX_KIND = "issue-123-completion-evidence-index"
 BUNDLE_SPEC_KIND = "issue-123-completion-bundle-specification"
 OUTPUT_KIND = "issue-123-completion-evaluation"
+OFFLINE_EVALUATION_MODE = "offline-structural"
+LIVE_EVALUATION_MODE = "production-same-process-live"
+OFFLINE_AUTHORITY = "same-process-live-verification-required"
+LIVE_AUTHORITY = "same-process-authenticated-gh-live-verification"
+LIVE_RECEIPT_NAME = "operations-live-receipt.json"
+LIVE_RESULT_NAME = "completion-live-result.json"
+LIVE_OPERATIONS_DIRECTORY = "operations-input"
+LIVE_OPERATIONS_RESPONSE_COUNT = 22
+BUNDLE_REOPEN_RECEIPT_KIND = "issue-123-completion-bundle-reopen-receipt"
+BUNDLE_REOPEN_RECEIPT_VERSION = 1
+PRIVATE_BUNDLE_BINDING_DOMAIN = "gmes.issue123.private-bundle-binding.v1"
+COMPLETION_BUNDLE_INVENTORY_DOMAIN = "gmes.issue123.completion-bundle-inventory.v1"
 DIFFERENTIAL_KIND = "issue-123-differential-evidence"
 MACOS_INDEX_KIND = "issue-123-macos-evidence-index"
 FAILURE_RUN_KIND = "two-gpu-failure-run"
@@ -48,6 +68,7 @@ CUDA_GRAPH_EXECUTION_REPRESENTATION = (
 
 INDEX_SCHEMA_VERSION = 2
 BUNDLE_SPEC_SCHEMA_VERSION = 1
+OUTPUT_SCHEMA_VERSION = 3
 BUNDLE_FORMAT = "canonical-directory-v1"
 PATH_CONTRACT = "bundle-relative-canonical-posix-v1"
 MEDIA_TYPE_JSON = "application/json"
@@ -86,6 +107,7 @@ MAX_JSON_DEPTH = 64
 MAX_JSON_NODES = 2_000_000
 MAX_JSON_COLLECTION_ITEMS = 1_000_000
 MAX_JSON_STRING_BYTES = 16 * 1024 * 1024
+MAX_RETAINED_BUNDLE_ENTRIES = 100_000
 MAX_ZIP_MEMBERS = 4096
 MAX_ZIP_MEMBER_BYTES = 512 * 1024 * 1024
 MAX_ZIP_TOTAL_BYTES = 1024 * 1024 * 1024
@@ -93,7 +115,16 @@ MAX_ZIP_COMPRESSION_RATIO = 10_000.0
 MAX_NPZ_MEMBERS = 512
 MAX_NPZ_ARRAY_BYTES = 256 * 1024 * 1024
 MAX_NPZ_TOTAL_BYTES = 512 * 1024 * 1024
+MAX_CORRECTNESS_NPZ_MEMBERS = 8192
+MAX_CORRECTNESS_NPZ_ARRAY_BYTES = 256 * 1024 * 1024
+MAX_CORRECTNESS_NPZ_TOTAL_BYTES = 1024 * 1024 * 1024
+MAX_CORRECTNESS_NPZ_METADATA_BYTES = 16 * 1024 * 1024
+MAX_RUNTIME_RECEIPT_BYTES = 16 * 1024 * 1024
 MAX_NPZ_DIMENSIONS = 8
+MAX_NPY_HEADER_BYTES = 64 * 1024
+MAX_NPZ_ARCHIVE_BYTES = (
+    MAX_NPZ_TOTAL_BYTES + MAX_NPZ_MEMBERS * (MAX_NPY_HEADER_BYTES + 1024) + 65535
+)
 GPU_TOPOLOGY_NORMALIZATION_RULE = "nvidia-smi-topology-underline-sgr-v1"
 GPU_TOPOLOGY_NORMALIZATION_PATH = "/environment/gpu_topology"
 DARWIN_SYSTEM_PATH_ALIASES = {
@@ -141,6 +172,288 @@ CUDA_CASES = (
     "single-gpu-2d",
     "single-gpu-3d",
 )
+CUDA_SUITE_CONTRACT_ID = "single-gpu-cuda-closure-v2"
+CUDA_PERFORMANCE_PRECISION_BY_CASE = {
+    "cpu-crossover-2d": "float32",
+    "cpu-crossover-3d": "float32",
+    "cpu-large-2d": "float32",
+    "cpu-large-3d": "float32",
+    "single-gpu-2d": "float32",
+    "single-gpu-3d": "float64",
+}
+CUDA_PRECISION_LIMITATION_REVIEW = {
+    "contract_id": "single-gpu-3d-float32-dynamic-range-review-v1",
+    "case": "single-gpu-3d",
+    "rejected_precision": "float32",
+    "accepted_precision": "float64",
+    "reason": "native-step-100-magnitude-exceeds-float32-range",
+}
+CUDA_CORRECTNESS_RUNTIME_MODES = (
+    {
+        "device": "cuda:0",
+        "precision": "float32",
+        "graph_mode": "eager",
+        "compile_policy": "eager",
+        "compile_mode": "default",
+    },
+    {
+        "device": "cuda:0",
+        "precision": "float32",
+        "graph_mode": "graph",
+        "compile_policy": "compile",
+        "compile_mode": "reduce-overhead",
+    },
+)
+CPU_CORRECTNESS_RUNTIME_MODE = {
+    "device": "cpu",
+    "precision": "float64",
+    "graph_mode": "eager",
+    "compile_policy": "eager",
+    "compile_mode": "default",
+}
+STATE_FINITENESS_CONTRACT_ID = "dynamic-checkpoint-finite-v1"
+CORRECTNESS_EVIDENCE_CONTRACT_ID = "torch-cpu-acceptance-v8"
+CORRECTNESS_INDEX_SCHEMA_VERSION = 2
+CORRECTNESS_INDEX_KIND = "torch-correctness-evidence-index"
+CORRECTNESS_INDEX_CONTRACT_ID = "complete-field-state-and-runtime-receipt-v2"
+CORRECTNESS_UNIQUE_ARCHIVE_COUNT = 136
+CORRECTNESS_INDEX_KEYS = {
+    "schema_version",
+    "kind",
+    "contract_id",
+    "manifest_contract_sha256",
+    "candidate_evidence",
+    "runtime_mode",
+    "runtime_receipt",
+    "required_cases",
+    "artifacts",
+    "suite_acceptance",
+}
+RUNTIME_RECEIPT_KIND = "issue123-runtime-publication-receipt"
+RUNTIME_RECEIPT_ROLES = (
+    "cpu",
+    "cuda-eager",
+    "cuda-graph",
+    "single-gpu-2d",
+    "single-gpu-3d",
+)
+SINGLE_GPU_DIFFERENTIAL_RUNTIME_MODES = (
+    {
+        "device": "cuda:0",
+        "precision": "float32",
+        "graph_mode": "eager",
+        "compile_policy": "eager",
+        "compile_mode": "default",
+    },
+    {
+        "device": "cuda:0",
+        "precision": "float64",
+        "graph_mode": "eager",
+        "compile_policy": "eager",
+        "compile_mode": "default",
+    },
+)
+CORRECTNESS_RUNTIME_MODE_KEYS = {
+    "device",
+    "precision",
+    "graph_mode",
+    "compile_policy",
+    "compile_mode",
+}
+CORRECTNESS_EVIDENCE_KEYS = {
+    "evidence_contract_id",
+    "cpu_contract_id",
+    "manifest_sha256",
+    "runner_sha256",
+    "solver_sha256",
+    "solver_abi",
+    "candidate_git_commit",
+    "candidate_git_status",
+}
+CORRECTNESS_RUNNER_INPUTS = (
+    "benchmarks/native_oracle.py",
+    "benchmarks/torch_cpu_baseline.py",
+    "benchmarks/torch_dm2.py",
+    "benchmarks/torch_tuning.py",
+)
+CORRECTNESS_SOLVER_INPUTS = (
+    "gmes/torch_dm2.py",
+    "gmes/torch_fdtd.py",
+    "gmes/torch_dispersive.py",
+    "gmes/torch_distributed.py",
+    "gmes/torch_plan.py",
+    "gmes/torch_source.py",
+)
+CORRECTNESS_ARTIFACT_KEYS = {
+    "case",
+    "group",
+    "reference",
+    "reference_observer_commit",
+    "candidate",
+    "candidate_provenance",
+    "comparison",
+    "tolerance_results",
+}
+DIFFERENTIAL_ELEMENTWISE_MODE = "elementwise-allclose-v1"
+DIFFERENTIAL_NORMALIZED_MODE = "normalized-linf-l2-v1"
+DIFFERENTIAL_NORMALIZED_LIMIT = 1e-6
+DIFFERENTIAL_NORMALIZED_ABSOLUTE_SCALE_FLOOR = 2e-12
+DIFFERENTIAL_SCHEMA_VERSION = 5
+DIFFERENTIAL_NORMALIZED_CASE = (
+    "single-gpu-cuda",
+    "single-gpu-3d",
+    "cuda:0",
+)
+DIFFERENTIAL_NORMALIZED_STEPS = (0, 1, 2, 5, 20, 100)
+DIFFERENTIAL_NORMALIZED_GROUPS = ((0, 1), (2, 5), (20, 100))
+DIFFERENTIAL_NORMALIZED_RESIDUAL_STEPS = frozenset({20, 100})
+FROZEN_DIFFERENTIAL_CAPTURE_STEPS = (1, 2, 5, 20, 100)
+FROZEN_DIFFERENTIAL_RECORDS_BY_SCOPE = {
+    "paired-real": tuple(
+        (case, device, "float64" if device == "cpu" else "float32")
+        for case in (
+            "bloch-2d",
+            "bloch-3d",
+            "upml-bloch",
+            "cpml-bloch",
+            "lorentz-bloch",
+            "dcp-ade-bloch",
+            "dcp-plrc-bloch",
+            "dcp-rc-bloch",
+        )
+        for device in ("cpu", "cuda:0")
+    ),
+    "single-gpu-cuda": (
+        ("single-gpu-2d", "cuda:0", "float32"),
+        ("single-gpu-3d", "cuda:0", "float64"),
+    ),
+}
+# These are duplicated deliberately: the differential acceptance contract must
+# not be redefined by a manifest selected by an evidence bundle.
+FROZEN_DIFFERENTIAL_TOLERANCES = {
+    "dielectric": {
+        "float32": {"rtol": 3e-5, "atol": 3e-6},
+        "float64": {"rtol": 1e-13, "atol": 1e-14},
+        "complex64": {"rtol": 3e-5, "atol": 3e-6},
+        "complex128": {"rtol": 2e-13, "atol": 2e-14},
+    },
+    "pml": {
+        "float32": {"rtol": 5e-5, "atol": 5e-6},
+        "float64": {"rtol": 2e-12, "atol": 2e-13},
+        "complex64": {"rtol": 8e-5, "atol": 8e-6},
+        "complex128": {"rtol": 4e-12, "atol": 4e-13},
+    },
+    "drude": {
+        "float32": {"rtol": 6e-4, "atol": 1e-4},
+        "float64": {"rtol": 5e-12, "atol": 5e-13},
+        "complex128": {"rtol": 6e-12, "atol": 6e-13},
+    },
+    "lorentz": {
+        "float32": {"rtol": 6e-4, "atol": 1e-4},
+        "float64": {"rtol": 5e-12, "atol": 5e-13},
+        "complex128": {"rtol": 6e-12, "atol": 6e-13},
+    },
+    "dcp-ade": {
+        "float32": {"rtol": 6e-4, "atol": 1e-4},
+        "float64": {"rtol": 5e-12, "atol": 5e-13},
+        "complex128": {"rtol": 1e-11, "atol": 1e-12},
+    },
+    "dcp-plrc": {
+        "float32": {"rtol": 6e-4, "atol": 1e-4},
+        "float64": {"rtol": 5e-12, "atol": 5e-13},
+        "complex128": {"rtol": 1e-11, "atol": 1e-12},
+    },
+    "dcp-rc": {
+        "float32": {"rtol": 6e-4, "atol": 1e-4},
+        "float64": {"rtol": 5e-12, "atol": 5e-13},
+        "complex128": {"rtol": 1e-11, "atol": 1e-12},
+    },
+    "dm2": {
+        "float32": {"rtol": 6e-4, "atol": 3e-6},
+        "float64": {"rtol": 2e-10, "atol": 2e-12},
+    },
+}
+DIFFERENTIAL_SOURCE_ARRAY = "persistent/source/semantic-contract.json"
+DIFFERENTIAL_SOURCE_SCHEMA = "point-source-semantic-v1"
+DIFFERENTIAL_SOURCE_PROOF_ARRAY = "persistent/source/raw-proof.json"
+DIFFERENTIAL_SOURCE_PROOF_SCHEMA = "point-source-raw-proof-v2"
+DIFFERENTIAL_POINT_SOURCE_LIVE_ARRAYS = (
+    "overwrite_targets",
+    "overwrite_models",
+    "overwrite_parameters",
+    "overwrite_amplitudes",
+    "_overwrite_values",
+    "additive_targets",
+    "additive_models",
+    "additive_parameters",
+    "additive_amplitudes",
+    "_additive_values",
+)
+DIFFERENTIAL_CASE_UPDATER_LABELS = {
+    "bloch-2d": ("0-Dielectric", "1-Dummy"),
+    "bloch-3d": ("0-Drude", "1-Dummy"),
+    "upml-bloch": ("0-Dielectric", "1-Dummy", "2-Upml"),
+    "cpml-bloch": ("0-Cpml", "1-Dielectric", "2-Dummy"),
+    "lorentz-bloch": ("0-Dummy", "1-Lorentz"),
+    "dcp-ade-bloch": ("0-DcpAde", "1-Dummy"),
+    "dcp-plrc-bloch": ("0-DcpPlrc", "1-Dummy"),
+    "dcp-rc-bloch": ("0-DcpRc", "1-Dummy"),
+    "single-gpu-2d": (
+        "0-Cpml",
+        "1-DcpAde",
+        "2-DcpPlrc+DcpRc",
+        "3-Dielectric",
+        "4-Dm2",
+        "5-Drude",
+        "6-Dummy",
+        "7-Lorentz",
+    ),
+    "single-gpu-3d": (
+        "0-Cpml",
+        "1-DcpAde",
+        "2-DcpPlrc+DcpRc",
+        "3-Dielectric",
+        "4-Drude",
+        "5-Dummy",
+        "6-Lorentz",
+    ),
+}
+FROZEN_DIFFERENTIAL_PERSISTENT_GEOMETRY_SHA256_BY_CASE = {
+    "bloch-2d": "c9f3fa5ff684335642cebf6e3ec08a5bf3d6a55ac2bd0a6cd9aba4ea4b3cf492",
+    "bloch-3d": "f761f31aa18052eee53c4d2729b1e7e889daa6a45896d4e33303254c07a9ea4f",
+    "upml-bloch": "f65f673b73e423993004ab41ec258f61d2b39e7c8f18d21bbfe2d0a6833ff53f",
+    "cpml-bloch": "53ba4c204c0049a162b2062413da5c072548cfbb047173830bc0b9c07c99c94f",
+    "lorentz-bloch": "57b24806b7909d4e80ea9e53ae1ed51230345248cd19488f28ddd18b92877195",
+    "dcp-ade-bloch": "b8f74ed09738c270ccf51844e2b0620107f913b87d56f00852fdb0add477204f",
+    "dcp-plrc-bloch": "213b7620064d703cd50c3d375eb0ba6d89a19b40dc19c4e4ae2a5a949b078bde",
+    "dcp-rc-bloch": "4f59c27cf0dd16f7ade60f143460857865538506919fd687396151309a78a245",
+    "single-gpu-2d": "69afb7d7a8d902eadfa82c133a3db50ec0b54396cc1ffdde097fb3ae090b74b1",
+    "single-gpu-3d": "2fa7d81021a44428f361db1707b5192089b4ac7fa92285e306b20a6a8944b765",
+}
+DIFFERENTIAL_STRATEGY_TOLERANCE_MODELS = {
+    "Cpml": ("pml",),
+    "DcpAde": ("dcp-ade",),
+    "DcpPlrc": ("dcp-plrc",),
+    "DcpPlrc+DcpRc": ("dcp-plrc", "dcp-rc"),
+    "DcpRc": ("dcp-rc",),
+    "Dielectric": ("dielectric",),
+    "Dm2": ("dm2",),
+    "Drude": ("drude",),
+    "Dummy": (),
+    "Lorentz": ("lorentz",),
+    "Upml": ("pml",),
+}
+DIFFERENTIAL_POINT_SOURCE_FREQUENCY = 0.35
+DIFFERENTIAL_POINT_SOURCE_PHASE = 0.0
+DIFFERENTIAL_POINT_SOURCE_START = 0.0
+DIFFERENTIAL_POINT_SOURCE_END = math.inf
+DIFFERENTIAL_POINT_SOURCE_WIDTH = 5.0 / DIFFERENTIAL_POINT_SOURCE_FREQUENCY
+DIFFERENTIAL_POINT_SOURCE_VALUE_ULP_FACTOR = 256
+DIFFERENTIAL_POINT_SOURCE_COURANT_RATIO = 0.99
+DIFFERENTIAL_SOURCE_PREIMAGE_SCHEMA = "point-source-role-preimage-v1"
+DIFFERENTIAL_GROUP_NPZ_SCHEMA = "issue-123-differential-group-npz-v1"
+MAX_DIFFERENTIAL_SOURCE_PROOF_BYTES = 1024 * 1024
+MAX_DIFFERENTIAL_SOURCE_PROOF_ARRAY_BYTES = 64 * 1024
 SINGLE_GPU_CASES = ("single-gpu-2d", "single-gpu-3d")
 TWO_GPU_CASES = {
     "strong-mixed": ("strong", 1.6),
@@ -243,6 +556,10 @@ REQUIRED_RUNTIME_ROLES = (
     "sdist-serial-suite",
 )
 FIELD_ARRAYS = ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")
+DIFFERENTIAL_PHYSICAL_SUFFIXES = (
+    *(f"physical/spectrum/{name}" for name in FIELD_ARRAYS),
+    "physical/summary",
+)
 TWO_GPU_CAPTURE_STEPS = (1, 2, 5, 20, 100)
 TWO_GPU_CORRECTNESS_ATOL = 2e-10
 TUNING_ACCEPTANCE_FIELDS = {
@@ -310,6 +627,12 @@ HOST_CONTRACT_KEYS = {"schema_version", "common_identity", "runtime_identity"}
 
 class EvidenceError(ValueError):
     """An evidence contract is absent, malformed, or internally inconsistent."""
+
+
+class CommittedAuthorityError(EvidenceError):
+    """The no-replace authority link exists but final custody cleanup failed."""
+
+    committed = True
 
 
 def _require(condition: Any, message: str) -> None:
@@ -767,6 +1090,25 @@ def _bounded_regular_file_bytes(
     return checked, raw
 
 
+def _trusted_manifest_bytes() -> tuple[Path, bytes, dict[str, Any]]:
+    path, raw = _bounded_regular_file_bytes(
+        DEFAULT_MANIFEST,
+        "trusted repository manifest",
+        max_bytes=MAX_MANIFEST_BYTES,
+    )
+    _require(
+        _sha256(raw) == TRUSTED_MANIFEST_SHA256,
+        "trusted repository manifest digest differs from the frozen contract",
+    )
+    document = _strict_json_bytes(
+        raw,
+        "trusted repository manifest",
+        max_bytes=MAX_MANIFEST_BYTES,
+    )
+    _require(isinstance(document, dict), "trusted repository manifest is not an object")
+    return path, raw, document
+
+
 def _ensure_directory_without_symlinks(path: Path, label: str) -> Path:
     """Create missing path components without traversing an existing symlink."""
 
@@ -808,6 +1150,156 @@ def _ensure_directory_without_symlinks(path: Path, label: str) -> Path:
     return absolute.resolve(strict=True)
 
 
+def _zip_local_sizes_match(
+    raw: bytes,
+    offset: int,
+    name_size: int,
+    extra_size: int,
+    info: zipfile.ZipInfo,
+    label: str,
+) -> bool:
+    compressed = int.from_bytes(raw[offset + 18 : offset + 22], "little")
+    uncompressed = int.from_bytes(raw[offset + 22 : offset + 26], "little")
+    if compressed != 0xFFFFFFFF and uncompressed != 0xFFFFFFFF:
+        return compressed == info.compress_size and uncompressed == info.file_size
+    extra = raw[offset + 30 + name_size : offset + 30 + name_size + extra_size]
+    cursor = 0
+    zip64 = None
+    while cursor < len(extra):
+        _require(cursor + 4 <= len(extra), f"{label} local extra field is truncated")
+        field_id = int.from_bytes(extra[cursor : cursor + 2], "little")
+        field_size = int.from_bytes(extra[cursor + 2 : cursor + 4], "little")
+        cursor += 4
+        _require(
+            cursor + field_size <= len(extra), f"{label} local extra field is truncated"
+        )
+        if field_id == 0x0001:
+            _require(zip64 is None, f"{label} repeats the ZIP64 local extra field")
+            zip64 = extra[cursor : cursor + field_size]
+        cursor += field_size
+    _require(zip64 is not None, f"{label} omits the ZIP64 local size field")
+    cursor = 0
+    expected = []
+    if uncompressed == 0xFFFFFFFF:
+        expected.append(info.file_size)
+    if compressed == 0xFFFFFFFF:
+        expected.append(info.compress_size)
+    _require(len(zip64) == 8 * len(expected), f"{label} ZIP64 local sizes differ")
+    return all(
+        int.from_bytes(zip64[index * 8 : (index + 1) * 8], "little") == value
+        for index, value in enumerate(expected)
+    )
+
+
+def _validate_zip_complete_coverage(
+    raw: bytes, infos: list[zipfile.ZipInfo], label: str
+) -> None:
+    """Require every byte to belong to an indexed local or central record."""
+
+    minimum_eocd = max(0, len(raw) - (22 + 65535))
+    eocd_offset = -1
+    for candidate in range(len(raw) - 22, minimum_eocd - 1, -1):
+        if raw[candidate : candidate + 4] != b"PK\x05\x06":
+            continue
+        comment_size = int.from_bytes(raw[candidate + 20 : candidate + 22], "little")
+        if candidate + 22 + comment_size == len(raw):
+            eocd_offset = candidate
+            break
+    _require(eocd_offset >= 0, f"{label} has no terminal ZIP directory record")
+    disk = int.from_bytes(raw[eocd_offset + 4 : eocd_offset + 6], "little")
+    central_disk = int.from_bytes(raw[eocd_offset + 6 : eocd_offset + 8], "little")
+    disk_entries = int.from_bytes(raw[eocd_offset + 8 : eocd_offset + 10], "little")
+    total_entries = int.from_bytes(raw[eocd_offset + 10 : eocd_offset + 12], "little")
+    central_size = int.from_bytes(raw[eocd_offset + 12 : eocd_offset + 16], "little")
+    central_offset = int.from_bytes(raw[eocd_offset + 16 : eocd_offset + 20], "little")
+    _require(
+        disk == central_disk == 0
+        and disk_entries == total_entries == len(infos)
+        and total_entries != 0xFFFF
+        and central_size != 0xFFFFFFFF
+        and central_offset != 0xFFFFFFFF
+        and central_offset + central_size == eocd_offset,
+        f"{label} central-directory coverage differs",
+    )
+
+    cursor = central_offset
+    for index, info in enumerate(infos):
+        member_label = f"{label} ZIP central member {index}"
+        _require(
+            cursor + 46 <= eocd_offset and raw[cursor : cursor + 4] == b"PK\x01\x02",
+            f"{member_label} is not contiguous",
+        )
+        name_size = int.from_bytes(raw[cursor + 28 : cursor + 30], "little")
+        extra_size = int.from_bytes(raw[cursor + 30 : cursor + 32], "little")
+        comment_size = int.from_bytes(raw[cursor + 32 : cursor + 34], "little")
+        record_end = cursor + 46 + name_size + extra_size + comment_size
+        encoding = "utf-8" if info.flag_bits & 0x800 else "cp437"
+        encoded_name = info.filename.encode(encoding)
+        _require(
+            record_end <= eocd_offset
+            and raw[cursor + 46 : cursor + 46 + name_size] == encoded_name
+            and int.from_bytes(raw[cursor + 8 : cursor + 10], "little")
+            == info.flag_bits
+            and int.from_bytes(raw[cursor + 10 : cursor + 12], "little")
+            == info.compress_type
+            and int.from_bytes(raw[cursor + 16 : cursor + 20], "little") == info.CRC
+            and int.from_bytes(raw[cursor + 20 : cursor + 24], "little")
+            == info.compress_size
+            and int.from_bytes(raw[cursor + 24 : cursor + 28], "little")
+            == info.file_size
+            and int.from_bytes(raw[cursor + 34 : cursor + 36], "little") == 0
+            and int.from_bytes(raw[cursor + 42 : cursor + 46], "little")
+            == info.header_offset,
+            f"{member_label} header differs",
+        )
+        cursor = record_end
+    _require(cursor == eocd_offset, f"{label} central directory contains gap bytes")
+
+    ordered = sorted(infos, key=lambda info: info.header_offset)
+    expected_offset = 0
+    for index, info in enumerate(ordered):
+        member_label = f"{label} ZIP local member {index}"
+        offset = info.header_offset
+        _require(offset == expected_offset, f"{member_label} is not contiguous")
+        name_size = int.from_bytes(raw[offset + 26 : offset + 28], "little")
+        extra_size = int.from_bytes(raw[offset + 28 : offset + 30], "little")
+        data_end = offset + 30 + name_size + extra_size + info.compress_size
+        next_offset = (
+            ordered[index + 1].header_offset
+            if index + 1 < len(ordered)
+            else central_offset
+        )
+        _require(data_end <= next_offset, f"{member_label} overlaps another record")
+        if info.flag_bits & 0x08:
+            descriptor = raw[data_end:next_offset]
+            if len(descriptor) == 16:
+                _require(
+                    descriptor[:4] == b"PK\x07\x08",
+                    f"{member_label} data descriptor signature differs",
+                )
+                descriptor = descriptor[4:]
+            _require(
+                len(descriptor) == 12
+                and int.from_bytes(descriptor[0:4], "little") == info.CRC
+                and int.from_bytes(descriptor[4:8], "little") == info.compress_size
+                and int.from_bytes(descriptor[8:12], "little") == info.file_size,
+                f"{member_label} data descriptor differs",
+            )
+        else:
+            _require(
+                data_end == next_offset
+                and int.from_bytes(raw[offset + 14 : offset + 18], "little") == info.CRC
+                and _zip_local_sizes_match(
+                    raw, offset, name_size, extra_size, info, member_label
+                ),
+                f"{member_label} byte coverage differs",
+            )
+        expected_offset = next_offset
+    _require(
+        expected_offset == central_offset, f"{label} local records leave gap bytes"
+    )
+
+
 def _preflight_zip(
     raw: bytes,
     label: str,
@@ -816,6 +1308,7 @@ def _preflight_zip(
     max_member_bytes: int = MAX_ZIP_MEMBER_BYTES,
     max_total_bytes: int = MAX_ZIP_TOTAL_BYTES,
     expected_files: set[str] | None = None,
+    expected_comment: bytes | None = None,
 ) -> list[zipfile.ZipInfo]:
     """Validate ZIP structure and CRCs before any consumer extracts a member."""
 
@@ -823,6 +1316,12 @@ def _preflight_zip(
     _require(raw.startswith(b"PK"), f"{label} is not ZIP bytes")
     try:
         with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+            if expected_comment is not None:
+                _require(
+                    type(expected_comment) is bytes
+                    and archive.comment == expected_comment,
+                    f"{label} ZIP comment binding differs",
+                )
             infos = archive.infolist()
             _require(len(infos) <= max_members, f"{label} has too many ZIP members")
             names: set[str] = set()
@@ -835,12 +1334,48 @@ def _preflight_zip(
                 _canonical_bundle_path(name, f"{member_label} name")
                 _require(name not in names, f"{label} repeats ZIP member {name!r}")
                 names.add(name)
+                offset = info.header_offset
+                _require(
+                    type(offset) is int
+                    and 0 <= offset <= len(raw) - 30
+                    and raw[offset : offset + 4] == b"PK\x03\x04",
+                    f"{member_label} has no bounded local header",
+                )
+                local_flags = int.from_bytes(raw[offset + 6 : offset + 8], "little")
+                local_compression = int.from_bytes(
+                    raw[offset + 8 : offset + 10], "little"
+                )
+                local_name_size = int.from_bytes(
+                    raw[offset + 26 : offset + 28], "little"
+                )
+                local_extra_size = int.from_bytes(
+                    raw[offset + 28 : offset + 30], "little"
+                )
+                local_header_end = offset + 30 + local_name_size + local_extra_size
+                encoding = "utf-8" if local_flags & 0x800 else "cp437"
+                try:
+                    encoded_name = info.filename.encode(encoding)
+                except UnicodeEncodeError as error:
+                    raise EvidenceError(
+                        f"{member_label} local name is not canonical"
+                    ) from error
+                _require(
+                    local_header_end <= len(raw)
+                    and raw[offset + 30 : offset + 30 + local_name_size] == encoded_name
+                    and local_flags == info.flag_bits
+                    and not (local_flags & (0x1 | 0x40))
+                    and local_compression == info.compress_type,
+                    f"{member_label} local header contract differs",
+                )
                 mode = info.external_attr >> 16
                 _require(
                     not stat.S_ISLNK(mode),
                     f"{member_label} is a symbolic link",
                 )
-                _require(not info.flag_bits & 0x1, f"{member_label} is encrypted")
+                _require(
+                    not info.flag_bits & (0x1 | 0x40),
+                    f"{member_label} is encrypted",
+                )
                 _require(
                     type(info.file_size) is int
                     and 0 <= info.file_size <= max_member_bytes,
@@ -875,12 +1410,24 @@ def _preflight_zip(
                     observed == info.file_size,
                     f"{member_label} uncompressed size differs",
                 )
+            _validate_zip_complete_coverage(raw, infos, label)
             if expected_files is not None:
                 _require(files == expected_files, f"{label} ZIP file closure differs")
             return infos
     except EvidenceError:
         raise
-    except (MemoryError, OSError, RuntimeError, zipfile.BadZipFile) as error:
+    except (
+        MemoryError,
+        NotImplementedError,
+        OSError,
+        OverflowError,
+        RecursionError,
+        RuntimeError,
+        TypeError,
+        ValueError,
+        zipfile.BadZipFile,
+        zlib.error,
+    ) as error:
         raise EvidenceError(f"{label} is not a bounded valid ZIP archive") from error
 
 
@@ -888,12 +1435,37 @@ def _validate_media_payload(raw: bytes, media_type: str, label: str) -> None:
     if media_type == MEDIA_TYPE_JSON:
         _strict_json_bytes(raw, label)
     elif media_type == MEDIA_TYPE_NPZ:
-        _preflight_zip(
+        infos = _preflight_zip(
             raw,
             label,
-            max_members=MAX_NPZ_MEMBERS,
-            max_member_bytes=MAX_NPZ_ARRAY_BYTES,
-            max_total_bytes=MAX_NPZ_TOTAL_BYTES,
+            max_members=MAX_CORRECTNESS_NPZ_MEMBERS,
+            max_member_bytes=MAX_CORRECTNESS_NPZ_ARRAY_BYTES,
+            max_total_bytes=MAX_CORRECTNESS_NPZ_TOTAL_BYTES,
+        )
+        _require(
+            bool(infos)
+            and all(
+                not info.is_dir()
+                and info.filename.endswith(".npy")
+                and info.compress_type in {zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED}
+                for info in infos
+            ),
+            f"{label} NPZ member closure differs",
+        )
+        names = [info.filename.removesuffix(".npy") for info in infos]
+        _require(
+            all(bool(name) for name in names),
+            f"{label} NPZ contains an empty array name",
+        )
+        _preflight_npz_array_headers(
+            raw,
+            infos,
+            names,
+            label,
+            exact_differential_group=False,
+            max_array_bytes=MAX_CORRECTNESS_NPZ_ARRAY_BYTES,
+            max_total_bytes=MAX_CORRECTNESS_NPZ_TOTAL_BYTES,
+            allow_metadata_json=True,
         )
     elif media_type in {MEDIA_TYPE_ZIP, MEDIA_TYPE_WHEEL}:
         _preflight_zip(raw, label)
@@ -947,6 +1519,377 @@ class LoadedArtifact:
     document: Any | None = None
 
 
+@dataclass(frozen=True, slots=True, repr=False)
+class _ArtifactDescriptorIdentity:
+    device: int
+    inode: int
+    mode: int
+    size: int
+    mtime_ns: int
+    ctime_ns: int
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class _RetainedArtifactView:
+    fd: int
+    identity: _ArtifactDescriptorIdentity
+    raw: bytes
+    sha256: str
+    size_bytes: int
+
+
+@dataclass(frozen=True, slots=True)
+class _ValidatedSdistInventory:
+    archive_sha256: str
+    archive_size: int
+    member_count: int
+    total_member_bytes: int
+    member_names: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class FileSnapshot:
+    path: Path
+    size_bytes: int
+    sha256: str
+    identity: tuple[int, int, int, int]
+
+
+@dataclass(frozen=True)
+class StagedOperationsSnapshots:
+    index: FileSnapshot
+    responses: tuple[tuple[str, FileSnapshot], ...]
+
+
+@dataclass(frozen=True)
+class RetainedBundleFile:
+    relative_path: PurePosixPath
+    descriptor_bytes: bytes | None
+    fd: int
+    identity: tuple[int, int, int, int, int]
+    size_bytes: int
+    sha256: str
+
+
+@dataclass(frozen=True)
+class RetainedBundleDirectory:
+    relative_path: PurePosixPath
+    fd: int
+    identity: tuple[int, int, int, int]
+
+
+@dataclass(frozen=True)
+class RetainedBundleTree:
+    root: Path
+    root_directory: RetainedBundleDirectory
+    directories: tuple[RetainedBundleDirectory, ...]
+    index: RetainedBundleFile
+    payloads: tuple[RetainedBundleFile, ...]
+    expected_entry_types: tuple[tuple[str, str], ...]
+    descriptor_ledger: tuple[bytes, ...]
+    inventory_bytes: bytes
+    inventory_root: str
+    index_semantics: bytes
+
+
+@dataclass(frozen=True)
+class LiveAuthoritySnapshots:
+    source_bundle: RetainedBundleTree
+    reopened_bundle: RetainedBundleTree
+    manifest: FileSnapshot
+    runtime_receipts: tuple[FileSnapshot, ...]
+    protected_openings: FileSnapshot
+    pre_acknowledgment_receipt: FileSnapshot
+    final_reopen_receipt: FileSnapshot
+
+    @property
+    def source_index(self) -> FileSnapshot:
+        return _retained_file_snapshot(self.source_bundle, self.source_bundle.index)
+
+    @property
+    def reopened_index(self) -> FileSnapshot:
+        return _retained_file_snapshot(self.reopened_bundle, self.reopened_bundle.index)
+
+
+def _file_identity(metadata: os.stat_result) -> tuple[int, int, int, int]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+    )
+
+
+def _artifact_descriptor_identity(
+    metadata: os.stat_result,
+) -> _ArtifactDescriptorIdentity:
+    return _ArtifactDescriptorIdentity(
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
+class _RetainedArtifactLease:
+    """Own one no-follow descriptor while an sdist is validated."""
+
+    __slots__ = (
+        "_expected_digest",
+        "_expected_identity",
+        "_expected_size",
+        "_fd",
+        "_path",
+        "_view",
+    )
+
+    def __init__(
+        self,
+        path: Path,
+        identity: _ArtifactDescriptorIdentity,
+        expected_size: int,
+        expected_digest: str,
+    ) -> None:
+        self._path = path
+        self._expected_identity = identity
+        self._expected_size = expected_size
+        self._expected_digest = expected_digest
+        self._fd = -1
+        self._view: _RetainedArtifactView | None = None
+
+    def __repr__(self) -> str:
+        return "<_RetainedArtifactLease>"
+
+    def _close_after_entry_failure(self) -> None:
+        if self._fd < 0:
+            return
+        try:
+            os.close(self._fd)
+        except OSError:
+            pass
+        self._fd = -1
+
+    def __enter__(self) -> _RetainedArtifactView:
+        failure: str | None = None
+        raw: bytes | None = None
+        identity: _ArtifactDescriptorIdentity | None = None
+        if self._view is not None or self._fd >= 0:
+            failure = "macOS sdist source is invalid"
+        if failure is None:
+            flags = (
+                os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+            )
+            try:
+                self._fd = os.open(self._path, flags)
+            except OSError:
+                failure = "macOS sdist source is invalid"
+        if failure is None:
+            try:
+                metadata = os.fstat(self._fd)
+                identity = _artifact_descriptor_identity(metadata)
+            except OSError:
+                failure = "macOS sdist source is invalid"
+            else:
+                if not stat.S_ISREG(metadata.st_mode):
+                    failure = "macOS sdist source is invalid"
+                elif identity != self._expected_identity:
+                    failure = "macOS sdist source changed during validation"
+                elif (
+                    metadata.st_size != self._expected_size
+                    or metadata.st_size < 0
+                    or metadata.st_size > MAX_ARTIFACT_BYTES
+                ):
+                    failure = "macOS sdist bytes differ from their descriptor"
+        if failure is None:
+            chunks: list[bytes] = []
+            offset = 0
+            try:
+                while offset < self._expected_size:
+                    chunk = os.pread(
+                        self._fd,
+                        min(1024 * 1024, self._expected_size - offset),
+                        offset,
+                    )
+                    if not chunk:
+                        failure = "macOS sdist source changed during validation"
+                        break
+                    chunks.append(chunk)
+                    offset += len(chunk)
+                if failure is None and os.pread(self._fd, 1, self._expected_size):
+                    failure = "macOS sdist source changed during validation"
+                raw = b"".join(chunks)
+                after = _artifact_descriptor_identity(os.fstat(self._fd))
+            except OSError:
+                failure = "macOS sdist source is invalid"
+            else:
+                if failure is None and (
+                    after != self._expected_identity or len(raw) != self._expected_size
+                ):
+                    failure = "macOS sdist source changed during validation"
+        if failure is None:
+            assert raw is not None
+            digest = _sha256(raw)
+            if digest != self._expected_digest:
+                failure = "macOS sdist bytes differ from their descriptor"
+        if failure is not None:
+            self._close_after_entry_failure()
+            raise EvidenceError(failure) from None
+        assert raw is not None and identity is not None
+        self._view = _RetainedArtifactView(
+            self._fd,
+            identity,
+            raw,
+            _sha256(raw),
+            len(raw),
+        )
+        return self._view
+
+    def __exit__(self, exc_type: Any, _exc: Any, _traceback: Any) -> bool:
+        close_failed = False
+        if self._fd >= 0:
+            try:
+                os.close(self._fd)
+            except OSError:
+                close_failed = True
+            self._fd = -1
+        if close_failed and exc_type is None:
+            raise EvidenceError("macOS sdist descriptor could not be closed") from None
+        return False
+
+
+def _private_sdist_inventory(
+    result: Any,
+    view: _RetainedArtifactView,
+    descriptor: dict[str, Any],
+    limits: Any,
+) -> tuple[str, _ValidatedSdistInventory | None]:
+    """Map the privacy-only ledger to the small completion inventory."""
+
+    try:
+        archive_size = result.archive_size
+        archive_sha256 = result.archive_sha256
+    except Exception:
+        return "structural", None
+    if (
+        type(archive_size) is not int
+        or archive_size != view.size_bytes
+        or archive_size != descriptor["size_bytes"]
+        or archive_sha256 != view.sha256
+        or archive_sha256 != descriptor["sha256"]
+    ):
+        return "descriptor", None
+    try:
+        members = result.members
+        total_member_bytes = result.total_member_bytes
+        physical_ordinary_count = result.physical_ordinary_count
+        logical_member_count = result.logical_member_count
+        if (
+            type(members) is not tuple
+            or type(total_member_bytes) is not int
+            or type(physical_ordinary_count) is not int
+            or type(logical_member_count) is not int
+            or archive_size > limits.archive_bytes
+            or len(members) > limits.members
+            or total_member_bytes < 0
+            or total_member_bytes > limits.total_member_bytes
+            or physical_ordinary_count != len(members)
+            or logical_member_count != len(members)
+        ):
+            return "structural", None
+        names: list[str] = []
+        total = 0
+        files = 0
+        for member in members:
+            name = member.name
+            type_code = member.type_code
+            size = member.size
+            body_offset = member.body_offset
+            digest = member.sha256
+            if (
+                not isinstance(name, str)
+                or _canonical_bundle_path(name, "macOS sdist member name").as_posix()
+                != name
+                or type_code not in {"file", "directory"}
+                or type(size) is not int
+                or size < 0
+                or size > limits.member_bytes
+                or type(body_offset) is not int
+                or body_offset < 0
+                or not isinstance(digest, str)
+                or SHA256_RE.fullmatch(digest) is None
+            ):
+                return "structural", None
+            total += size
+            if total > limits.total_member_bytes:
+                return "structural", None
+            names.append(name)
+            files += type_code == "file"
+        if len(set(names)) != len(names) or files == 0 or total != total_member_bytes:
+            return "structural", None
+    except Exception:
+        return "structural", None
+    return (
+        "ok",
+        _ValidatedSdistInventory(
+            archive_sha256,
+            archive_size,
+            len(members),
+            total_member_bytes,
+            tuple(names),
+        ),
+    )
+
+
+def _snapshot_regular_file(
+    path_value: Path | str,
+    label: str,
+    *,
+    max_bytes: int,
+) -> tuple[FileSnapshot, bytes]:
+    try:
+        supplied = Path(path_value)
+    except TypeError as error:
+        raise EvidenceError(f"{label} path is invalid") from error
+    path, metadata = _path_without_symlinks(supplied, label)
+    _require(stat.S_ISREG(metadata.st_mode), f"{label} is not a regular file")
+    _require(
+        0 < metadata.st_size <= max_bytes,
+        f"{label} exceeds the byte bound or is empty",
+    )
+    identity = _file_identity(metadata)
+    raw = _read_opened_regular_file(
+        path,
+        label,
+        max_bytes=max_bytes,
+        expected_size=metadata.st_size,
+    )
+    try:
+        after = path.stat()
+    except OSError as error:
+        raise EvidenceError(f"{label} changed after being read") from error
+    _require(
+        _file_identity(after) == identity,
+        f"{label} changed after being read",
+    )
+    return FileSnapshot(path, len(raw), _sha256(raw), identity), raw
+
+
+def _require_snapshot_unchanged(
+    snapshot: FileSnapshot,
+    label: str,
+    *,
+    max_bytes: int,
+) -> None:
+    current, _raw = _snapshot_regular_file(
+        snapshot.path,
+        label,
+        max_bytes=max_bytes,
+    )
+    _require(current == snapshot, f"{label} was substituted during verification")
+
+
 class ArtifactReader:
     """Read exact-byte artifacts from one relocatable, symlink-free bundle."""
 
@@ -955,6 +1898,7 @@ class ArtifactReader:
         base: Path,
         candidate: dict[str, str],
         registry: list[dict[str, Any]] | None = None,
+        descriptor_access_log: list[dict[str, Any]] | None = None,
     ):
         self.base, metadata = _path_without_symlinks(base, "evidence bundle root")
         _require(
@@ -964,6 +1908,7 @@ class ArtifactReader:
         self.candidate = candidate
         self._seen: dict[Path, tuple[int, str]] = {}
         self._registry: dict[str, dict[str, Any]] | None = None
+        self._descriptor_access_log = descriptor_access_log
         if registry is not None:
             validated = [
                 _validate_descriptor(item, candidate, f"payload registry[{index}]")
@@ -1026,7 +1971,115 @@ class ArtifactReader:
         document = _strict_json_bytes(raw, label) if json_document else None
         if document is not None and require_embedded_candidate:
             _document_candidate_matches(document, self.candidate)
+        if self._descriptor_access_log is not None:
+            self._descriptor_access_log.append(
+                {"label": label, "descriptor": dict(descriptor)}
+            )
         return LoadedArtifact(dict(descriptor), path, raw, document)
+
+    def load_private_sdist(
+        self,
+        descriptor: Any,
+        label: str,
+    ) -> tuple[LoadedArtifact, _ValidatedSdistInventory]:
+        """Load one gzip sdist from its retained descriptor, never a reopened path."""
+
+        descriptor = _validate_descriptor(descriptor, self.candidate, label)
+        if self._registry is not None:
+            _require(
+                self._registry.get(descriptor["path"]) == descriptor,
+                f"{label} descriptor is absent from the payload registry",
+            )
+        _require(
+            descriptor["media_type"] == MEDIA_TYPE_GZIP,
+            f"{label} media type differs from its role",
+        )
+        path: Path | None = None
+        metadata: os.stat_result | None = None
+        path_failure = False
+        try:
+            portable = _canonical_bundle_path(descriptor["path"], f"{label} path")
+            path = self.base
+            for part in portable.parts:
+                path = path / part
+                metadata = path.lstat()
+                if stat.S_ISLNK(metadata.st_mode):
+                    path_failure = True
+                    break
+            if not path_failure:
+                path, metadata = _path_without_symlinks(path, label)
+                metadata = path.lstat()
+        except (EvidenceError, OSError):
+            path_failure = True
+        if path_failure or path is None or metadata is None:
+            raise EvidenceError("macOS sdist source is invalid") from None
+        if not stat.S_ISREG(metadata.st_mode):
+            raise EvidenceError("macOS sdist source is invalid") from None
+        if metadata.st_size != descriptor["size_bytes"]:
+            raise EvidenceError(
+                "macOS sdist bytes differ from their descriptor"
+            ) from None
+        expected_identity = _artifact_descriptor_identity(metadata)
+        try:
+            from benchmarks import issue123_privacy as privacy
+        except (ImportError, OSError):
+            raise EvidenceError("macOS sdist privacy validation failed") from None
+        privacy_failure = False
+        result: Any = None
+        limits: Any = None
+        inventory: _ValidatedSdistInventory | None = None
+        with _RetainedArtifactLease(
+            path,
+            expected_identity,
+            descriptor["size_bytes"],
+            descriptor["sha256"],
+        ) as view:
+            if not view.raw.startswith(b"\x1f\x8b"):
+                raise EvidenceError("macOS sdist source is invalid") from None
+            try:
+                limits = privacy._default_private_sdist_validation_limits()
+                with privacy._retain_private_sdist_fd(view.fd) as source:
+                    result = privacy._validate_private_sdist_raw_first(
+                        source,
+                        (),
+                        limits=limits,
+                    )
+            except Exception:
+                privacy_failure = True
+            if privacy_failure:
+                raise EvidenceError("macOS sdist privacy validation failed") from None
+            status, inventory = _private_sdist_inventory(
+                result,
+                view,
+                descriptor,
+                limits,
+            )
+            if status == "descriptor":
+                raise EvidenceError(
+                    "macOS sdist bytes differ from their descriptor"
+                ) from None
+            if status != "ok" or inventory is None:
+                raise EvidenceError(
+                    "macOS sdist structural inventory differs"
+                ) from None
+            identity_failure = False
+            try:
+                current_identity = _artifact_descriptor_identity(os.fstat(view.fd))
+            except OSError:
+                identity_failure = True
+            if identity_failure or current_identity != expected_identity:
+                raise EvidenceError(
+                    "macOS sdist source changed during validation"
+                ) from None
+            artifact = LoadedArtifact(dict(descriptor), path, view.raw)
+        identity = (len(artifact.raw), artifact.descriptor["sha256"])
+        previous = self._seen.setdefault(path, identity)
+        _require(previous == identity, f"{label} path has conflicting descriptors")
+        if self._descriptor_access_log is not None:
+            self._descriptor_access_log.append(
+                {"label": label, "descriptor": dict(descriptor)}
+            )
+        return artifact, inventory
 
     def load_many(
         self,
@@ -1370,26 +2423,399 @@ def _bind_tuning_traces(
     _require(used == set(traces), f"{label} contains unreferenced trace artifacts")
 
 
+def _repository_inputs_sha256(paths: tuple[str, ...], label: str) -> str:
+    digest = hashlib.sha256()
+    for relative in sorted(paths):
+        _canonical_bundle_path(relative, f"{label} input")
+        _path, raw = _bounded_regular_file_bytes(
+            ROOT / relative,
+            f"{label} input {relative}",
+            max_bytes=MAX_ARTIFACT_BYTES,
+        )
+        digest.update(relative.encode())
+        digest.update(b"\0")
+        digest.update(raw)
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _expected_correctness_candidate_evidence(
+    manifest: dict[str, Any], candidate: dict[str, str]
+) -> dict[str, str]:
+    try:
+        cpu_contract_id = manifest["performance_gates"]["cpu_acceptance"]["contract_id"]
+    except (KeyError, TypeError) as error:
+        raise EvidenceError("manifest CPU correctness contract is absent") from error
+    _require(
+        isinstance(cpu_contract_id, str) and bool(cpu_contract_id),
+        "manifest CPU correctness contract is invalid",
+    )
+    return {
+        "evidence_contract_id": CORRECTNESS_EVIDENCE_CONTRACT_ID,
+        "cpu_contract_id": cpu_contract_id,
+        "manifest_sha256": candidate["manifest_sha256"],
+        "runner_sha256": _repository_inputs_sha256(
+            CORRECTNESS_RUNNER_INPUTS, "correctness runner"
+        ),
+        "solver_sha256": _repository_inputs_sha256(
+            CORRECTNESS_SOLVER_INPUTS, "correctness solver"
+        ),
+        "solver_abi": TORCH_SOLVER_ABI,
+        "candidate_git_commit": candidate["candidate_git_commit"],
+        "candidate_git_status": candidate["candidate_git_status"],
+    }
+
+
+def _validate_correctness_runtime_mode(value: Any, label: str) -> None:
+    _exact_keys(value, CORRECTNESS_RUNTIME_MODE_KEYS, label)
+    device = value["device"]
+    precision = value["precision"]
+    graph_mode = value["graph_mode"]
+    compile_mode = value["compile_mode"]
+    canonical_cuda = (
+        isinstance(device, str)
+        and device.startswith("cuda:")
+        and device[5:].isdigit()
+        and str(int(device[5:])) == device[5:]
+    )
+    _require(
+        (device == "cpu" or canonical_cuda)
+        and precision in {"float32", "float64"}
+        and graph_mode in {"eager", "graph"}
+        and compile_mode in {"default", "reduce-overhead", "max-autotune"}
+        and (graph_mode != "eager" or compile_mode == "default")
+        and (device != "cpu" or compile_mode == "default")
+        and value["compile_policy"]
+        == ("compile" if graph_mode == "graph" else "eager"),
+        f"{label} differs from the frozen execution contract",
+    )
+
+
+def _validate_runtime_receipt_document(
+    value: Any,
+    manifest: dict[str, Any],
+    candidate: dict[str, str],
+    expected_runtime_mode: dict[str, str],
+    label: str,
+    *,
+    expected_candidate_cases: tuple[str, ...] | None = None,
+) -> None:
+    _exact_keys(
+        value,
+        {
+            "schema_version",
+            "kind",
+            "final_sha",
+            "manifest_sha256",
+            "workflow",
+            "profiler_witness",
+            "runtime_mode",
+            "candidate_archives",
+        },
+        label,
+    )
+    workflow = value["workflow"]
+    witness = value["profiler_witness"]
+    _exact_keys(
+        workflow,
+        {"repository", "run_id", "run_attempt", "job_id", "job_name"},
+        f"{label} workflow",
+    )
+    _exact_keys(
+        witness,
+        {"name", "sha256", "size_bytes", "media_type"},
+        f"{label} profiler witness",
+    )
+    _validate_correctness_runtime_mode(value["runtime_mode"], f"{label} runtime mode")
+    _require(
+        _is_exact_int(value["schema_version"], 1)
+        and value["kind"] == RUNTIME_RECEIPT_KIND
+        and value["final_sha"] == candidate["candidate_git_commit"]
+        and value["manifest_sha256"]
+        == candidate["manifest_sha256"]
+        == TRUSTED_MANIFEST_SHA256
+        and _type_exact_equal(value["runtime_mode"], expected_runtime_mode),
+        f"{label} identity or runtime binding differs",
+    )
+    _require(
+        workflow["repository"] == "ruddyscent/gmes"
+        and all(
+            type(workflow[name]) is int and workflow[name] > 0
+            for name in ("run_id", "run_attempt", "job_id")
+        )
+        and isinstance(workflow["job_name"], str)
+        and 0 < len(workflow["job_name"]) <= 256
+        and workflow["job_name"] == workflow["job_name"].strip()
+        and not any(ord(character) < 32 for character in workflow["job_name"]),
+        f"{label} workflow identity differs",
+    )
+    _require(
+        isinstance(witness["name"], str)
+        and 0 < len(witness["name"]) <= 256
+        and PurePosixPath(witness["name"]).name == witness["name"]
+        and witness["name"] not in {".", ".."}
+        and "\\" not in witness["name"]
+        and "\x00" not in witness["name"]
+        and isinstance(witness["sha256"], str)
+        and SHA256_RE.fullmatch(witness["sha256"]) is not None
+        and type(witness["size_bytes"]) is int
+        and 0 < witness["size_bytes"] <= MAX_ARTIFACT_BYTES
+        and isinstance(witness["media_type"], str)
+        and witness["media_type"] == witness["media_type"].lower()
+        and witness["media_type"].count("/") == 1
+        and not any(character.isspace() for character in witness["media_type"]),
+        f"{label} profiler witness differs",
+    )
+    archives = value["candidate_archives"]
+    required_cases = (
+        list(expected_candidate_cases)
+        if expected_candidate_cases is not None
+        else [
+            case["name"]
+            for group in ("correctness", "physical_checks")
+            for case in manifest[group]
+        ]
+    )
+    _require(
+        isinstance(archives, list) and len(archives) == len(required_cases),
+        f"{label} candidate archive closure differs",
+    )
+    for index, (archive, case) in enumerate(zip(archives, required_cases, strict=True)):
+        _exact_keys(
+            archive,
+            {"case", "sha256", "size_bytes"},
+            f"{label} candidate archive {index}",
+        )
+        _require(
+            archive["case"] == case
+            and isinstance(archive["sha256"], str)
+            and SHA256_RE.fullmatch(archive["sha256"]) is not None
+            and type(archive["size_bytes"]) is int
+            and 0 < archive["size_bytes"] <= MAX_ARTIFACT_BYTES,
+            f"{label} candidate archive {index} differs",
+        )
+
+
+def _load_trusted_runtime_receipts(
+    paths: Any,
+    manifest: dict[str, Any],
+    candidate: dict[str, str],
+    bundle_root: Path,
+) -> tuple[LoadedArtifact, ...]:
+    _require(
+        isinstance(paths, (list, tuple)) and len(paths) == len(RUNTIME_RECEIPT_ROLES),
+        "exactly five trusted runtime receipt paths are required",
+    )
+    modes = (
+        CPU_CORRECTNESS_RUNTIME_MODE,
+        *CUDA_CORRECTNESS_RUNTIME_MODES,
+        *SINGLE_GPU_DIFFERENTIAL_RUNTIME_MODES,
+    )
+    candidate_case_closures = (
+        None,
+        None,
+        None,
+        ("single-gpu-2d",),
+        ("single-gpu-3d",),
+    )
+    loaded = []
+    for role, path_value, mode, case_closure in zip(
+        RUNTIME_RECEIPT_ROLES,
+        paths,
+        modes,
+        candidate_case_closures,
+        strict=True,
+    ):
+        path, raw = _bounded_regular_file_bytes(
+            Path(path_value),
+            f"trusted {role} runtime receipt",
+            max_bytes=MAX_RUNTIME_RECEIPT_BYTES,
+        )
+        _require(
+            not path.is_relative_to(bundle_root),
+            f"trusted {role} runtime receipt must be outside the evidence bundle",
+        )
+        document = _strict_json_bytes(
+            raw,
+            f"trusted {role} runtime receipt",
+            max_bytes=MAX_RUNTIME_RECEIPT_BYTES,
+        )
+        _require(
+            raw == _canonical_json_bytes(document),
+            f"trusted {role} runtime receipt is not canonical JSON",
+        )
+        _validate_runtime_receipt_document(
+            document,
+            manifest,
+            candidate,
+            mode,
+            f"trusted {role} runtime receipt",
+            expected_candidate_cases=case_closure,
+        )
+        loaded.append(
+            LoadedArtifact(
+                {
+                    "path": path.name,
+                    "sha256": _sha256(raw),
+                    "size_bytes": len(raw),
+                    "media_type": MEDIA_TYPE_JSON,
+                },
+                path,
+                raw,
+                document,
+            )
+        )
+    _require(
+        len({item.path for item in loaded}) == len(loaded)
+        and len({item.descriptor["sha256"] for item in loaded}) == len(loaded)
+        and len({(item.path.stat().st_dev, item.path.stat().st_ino) for item in loaded})
+        == len(loaded),
+        "trusted runtime receipts are not five distinct files and byte sets",
+    )
+    return tuple(loaded)
+
+
+def _load_bundled_runtime_receipt(
+    reader: ArtifactReader, descriptor: Any, label: str
+) -> LoadedArtifact:
+    _exact_keys(
+        descriptor,
+        {"path", "sha256", "size_bytes", "media_type"},
+        f"{label} descriptor",
+    )
+    _canonical_bundle_path(descriptor["path"], f"{label} path")
+    _require(
+        isinstance(descriptor["sha256"], str)
+        and SHA256_RE.fullmatch(descriptor["sha256"]) is not None
+        and type(descriptor["size_bytes"]) is int
+        and 0 < descriptor["size_bytes"] <= MAX_RUNTIME_RECEIPT_BYTES
+        and descriptor["media_type"] == MEDIA_TYPE_JSON,
+        f"{label} descriptor differs",
+    )
+    registered = (
+        reader._registry.get(descriptor["path"])
+        if reader._registry is not None
+        else {
+            **descriptor,
+            "candidate_evidence": reader.candidate,
+        }
+    )
+    _require(isinstance(registered, dict), f"{label} descriptor is not registered")
+    _require(
+        all(registered.get(name) == descriptor[name] for name in descriptor),
+        f"{label} descriptor differs from its registered artifact",
+    )
+    return reader.load(
+        registered,
+        label,
+        expected_media_types={MEDIA_TYPE_JSON},
+        require_embedded_candidate=False,
+    )
+
+
+def _correctness_archive_binding(
+    artifact: LoadedArtifact, case: str, label: str
+) -> dict[str, Any]:
+    try:
+        metadata = artifact.path.stat()
+    except OSError as error:
+        raise EvidenceError(f"{label} identity is unreadable") from error
+    _require(
+        stat.S_ISREG(metadata.st_mode)
+        and metadata.st_size == artifact.descriptor["size_bytes"]
+        and metadata.st_size == len(artifact.raw),
+        f"{label} payload identity differs",
+    )
+    return {
+        "case": case,
+        "path": artifact.descriptor["path"],
+        "sha256": artifact.descriptor["sha256"],
+        "size_bytes": artifact.descriptor["size_bytes"],
+        "media_type": artifact.descriptor["media_type"],
+        "payload_identity": _file_identity(metadata),
+    }
+
+
 def _validate_correctness_index(
     artifact: LoadedArtifact,
     manifest: dict[str, Any],
     candidate: dict[str, str],
     reader: ArtifactReader,
-) -> dict[str, Any]:
+    *,
+    include_archive_bindings: bool = False,
+    expected_runtime_mode: dict[str, str] | None = None,
+    trusted_runtime_receipt: LoadedArtifact | None = None,
+) -> dict[str, Any] | tuple[dict[str, Any], dict[str, list[dict[str, Any]]]]:
     document = artifact.document
     _require(isinstance(document, dict), "correctness index root must be an object")
     _document_candidate_matches(document, candidate, required=True)
     evidence = document.get("candidate_evidence")
-    _require(isinstance(evidence, dict), "correctness index has no candidate evidence")
+    expected_evidence = _expected_correctness_candidate_evidence(manifest, candidate)
+    _exact_keys(
+        evidence,
+        CORRECTNESS_EVIDENCE_KEYS,
+        "correctness index candidate evidence",
+    )
+    _require(
+        _type_exact_equal(evidence, expected_evidence),
+        "correctness index candidate evidence differs from the current candidate",
+    )
+    _exact_keys(document, CORRECTNESS_INDEX_KEYS, "correctness index")
+    _require(
+        _is_exact_int(document["schema_version"], CORRECTNESS_INDEX_SCHEMA_VERSION)
+        and document["kind"] == CORRECTNESS_INDEX_KIND
+        and document["contract_id"] == CORRECTNESS_INDEX_CONTRACT_ID,
+        "correctness index identity differs",
+    )
+    _validate_correctness_runtime_mode(
+        document["runtime_mode"], "correctness index runtime mode"
+    )
+    if expected_runtime_mode is not None:
+        _require(
+            _type_exact_equal(document["runtime_mode"], expected_runtime_mode),
+            "correctness index runtime mode differs from the required scope",
+        )
+    _require(
+        isinstance(trusted_runtime_receipt, LoadedArtifact),
+        "an external trusted runtime publication receipt is required",
+    )
+    bundled_runtime_receipt = _load_bundled_runtime_receipt(
+        reader,
+        document["runtime_receipt"],
+        "correctness runtime publication receipt",
+    )
+    _require(
+        bundled_runtime_receipt.raw == trusted_runtime_receipt.raw
+        and _type_exact_equal(
+            bundled_runtime_receipt.document, trusted_runtime_receipt.document
+        ),
+        "bundled runtime publication receipt bytes differ from the external receipt",
+    )
+    bundled_metadata = bundled_runtime_receipt.path.stat()
+    trusted_metadata = trusted_runtime_receipt.path.stat()
+    _require(
+        (bundled_metadata.st_dev, bundled_metadata.st_ino)
+        != (trusted_metadata.st_dev, trusted_metadata.st_ino),
+        "bundled runtime publication receipt is not independent from the external "
+        "receipt",
+    )
+    _validate_runtime_receipt_document(
+        trusted_runtime_receipt.document,
+        manifest,
+        candidate,
+        document["runtime_mode"],
+        "correctness external runtime publication receipt",
+    )
     _require(
         document.get("manifest_contract_sha256") == _canonical_sha256(manifest),
         "correctness index canonical manifest digest differs",
     )
-    required = [
-        case["name"]
+    required_pairs = [
+        (group, case["name"])
         for group in ("correctness", "physical_checks")
         for case in manifest.get(group, ())
     ]
+    required = [name for _group, name in required_pairs]
     _require(
         document.get("required_cases") == required, "correctness case closure differs"
     )
@@ -1415,25 +2841,70 @@ def _validate_correctness_index(
         "correctness archive descriptor closure differs",
     )
     nested = []
-    for index, record in enumerate(artifacts):
-        _require(isinstance(record, dict), "correctness artifact record differs")
+    archive_bindings: dict[str, list[dict[str, Any]]] = {
+        "reference": [],
+        "candidate": [],
+    }
+    used_archive_paths = set()
+    used_archive_digests = set()
+    for index, (record, (expected_group, expected_case)) in enumerate(
+        zip(artifacts, required_pairs, strict=True)
+    ):
+        record_label = f"correctness artifact {index}"
+        _exact_keys(record, CORRECTNESS_ARTIFACT_KEYS, record_label)
+        _require(
+            record["case"] == expected_case and record["group"] == expected_group,
+            f"{record_label} identity differs from the manifest",
+        )
         for role in ("reference", "candidate"):
-            nested.append(
-                reader.load(
-                    record.get(role),
+            loaded = reader.load(
+                record[role],
+                f"correctness {index} {role} archive",
+                json_document=False,
+                expected_media_types={MEDIA_TYPE_NPZ},
+            )
+            descriptor = loaded.descriptor
+            _require(
+                descriptor["path"] not in used_archive_paths
+                and descriptor["sha256"] not in used_archive_digests,
+                "correctness archive descriptors reuse a path or digest",
+            )
+            used_archive_paths.add(descriptor["path"])
+            used_archive_digests.add(descriptor["sha256"])
+            archive_bindings[role].append(
+                _correctness_archive_binding(
+                    loaded,
+                    expected_case,
                     f"correctness {index} {role} archive",
-                    json_document=False,
-                    expected_media_types={MEDIA_TYPE_NPZ},
                 )
             )
+            nested.append(loaded)
+    expected_receipt_archives = [
+        {
+            "case": case,
+            "sha256": descriptor["sha256"],
+            "size_bytes": descriptor["size_bytes"],
+        }
+        for case, descriptor in zip(
+            required, archive_bindings["candidate"], strict=True
+        )
+    ]
+    _require(
+        _type_exact_equal(
+            trusted_runtime_receipt.document["candidate_archives"],
+            expected_receipt_archives,
+        ),
+        "runtime publication receipt candidate archive binding differs",
+    )
     try:
         from benchmarks.torch_correctness import load_correctness_evidence_index
 
         rebuilt = load_correctness_evidence_index(
             artifact.path,
             manifest,
-            evidence,
+            expected_evidence,
             descriptor_root=reader.base,
+            runtime_receipt=trusted_runtime_receipt.path,
         )
     except (
         ImportError,
@@ -1461,7 +2932,257 @@ def _validate_correctness_index(
         _require(
             checked.raw == loaded.raw, "correctness archive changed during validation"
         )
+    if include_archive_bindings:
+        return rebuilt, archive_bindings
     return rebuilt
+
+
+def _validate_cuda_correctness_indexes(
+    records: Any,
+    reader: ArtifactReader,
+    manifest: dict[str, Any],
+    candidate: dict[str, str],
+    label: str,
+    trusted_runtime_receipts: tuple[LoadedArtifact, ...] | None = None,
+) -> tuple[
+    list[dict[str, Any]],
+    tuple[dict[str, list[dict[str, Any]]], ...],
+]:
+    _require(
+        trusted_runtime_receipts is None
+        or (
+            isinstance(trusted_runtime_receipts, tuple)
+            and len(trusted_runtime_receipts) == len(CUDA_CORRECTNESS_RUNTIME_MODES)
+            and all(
+                isinstance(receipt, LoadedArtifact)
+                for receipt in trusted_runtime_receipts
+            )
+        ),
+        f"{label} requires exactly two external correctness runtime receipts",
+    )
+    _require(
+        isinstance(records, list)
+        and len(records) == len(CUDA_CORRECTNESS_RUNTIME_MODES),
+        f"{label} correctness index closure differs",
+    )
+    rebuilt_indexes = []
+    archive_bindings_by_mode = []
+    used_paths = set()
+    used_digests = set()
+    for index, (record, expected_mode) in enumerate(
+        zip(records, CUDA_CORRECTNESS_RUNTIME_MODES, strict=True)
+    ):
+        record_label = f"{label} correctness index {index}"
+        _exact_keys(record, {"runtime_mode", "source_artifact"}, record_label)
+        _require(
+            _type_exact_equal(record["runtime_mode"], expected_mode),
+            f"{record_label} runtime mode differs",
+        )
+        artifact = reader.load(
+            record["source_artifact"],
+            record_label,
+            expected_media_types={MEDIA_TYPE_JSON},
+        )
+        descriptor = artifact.descriptor
+        _require(
+            descriptor["path"] not in used_paths
+            and descriptor["sha256"] not in used_digests,
+            f"{label} correctness indexes reuse an artifact path or digest",
+        )
+        used_paths.add(descriptor["path"])
+        used_digests.add(descriptor["sha256"])
+        _require(
+            isinstance(artifact.document, dict)
+            and _type_exact_equal(artifact.document.get("runtime_mode"), expected_mode),
+            f"{record_label} loaded runtime mode differs",
+        )
+        receipt_arguments = (
+            {"trusted_runtime_receipt": trusted_runtime_receipts[index]}
+            if trusted_runtime_receipts is not None
+            else {}
+        )
+        rebuilt, archive_bindings = _validate_correctness_index(
+            artifact,
+            manifest,
+            candidate,
+            reader,
+            include_archive_bindings=True,
+            **receipt_arguments,
+        )
+        _require(
+            _type_exact_equal(rebuilt.get("runtime_mode"), expected_mode),
+            f"{record_label} recomputed runtime mode differs",
+        )
+        recomputed_source = rebuilt.get("source_artifact")
+        _exact_keys(
+            recomputed_source,
+            {"path", "sha256", "size_bytes", "media_type", "candidate_evidence"},
+            f"{record_label} recomputed source artifact",
+        )
+        _require(
+            _type_exact_equal(recomputed_source, descriptor)
+            and recomputed_source["sha256"] == descriptor["sha256"],
+            f"{record_label} descriptor differs from the recomputed source artifact",
+        )
+        rebuilt_indexes.append(rebuilt)
+        archive_bindings_by_mode.append(archive_bindings)
+    eager_bindings, graph_bindings = archive_bindings_by_mode
+    _require(
+        _type_exact_equal(eager_bindings["reference"], graph_bindings["reference"]),
+        f"{label} correctness native reference archives differ by runtime mode",
+    )
+    eager_candidate_paths = {
+        descriptor["path"] for descriptor in eager_bindings["candidate"]
+    }
+    graph_candidate_paths = {
+        descriptor["path"] for descriptor in graph_bindings["candidate"]
+    }
+    eager_candidate_digests = {
+        descriptor["sha256"] for descriptor in eager_bindings["candidate"]
+    }
+    graph_candidate_digests = {
+        descriptor["sha256"] for descriptor in graph_bindings["candidate"]
+    }
+    _require(
+        eager_candidate_paths.isdisjoint(graph_candidate_paths)
+        and eager_candidate_digests.isdisjoint(graph_candidate_digests),
+        f"{label} correctness candidate archives overlap by runtime mode",
+    )
+    return rebuilt_indexes, tuple(archive_bindings_by_mode)
+
+
+def _candidate_archive_bindings_by_case(
+    manifest: dict[str, Any],
+    archive_bindings: dict[str, list[dict[str, Any]]],
+    label: str,
+) -> list[dict[str, Any]]:
+    required_cases = [
+        case["name"]
+        for group in ("correctness", "physical_checks")
+        for case in manifest[group]
+    ]
+    candidates = archive_bindings.get("candidate")
+    _require(
+        isinstance(candidates, list) and len(candidates) == len(required_cases),
+        f"{label} candidate archive closure differs",
+    )
+    return [
+        {
+            "case": case,
+            "sha256": descriptor["sha256"],
+            "size_bytes": descriptor["size_bytes"],
+        }
+        for case, descriptor in zip(required_cases, candidates, strict=True)
+    ]
+
+
+def _ordered_correctness_archive_bindings(
+    value: Any, manifest: dict[str, Any], label: str
+) -> dict[str, list[dict[str, Any]]]:
+    _exact_keys(value, {"reference", "candidate"}, label)
+    required_cases = [
+        case["name"]
+        for group in ("correctness", "physical_checks")
+        for case in manifest[group]
+    ]
+    checked: dict[str, list[dict[str, Any]]] = {}
+    for role in ("reference", "candidate"):
+        records = value[role]
+        _require(
+            isinstance(records, list) and len(records) == len(required_cases),
+            f"{label} {role} archive closure differs",
+        )
+        validated = []
+        for index, (record, case) in enumerate(
+            zip(records, required_cases, strict=True)
+        ):
+            record_label = f"{label} {role} archive {index}"
+            _exact_keys(
+                record,
+                {
+                    "case",
+                    "path",
+                    "sha256",
+                    "size_bytes",
+                    "media_type",
+                    "payload_identity",
+                },
+                record_label,
+            )
+            identity = record["payload_identity"]
+            _canonical_bundle_path(record["path"], f"{record_label} path")
+            _require(
+                record["case"] == case
+                and isinstance(record["sha256"], str)
+                and SHA256_RE.fullmatch(record["sha256"]) is not None
+                and type(record["size_bytes"]) is int
+                and 0 < record["size_bytes"] <= MAX_ARTIFACT_BYTES
+                and record["media_type"] == MEDIA_TYPE_NPZ
+                and isinstance(identity, tuple)
+                and len(identity) == 4
+                and all(type(item) is int and item >= 0 for item in identity),
+                f"{record_label} differs",
+            )
+            validated.append(copy.deepcopy(record))
+        checked[role] = validated
+    return checked
+
+
+def _validate_global_correctness_archive_topology(
+    cpu: dict[str, Any], single: dict[str, Any], manifest: dict[str, Any]
+) -> dict[str, int]:
+    cpu_bindings = _ordered_correctness_archive_bindings(
+        cpu.get("_correctness_archive_bindings"),
+        manifest,
+        "CPU correctness",
+    )
+    cuda_by_mode = single.get("_correctness_archive_bindings_by_mode")
+    _exact_keys(
+        cuda_by_mode,
+        {"eager", "graph"},
+        "CUDA correctness archive runtime modes",
+    )
+    eager_bindings = _ordered_correctness_archive_bindings(
+        cuda_by_mode["eager"], manifest, "CUDA eager correctness"
+    )
+    graph_bindings = _ordered_correctness_archive_bindings(
+        cuda_by_mode["graph"], manifest, "CUDA graph correctness"
+    )
+    _require(
+        _type_exact_equal(cpu_bindings["reference"], eager_bindings["reference"])
+        and _type_exact_equal(cpu_bindings["reference"], graph_bindings["reference"]),
+        "CPU and CUDA correctness native reference archives differ",
+    )
+    groups = (
+        cpu_bindings["reference"],
+        cpu_bindings["candidate"],
+        eager_bindings["candidate"],
+        graph_bindings["candidate"],
+    )
+    required_cases = len(cpu_bindings["reference"])
+    _require(
+        required_cases * len(groups) == CORRECTNESS_UNIQUE_ARCHIVE_COUNT,
+        "correctness manifest does not define the frozen 136-archive topology",
+    )
+    identities = {
+        "path": lambda record: record["path"],
+        "digest": lambda record: record["sha256"],
+        "payload identity": lambda record: record["payload_identity"],
+    }
+    for identity_label, identity in identities.items():
+        values = [identity(record) for group in groups for record in group]
+        _require(
+            len(values) == CORRECTNESS_UNIQUE_ARCHIVE_COUNT
+            and len(set(values)) == CORRECTNESS_UNIQUE_ARCHIVE_COUNT,
+            "correctness native reference and CPU/CUDA candidate archives are "
+            f"not exactly 136 globally unique {identity_label}s",
+        )
+    return {
+        "case_count": required_cases,
+        "shared_reference_archive_count": required_cases,
+        "candidate_archive_count": required_cases * 3,
+        "unique_archive_count": CORRECTNESS_UNIQUE_ARCHIVE_COUNT,
+    }
 
 
 def _validate_tuning_acceptance(
@@ -2266,7 +3987,7 @@ def _public_torch_versions_match(first: Any, second: Any) -> bool:
         from benchmarks.torch_cpu_baseline import public_torch_version
 
         return public_torch_version(first) == public_torch_version(second)
-    except ImportError, TypeError, ValueError:
+    except (ImportError, TypeError, ValueError):
         return False
 
 
@@ -2410,6 +4131,7 @@ def _validate_cpu_scope(
     manifest: dict[str, Any],
     candidate: dict[str, str],
     manifest_path: Path,
+    trusted_runtime_receipt: LoadedArtifact,
 ) -> dict[str, Any]:
     _exact_keys(
         scope,
@@ -2477,11 +4199,14 @@ def _validate_cpu_scope(
         scope["correctness_index"],
         "CPU correctness index",
     )
-    correctness = _validate_correctness_index(
+    correctness, correctness_archive_bindings = _validate_correctness_index(
         correctness_artifact,
         manifest,
         candidate,
         reader,
+        include_archive_bindings=True,
+        expected_runtime_mode=CPU_CORRECTNESS_RUNTIME_MODE,
+        trusted_runtime_receipt=trusted_runtime_receipt,
     )
     embedded_correctness = aggregate.get("correctness_evidence")
     _require(
@@ -2781,22 +4506,187 @@ def _validate_cpu_scope(
         "torch_raw_seconds_per_step": torch_raw_by_mode,
         "native_raw_seconds_per_step": native_raw_by_mode,
         "raw_recomputed_acceptance": raw_acceptance_by_mode,
+        "_correctness_archive_bindings": copy.deepcopy(correctness_archive_bindings),
+        "correctness_candidate_archives": _candidate_archive_bindings_by_case(
+            manifest,
+            correctness_archive_bindings,
+            "CPU correctness",
+        ),
     }
+
+
+def _preflight_npz_array_headers(
+    raw: bytes,
+    infos: list[zipfile.ZipInfo],
+    names: list[str],
+    label: str,
+    *,
+    exact_differential_group: bool,
+    max_array_bytes: int = MAX_NPZ_ARRAY_BYTES,
+    max_total_bytes: int = MAX_NPZ_TOTAL_BYTES,
+    allow_metadata_json: bool = False,
+) -> dict[str, tuple[tuple[int, ...], np.dtype[Any], int]]:
+    expected_members = [f"{name}.npy" for name in names]
+    _require(
+        [info.filename for info in infos] == expected_members,
+        f"{label} NPY member order differs",
+    )
+    total_payload_bytes = 0
+    metadata: dict[str, tuple[tuple[int, ...], np.dtype[Any], int]] = {}
+    try:
+        with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+            for info, name in zip(infos, names, strict=True):
+                array_label = f"{label} array {name!r}"
+                mode = info.external_attr >> 16
+                _require(
+                    not info.is_dir() and stat.S_IFMT(mode) in {0, stat.S_IFREG},
+                    f"{array_label} is not a regular file",
+                )
+                if exact_differential_group:
+                    _require(
+                        info.compress_type == zipfile.ZIP_DEFLATED,
+                        f"{array_label} is not DEFLATE-compressed",
+                    )
+                with archive.open(info, "r") as stream:
+                    prefix = stream.read(8)
+                    _require(
+                        len(prefix) == 8 and prefix[:6] == b"\x93NUMPY",
+                        f"{array_label} has no NPY header",
+                    )
+                    version = tuple(prefix[6:])
+                    _require(
+                        (
+                            version == (1, 0)
+                            if exact_differential_group
+                            else version in {(1, 0), (2, 0), (3, 0)}
+                        ),
+                        f"{array_label} uses an unsupported NPY version",
+                    )
+                    length_bytes = 2 if version == (1, 0) else 4
+                    encoded_length = stream.read(length_bytes)
+                    _require(
+                        len(encoded_length) == length_bytes,
+                        f"{array_label} has a truncated NPY header length",
+                    )
+                    header_length = int.from_bytes(encoded_length, "little")
+                    _require(
+                        0 < header_length <= MAX_NPY_HEADER_BYTES,
+                        f"{array_label} NPY header exceeds the bound",
+                    )
+                    encoded_header = stream.read(header_length)
+                    _require(
+                        len(encoded_header) == header_length,
+                        f"{array_label} has a truncated NPY header",
+                    )
+                encoding = "utf-8" if version == (3, 0) else "latin1"
+                header = ast.literal_eval(encoded_header.decode(encoding))
+                _exact_keys(
+                    header,
+                    {"descr", "fortran_order", "shape"},
+                    f"{array_label} NPY header",
+                )
+                dtype = np.dtype(header["descr"])
+                shape = header["shape"]
+                metadata_json = (
+                    allow_metadata_json
+                    and name == "metadata.json"
+                    and dtype.kind == "U"
+                    and isinstance(shape, tuple)
+                    and shape == ()
+                    and 0 < dtype.itemsize <= MAX_CORRECTNESS_NPZ_METADATA_BYTES
+                )
+                _require(
+                    dtype.fields is None
+                    and dtype.subdtype is None
+                    and not dtype.hasobject
+                    and (dtype.kind in {"b", "i", "u", "f", "c"} or metadata_json)
+                    and dtype.itemsize > 0
+                    and (not exact_differential_group or dtype.itemsize <= 16),
+                    f"{array_label} NPY dtype is not a plain numeric type",
+                )
+                _require(
+                    header["fortran_order"] is False
+                    and isinstance(shape, tuple)
+                    and len(shape) <= MAX_NPZ_DIMENSIONS
+                    and all(
+                        type(size) is int and 0 <= size <= 2**31 - 1 for size in shape
+                    ),
+                    f"{array_label} NPY shape or storage order exceeds the bound",
+                )
+                payload_bytes = math.prod(shape) * dtype.itemsize
+                _require(
+                    payload_bytes <= max_array_bytes,
+                    f"{array_label} declared payload exceeds the bound",
+                )
+                header_bytes = 8 + length_bytes + header_length
+                _require(
+                    header_bytes + payload_bytes == info.file_size,
+                    f"{array_label} NPY header and payload size differ",
+                )
+                total_payload_bytes += payload_bytes
+                _require(
+                    total_payload_bytes <= max_total_bytes,
+                    f"{label} declared NPY payloads exceed the byte bound",
+                )
+                metadata[name] = (shape, dtype, payload_bytes)
+    except EvidenceError:
+        raise
+    except (
+        MemoryError,
+        OSError,
+        OverflowError,
+        RecursionError,
+        RuntimeError,
+        SyntaxError,
+        TypeError,
+        UnicodeDecodeError,
+        ValueError,
+        zipfile.BadZipFile,
+        zlib.error,
+    ) as error:
+        raise EvidenceError(f"{label} has an invalid bounded NPY header") from error
+    return metadata
 
 
 def _npz_arrays(
     artifact: LoadedArtifact,
     names: list[str],
     label: str,
+    *,
+    expected_comment: bytes | None = None,
 ) -> dict[str, np.ndarray]:
+    _require(
+        type(artifact.raw) is bytes and 0 < len(artifact.raw) <= MAX_NPZ_ARCHIVE_BYTES,
+        f"{label} NPZ archive exceeds the byte bound",
+    )
+    if expected_comment is not None:
+        eocd_offset = len(artifact.raw) - 22 - len(expected_comment)
+        _require(
+            artifact.raw.startswith(b"PK\x03\x04")
+            and eocd_offset >= 0
+            and artifact.raw[eocd_offset : eocd_offset + 4] == b"PK\x05\x06"
+            and int.from_bytes(
+                artifact.raw[eocd_offset + 20 : eocd_offset + 22], "little"
+            )
+            == len(expected_comment),
+            f"{label} differential NPZ has prepended or trailing bytes",
+        )
     expected_files = {f"{name}.npy" for name in names}
-    _preflight_zip(
+    infos = _preflight_zip(
         artifact.raw,
         label,
         max_members=MAX_NPZ_MEMBERS,
         max_member_bytes=MAX_NPZ_ARRAY_BYTES,
         max_total_bytes=MAX_NPZ_TOTAL_BYTES,
         expected_files=expected_files,
+        expected_comment=expected_comment,
+    )
+    header_metadata = _preflight_npz_array_headers(
+        artifact.raw,
+        infos,
+        names,
+        label,
+        exact_differential_group=expected_comment is not None,
     )
     try:
         with np.load(io.BytesIO(artifact.raw), allow_pickle=False) as archive:
@@ -2808,6 +4698,7 @@ def _npz_arrays(
             total = 0
             for name in names:
                 array = np.asarray(archive[name])
+                expected_shape, expected_dtype, expected_nbytes = header_metadata[name]
                 _require(
                     array.dtype.fields is None
                     and array.dtype.subdtype is None
@@ -2823,8 +4714,12 @@ def _npz_arrays(
                     f"{label} array {name!r} shape exceeds the bound",
                 )
                 _require(
-                    array.flags.c_contiguous and array.nbytes <= MAX_NPZ_ARRAY_BYTES,
-                    f"{label} array {name!r} storage exceeds the bound",
+                    array.dtype == expected_dtype
+                    and array.shape == expected_shape
+                    and array.flags.c_contiguous
+                    and array.nbytes == expected_nbytes
+                    and array.nbytes <= MAX_NPZ_ARRAY_BYTES,
+                    f"{label} array {name!r} differs from its bounded NPY header",
                 )
                 total += array.nbytes
                 _require(
@@ -2833,10 +4728,1300 @@ def _npz_arrays(
                 )
                 result[name] = array
             return result
-    except (MemoryError, OSError, TypeError, ValueError) as error:
+    except (
+        EOFError,
+        MemoryError,
+        OSError,
+        TypeError,
+        ValueError,
+        zlib.error,
+    ) as error:
         if isinstance(error, EvidenceError):
             raise
         raise EvidenceError(f"{label} is not a readable safe NPZ archive") from error
+
+
+def _differential_float_token(value: float) -> dict[str, Any]:
+    value = float(value)
+    if math.isinf(value):
+        return {"kind": "infinity", "sign": 1 if value > 0 else -1}
+    _require(math.isfinite(value), "differential source value is non-finite")
+    return {"kind": "finite", "hex": value.hex()}
+
+
+def _expected_differential_source_medium(
+    workload: dict[str, Any],
+) -> tuple[float, float]:
+    recipe = workload.get("recipe")
+    material = workload.get("material")
+    if recipe == "coverage" or material in {"dielectric", "upml", "cpml"}:
+        return (1.7, 1.05)
+    if (
+        recipe == "homogeneous"
+        and isinstance(material, str)
+        and material.startswith(("drude-", "lorentz-", "dcp-", "dm2-"))
+    ):
+        return (1.2, 1.0)
+    raise EvidenceError(
+        "differential source-cell medium is outside the frozen contract"
+    )
+
+
+def _expected_differential_source_contract(workload: dict[str, Any]) -> dict[str, Any]:
+    _require(
+        workload.get("source", "point") == "point"
+        and workload.get("source_component", "Ex") == "Ex",
+        "differential source contract is outside the frozen Ex PointSource scope",
+    )
+    resolution = float(workload["resolution"])
+    whole_shape = [
+        1 if float(length) == 0 else int(np.rint(float(length) * resolution))
+        for length in workload["size"]
+    ]
+    target = [
+        whole_shape[0] // 2,
+        0 if whole_shape[1] == 1 else int(math.floor(whole_shape[1] / 2 + 0.5)),
+        0 if whole_shape[2] == 1 else int(math.floor(whole_shape[2] / 2 + 0.5)),
+    ]
+    frequency = 0.35
+    parameters = (frequency, 0.0, 0.0, math.inf, 5.0 / frequency, 0.0)
+    return {
+        "schema": DIFFERENTIAL_SOURCE_SCHEMA,
+        "workload": workload["name"],
+        "schedule": "yee-point-source-overwrite-v1",
+        "sources": [
+            {
+                "component": "Ex",
+                "native_type": "PointSourceEx",
+                "target_index": target,
+                "operation": "overwrite",
+                "model": {"id": 0, "name": "Continuous"},
+                "parameters": [
+                    _differential_float_token(value) for value in parameters
+                ],
+                "amplitude": _differential_float_token(
+                    workload.get("source_amp", 1e-3)
+                ),
+                "source_cell_medium": {
+                    "eps_inf": _differential_float_token(
+                        _expected_differential_source_medium(workload)[0]
+                    ),
+                    "mu_inf": _differential_float_token(
+                        _expected_differential_source_medium(workload)[1]
+                    ),
+                },
+            }
+        ],
+    }
+
+
+def _differential_capture_steps(
+    manifest: dict[str, Any], workload: dict[str, Any]
+) -> list[int]:
+    reference = manifest.get("reference")
+    _require(isinstance(reference, dict), "manifest reference contract is absent")
+    steps = workload.get("capture_steps", reference.get("capture_steps"))
+    _require(
+        isinstance(steps, list)
+        and bool(steps)
+        and all(type(step) is int and step > 0 for step in steps)
+        and steps == sorted(set(steps)),
+        "differential source proof capture steps are malformed",
+    )
+    return steps
+
+
+def _differential_source_array_from_record(
+    value: Any, label: str
+) -> np.ndarray[Any, Any]:
+    _exact_keys(value, {"dtype", "shape", "data_hex"}, label)
+    dtype_name = value["dtype"]
+    _require(
+        isinstance(dtype_name, str) and 0 < len(dtype_name) <= 16,
+        f"{label} dtype is invalid",
+    )
+    try:
+        dtype = np.dtype(dtype_name)
+    except (TypeError, ValueError) as error:
+        raise EvidenceError(f"{label} dtype is invalid") from error
+    _require(
+        dtype.str == dtype_name
+        and dtype.fields is None
+        and dtype.subdtype is None
+        and dtype.kind in {"b", "i", "u", "f", "c"}
+        and 0 < dtype.itemsize <= 16,
+        f"{label} dtype is outside the raw source proof contract",
+    )
+    shape = value["shape"]
+    _require(
+        isinstance(shape, list)
+        and len(shape) <= MAX_NPZ_DIMENSIONS
+        and all(type(size) is int and 0 <= size <= 2**31 - 1 for size in shape),
+        f"{label} shape is invalid",
+    )
+    size_bytes = math.prod(shape) * dtype.itemsize
+    data_hex = value["data_hex"]
+    _require(
+        size_bytes <= MAX_DIFFERENTIAL_SOURCE_PROOF_ARRAY_BYTES
+        and isinstance(data_hex, str)
+        and len(data_hex) == 2 * size_bytes
+        and re.fullmatch(r"[0-9a-f]*", data_hex) is not None,
+        f"{label} exact bytes are invalid",
+    )
+    try:
+        raw = bytes.fromhex(data_hex)
+        array = np.frombuffer(raw, dtype=dtype).reshape(shape).copy()
+    except (MemoryError, TypeError, ValueError) as error:
+        raise EvidenceError(f"{label} exact bytes are invalid") from error
+    _require(
+        array.flags.c_contiguous and array.tobytes(order="C").hex() == data_hex,
+        f"{label} exact bytes are not canonical",
+    )
+    return array
+
+
+def _differential_continuous_point_source_value(
+    time: float, *, paired_real: bool
+) -> float | complex:
+    since_start = time - DIFFERENTIAL_POINT_SOURCE_START
+    until_end = DIFFERENTIAL_POINT_SOURCE_END - time
+    if since_start < 0.0 or until_end < 0.0:
+        return 0j if paired_real else 0.0
+    rise = (
+        math.sin(0.5 * math.pi * since_start / DIFFERENTIAL_POINT_SOURCE_WIDTH) ** 2
+        if since_start < DIFFERENTIAL_POINT_SOURCE_WIDTH
+        else 1.0
+    )
+    fall = (
+        math.sin(0.5 * math.pi * until_end / DIFFERENTIAL_POINT_SOURCE_WIDTH) ** 2
+        if until_end < DIFFERENTIAL_POINT_SOURCE_WIDTH
+        else 1.0
+    )
+    angle = (
+        2.0 * math.pi * DIFFERENTIAL_POINT_SOURCE_FREQUENCY * time
+        + DIFFERENTIAL_POINT_SOURCE_PHASE
+    )
+    value = rise * fall * complex(math.cos(angle), math.sin(angle))
+    return value if paired_real else value.real
+
+
+def _differential_point_source_value_matches(
+    actual: Any,
+    expected: Any,
+    dtype: np.dtype[Any],
+    scale: float,
+) -> bool:
+    actual_array = np.asarray(actual)
+    expected_array = np.asarray(expected)
+    if not np.isfinite(actual_array).all() or not np.isfinite(expected_array).all():
+        return False
+    if np.all(expected_array == 0):
+        return bool(np.array_equal(actual_array, expected_array))
+    real_dtype = np.empty((), dtype=dtype).real.dtype
+    tolerance = (
+        DIFFERENTIAL_POINT_SOURCE_VALUE_ULP_FACTOR
+        * np.finfo(real_dtype).eps
+        * max(float(np.max(np.abs(expected_array))), abs(float(scale)))
+    )
+    return bool(np.all(np.abs(actual_array - expected_array) <= tolerance))
+
+
+def _expected_differential_point_source_time_step(
+    workload: dict[str, Any],
+) -> float:
+    resolution = float(workload["resolution"])
+    eps_inf, mu_inf = _expected_differential_source_medium(workload)
+    value = (
+        DIFFERENTIAL_POINT_SOURCE_COURANT_RATIO
+        * math.sqrt(eps_inf * mu_inf)
+        / (resolution * math.sqrt(3.0))
+    )
+    _require(
+        math.isfinite(value) and value > 0.0,
+        "differential PointSource workload has no finite Courant time step",
+    )
+    return value
+
+
+def _validate_differential_source_time(
+    value: np.ndarray[Any, Any],
+    manifest: dict[str, Any],
+    workload: dict[str, Any],
+    captured_step: int,
+    label: str,
+) -> None:
+    expected_step = manifest["reference"]["precondition_steps"] + captured_step
+    expected_time_step = _expected_differential_point_source_time_step(workload)
+    _require(
+        value.shape == (3,)
+        and value.dtype == np.dtype("float64")
+        and np.isfinite(value).all()
+        and float(value[2]) == expected_time_step
+        and float(value[0]) == expected_step
+        and float(value[1]) == expected_step * float(value[2]),
+        f"{label} differs from the relative capture clock",
+    )
+
+
+def _differential_source_role_preimage_sha256(
+    workload: dict[str, Any], role: str, captures: list[dict[str, Any]]
+) -> str:
+    _require(
+        role in {"reference", "candidate"},
+        "differential PointSource proof role is invalid",
+    )
+    source_role = "native" if role == "reference" else "candidate"
+    payload = {
+        "schema": DIFFERENTIAL_SOURCE_PREIMAGE_SCHEMA,
+        "workload": workload["name"],
+        "role": role,
+        "captures": [
+            {"step": capture["step"], "arrays": capture[source_role]}
+            for capture in captures
+        ],
+    }
+    raw = json.dumps(
+        payload,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _differential_point_source_field_shape(
+    workload: dict[str, Any],
+) -> tuple[int, int, int]:
+    resolution = float(workload["resolution"])
+    whole_shape = [
+        1 if float(length) == 0.0 else int(np.rint(float(length) * resolution))
+        for length in workload["size"]
+    ]
+    return (whole_shape[0], whole_shape[1] + 1, whole_shape[2] + 1)
+
+
+def _validate_differential_source_proof(
+    reference: np.ndarray[Any, Any],
+    candidate: np.ndarray[Any, Any],
+    manifest: dict[str, Any],
+    workload: dict[str, Any],
+    precision: str,
+    semantic_contract: dict[str, Any],
+    label: str,
+) -> None:
+    _require(
+        reference.dtype == candidate.dtype == np.dtype("uint8")
+        and reference.ndim == candidate.ndim == 1
+        and 0 < reference.size <= MAX_DIFFERENTIAL_SOURCE_PROOF_BYTES
+        and np.array_equal(reference, candidate),
+        f"{label} PointSource raw proof bytes differ",
+    )
+    raw = reference.tobytes()
+    proof = _strict_json_bytes(
+        raw,
+        f"{label} PointSource raw proof",
+        max_bytes=MAX_DIFFERENTIAL_SOURCE_PROOF_BYTES,
+    )
+    _exact_keys(
+        proof,
+        {
+            "schema",
+            "workload",
+            "reference_preimage_sha256",
+            "candidate_preimage_sha256",
+            "captures",
+        },
+        f"{label} PointSource raw proof",
+    )
+    reference_digest = proof["reference_preimage_sha256"]
+    candidate_digest = proof["candidate_preimage_sha256"]
+    _require(
+        proof["schema"] == DIFFERENTIAL_SOURCE_PROOF_SCHEMA
+        and proof["workload"] == workload["name"]
+        and isinstance(reference_digest, str)
+        and SHA256_RE.fullmatch(reference_digest) is not None
+        and isinstance(candidate_digest, str)
+        and SHA256_RE.fullmatch(candidate_digest) is not None
+        and reference_digest != candidate_digest
+        and raw
+        == json.dumps(
+            proof,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode(),
+        f"{label} PointSource raw proof identity differs",
+    )
+    capture_steps = _differential_capture_steps(manifest, workload)
+    expected_steps = [0, *capture_steps]
+    captures = proof["captures"]
+    _require(
+        isinstance(captures, list)
+        and len(captures) == len(expected_steps)
+        and all(isinstance(capture, dict) for capture in captures)
+        and [capture.get("step") for capture in captures] == expected_steps,
+        f"{label} PointSource raw proof capture closure differs",
+    )
+    for index, capture in enumerate(captures):
+        _exact_keys(
+            capture,
+            {"step", "native", "candidate"},
+            f"{label} PointSource raw proof capture {index}",
+        )
+    _require(
+        reference_digest
+        == _differential_source_role_preimage_sha256(workload, "reference", captures)
+        and candidate_digest
+        == _differential_source_role_preimage_sha256(workload, "candidate", captures),
+        f"{label} PointSource raw preimage digest differs from canonical bytes",
+    )
+    source = semantic_contract["sources"][0]
+    amplitude = float(workload.get("source_amp", 1e-3))
+    medium = _expected_differential_source_medium(workload)
+    paired_real = bool(workload.get("complex"))
+    try:
+        candidate_dtype = np.dtype(precision)
+    except (TypeError, ValueError) as error:
+        raise EvidenceError(f"{label} source precision is invalid") from error
+    _require(
+        candidate_dtype in {np.dtype("float32"), np.dtype("float64")},
+        f"{label} source precision is outside the frozen contract",
+    )
+    channels = 2 if paired_real else 1
+    expected_parameters = np.asarray(
+        [
+            DIFFERENTIAL_POINT_SOURCE_FREQUENCY,
+            DIFFERENTIAL_POINT_SOURCE_PHASE,
+            DIFFERENTIAL_POINT_SOURCE_START,
+            DIFFERENTIAL_POINT_SOURCE_END,
+            DIFFERENTIAL_POINT_SOURCE_WIDTH,
+            0.0,
+        ],
+        dtype=candidate_dtype,
+    )
+    expected_amplitude = np.asarray(amplitude, dtype=candidate_dtype)
+    field_shape = _differential_point_source_field_shape(workload)
+    target = source["target_index"]
+    flat_target = int(np.ravel_multi_index(tuple(target), field_shape))
+    for capture, captured_step in zip(captures, expected_steps, strict=True):
+        capture_label = f"{label} PointSource raw proof step {captured_step}"
+        _exact_keys(capture, {"step", "native", "candidate"}, capture_label)
+        _require(
+            type(capture["step"]) is int and capture["step"] == captured_step,
+            f"{capture_label} identity differs",
+        )
+        native = capture["native"]
+        torch_source = capture["candidate"]
+        _exact_keys(native, {"time", "indices", "values"}, f"{capture_label} native")
+        _exact_keys(
+            torch_source,
+            {"time", "packed_indices", "packed_values", "live"},
+            f"{capture_label} candidate",
+        )
+        live_records = torch_source["live"]
+        _exact_keys(
+            live_records,
+            set(DIFFERENTIAL_POINT_SOURCE_LIVE_ARRAYS),
+            f"{capture_label} candidate live",
+        )
+        native_time = _differential_source_array_from_record(
+            native["time"], f"{capture_label} native time"
+        )
+        candidate_time = _differential_source_array_from_record(
+            torch_source["time"], f"{capture_label} candidate time"
+        )
+        _validate_differential_source_time(
+            native_time,
+            manifest,
+            workload,
+            captured_step,
+            f"{capture_label} native time",
+        )
+        _validate_differential_source_time(
+            candidate_time,
+            manifest,
+            workload,
+            captured_step,
+            f"{capture_label} candidate time",
+        )
+        _require(
+            np.array_equal(native_time, candidate_time),
+            f"{capture_label} native and candidate clocks differ",
+        )
+        native_indices = _differential_source_array_from_record(
+            native["indices"], f"{capture_label} native indices"
+        )
+        native_values = _differential_source_array_from_record(
+            native["values"], f"{capture_label} native values"
+        )
+        oscillator = _differential_continuous_point_source_value(
+            float(native_time[1]), paired_real=paired_real
+        )
+        _require(
+            native_indices.shape == (1, 3)
+            and native_indices.dtype == np.dtype(np.intc)
+            and native_indices.astype(np.int64).tolist() == [target]
+            and native_values.shape == (4,)
+            and native_values.dtype == np.dtype("complex128")
+            and _differential_point_source_value_matches(
+                native_values[0], complex(amplitude), np.dtype("complex128"), amplitude
+            )
+            and _differential_point_source_value_matches(
+                native_values[1], complex(medium[0]), np.dtype("complex128"), medium[0]
+            )
+            and _differential_point_source_value_matches(
+                native_values[2], complex(medium[1]), np.dtype("complex128"), medium[1]
+            )
+            and _differential_point_source_value_matches(
+                native_values[3], oscillator, np.dtype("complex128"), 1.0
+            ),
+            f"{capture_label} native semantics differ from the workload",
+        )
+        live = {
+            name: _differential_source_array_from_record(
+                live_records[name], f"{capture_label} candidate live {name}"
+            )
+            for name in DIFFERENTIAL_POINT_SOURCE_LIVE_ARRAYS
+        }
+        evaluated_time = float(candidate_time[1]) - 0.5 * float(candidate_time[2])
+        evaluated = _differential_continuous_point_source_value(
+            evaluated_time, paired_real=paired_real
+        )
+        expected_evaluated = expected_amplitude.item() * np.asarray(
+            (
+                [complex(evaluated).real, complex(evaluated).imag]
+                if channels == 2
+                else [float(evaluated)]
+            )
+        )
+        _require(
+            live["overwrite_targets"].dtype == np.dtype("int64")
+            and live["overwrite_targets"].shape == (1,)
+            and int(live["overwrite_targets"][0]) == flat_target
+            and live["overwrite_models"].dtype == np.dtype("int8")
+            and live["overwrite_models"].shape == (1,)
+            and int(live["overwrite_models"][0]) == source["model"]["id"]
+            and live["overwrite_parameters"].dtype == candidate_dtype
+            and live["overwrite_parameters"].shape == (1, 6)
+            and np.array_equal(live["overwrite_parameters"][0], expected_parameters)
+            and live["overwrite_amplitudes"].dtype == candidate_dtype
+            and live["overwrite_amplitudes"].shape == (1,)
+            and np.array_equal(live["overwrite_amplitudes"][0], expected_amplitude)
+            and live["_overwrite_values"].dtype == candidate_dtype
+            and live["_overwrite_values"].shape == (1, channels)
+            and _differential_point_source_value_matches(
+                live["_overwrite_values"][0],
+                expected_evaluated,
+                candidate_dtype,
+                expected_amplitude.item(),
+            ),
+            f"{capture_label} candidate overwrite semantics differ from the workload",
+        )
+        for name, shape, dtype in (
+            ("additive_targets", (0,), np.dtype("int64")),
+            ("additive_models", (0,), np.dtype("int8")),
+            ("additive_parameters", (0, 6), candidate_dtype),
+            ("additive_amplitudes", (0,), candidate_dtype),
+            ("_additive_values", (0, channels), candidate_dtype),
+        ):
+            _require(
+                live[name].shape == shape and live[name].dtype == dtype,
+                f"{capture_label} has an unexpected additive source",
+            )
+        packed_indices = _differential_source_array_from_record(
+            torch_source["packed_indices"],
+            f"{capture_label} candidate packed indices",
+        )
+        packed_values = _differential_source_array_from_record(
+            torch_source["packed_values"],
+            f"{capture_label} candidate packed values",
+        )
+        expected_packed_values = (
+            np.concatenate(
+                (
+                    np.asarray(
+                        [0.0, float(live["overwrite_models"][0])], dtype=np.float64
+                    ),
+                    live["overwrite_parameters"][0].astype(np.float64),
+                    live["overwrite_amplitudes"].astype(np.float64),
+                )
+            )
+            .astype("<f8", copy=False)
+            .view("<u8")
+        )
+        _require(
+            packed_indices.dtype == np.dtype("int64")
+            and packed_indices.shape == (1, 3)
+            and packed_indices.tolist() == [target]
+            and packed_values.dtype == np.dtype("<u8")
+            and packed_values.shape == (9,)
+            and np.array_equal(packed_values, expected_packed_values),
+            f"{capture_label} candidate packed semantics differ from live buffers",
+        )
+
+
+def _stable_differential_l2(value: np.ndarray) -> float:
+    magnitudes = np.abs(value).reshape(-1)
+    scale = float(np.max(magnitudes, initial=0.0))
+    if scale == 0.0:
+        return 0.0
+    scaled = magnitudes / scale
+    return scale * math.sqrt(float(np.sum(scaled * scaled, dtype=np.float64)))
+
+
+def _differential_norms(
+    reference: np.ndarray,
+    actual: np.ndarray,
+    floor: float,
+    *,
+    zero_exact: bool,
+) -> tuple[float, float]:
+    if reference.size == 0:
+        return (0.0, 0.0) if np.array_equal(reference, actual) else (math.inf,) * 2
+    difference = np.abs(actual - reference)
+    difference_linf = float(np.max(difference, initial=0.0))
+    reference_linf = float(np.max(np.abs(reference), initial=0.0))
+    if zero_exact and reference_linf == 0.0:
+        return (0.0, 0.0) if np.array_equal(reference, actual) else (math.inf,) * 2
+    linf_denominator = max(reference_linf, floor)
+    l2_denominator = max(
+        _stable_differential_l2(reference), floor * math.sqrt(reference.size)
+    )
+    linf = (
+        0.0
+        if difference_linf == 0.0
+        else math.inf if linf_denominator == 0.0 else difference_linf / linf_denominator
+    )
+    difference_l2 = _stable_differential_l2(difference)
+    l2 = (
+        0.0
+        if difference_l2 == 0.0
+        else math.inf if l2_denominator == 0.0 else difference_l2 / l2_denominator
+    )
+    return linf, l2
+
+
+def _recompute_differential_metrics(
+    reference: dict[str, np.ndarray],
+    actual: dict[str, np.ndarray],
+    comparison: dict[str, Any],
+    label: str,
+    *,
+    array_comparisons: dict[str, dict[str, Any]] | None = None,
+) -> tuple[dict[str, float], bool]:
+    _require(
+        set(reference) == set(actual),
+        f"{label} projection array closure differs",
+    )
+    if array_comparisons is not None:
+        _require(
+            set(array_comparisons) == set(reference),
+            f"{label} per-array comparison closure differs",
+        )
+    maximum_abs = 0.0
+    maximum_relative = 0.0
+    maximum_linf = 0.0
+    maximum_l2 = 0.0
+    passed = True
+    for name in reference:
+        left = reference[name]
+        right = actual[name]
+        array_comparison = (
+            comparison if array_comparisons is None else array_comparisons[name]
+        )
+        mode = array_comparison.get("mode")
+        floor = (
+            array_comparison.get("absolute_scale_floor")
+            if mode == DIFFERENTIAL_NORMALIZED_MODE
+            else array_comparison.get("atol")
+        )
+        _require(
+            type(floor) is float and math.isfinite(floor) and floor >= 0.0,
+            f"{label} array {name} comparison scale floor is invalid",
+        )
+        _require(
+            left.shape == right.shape and left.dtype == right.dtype,
+            f"{label} array {name} shape or dtype differs",
+        )
+        _require(
+            np.isfinite(left).all() and np.isfinite(right).all(),
+            f"{label} array {name} contains non-finite values",
+        )
+        integer_exact = left.dtype.kind in {"b", "i", "u"}
+        zero_reference = not bool(np.any(left))
+        difference = (
+            np.abs(right.astype(np.float64) - left.astype(np.float64))
+            if integer_exact
+            else np.abs(right - left)
+        )
+        maximum_abs = max(maximum_abs, float(np.max(difference, initial=0.0)))
+        denominator = np.maximum(
+            np.abs(left), floor if floor > 0 else np.finfo(float).tiny
+        )
+        maximum_relative = max(
+            maximum_relative,
+            float(np.max(difference / denominator, initial=0.0)),
+        )
+        if integer_exact or zero_reference:
+            equal = np.array_equal(left, right)
+            linf = l2 = 0.0 if equal else math.inf
+            passed = passed and bool(equal)
+        else:
+            linf, l2 = _differential_norms(
+                left,
+                right,
+                floor,
+                zero_exact=True,
+            )
+            if mode == DIFFERENTIAL_ELEMENTWISE_MODE:
+                passed = passed and bool(
+                    np.allclose(
+                        right,
+                        left,
+                        rtol=array_comparison["rtol"],
+                        atol=array_comparison["atol"],
+                    )
+                )
+            else:
+                passed = passed and (
+                    linf <= array_comparison["linf_limit"]
+                    and l2 <= array_comparison["l2_limit"]
+                )
+        maximum_linf = max(maximum_linf, linf)
+        maximum_l2 = max(maximum_l2, l2)
+    return (
+        {
+            "maximum_abs_error": maximum_abs,
+            "maximum_relative_error": maximum_relative,
+            "maximum_normalized_linf_error": maximum_linf,
+            "maximum_normalized_l2_error": maximum_l2,
+        },
+        passed,
+    )
+
+
+def _expected_completion_differential_records(
+    manifest: dict[str, Any], scope: str
+) -> list[dict[str, str]]:
+    _require(
+        scope in FROZEN_DIFFERENTIAL_RECORDS_BY_SCOPE,
+        f"unknown differential scope {scope!r}",
+    )
+    frozen = FROZEN_DIFFERENTIAL_RECORDS_BY_SCOPE[scope]
+    for case, _device, _precision in frozen:
+        _manifest_case(manifest, case)
+    if scope == "paired-real":
+        manifest_names = [
+            case.get("name")
+            for case in manifest.get("correctness", ())
+            if case.get("complex") is True
+        ]
+        frozen_names = list(dict.fromkeys(case for case, _device, _precision in frozen))
+        _require(
+            manifest_names == frozen_names,
+            "paired-real manifest cases differ from the frozen closure",
+        )
+    return [
+        {
+            "case": case,
+            "device": device,
+            "precision": precision,
+        }
+        for case, device, precision in frozen
+    ]
+
+
+def _is_normalized_differential_record(scope: str, record: dict[str, str]) -> bool:
+    return (
+        scope,
+        record["case"],
+        record["device"],
+    ) == DIFFERENTIAL_NORMALIZED_CASE
+
+
+def _expected_differential_projection_steps(
+    manifest: dict[str, Any], scope: str, record: dict[str, str]
+) -> list[int]:
+    workload = _manifest_case(manifest, record["case"])
+    reference = manifest.get("reference")
+    _require(isinstance(reference, dict), "manifest reference contract is absent")
+    capture_steps = workload.get("capture_steps", reference.get("capture_steps"))
+    _require(
+        capture_steps == list(FROZEN_DIFFERENTIAL_CAPTURE_STEPS),
+        "differential capture steps differ from the frozen contract",
+    )
+    if _is_normalized_differential_record(scope, record):
+        _require(
+            set(DIFFERENTIAL_NORMALIZED_STEPS) - {0} <= set(capture_steps),
+            "normalized differential capture steps are absent from the manifest",
+        )
+        return list(DIFFERENTIAL_NORMALIZED_STEPS)
+    return [FROZEN_DIFFERENTIAL_CAPTURE_STEPS[-1]]
+
+
+def _expected_differential_projection_groups(
+    manifest: dict[str, Any], scope: str, record: dict[str, str]
+) -> list[list[int]]:
+    projection_steps = _expected_differential_projection_steps(manifest, scope, record)
+    groups = (
+        [list(group) for group in DIFFERENTIAL_NORMALIZED_GROUPS]
+        if _is_normalized_differential_record(scope, record)
+        else [projection_steps]
+    )
+    _require(
+        [step for group in groups for step in group] == projection_steps,
+        "differential projection groups do not close over the frozen steps",
+    )
+    return groups
+
+
+def _expected_differential_group_comment(
+    scope: str,
+    record: dict[str, str],
+    role: str,
+    ordinal: int,
+    steps: list[int],
+    candidate: dict[str, str],
+) -> bytes:
+    _require(role in {"reference", "candidate"}, "differential group role is invalid")
+    _exact_keys(
+        candidate,
+        {"candidate_git_commit", "candidate_git_status", "manifest_sha256"},
+        "differential group candidate evidence",
+    )
+    return json.dumps(
+        {
+            "schema": DIFFERENTIAL_GROUP_NPZ_SCHEMA,
+            "scope": scope,
+            "case": record["case"],
+            "device": record["device"],
+            "role": role,
+            "ordinal": ordinal,
+            "steps": steps,
+            "candidate_evidence": candidate,
+        },
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+
+
+def _differential_projection_name(value: Any, label: str) -> str:
+    _require(isinstance(value, str) and bool(value), f"{label} name is empty")
+    path = PurePosixPath(value)
+    _require(
+        not path.is_absolute()
+        and path.as_posix() == value
+        and all(part not in {"", ".", ".."} for part in path.parts),
+        f"{label} name is not canonical",
+    )
+    return value
+
+
+def _expected_differential_field_arrays(steps: list[int]) -> list[str]:
+    return [
+        f"step/{step}/field/{component}" for step in steps for component in FIELD_ARRAYS
+    ]
+
+
+def _expected_differential_physical_arrays(
+    steps: list[int], *, normalized: bool
+) -> list[str]:
+    if not normalized:
+        return []
+    return [
+        f"step/{step}/{suffix}"
+        for step in steps
+        for suffix in DIFFERENTIAL_PHYSICAL_SUFFIXES
+    ]
+
+
+def _expected_differential_persistent_arrays(
+    steps: list[int], case: str, label: str
+) -> list[str]:
+    try:
+        updater_labels = DIFFERENTIAL_CASE_UPDATER_LABELS[case]
+    except KeyError as error:
+        raise EvidenceError(
+            f"{label} has no frozen persistent inventory for {case!r}"
+        ) from error
+    expected_suffixes = sorted(
+        f"state/{component}/{updater}/{kind}"
+        for component in FIELD_ARRAYS
+        for updater in updater_labels
+        for kind in ("indices", "values")
+    )
+    expected = [
+        f"step/{step}/{suffix}" for step in steps for suffix in expected_suffixes
+    ]
+    return expected
+
+
+def _validate_differential_persistent_arrays(
+    value: Any, steps: list[int], case: str, label: str
+) -> list[str]:
+    expected = _expected_differential_persistent_arrays(steps, case, label)
+    _require(
+        isinstance(value, list)
+        and all(
+            _differential_projection_name(name, f"{label} persistent array") == name
+            for name in value
+        )
+        and value == expected,
+        f"{label} persistent array closure differs from the frozen case",
+    )
+    return expected
+
+
+def _differential_active_model_names(case: str, label: str) -> tuple[str, ...]:
+    try:
+        updater_labels = DIFFERENTIAL_CASE_UPDATER_LABELS[case]
+    except KeyError as error:
+        raise EvidenceError(
+            f"{label} has no frozen updater inventory for {case!r}"
+        ) from error
+    try:
+        models = {
+            model
+            for updater_label in updater_labels
+            for model in DIFFERENTIAL_STRATEGY_TOLERANCE_MODELS[
+                updater_label.split("-", 1)[-1]
+            ]
+        }
+    except KeyError as error:
+        raise EvidenceError(
+            f"{label} has no frozen tolerance model for an active updater"
+        ) from error
+    return tuple(sorted(models))
+
+
+def _expected_differential_comparison(
+    manifest: dict[str, Any], scope: str, record: dict[str, str]
+) -> dict[str, Any]:
+    dtype = _differential_comparison_dtype(scope, record)
+    frozen = _differential_model_tolerance(
+        manifest,
+        _differential_active_model_names(record["case"], "differential comparison"),
+        dtype,
+    )
+    if _is_normalized_differential_record(scope, record):
+        return {
+            "mode": DIFFERENTIAL_NORMALIZED_MODE,
+            "linf_limit": DIFFERENTIAL_NORMALIZED_LIMIT,
+            "l2_limit": DIFFERENTIAL_NORMALIZED_LIMIT,
+            "absolute_scale_floor": DIFFERENTIAL_NORMALIZED_ABSOLUTE_SCALE_FLOOR,
+            "all_zero_reference": "exact",
+        }
+    return {
+        "mode": DIFFERENTIAL_ELEMENTWISE_MODE,
+        "rtol": frozen["rtol"],
+        "atol": frozen["atol"],
+    }
+
+
+def _differential_comparison_dtype(scope: str, record: dict[str, str]) -> str:
+    return (
+        "complex128"
+        if scope == "paired-real" and record["device"] == "cpu"
+        else record["precision"]
+    )
+
+
+def _differential_model_tolerance(
+    manifest: dict[str, Any], models: tuple[str, ...], dtype: str
+) -> dict[str, float]:
+    if not models:
+        return {"rtol": 0.0, "atol": 0.0}
+    tolerances = []
+    for model in models:
+        model_dtype = "float64" if model == "dm2" and dtype == "complex128" else dtype
+        try:
+            tolerance = FROZEN_DIFFERENTIAL_TOLERANCES[model][model_dtype]
+            manifest_tolerance = manifest["tolerances"]["torch"][model][model_dtype]
+        except (KeyError, TypeError) as error:
+            raise EvidenceError(
+                f"there is no frozen {model_dtype} tolerance for {model}"
+            ) from error
+        _exact_keys(
+            manifest_tolerance,
+            {"rtol", "atol"},
+            f"manifest {model} {model_dtype} tolerance",
+        )
+        parsed = {name: float(tolerance[name]) for name in ("rtol", "atol")}
+        observed = {name: float(manifest_tolerance[name]) for name in ("rtol", "atol")}
+        _require(
+            observed == parsed
+            and all(math.isfinite(value) and value >= 0.0 for value in parsed.values()),
+            f"manifest {model} {model_dtype} tolerance differs from the frozen contract",
+        )
+        tolerances.append(parsed)
+    frozen = {
+        name: max(tolerance[name] for tolerance in tolerances)
+        for name in ("rtol", "atol")
+    }
+    return frozen
+
+
+def _expected_differential_array_comparisons(
+    manifest: dict[str, Any],
+    scope: str,
+    record: dict[str, str],
+    names: list[str],
+) -> dict[str, dict[str, Any]]:
+    suite_comparison = _expected_differential_comparison(manifest, scope, record)
+    dtype = _differential_comparison_dtype(scope, record)
+    result = {}
+    for name in names:
+        parts = name.split("/")
+        step = (
+            int(parts[1])
+            if len(parts) >= 2
+            and parts[0] == "step"
+            and parts[1].isdigit()
+            and str(int(parts[1])) == parts[1]
+            else None
+        )
+        if suite_comparison["mode"] == DIFFERENTIAL_NORMALIZED_MODE:
+            _require(
+                step in DIFFERENTIAL_NORMALIZED_STEPS
+                or name in {DIFFERENTIAL_SOURCE_ARRAY, DIFFERENTIAL_SOURCE_PROOF_ARRAY},
+                f"no frozen normalized differential step for {name!r}",
+            )
+            if step in DIFFERENTIAL_NORMALIZED_RESIDUAL_STEPS or step is None:
+                result[name] = suite_comparison
+                continue
+        models = _differential_active_model_names(
+            record["case"], "differential array comparison"
+        )
+        if len(parts) == 6 and parts[2] == "state" and parts[-1] == "values":
+            strategy = parts[4].split("-", 1)[-1]
+            try:
+                models = DIFFERENTIAL_STRATEGY_TOLERANCE_MODELS[strategy]
+            except KeyError as error:
+                raise EvidenceError(
+                    f"no frozen differential tolerance model for {strategy!r}"
+                ) from error
+        tolerance = _differential_model_tolerance(manifest, models, dtype)
+        result[name] = {
+            "mode": DIFFERENTIAL_ELEMENTWISE_MODE,
+            "rtol": tolerance["rtol"],
+            "atol": tolerance["atol"],
+        }
+    return result
+
+
+def _expected_differential_field_dtype(
+    scope: str, record: dict[str, str]
+) -> np.dtype[Any]:
+    if scope == "paired-real":
+        return np.dtype("complex128" if record["device"] == "cpu" else "complex64")
+    return np.dtype(record["precision"])
+
+
+def _differential_whole_shape(workload: dict[str, Any]) -> tuple[int, int, int]:
+    size = workload.get("size")
+    resolution = workload.get("resolution")
+    _require(
+        isinstance(size, list)
+        and len(size) == 3
+        and all(
+            type(length) in {int, float} and math.isfinite(float(length))
+            for length in size
+        )
+        and type(resolution) in {int, float}
+        and math.isfinite(float(resolution))
+        and float(resolution) > 0.0,
+        "differential workload grid contract is invalid",
+    )
+    shape = tuple(
+        1 if float(length) == 0.0 else int(np.rint(float(length) * resolution))
+        for length in size
+    )
+    _require(
+        all(value > 0 for value in shape),
+        "differential workload grid shape is invalid",
+    )
+    return shape
+
+
+def _expected_differential_field_shapes(
+    workload: dict[str, Any],
+) -> dict[str, tuple[int, int, int]]:
+    nx, ny, nz = _differential_whole_shape(workload)
+    return {
+        "Ex": (nx, ny + 1, nz + 1),
+        "Ey": (nx + 1, ny, nz + 1),
+        "Ez": (nx + 1, ny + 1, nz),
+        "Hx": (nx, ny + 1, nz + 1),
+        "Hy": (nx + 1, ny, nz + 1),
+        "Hz": (nx + 1, ny + 1, nz),
+    }
+
+
+def _differential_strategy_pole_count(workload: dict[str, Any], prefix: str) -> int:
+    families = workload.get("families", ())
+    _require(
+        isinstance(families, (list, tuple))
+        and all(isinstance(name, str) for name in families),
+        "differential workload material families are invalid",
+    )
+    names = [workload.get("material", ""), *families]
+    return 4 if f"{prefix}-4" in names else 1
+
+
+def _differential_persistent_state_width(
+    workload: dict[str, Any], component: str, updater_label: str
+) -> int:
+    strategy = updater_label.split("-", 1)[-1]
+    if strategy == "Cpml":
+        return 2
+    if strategy == "Upml":
+        return 1
+    if strategy in {"Dielectric", "Dummy"} or component.startswith("H"):
+        return 0
+    if strategy == "Drude":
+        return 2 * _differential_strategy_pole_count(workload, "drude")
+    if strategy == "Lorentz":
+        return 2 * _differential_strategy_pole_count(workload, "lorentz")
+    if strategy == "DcpAde":
+        return 7
+    if strategy in {"DcpPlrc", "DcpPlrc+DcpRc", "DcpRc"}:
+        return 6
+    if strategy == "Dm2":
+        _require(
+            _differential_strategy_pole_count(workload, "dm2") == 1,
+            "no frozen differential state width exists for multi-transition DM2",
+        )
+        return 3
+    raise EvidenceError(f"no frozen persistent-state width for {strategy!r}")
+
+
+def _differential_array_digest(array: np.ndarray) -> str:
+    digest = hashlib.sha256()
+    digest.update(b"issue-123-differential-array-v1\0")
+    digest.update(array.dtype.str.encode("ascii"))
+    digest.update(b"\0")
+    digest.update(json.dumps(list(array.shape), separators=(",", ":")).encode("ascii"))
+    digest.update(b"\0")
+    digest.update(memoryview(array).cast("B"))
+    return digest.hexdigest()
+
+
+def _differential_persistent_geometry_sha256(
+    arrays: dict[str, np.ndarray],
+    workload: dict[str, Any],
+    case: str,
+    step: int,
+) -> str:
+    try:
+        updater_labels = DIFFERENTIAL_CASE_UPDATER_LABELS[case]
+    except KeyError as error:
+        raise EvidenceError(
+            f"no frozen persistent geometry exists for {case!r}"
+        ) from error
+    digest = hashlib.sha256()
+    digest.update(b"issue-123-persistent-geometry-v1\0")
+    digest.update(case.encode())
+    digest.update(b"\0")
+    digest.update(
+        json.dumps(
+            workload,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode()
+    )
+    digest.update(b"\0")
+    suffixes = sorted(
+        f"state/{component}/{updater_label}/indices"
+        for component in FIELD_ARRAYS
+        for updater_label in updater_labels
+    )
+    for suffix in suffixes:
+        indices = arrays[f"step/{step}/{suffix}"]
+        _require(
+            indices.dtype == np.dtype("int64")
+            and indices.ndim == 2
+            and indices.shape[1:] == (3,)
+            and indices.flags.c_contiguous,
+            f"persistent geometry input is invalid for {suffix}",
+        )
+        canonical = indices.astype("<i8", copy=False)
+        digest.update(suffix.encode())
+        digest.update(b"\0")
+        digest.update(json.dumps(list(canonical.shape), separators=(",", ":")).encode())
+        digest.update(b"\0")
+        digest.update(canonical.tobytes(order="C"))
+    return digest.hexdigest()
+
+
+def _recompute_differential_physical_arrays(
+    arrays: dict[str, np.ndarray], step: int
+) -> dict[str, np.ndarray]:
+    summary = [0.0, 0.0, 0.0, 0.0, 1.0]
+    result: dict[str, np.ndarray] = {}
+    for component in FIELD_ARRAYS:
+        field = arrays[f"step/{step}/field/{component}"]
+        magnitude = np.abs(field)
+        summary[0] += float(np.sum(magnitude * magnitude))
+        summary[1] = max(summary[1], float(np.max(magnitude)))
+        summary[2] += float(np.sum(magnitude[0] * magnitude[0]))
+        summary[3] += float(np.sum(magnitude[-1] * magnitude[-1]))
+        summary[4] = float(bool(summary[4]) and np.isfinite(field).all())
+        axes = tuple(range(1, field.ndim))
+        line = np.mean(field, axis=axes) if axes else field
+        result[f"step/{step}/physical/spectrum/{component}"] = np.ascontiguousarray(
+            np.abs(np.fft.fft(line))
+        )
+    result[f"step/{step}/physical/summary"] = np.asarray(summary, dtype=np.float64)
+    return result
+
+
+def _validate_differential_projected_array_contract(
+    arrays: dict[str, np.ndarray],
+    workload: dict[str, Any],
+    scope: str,
+    record: dict[str, str],
+    projection_steps: list[int],
+    label: str,
+    *,
+    baseline_index_digests: dict[str, str] | None = None,
+) -> None:
+    field_shapes = _expected_differential_field_shapes(workload)
+    field_dtype = _expected_differential_field_dtype(scope, record)
+    physical_dtype = np.empty((), dtype=field_dtype).real.dtype
+    try:
+        updater_labels = DIFFERENTIAL_CASE_UPDATER_LABELS[record["case"]]
+    except KeyError as error:
+        raise EvidenceError(
+            f"{label} has no frozen updater inventory for {record['case']!r}"
+        ) from error
+    if baseline_index_digests is None:
+        baseline_index_digests = {}
+    for step in projection_steps:
+        for component, shape in field_shapes.items():
+            field = arrays[f"step/{step}/field/{component}"]
+            _require(
+                field.shape == shape and field.dtype == field_dtype,
+                f"{label} field shape or dtype differs for step/{step}/{component}",
+            )
+        if _is_normalized_differential_record(scope, record):
+            for component, shape in field_shapes.items():
+                spectrum = arrays[f"step/{step}/physical/spectrum/{component}"]
+                _require(
+                    spectrum.shape == (shape[0],) and spectrum.dtype == physical_dtype,
+                    f"{label} physical spectrum shape or dtype differs for "
+                    f"step/{step}/{component}",
+                )
+            summary = arrays[f"step/{step}/physical/summary"]
+            _require(
+                summary.shape == (5,) and summary.dtype == np.dtype("float64"),
+                f"{label} physical summary shape or dtype differs for step/{step}",
+            )
+            recomputed_physical = _recompute_differential_physical_arrays(arrays, step)
+            for name, expected in recomputed_physical.items():
+                _require(
+                    np.array_equal(arrays[name], expected),
+                    f"{label} {name} differs from the projected fields",
+                )
+        for component, shape in field_shapes.items():
+            covered = np.zeros(math.prod(shape), dtype=np.bool_)
+            for updater_label in updater_labels:
+                prefix = f"step/{step}/state/{component}/{updater_label}"
+                indices = arrays[f"{prefix}/indices"]
+                values = arrays[f"{prefix}/values"]
+                _require(
+                    indices.dtype == np.dtype("int64")
+                    and indices.ndim == 2
+                    and indices.shape[1:] == (3,)
+                    and indices.shape[0] > 0,
+                    f"{label} persistent index shape or dtype differs for {prefix}",
+                )
+                _require(
+                    all(
+                        bool(np.all(indices[:, axis] >= 0))
+                        and bool(np.all(indices[:, axis] < shape[axis]))
+                        for axis in range(3)
+                    ),
+                    f"{label} persistent indices are outside the field for {prefix}",
+                )
+                linear = np.ravel_multi_index(tuple(indices.T), shape)
+                _require(
+                    len(np.unique(linear)) == len(linear)
+                    and not bool(np.any(covered[linear])),
+                    f"{label} persistent indices overlap for {prefix}",
+                )
+                covered[linear] = True
+                width = _differential_persistent_state_width(
+                    workload, component, updater_label
+                )
+                _require(
+                    values.dtype == np.dtype("complex128")
+                    and values.shape == (indices.shape[0] * width,),
+                    f"{label} persistent value shape or dtype differs for {prefix}",
+                )
+                suffix = f"state/{component}/{updater_label}/indices"
+                index_digest = _differential_array_digest(indices)
+                previous = baseline_index_digests.get(suffix)
+                if previous is None:
+                    baseline_index_digests[suffix] = index_digest
+                else:
+                    _require(
+                        previous == index_digest,
+                        f"{label} persistent indices change across capture groups "
+                        f"for {suffix}",
+                    )
+            _require(
+                bool(np.all(covered)),
+                f"{label} persistent indices do not cover the complete field for "
+                f"step/{step}/{component}",
+            )
+        try:
+            expected_geometry = FROZEN_DIFFERENTIAL_PERSISTENT_GEOMETRY_SHA256_BY_CASE[
+                record["case"]
+            ]
+        except KeyError as error:
+            raise EvidenceError(
+                f"{label} has no frozen persistent geometry digest for "
+                f"{record['case']!r}"
+            ) from error
+        _require(
+            _differential_persistent_geometry_sha256(
+                arrays, workload, record["case"], step
+            )
+            == expected_geometry,
+            f"{label} persistent geometry differs from the frozen case for "
+            f"step/{step}",
+        )
+
+
+def _expected_differential_precision_limitation(
+    reference: dict[str, np.ndarray],
+    *,
+    normalized: bool,
+    label: str,
+) -> dict[str, Any] | None:
+    if not normalized:
+        return None
+    field_names = [f"step/100/field/{component}" for component in FIELD_ARRAYS]
+    maximum = max(
+        float(np.max(np.abs(reference[name]), initial=0.0)) for name in field_names
+    )
+    float32_maximum = float(np.finfo(np.float32).max)
+    _require(
+        math.isfinite(maximum) and maximum > float32_maximum,
+        f"{label} native reference does not prove the float32 range limitation",
+    )
+    return {
+        "contract_id": CUDA_PRECISION_LIMITATION_REVIEW["contract_id"],
+        "rejected_precision": CUDA_PRECISION_LIMITATION_REVIEW["rejected_precision"],
+        "accepted_precision": CUDA_PRECISION_LIMITATION_REVIEW["accepted_precision"],
+        "reference_step": 100,
+        "reference_field_max_abs": maximum,
+        "rejected_precision_max": float32_maximum,
+        "range_exceeded": True,
+        "reason": CUDA_PRECISION_LIMITATION_REVIEW["reason"],
+    }
 
 
 def _validate_differential(
@@ -2846,7 +6031,7 @@ def _validate_differential(
     candidate: dict[str, str],
     *,
     scope: str,
-) -> None:
+) -> list[dict[str, Any]]:
     try:
         from benchmarks.issue123_differential import (
             validate_differential_document,
@@ -2890,35 +6075,34 @@ def _validate_differential(
         f"{scope} differential index",
     )
     _require(
-        _is_exact_int(document["schema_version"], 1)
+        _is_exact_int(document["schema_version"], DIFFERENTIAL_SCHEMA_VERSION)
         and document["kind"] == DIFFERENTIAL_KIND
         and document["scope"] == scope
         and document["candidate_evidence"] == candidate,
         f"{scope} differential contract differs",
     )
-    if scope == "paired-real":
-        names = [
-            case["name"]
-            for case in manifest.get("correctness", ())
-            if case.get("complex") is True
-        ]
-        expected = [
-            {"case": name, "device": device}
-            for name in names
-            for device in ("cpu", "cuda:0")
-        ]
-    elif scope == "single-gpu-cuda":
-        expected = [{"case": name, "device": "cuda:0"} for name in SINGLE_GPU_CASES]
-    else:
-        raise EvidenceError(f"unknown differential scope {scope!r}")
-    _require(document["required_cases"] == expected, f"{scope} required cases differ")
+    expected = _expected_completion_differential_records(manifest, scope)
+    _require(
+        _type_exact_equal(document["required_cases"], expected),
+        f"{scope} required cases differ",
+    )
     cases = document["cases"]
     _require(
         isinstance(cases, list)
-        and [{"case": case.get("case"), "device": case.get("device")} for case in cases]
+        and [
+            {
+                "case": case.get("case"),
+                "device": case.get("device"),
+                "precision": case.get("precision"),
+            }
+            for case in cases
+        ]
         == expected,
         f"{scope} evaluated case closure differs",
     )
+    used_projection_paths: set[str] = set()
+    used_projection_digests: set[str] = set()
+    source_bindings = []
     for index, (record, expected_record) in enumerate(
         zip(cases, expected, strict=True)
     ):
@@ -2928,91 +6112,280 @@ def _validate_differential(
             {
                 "case",
                 "device",
+                "precision",
+                "projection_steps",
+                "projection_groups",
+                "reference_source",
+                "candidate_source",
                 "reference",
                 "candidate",
                 "field_arrays",
+                "physical_arrays",
                 "persistent_arrays",
-                "rtol",
-                "atol",
-                "maximum_abs_error",
-                "maximum_relative_error",
+                "contract_arrays",
+                "comparison",
+                "precision_limitation",
+                "metrics",
                 "passed",
             },
             label,
         )
+        projection_steps = _expected_differential_projection_steps(
+            manifest, scope, expected_record
+        )
+        projection_groups = _expected_differential_projection_groups(
+            manifest, scope, expected_record
+        )
         _require(
             record["case"] == expected_record["case"]
-            and record["device"] == expected_record["device"],
+            and record["device"] == expected_record["device"]
+            and record["precision"] == expected_record["precision"]
+            and _type_exact_equal(record["projection_steps"], projection_steps)
+            and _type_exact_equal(record["projection_groups"], projection_groups),
             f"{label} identity differs",
         )
+        sources = {}
+        for role in ("reference", "candidate"):
+            descriptor = _validate_descriptor(
+                record[f"{role}_source"], candidate, f"{label} {role} source"
+            )
+            _require(
+                descriptor["media_type"] == MEDIA_TYPE_NPZ,
+                f"{label} {role} source media type differs",
+            )
+            sources[role] = descriptor
+        source_bindings.append(
+            {
+                **copy.deepcopy(expected_record),
+                "reference_source": sources["reference"],
+                "candidate_source": sources["candidate"],
+            }
+        )
+        normalized = _is_normalized_differential_record(scope, expected_record)
         field_arrays = record["field_arrays"]
+        physical_arrays = record["physical_arrays"]
         persistent_arrays = record["persistent_arrays"]
+        contract_arrays = record["contract_arrays"]
+        expected_fields = _expected_differential_field_arrays(projection_steps)
+        expected_physical = _expected_differential_physical_arrays(
+            projection_steps, normalized=normalized
+        )
         _require(
-            field_arrays == list(FIELD_ARRAYS),
+            _type_exact_equal(field_arrays, expected_fields),
             f"{label} complete field array list differs",
         )
         _require(
-            isinstance(persistent_arrays, list)
-            and bool(persistent_arrays)
-            and all(isinstance(name, str) and name for name in persistent_arrays)
-            and len(set(persistent_arrays)) == len(persistent_arrays),
-            f"{label} persistent array closure is absent",
+            _type_exact_equal(physical_arrays, expected_physical),
+            f"{label} physical array closure differs",
         )
-        names = field_arrays + persistent_arrays
-        _require(len(set(names)) == len(names), f"{label} repeats array names")
-        reference = reader.load(
-            record["reference"],
-            f"{label} reference",
-            json_document=False,
-            expected_media_types={MEDIA_TYPE_NPZ},
+        persistent_arrays = _validate_differential_persistent_arrays(
+            persistent_arrays,
+            projection_steps,
+            expected_record["case"],
+            label,
         )
-        actual = reader.load(
-            record["candidate"],
-            f"{label} candidate",
-            json_document=False,
-            expected_media_types={MEDIA_TYPE_NPZ},
-        )
-        reference_arrays = _npz_arrays(reference, names, f"{label} reference")
-        actual_arrays = _npz_arrays(actual, names, f"{label} candidate")
-        rtol = _finite_float(record["rtol"], f"{label} rtol")
-        atol = _finite_float(record["atol"], f"{label} atol")
         _require(
-            rtol >= 0.0 and atol >= 0.0, f"{label} tolerances must be non-negative"
+            _type_exact_equal(
+                contract_arrays,
+                [DIFFERENTIAL_SOURCE_ARRAY, DIFFERENTIAL_SOURCE_PROOF_ARRAY],
+            ),
+            f"{label} source contract array closure differs",
         )
-        maximum_abs = 0.0
-        maximum_relative = 0.0
-        all_close = True
-        for name in names:
-            left = reference_arrays[name]
-            right = actual_arrays[name]
-            _require(
-                left.shape == right.shape and left.dtype == right.dtype,
-                f"{label} array {name} shape or dtype differs",
-            )
-            _require(
-                np.isfinite(left).all() and np.isfinite(right).all(),
-                f"{label} array {name} contains non-finite values",
-            )
-            difference = np.abs(right - left)
-            maximum_abs = max(maximum_abs, float(np.max(difference, initial=0.0)))
-            denominator = np.maximum(
-                np.abs(left), atol if atol > 0 else np.finfo(float).tiny
-            )
-            maximum_relative = max(
-                maximum_relative,
-                float(np.max(difference / denominator, initial=0.0)),
-            )
-            all_close = all_close and bool(
-                np.allclose(right, left, rtol=rtol, atol=atol)
-            )
-        _close(record["maximum_abs_error"], maximum_abs, f"{label} maximum abs error")
-        _close(
-            record["maximum_relative_error"],
-            maximum_relative,
-            f"{label} maximum relative error",
+        names = field_arrays + physical_arrays + persistent_arrays + contract_arrays
+        _require(len(set(names)) == len(names), f"{label} repeats array names")
+        reference_descriptors = record["reference"]
+        candidate_descriptors = record["candidate"]
+        _require(
+            isinstance(reference_descriptors, list)
+            and isinstance(candidate_descriptors, list)
+            and len(reference_descriptors) == len(projection_groups)
+            and len(candidate_descriptors) == len(projection_groups),
+            f"{label} projection descriptor group closure differs",
         )
-        _require(all_close and record["passed"] is True, f"{label} differential failed")
+        workload = _manifest_case(manifest, expected_record["case"])
+        expected_source = _expected_differential_source_contract(workload)
+        expected_comparison = _expected_differential_comparison(
+            manifest, scope, expected_record
+        )
+        _require(
+            _type_exact_equal(record["comparison"], expected_comparison),
+            f"{label} comparison contract differs from the manifest",
+        )
+        field_dtype = _expected_differential_field_dtype(scope, expected_record)
+        aggregate_metrics: dict[str, float] | None = None
+        aggregate_passed = True
+        expected_limitation = None
+        baseline_index_digests: dict[str, str] = {}
+        source_contract_raw: bytes | None = None
+        source_proof_raw: bytes | None = None
+        for ordinal, group_steps in enumerate(projection_groups):
+            group_label = f"{label} projection group {ordinal}"
+            group_fields = _expected_differential_field_arrays(group_steps)
+            group_physical = _expected_differential_physical_arrays(
+                group_steps, normalized=normalized
+            )
+            group_persistent = _expected_differential_persistent_arrays(
+                group_steps, expected_record["case"], group_label
+            )
+            group_names = (
+                group_fields + group_physical + group_persistent + contract_arrays
+            )
+            loaded_arrays: dict[str, dict[str, np.ndarray]] = {}
+            for role, descriptors in (
+                ("reference", reference_descriptors),
+                ("candidate", candidate_descriptors),
+            ):
+                loaded = reader.load(
+                    descriptors[ordinal],
+                    f"{group_label} {role}",
+                    json_document=False,
+                    expected_media_types={MEDIA_TYPE_NPZ},
+                )
+                descriptor = loaded.descriptor
+                _require(
+                    descriptor["path"] not in used_projection_paths
+                    and descriptor["sha256"] not in used_projection_digests,
+                    f"{group_label} projection descriptor path or digest is reused",
+                )
+                used_projection_paths.add(descriptor["path"])
+                used_projection_digests.add(descriptor["sha256"])
+                loaded_arrays[role] = _npz_arrays(
+                    loaded,
+                    group_names,
+                    f"{group_label} {role}",
+                    expected_comment=_expected_differential_group_comment(
+                        scope,
+                        expected_record,
+                        role,
+                        ordinal,
+                        group_steps,
+                        candidate,
+                    ),
+                )
+            reference_arrays = loaded_arrays["reference"]
+            actual_arrays = loaded_arrays["candidate"]
+            _validate_differential_projected_array_contract(
+                reference_arrays,
+                workload,
+                scope,
+                expected_record,
+                group_steps,
+                f"{group_label} reference",
+                baseline_index_digests=baseline_index_digests,
+            )
+            _validate_differential_projected_array_contract(
+                actual_arrays,
+                workload,
+                scope,
+                expected_record,
+                group_steps,
+                f"{group_label} candidate",
+                baseline_index_digests=baseline_index_digests,
+            )
+            _require(
+                all(
+                    reference_arrays[name].dtype
+                    == actual_arrays[name].dtype
+                    == field_dtype
+                    for name in group_fields
+                ),
+                f"{group_label} field dtype differs from the frozen scope",
+            )
+            source_reference = reference_arrays[DIFFERENTIAL_SOURCE_ARRAY]
+            source_actual = actual_arrays[DIFFERENTIAL_SOURCE_ARRAY]
+            _require(
+                source_reference.dtype == source_actual.dtype == np.dtype("uint8")
+                and source_reference.ndim == source_actual.ndim == 1
+                and 0 < source_reference.size <= 64 * 1024
+                and np.array_equal(source_reference, source_actual),
+                f"{group_label} PointSource contract bytes differ",
+            )
+            current_source_raw = source_reference.tobytes()
+            _require(
+                _strict_json_bytes(
+                    current_source_raw,
+                    f"{group_label} PointSource contract",
+                    max_bytes=64 * 1024,
+                )
+                == expected_source
+                and current_source_raw
+                == json.dumps(
+                    expected_source,
+                    allow_nan=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ).encode(),
+                f"{group_label} PointSource contract differs from the workload",
+            )
+            _validate_differential_source_proof(
+                reference_arrays[DIFFERENTIAL_SOURCE_PROOF_ARRAY],
+                actual_arrays[DIFFERENTIAL_SOURCE_PROOF_ARRAY],
+                manifest,
+                workload,
+                expected_record["precision"],
+                expected_source,
+                group_label,
+            )
+            current_proof_raw = reference_arrays[
+                DIFFERENTIAL_SOURCE_PROOF_ARRAY
+            ].tobytes()
+            if source_contract_raw is None:
+                source_contract_raw = current_source_raw
+                source_proof_raw = current_proof_raw
+            else:
+                _require(
+                    current_source_raw == source_contract_raw
+                    and current_proof_raw == source_proof_raw,
+                    f"{group_label} source contract or proof changes across groups",
+                )
+            if normalized and 100 in group_steps:
+                expected_limitation = _expected_differential_precision_limitation(
+                    reference_arrays,
+                    normalized=True,
+                    label=group_label,
+                )
+            group_metrics, group_passed = _recompute_differential_metrics(
+                reference_arrays,
+                actual_arrays,
+                expected_comparison,
+                group_label,
+                array_comparisons=_expected_differential_array_comparisons(
+                    manifest,
+                    scope,
+                    expected_record,
+                    group_names,
+                ),
+            )
+            if aggregate_metrics is None:
+                aggregate_metrics = group_metrics
+            else:
+                aggregate_metrics = {
+                    name: max(aggregate_metrics[name], value)
+                    for name, value in group_metrics.items()
+                }
+            aggregate_passed = aggregate_passed and group_passed
+            del loaded, loaded_arrays, reference_arrays, actual_arrays
+        _require(
+            _type_exact_equal(record["precision_limitation"], expected_limitation),
+            f"{label} precision limitation proof differs",
+        )
+        _require(
+            aggregate_metrics is not None,
+            f"{label} has no projection groups",
+        )
+        _exact_keys(
+            record["metrics"],
+            set(aggregate_metrics),
+            f"{label} metrics",
+        )
+        for name, value in aggregate_metrics.items():
+            _close(record["metrics"][name], value, f"{label} {name}")
+        _require(
+            aggregate_passed and record["passed"] is True,
+            f"{label} differential failed",
+        )
     _require(document["passed"] is True, f"{scope} embedded suite pass is false")
+    return source_bindings
 
 
 def _tuning_cases(document: Any, label: str) -> list[dict[str, Any]]:
@@ -3367,9 +6740,668 @@ def _validate_cuda_memory(result: dict[str, Any], label: str) -> None:
         and growth <= 1024 * 1024
         and type(peak) is int
         and peak > 0
+        and peak >= before
+        and peak >= after
         and type(reserved) is int
         and reserved >= peak,
         f"{label} CUDA memory gate failed",
+    )
+
+
+def _expected_cuda_field_buffer_sizes(
+    result: dict[str, Any], label: str
+) -> tuple[dict[str, int], int]:
+    workload = result.get("workload")
+    runtime = result.get("runtime")
+    _require(
+        isinstance(workload, dict)
+        and isinstance(workload.get("size"), list)
+        and len(workload["size"]) == 3
+        and all(
+            not isinstance(length, bool)
+            and isinstance(length, (int, float))
+            and math.isfinite(float(length))
+            and float(length) >= 0.0
+            for length in workload["size"]
+        )
+        and not isinstance(workload.get("resolution"), bool)
+        and isinstance(workload.get("resolution"), (int, float))
+        and math.isfinite(float(workload["resolution"]))
+        and float(workload["resolution"]) > 0.0,
+        f"{label} workload grid is invalid",
+    )
+    _require(isinstance(runtime, dict), f"{label} runtime is absent")
+    precision = runtime.get("precision")
+    channels = runtime.get("field_storage_channels")
+    try:
+        element_size = np.dtype(precision).itemsize
+    except (TypeError, ValueError) as error:
+        raise EvidenceError(f"{label} field precision is invalid") from error
+    _require(
+        precision in {"float32", "float64"}
+        and type(channels) is int
+        and channels in {1, 2},
+        f"{label} field storage contract is invalid",
+    )
+    resolution = float(workload["resolution"])
+    whole_shape = tuple(
+        1 if float(length) == 0.0 else int(np.rint(float(length) * resolution))
+        for length in workload["size"]
+    )
+    _require(
+        all(size > 0 for size in whole_shape),
+        f"{label} workload grid has an empty non-collapsed dimension",
+    )
+    nx, ny, nz = whole_shape
+    shapes = {
+        "Ex": (nx, ny + 1, nz + 1),
+        "Ey": (nx + 1, ny, nz + 1),
+        "Ez": (nx + 1, ny + 1, nz),
+        "Hx": (nx, ny + 1, nz + 1),
+        "Hy": (nx + 1, ny, nz + 1),
+        "Hz": (nx + 1, ny + 1, nz),
+    }
+    expected = {
+        f"state.{component}": math.prod(shapes[component]) * channels * element_size
+        for component in FIELD_ARRAYS
+    }
+    return expected, element_size
+
+
+_MATERIAL_DIELECTRIC = (("dielectric", ()),)
+_MATERIAL_PML_DIELECTRIC = (("cpml", (2,)), ("dielectric", ()))
+_MATERIAL_FULL_2D = (
+    ("cpml", (2,)),
+    ("dcp-ade", (1, 2)),
+    ("dcp-plrc", (1, 2)),
+    ("dcp-rc", (1, 2)),
+    ("dielectric", ()),
+    ("dm2", (1,)),
+    ("drude", (1,)),
+    ("lorentz", (1,)),
+)
+_MATERIAL_FULL_3D = tuple(
+    signature for signature in _MATERIAL_FULL_2D if signature[0] != "dm2"
+)
+_MATERIAL_CROSSOVER_3D_TRANSVERSE = tuple(
+    signature for signature in _MATERIAL_FULL_3D if signature[0] != "dcp-ade"
+)
+_MATERIAL_BLOCH_3D_ELECTRIC = (("drude", (4,)),)
+_MATERIAL_OVERLAP_ELECTRIC = (("dielectric", ()), ("drude", (1,)))
+
+_FROZEN_CUDA_MATERIAL_TOPOLOGY_BY_CASE = {
+    "coverage-1-contiguous": (
+        _MATERIAL_FULL_2D,
+        _MATERIAL_PML_DIELECTRIC,
+        _MATERIAL_PML_DIELECTRIC,
+        _MATERIAL_PML_DIELECTRIC,
+        _MATERIAL_PML_DIELECTRIC,
+        _MATERIAL_PML_DIELECTRIC,
+    ),
+    "coverage-1-fragmented": (_MATERIAL_PML_DIELECTRIC,) * len(FIELD_ARRAYS),
+    **{
+        name: (_MATERIAL_FULL_2D,) * 3 + (_MATERIAL_PML_DIELECTRIC,) * 3
+        for name in (
+            "coverage-10-contiguous",
+            "coverage-10-fragmented",
+            "coverage-50-contiguous",
+            "coverage-50-fragmented",
+            "coverage-90-contiguous",
+            "coverage-90-fragmented",
+            "cpu-crossover-2d",
+            "cpu-large-2d",
+            "single-gpu-2d",
+        )
+    },
+    "bloch-2d": (_MATERIAL_DIELECTRIC,) * len(FIELD_ARRAYS),
+    "bloch-3d": (_MATERIAL_BLOCH_3D_ELECTRIC,) * 3 + (_MATERIAL_DIELECTRIC,) * 3,
+    "cpu-crossover-3d": (
+        _MATERIAL_FULL_3D,
+        _MATERIAL_CROSSOVER_3D_TRANSVERSE,
+        _MATERIAL_CROSSOVER_3D_TRANSVERSE,
+        _MATERIAL_PML_DIELECTRIC,
+        _MATERIAL_PML_DIELECTRIC,
+        _MATERIAL_PML_DIELECTRIC,
+    ),
+    **{
+        name: (_MATERIAL_FULL_3D,) * 3 + (_MATERIAL_PML_DIELECTRIC,) * 3
+        for name in ("cpu-large-3d", "single-gpu-3d")
+    },
+    **{
+        name: (_MATERIAL_OVERLAP_ELECTRIC,) * 3 + (_MATERIAL_DIELECTRIC,) * 3
+        for name in REGION_INVARIANCE_CASES
+    },
+}
+
+# Counts are frozen from the independently built CPU eager planner. They bind
+# producer diagnostics without rerunning a workload-sized planner during audit.
+_FROZEN_CUDA_MATERIAL_TARGETS_BY_CASE = {
+    "coverage-1-contiguous": (
+        (570, 79, 79, 79, 11244, 79, 79, 79),
+        (538, 11750),
+        (663, 11625),
+        (538, 11750),
+        (570, 11718),
+        (444, 11844),
+    ),
+    "coverage-1-fragmented": (
+        (570, 11718),
+        (538, 11750),
+        (663, 11625),
+        (538, 11750),
+        (570, 11718),
+        (444, 11844),
+    ),
+    "coverage-10-contiguous": (
+        (570, 158, 158, 158, 10770, 158, 158, 158),
+        (538, 156, 156, 156, 10814, 156, 156, 156),
+        (663, 158, 158, 158, 10677, 158, 158, 158),
+        (538, 11750),
+        (570, 11718),
+        (444, 11844),
+    ),
+    "coverage-10-fragmented": (
+        (570, 38, 38, 38, 11490, 38, 38, 38),
+        (538, 40, 40, 40, 11510, 40, 40, 40),
+        (663, 38, 38, 38, 11397, 38, 38, 38),
+        (538, 11750),
+        (570, 11718),
+        (444, 11844),
+    ),
+    "coverage-50-contiguous": (
+        (570, 790, 790, 790, 6978, 790, 790, 790),
+        (538, 780, 780, 702, 7226, 780, 780, 702),
+        (663, 790, 790, 711, 7043, 790, 790, 711),
+        (538, 11750),
+        (570, 11718),
+        (444, 11844),
+    ),
+    "coverage-50-fragmented": (
+        (570, 209, 209, 190, 10502, 209, 209, 190),
+        (538, 180, 180, 200, 10630, 180, 180, 200),
+        (663, 171, 171, 190, 10561, 171, 171, 190),
+        (538, 11750),
+        (570, 11718),
+        (444, 11844),
+    ),
+    "coverage-90-contiguous": (
+        (570, 1343, 1343, 1422, 3344, 1422, 1422, 1422),
+        (538, 1404, 1404, 1404, 3482, 1326, 1326, 1404),
+        (663, 1422, 1422, 1422, 3251, 1343, 1343, 1422),
+        (538, 11750),
+        (570, 11718),
+        (444, 11844),
+    ),
+    "coverage-90-fragmented": (
+        (570, 323, 323, 342, 9704, 342, 342, 342),
+        (538, 380, 380, 360, 9550, 360, 360, 360),
+        (663, 361, 361, 342, 9535, 342, 342, 342),
+        (538, 11750),
+        (570, 11718),
+        (444, 11844),
+    ),
+    "bloch-2d": ((768,),) * len(FIELD_ARRAYS),
+    "bloch-3d": ((3240,),) * len(FIELD_ARRAYS),
+    "cpu-crossover-2d": (
+        (1730, 99, 99, 66, 23342, 99, 99, 66),
+        (1730, 32, 32, 64, 23614, 32, 32, 64),
+        (1575, 33, 33, 66, 23761, 33, 33, 66),
+        (1730, 23870),
+        (1730, 23870),
+        (1884, 23716),
+    ),
+    "cpu-crossover-3d": (
+        (59738, 1664, 832, 832, 197414, 832, 832),
+        (59354, 896, 1792, 197414, 1792, 896),
+        (59546, 832, 1664, 197606, 1664, 832),
+        (62700, 199444),
+        (63084, 199060),
+        (63012, 199132),
+    ),
+    "cpu-large-2d": (
+        (7010, 6288, 6288, 6288, 364862, 6288, 6288, 6288),
+        (7010, 6468, 6468, 6600, 363518, 6468, 6468, 6600),
+        (6375, 6419, 6419, 6550, 364449, 6419, 6419, 6550),
+        (7010, 402590),
+        (7010, 402590),
+        (7644, 401956),
+    ),
+    "cpu-large-3d": (
+        (455390, 41472, 38016, 38016, 1448226, 38016, 38016),
+        (457670, 39936, 39936, 39936, 1439802, 39936, 39936),
+        (455030, 41472, 41472, 41472, 1434762, 41472, 41472),
+        (445364, 1651788),
+        (443012, 1654140),
+        (445476, 1651676),
+    ),
+    "single-gpu-2d": (
+        (5114, 16093, 16093, 16302, 946486, 16093, 16093, 16302),
+        (5114, 16590, 16590, 16380, 944342, 16590, 16590, 16380),
+        (6135, 16511, 16511, 16302, 943793, 16511, 16511, 16302),
+        (5114, 1043462),
+        (5114, 1043462),
+        (4092, 1044484),
+    ),
+    "single-gpu-3d": (
+        (179168, 18240, 16416, 18240, 618016, 18240, 16416),
+        (177612, 15360, 17280, 17280, 622644, 17280, 17280),
+        (179064, 14592, 16416, 16416, 625416, 16416, 16416),
+        (184608, 700128),
+        (186112, 698624),
+        (184528, 700208),
+    ),
+    "equivalent-region-1": (
+        (100, 156),
+        (100, 156),
+        (87, 169),
+        (256,),
+        (256,),
+        (256,),
+    ),
+    "equivalent-region-32": (
+        (100, 156),
+        (100, 156),
+        (87, 169),
+        (256,),
+        (256,),
+        (256,),
+    ),
+}
+
+_FROZEN_CUDA_MATERIAL_PLAN_SHA256_BY_CASE = {
+    "coverage-1-contiguous": "17571d7373c7d2b189fd3cc1d68c51411b60304f06e31f42168351d9d9380156",
+    "coverage-1-fragmented": "e899671163916142f49b3df31ba36f15de8d184a4dc73a0d58e1dabe2ed6a40a",
+    "coverage-10-contiguous": "c0815491d7ecd431a1e9496ca52ec770f952c11e691ce288d8bb3a798edd943e",
+    "coverage-10-fragmented": "02de13164cd7891cfffc2ddf00ab7541cca7d15b45d08f32528504dea430a112",
+    "coverage-50-contiguous": "a04192fcceb904df34c72407af52afea3d9948e9860702512469e6862042f435",
+    "coverage-50-fragmented": "36660abe6f8b9b7c6f6f84255507ac6efe93ff35aeea4b097ec1fbecfa2a29e9",
+    "coverage-90-contiguous": "94d9f6513555ee77532d64cab03c885bff3e7d65bc78ea944b0cc5f78942690b",
+    "coverage-90-fragmented": "9621d41404470a477846be640dfd168c31c290d8dfbfe4d477b000f65b5b8654",
+    "bloch-2d": "831af63fbf973a24b10c25fd1a4a61196d448d42bd79803666d168c4a1209ffe",
+    "bloch-3d": "9dabf5d501df89e97b2160a816c8bee2e3acaf5b00c3db669836fb8c34c707a3",
+    "cpu-crossover-2d": "0a9b738ce299f1922748df9a0271a1a2e83903c9c46af33de062d5ed418d6122",
+    "cpu-crossover-3d": "dc7f1ea3f41fb5c9850d132e03e803f5fc496f9f3872a85704312b01bb7c59ef",
+    "cpu-large-2d": "b195a094c40f29d40f3e1449a017af0c50f144f60365f623dacfa1016f72b837",
+    "cpu-large-3d": "d943c23b32a6c3ca4a49916ff8860d30a7c26674446f7fc913821b3db119bd1b",
+    "single-gpu-2d": "7f9044cd13075c9266d1e149fcb61f0af6c08d715cbf01ac986c0e428b4799f3",
+    "single-gpu-3d": "fc7f1af1ea0afc0475276db42c443d7a3750dcbbfc1aa0158b2a9cbb08f8a5b9",
+    "equivalent-region-1": "6f63be609961ce4bc7a5dc847c52ae103aa493bd46dbb9b92f806cea6fa33245",
+    "equivalent-region-32": "6f63be609961ce4bc7a5dc847c52ae103aa493bd46dbb9b92f806cea6fa33245",
+}
+
+
+def _frozen_cuda_material_contract(workload: dict[str, Any], label: str) -> tuple[
+    tuple[tuple[tuple[str, tuple[int, ...]], ...], ...],
+    tuple[tuple[int, ...], ...],
+]:
+    _require(isinstance(workload, dict), f"{label} workload is absent")
+    name = workload.get("name")
+    topology = _FROZEN_CUDA_MATERIAL_TOPOLOGY_BY_CASE.get(name)
+    targets = _FROZEN_CUDA_MATERIAL_TARGETS_BY_CASE.get(name)
+    _require(
+        topology is not None
+        and targets is not None
+        and name in _FROZEN_CUDA_MATERIAL_PLAN_SHA256_BY_CASE
+        and len(topology) == len(FIELD_ARRAYS)
+        and len(targets) == len(FIELD_ARRAYS)
+        and all(
+            signatures == tuple(sorted(signatures))
+            and len(signatures) == len(component_targets)
+            and all(type(count) is int and count > 0 for count in component_targets)
+            for signatures, component_targets in zip(topology, targets, strict=True)
+        ),
+        f"{label} case has no valid frozen lowered-material contract",
+    )
+    return topology, targets
+
+
+def _expected_cuda_persistent_material_inventory(
+    workload: dict[str, Any], label: str
+) -> dict[str, tuple[str, int, int]]:
+    """Derive exact mutable names, widths, and targets from frozen lowering."""
+
+    topology, target_counts = _frozen_cuda_material_contract(workload, label)
+    inventory: dict[str, tuple[str, int, int]] = {}
+    dm2_ordinal = 0
+    for component, signatures, component_targets in zip(
+        FIELD_ARRAYS, topology, target_counts, strict=True
+    ):
+        for bucket_index, ((model, state_shape), targets) in enumerate(
+            zip(signatures, component_targets, strict=True)
+        ):
+            prefix = f"bucket_{component.lower()}_{bucket_index}"
+            entries: tuple[tuple[str, int], ...] = ()
+            family = "dispersive"
+            if model in {"cpml", "upml"}:
+                entries = (
+                    (f"pml_{component.lower()}_{bucket_index}_state", sum(state_shape)),
+                )
+                family = "pml"
+            elif model in {"drude", "lorentz"}:
+                poles = state_shape[0]
+                entries = tuple(
+                    (f"{prefix}_{suffix}", poles) for suffix in ("previous", "current")
+                )
+            elif model == "dcp-ade":
+                poles, points = state_shape
+                entries = (
+                    (f"{prefix}_field_old", 1),
+                    (f"{prefix}_pole_old", poles),
+                    (f"{prefix}_pole_now", poles),
+                    (f"{prefix}_point_old", points),
+                    (f"{prefix}_point_now", points),
+                )
+            elif model in {"dcp-plrc", "dcp-rc"}:
+                poles, points = state_shape
+                entries = (
+                    (f"{prefix}_pole_state", poles),
+                    (f"{prefix}_point_state", 2 * points),
+                )
+            elif model == "dm2":
+                transitions = state_shape[0]
+                entries = ((f"dm2_buckets.{dm2_ordinal}.u", 3 * transitions),)
+                family = "dm2"
+                dm2_ordinal += 1
+            for name, width in entries:
+                _require(
+                    name not in inventory and type(width) is int and width > 0,
+                    f"{label} persistent material inventory is inconsistent",
+                )
+                inventory[name] = (family, width, targets)
+    return inventory
+
+
+def _validate_frozen_cuda_material_plan(result: dict[str, Any], label: str) -> None:
+    workload = result["workload"]
+    topology, target_counts = _frozen_cuda_material_contract(workload, label)
+    diagnostics = result.get("diagnostics")
+    plan = diagnostics.get("material_plan") if isinstance(diagnostics, dict) else None
+    _require(
+        isinstance(plan, list)
+        and len(plan) == len(FIELD_ARRAYS)
+        and [record.get("component") for record in plan if isinstance(record, dict)]
+        == list(FIELD_ARRAYS),
+        f"{label} lowered material-plan component closure differs",
+    )
+    projection = []
+    precision = result["runtime"]["precision"]
+    for component, record, signatures, component_targets in zip(
+        FIELD_ARRAYS, plan, topology, target_counts, strict=True
+    ):
+        buckets = record.get("buckets")
+        _require(
+            type(record.get("launches")) is int
+            and record["launches"] == len(signatures)
+            and isinstance(buckets, list)
+            and len(buckets) == len(signatures),
+            f"{label} lowered material-plan {component} bucket closure differs",
+        )
+        projected_buckets = []
+        for index, (bucket, expected_signature, expected_targets) in enumerate(
+            zip(buckets, signatures, component_targets, strict=True)
+        ):
+            signature = bucket.get("signature") if isinstance(bucket, dict) else None
+            model, state_shape = expected_signature
+            if model == "dielectric":
+                expected_state_width = 0
+            elif model in {"cpml", "dm2"}:
+                expected_state_width = sum(state_shape)
+            elif model in {"drude", "lorentz"}:
+                expected_state_width = 2 * state_shape[0]
+            elif model == "dcp-ade":
+                expected_state_width = 1 + 2 * state_shape[0] + 2 * state_shape[1]
+            else:
+                expected_state_width = state_shape[0] + 2 * state_shape[1]
+            _require(
+                isinstance(signature, dict)
+                and set(signature) == {"model", "component", "precision", "state_shape"}
+                and signature["model"] == model
+                and signature["component"] == component
+                and signature["precision"] == precision
+                and signature["state_shape"] == list(state_shape)
+                and _is_exact_int(bucket.get("targets"), expected_targets)
+                and _is_exact_int(bucket.get("state_width"), expected_state_width),
+                f"{label} lowered material-plan {component} bucket {index} differs",
+            )
+            projected_buckets.append(
+                {
+                    "model": model,
+                    "state_shape": list(state_shape),
+                    "targets": expected_targets,
+                }
+            )
+        projection.append({"component": component, "buckets": projected_buckets})
+    _require(
+        _canonical_sha256(projection)
+        == _FROZEN_CUDA_MATERIAL_PLAN_SHA256_BY_CASE[workload["name"]],
+        f"{label} lowered material-plan digest differs",
+    )
+
+
+def _validate_cuda_state_finiteness(
+    result: dict[str, Any],
+    reference: dict[str, Any],
+    label: str,
+) -> None:
+    state = result.get("state_progress")
+    _exact_keys(
+        state,
+        {
+            "initial_checksum",
+            "post_warmup_checksum",
+            "post_one_step_checksum",
+            "final_checksum",
+            "changed_after_first_timed_step",
+            "one_step_count",
+            "expected_one_step_count",
+            "timed_step_count",
+            "expected_timed_step_count",
+            "profiler_step_count",
+            "expected_profiler_step_count",
+            "changed_buffers",
+            "fields_changed",
+            "all_fields_changed",
+            "pml_state_changed",
+            "dispersive_state_changed",
+            "dm2_state_changed",
+        },
+        f"{label} state progress",
+    )
+    checksum_names = (
+        "initial_checksum",
+        "post_warmup_checksum",
+        "post_one_step_checksum",
+        "final_checksum",
+    )
+    _require(
+        all(
+            not isinstance(state[name], bool)
+            and isinstance(state[name], (int, float))
+            and math.isfinite(float(state[name]))
+            and float(state[name]) >= 0
+            for name in checksum_names
+        ),
+        f"{label} state checksums are non-finite or malformed",
+    )
+    expected_counts = {
+        "expected_one_step_count": reference["performance_warmup_steps"] + 1,
+        "expected_timed_step_count": (
+            reference["performance_warmup_steps"]
+            + reference["performance_steps_per_repeat"]
+        ),
+        "expected_profiler_step_count": (
+            reference["performance_warmup_steps"]
+            + reference["performance_profile_steps"]
+        ),
+    }
+    observed_counts = {
+        "one_step_count": expected_counts["expected_one_step_count"],
+        "timed_step_count": expected_counts["expected_timed_step_count"],
+        "profiler_step_count": expected_counts["expected_profiler_step_count"],
+    }
+    _require(
+        all(
+            _is_exact_int(state[name], value)
+            for name, value in {**expected_counts, **observed_counts}.items()
+        ),
+        f"{label} state step counts differ from the benchmark contract",
+    )
+    changed = state["changed_buffers"]
+    field_names = {name.lower() for name in FIELD_ARRAYS}
+    changed_names = (
+        {name for name in changed if isinstance(name, str)}
+        if isinstance(changed, list)
+        else set()
+    )
+    material_inventory = _expected_cuda_persistent_material_inventory(
+        result["workload"], label
+    )
+    _validate_frozen_cuda_material_plan(result, label)
+    expected_material_flags = {
+        "pml_state_changed": any(
+            name in changed_names and family == "pml"
+            for name, (family, _width, _targets) in material_inventory.items()
+        ),
+        "dispersive_state_changed": any(
+            name in changed_names and family == "dispersive"
+            for name, (family, _width, _targets) in material_inventory.items()
+        ),
+        "dm2_state_changed": any(
+            name in changed_names and family == "dm2"
+            for name, (family, _width, _targets) in material_inventory.items()
+        ),
+    }
+    material_families = {
+        family for family, _width, _targets in material_inventory.values()
+    }
+    required_material_flags = {
+        "pml_state_changed": "pml" in material_families,
+        "dispersive_state_changed": "dispersive" in material_families,
+        "dm2_state_changed": "dm2" in material_families,
+    }
+    _require(
+        isinstance(changed, list)
+        and all(isinstance(name, str) and bool(name) for name in changed)
+        and changed == sorted(set(changed))
+        and state["fields_changed"] == sorted(set(changed) & field_names)
+        and state["all_fields_changed"] is (field_names <= set(changed))
+        and state["all_fields_changed"] is True
+        and all(
+            state[name] is expected
+            for name, expected in expected_material_flags.items()
+        )
+        and all(
+            not required or expected_material_flags[name]
+            for name, required in required_material_flags.items()
+        )
+        and state["changed_after_first_timed_step"]
+        is (state["post_one_step_checksum"] != state["final_checksum"]),
+        f"{label} changed dynamic-state summary differs",
+    )
+    finiteness = result.get("state_finiteness")
+    _exact_keys(
+        finiteness,
+        {"contract_id", "tracked_buffers", "stages", "passed"},
+        f"{label} state finiteness",
+    )
+    tracked = finiteness["tracked_buffers"]
+    tracked_names = (
+        set(tracked)
+        if isinstance(tracked, list) and all(isinstance(name, str) for name in tracked)
+        else set()
+    )
+    material_prefixes = ("pml_", "bucket_", "dm2_buckets.")
+    tracked_material_names = {
+        name for name in tracked_names if name.startswith(material_prefixes)
+    }
+    _require(
+        finiteness["contract_id"] == STATE_FINITENESS_CONTRACT_ID
+        and isinstance(tracked, list)
+        and all(isinstance(name, str) and bool(name) for name in tracked)
+        and tracked == sorted(set(tracked))
+        and bool(tracked)
+        and not any(
+            name.startswith("plan.") or ".state.plan." in name for name in tracked
+        )
+        and tracked_names
+        == field_names
+        | {"source_time", "time_step", "step_count"}
+        | set(material_inventory)
+        and set(changed) <= tracked_names
+        and tracked_material_names == set(material_inventory),
+        f"{label} finite-state buffer or material inventory closure differs",
+    )
+    stages = finiteness["stages"]
+    expected_stages = (
+        "initial",
+        "post_warmup",
+        "post_one_step",
+        "post_timed",
+        "post_profile",
+    )
+    _require(
+        isinstance(stages, dict) and set(stages) == set(expected_stages),
+        f"{label} finite-state stage closure differs",
+    )
+    profiler = result.get("profiler")
+    field_sizes = (
+        profiler.get("field_buffer_sizes_bytes") if isinstance(profiler, dict) else None
+    )
+    expected_field_sizes, element_size = _expected_cuda_field_buffer_sizes(
+        result, label
+    )
+    _require(
+        isinstance(field_sizes, dict)
+        and all(
+            type(field_sizes.get(name)) is int and field_sizes[name] == expected_size
+            for name, expected_size in expected_field_sizes.items()
+        )
+        and type(field_sizes.get("aggregate.all-fields")) is int
+        and field_sizes["aggregate.all-fields"] == sum(expected_field_sizes.values()),
+        f"{label} field-size inventory differs from the workload",
+    )
+    expected_field_elements = sum(expected_field_sizes.values()) // element_size
+    channels = result["runtime"]["field_storage_channels"]
+    expected_material_elements = sum(
+        width * targets * channels
+        for _family, width, targets in material_inventory.values()
+    )
+    expected_floating_buffers = len(FIELD_ARRAYS) + len(material_inventory) + 2
+    expected_floating_elements = (
+        expected_field_elements + expected_material_elements + 2
+    )
+    sizes = set()
+    for stage in expected_stages:
+        record = stages[stage]
+        _exact_keys(
+            record,
+            {
+                "floating_or_complex_buffer_count",
+                "floating_or_complex_element_count",
+                "nonfinite_element_count",
+                "finite",
+            },
+            f"{label} state finiteness {stage}",
+        )
+        _require(
+            type(record["floating_or_complex_buffer_count"]) is int
+            and record["floating_or_complex_buffer_count"] == expected_floating_buffers
+            and type(record["floating_or_complex_element_count"]) is int
+            and record["floating_or_complex_element_count"]
+            == expected_floating_elements
+            and _is_exact_int(record["nonfinite_element_count"], 0)
+            and record["finite"] is True,
+            f"{label} state finiteness {stage} failed",
+        )
+        sizes.add(
+            (
+                record["floating_or_complex_buffer_count"],
+                record["floating_or_complex_element_count"],
+            )
+        )
+    _require(
+        len(sizes) == 1 and finiteness["passed"] is True,
+        f"{label} finite-state shape changed or suite failed",
     )
 
 
@@ -3398,10 +7430,15 @@ def _validate_cuda_tuning_case(
     runtime = result.get("runtime")
     expected_representation = "paired-real-v1" if paired_real else "real-v1"
     expected_channels = 2 if paired_real else 1
+    expected_precision = (
+        CUDA_PERFORMANCE_PRECISION_BY_CASE[name]
+        if not paired_real and name in CUDA_PERFORMANCE_PRECISION_BY_CASE
+        else "float32"
+    )
     _require(
         isinstance(runtime, dict)
         and runtime.get("device") == "cuda:0"
-        and runtime.get("precision") == "float32"
+        and runtime.get("precision") == expected_precision
         and runtime.get("compile_policy") == "compile"
         and runtime.get("compile_mode") == "default"
         and runtime.get("explicit_cuda_graphs") is False
@@ -3412,7 +7449,7 @@ def _validate_cuda_tuning_case(
         and runtime.get("paired_real") is paired_real
         and runtime.get("field_storage_representation") == expected_representation
         and _is_exact_int(runtime.get("field_storage_channels"), expected_channels)
-        and runtime.get("field_storage_dtype") == "torch.float32",
+        and runtime.get("field_storage_dtype") == f"torch.{expected_precision}",
         f"{label} runtime/storage contract differs",
     )
     contract = result.get("benchmark_contract")
@@ -3427,6 +7464,7 @@ def _validate_cuda_tuning_case(
         and contract.get("sample_start") == "independently-restored-pre-warmup-state",
         f"{label} benchmark contract differs",
     )
+    _validate_cuda_state_finiteness(result, reference, label)
     _validate_tuning_acceptance(result, label)
     summary = result.get("measurements", {}).get("advance")
     raw, seconds = _raw_summary(
@@ -3970,7 +8008,7 @@ def _validate_policy_scope(
         "policy matrix uncompiled diagnostic trace closure differs",
     )
     paired = reader.load(scope["paired_real_differential"], "paired-real differential")
-    _validate_differential(
+    differential_source_bindings = _validate_differential(
         paired,
         reader,
         manifest,
@@ -4016,6 +8054,7 @@ def _validate_policy_scope(
         "matrix_count": len(cases),
         "paired_real": paired_tuning,
         "region_invariance": region,
+        "differential_source_bindings": differential_source_bindings,
     }
 
 
@@ -4095,6 +8134,7 @@ def _validate_single_gpu_scope(
     reader: ArtifactReader,
     manifest: dict[str, Any],
     candidate: dict[str, str],
+    trusted_runtime_receipts: tuple[LoadedArtifact, ...],
 ) -> dict[str, Any]:
     _exact_keys(
         scope,
@@ -4104,6 +8144,69 @@ def _validate_single_gpu_scope(
     artifact = reader.load(scope["cuda_gates"], "single-GPU CUDA gates")
     document = artifact.document
     _document_candidate_matches(document, candidate, required=True)
+    gate = document.get("cuda_suite_gate")
+    _exact_keys(
+        gate,
+        {
+            "contract_id",
+            "required_cases",
+            "required_case_precisions",
+            "reviewed_precision_limitations",
+            "required_correctness_runtime_modes",
+            "case_closure_complete",
+            "environment_complete",
+            "correctness_index_count",
+            "correctness_indexes",
+            "correctness_evidence_bound",
+            "timing_statistics",
+            "trace_contract",
+            "errors",
+            "passed",
+        },
+        "single-GPU embedded suite gate",
+    )
+    required_precisions = [
+        {"case": name, "precision": CUDA_PERFORMANCE_PRECISION_BY_CASE[name]}
+        for name in CUDA_CASES
+    ]
+    correctness_indexes = gate["correctness_indexes"]
+    _require(
+        gate["contract_id"] == CUDA_SUITE_CONTRACT_ID
+        and gate["required_cases"] == list(CUDA_CASES)
+        and gate["required_case_precisions"] == required_precisions
+        and gate["reviewed_precision_limitations"] == [CUDA_PRECISION_LIMITATION_REVIEW]
+        and gate["required_correctness_runtime_modes"]
+        == list(CUDA_CORRECTNESS_RUNTIME_MODES)
+        and gate["case_closure_complete"] is True
+        and gate["environment_complete"] is True
+        and _is_exact_int(gate["correctness_index_count"], 2)
+        and isinstance(correctness_indexes, list)
+        and len(correctness_indexes) == 2
+        and gate["correctness_evidence_bound"] is True
+        and gate["timing_statistics"] == "raw-median-relative-mad-v1"
+        and gate["trace_contract"] == "sha256-bound-zero-transfer-kernel-count-v1"
+        and gate["errors"] == []
+        and gate["passed"] is True,
+        "single-GPU embedded suite gate differs",
+    )
+    _rebuilt_correctness, correctness_archive_bindings = (
+        _validate_cuda_correctness_indexes(
+            correctness_indexes,
+            reader,
+            manifest,
+            candidate,
+            "single-GPU embedded suite gate",
+            trusted_runtime_receipts,
+        )
+    )
+    suite = document.get("suite_acceptance")
+    _require(
+        isinstance(suite, dict)
+        and suite.get("cuda_suite_expected") is True
+        and suite.get("cuda_suite_complete") is True
+        and suite.get("passed") is True,
+        "single-GPU suite acceptance failed",
+    )
     cases = _tuning_cases(document, "single-GPU CUDA gates")
     _require(
         [case.get("workload", {}).get("name") for case in cases] == list(CUDA_CASES),
@@ -4126,7 +8229,7 @@ def _validate_single_gpu_scope(
         scope["correctness"],
         "single-GPU differential",
     )
-    _validate_differential(
+    differential_source_bindings = _validate_differential(
         correctness,
         reader,
         manifest,
@@ -4138,6 +8241,27 @@ def _validate_single_gpu_scope(
         "candidate_evidence": candidate,
         "environment": environment,
         "cuda_raw_seconds_per_step": cuda_raw_by_case,
+        "_correctness_archive_bindings_by_mode": {
+            mode["graph_mode"]: copy.deepcopy(bindings)
+            for mode, bindings in zip(
+                CUDA_CORRECTNESS_RUNTIME_MODES,
+                correctness_archive_bindings,
+                strict=True,
+            )
+        },
+        "correctness_candidate_archives_by_mode": {
+            mode["graph_mode"]: _candidate_archive_bindings_by_case(
+                manifest,
+                bindings,
+                f"CUDA {mode['graph_mode']} correctness",
+            )
+            for mode, bindings in zip(
+                CUDA_CORRECTNESS_RUNTIME_MODES,
+                correctness_archive_bindings,
+                strict=True,
+            )
+        },
+        "differential_source_bindings": differential_source_bindings,
     }
 
 
@@ -4197,6 +8321,8 @@ def _validate_two_gpu_memory(value: Any, label: str) -> None:
         and growth <= 1024 * 1024
         and type(peak) is int
         and peak > 0
+        and peak >= before
+        and peak >= after
         and type(reserved) is int
         and reserved >= peak
     )
@@ -5934,7 +10060,7 @@ def _validate_actions_archive(
     )
     expected = {"runtime-index.json", *payload_by_path}
     try:
-        with zipfile.ZipFile(archive.path) as zipped:
+        with zipfile.ZipFile(io.BytesIO(archive.raw)) as zipped:
             members = [item for item in zipped.infolist() if not item.is_dir()]
             names = [item.filename for item in members]
             _require(
@@ -5988,28 +10114,36 @@ def _validate_package(
     _exact_keys(record, {"role", "filename", "artifact"}, label)
     role = record["role"]
     _require(role in {"sdist", "wheel-macos-arm64"}, f"{label} role differs")
-    artifact = reader.load(
-        record["artifact"],
-        f"{label} bytes",
-        json_document=False,
-        expected_media_types={MEDIA_TYPE_GZIP, MEDIA_TYPE_WHEEL},
-    )
-    _require(record["filename"] == artifact.path.name, f"{label} filename differs")
     if role == "sdist":
+        descriptor = _validate_descriptor(record["artifact"], reader.candidate, label)
         _require(
-            artifact.descriptor["media_type"] == MEDIA_TYPE_GZIP,
+            isinstance(record["filename"], str)
+            and record["filename"] == PurePosixPath(descriptor["path"]).name,
+            f"{label} filename differs",
+        )
+        _require(
+            descriptor["media_type"] == MEDIA_TYPE_GZIP,
             "macOS sdist media type differs",
         )
         _require(
-            artifact.path.name.endswith(".tar.gz"),
+            record["filename"].endswith(".tar.gz"),
             "macOS sdist filename must end in .tar.gz",
         )
-        try:
-            with tarfile.open(artifact.path, "r:gz") as archive:
-                _require(bool(archive.getmembers()), "macOS sdist is empty")
-        except (OSError, tarfile.TarError) as error:
-            raise EvidenceError("macOS sdist is not a readable gzip tar") from error
+        artifact, inventory = reader.load_private_sdist(
+            record["artifact"], f"{label} bytes"
+        )
+        _require(
+            inventory.member_count > 0,
+            "macOS sdist structural inventory differs",
+        )
     else:
+        artifact = reader.load(
+            record["artifact"],
+            f"{label} bytes",
+            json_document=False,
+            expected_media_types={MEDIA_TYPE_WHEEL},
+        )
+        _require(record["filename"] == artifact.path.name, f"{label} filename differs")
         _require(
             artifact.descriptor["media_type"] == MEDIA_TYPE_WHEEL,
             "macOS wheel media type differs",
@@ -6020,220 +10154,12 @@ def _validate_package(
             "macOS wheel is not a CPython 3.14 arm64 wheel",
         )
         try:
-            with zipfile.ZipFile(artifact.path) as archive:
+            with zipfile.ZipFile(io.BytesIO(artifact.raw)) as archive:
                 _require(bool(archive.namelist()), "macOS wheel is empty")
                 _require(archive.testzip() is None, "macOS wheel CRC check failed")
         except (OSError, zipfile.BadZipFile) as error:
             raise EvidenceError("macOS wheel is not a readable ZIP") from error
     return role, artifact
-
-
-def _validate_macos_scope(
-    scope: Any,
-    reader: ArtifactReader,
-    candidate: dict[str, str],
-) -> dict[str, Any]:
-    _exact_keys(scope, {"index", "actions_archive"}, "macOS scope")
-    archive = reader.load(
-        scope["actions_archive"],
-        "macOS Actions archive",
-        json_document=False,
-        expected_media_types={MEDIA_TYPE_ZIP},
-    )
-    artifact = reader.load(scope["index"], "macOS evidence index")
-    document = artifact.document
-    _exact_keys(
-        document,
-        {
-            "schema_version",
-            "kind",
-            "candidate_evidence",
-            "pull_request",
-            "jobs",
-            "actions_artifact",
-            "code_scanning_analyses",
-            "packages",
-            "runtime_checks",
-            "passed",
-        },
-        "macOS evidence index",
-    )
-    _require(
-        _is_exact_int(document["schema_version"], 1)
-        and document["kind"] == MACOS_INDEX_KIND
-        and document["candidate_evidence"] == candidate,
-        "macOS evidence index contract differs",
-    )
-    pull_request = _validate_pull_request(document["pull_request"], candidate)
-    jobs = document["jobs"]
-    _require(isinstance(jobs, list), "macOS job index must be a list")
-    job_names = [
-        _validate_job(job, candidate, f"macOS job {index}")
-        for index, job in enumerate(jobs)
-    ]
-    _require(
-        job_names == list(REQUIRED_JOBS),
-        "macOS required CI/CodeQL job closure or order differs",
-    )
-    _require(
-        jobs[0]["run_id"] == jobs[1]["run_id"]
-        and jobs[0]["run_attempt"] == jobs[1]["run_attempt"]
-        and jobs[2]["run_id"] == jobs[3]["run_id"]
-        and jobs[2]["run_attempt"] == jobs[3]["run_attempt"],
-        "required CI/CodeQL jobs do not come from one exact run per workflow",
-    )
-    job_by_language = {
-        name.removeprefix("CodeQL / "): job
-        for name, job in zip(job_names, jobs, strict=True)
-        if name.startswith("CodeQL / ")
-    }
-    analyses = document["code_scanning_analyses"]
-    _require(
-        isinstance(analyses, list) and len(analyses) == 2,
-        "CodeQL analysis closure differs",
-    )
-    analysis_languages = [
-        _validate_code_scanning_analysis(
-            analysis,
-            candidate,
-            pull_request,
-            job_by_language[language],
-            f"CodeQL analysis {index}",
-        )
-        for index, (language, analysis) in enumerate(
-            zip(("python", "c-cpp"), analyses, strict=True)
-        )
-    ]
-    _require(
-        analysis_languages == ["python", "c-cpp"],
-        "CodeQL analysis language order differs",
-    )
-    packages = document["packages"]
-    _require(
-        isinstance(packages, list) and len(packages) == 2,
-        "macOS package closure differs",
-    )
-    package_records = [
-        _validate_package(record, reader, f"macOS package {index}")
-        for index, record in enumerate(packages)
-    ]
-    _require(
-        [role for role, _artifact in package_records] == ["sdist", "wheel-macos-arm64"],
-        "macOS package roles or order differ",
-    )
-    package_digests = {
-        role: item.descriptor["sha256"] for role, item in package_records
-    }
-    payloads = [item for _role, item in package_records]
-    runtime_checks = document["runtime_checks"]
-    _require(isinstance(runtime_checks, list), "macOS runtime checks must be a list")
-    roles = []
-    for index, check in enumerate(runtime_checks):
-        label = f"macOS runtime check {index}"
-        _exact_keys(
-            check,
-            {
-                "role",
-                "package_sha256",
-                "platform",
-                "exit_code",
-                "log",
-            },
-            label,
-        )
-        role = check["role"]
-        _require(role in REQUIRED_RUNTIME_ROLES, f"{label} role differs")
-        package_role = "wheel-macos-arm64" if role.startswith("wheel-") else "sdist"
-        _require(
-            check["package_sha256"] == package_digests[package_role],
-            f"{label} package digest differs",
-        )
-        platform_record = check["platform"]
-        _exact_keys(
-            platform_record,
-            {"system", "machine", "python"},
-            f"{label} platform",
-        )
-        _require(
-            platform_record["system"] == "Darwin"
-            and platform_record["machine"] == "arm64"
-            and isinstance(platform_record["python"], str)
-            and re.fullmatch(r"3\.14(?:\.\d+)?", platform_record["python"]) is not None
-            and _is_exact_int(check["exit_code"], 0),
-            f"{label} runtime platform or exit code differs",
-        )
-        log = reader.load(
-            check["log"],
-            f"{label} log",
-            json_document=False,
-            expected_media_types=(
-                {MEDIA_TYPE_TEXT}
-                if role in {"wheel-import", "sdist-import"}
-                else {MEDIA_TYPE_JSON}
-            ),
-        )
-        _require(bool(log.raw), f"{label} log is empty")
-        _decode_log(log.raw, f"{label} log")
-
-        if role not in {"wheel-import", "sdist-import"}:
-            suite_log = _strict_json_bytes(log.raw, f"{label} suite log")
-            _exact_keys(
-                suite_log,
-                {
-                    "role",
-                    "mode",
-                    "package_sha256",
-                    "platform",
-                    "openmp_enabled",
-                    "native_fdtd_steps",
-                    "passed",
-                },
-                f"{label} suite log",
-            )
-            suite_platform = suite_log["platform"]
-            _exact_keys(
-                suite_platform,
-                {"system", "machine", "python"},
-                f"{label} suite log platform",
-            )
-            expected_mode = "default" if "-default-" in role else "serial"
-            _require(
-                suite_log["role"] == role
-                and suite_log["mode"] == expected_mode
-                and suite_log["package_sha256"] == check["package_sha256"]
-                and suite_platform == platform_record
-                and suite_log["openmp_enabled"] is False
-                and type(suite_log["native_fdtd_steps"]) is int
-                and suite_log["native_fdtd_steps"] == 1
-                and suite_log["passed"] is True,
-                f"{label} installed-package suite evidence differs",
-            )
-
-        payloads.append(log)
-        roles.append(role)
-    _require(
-        roles == list(REQUIRED_RUNTIME_ROLES),
-        "macOS runtime role closure or order differs",
-    )
-    actions = _validate_actions_artifact(
-        document["actions_artifact"],
-        archive,
-        candidate,
-        jobs,
-    )
-    archive_members = _validate_actions_archive(archive, document, payloads)
-    _require(document["passed"] is True, "macOS embedded suite pass is false")
-    return {
-        "candidate_evidence": candidate,
-        "pull_request": pull_request,
-        "jobs": job_names,
-        "actions_artifact_id": actions["id"],
-        "actions_archive_sha256": archive.descriptor["sha256"],
-        "actions_archive_members": archive_members,
-        "code_scanning_analyses": analysis_languages,
-        "packages": list(package_digests),
-        "runtime_checks": roles,
-    }
 
 
 def _validate_macos_command(
@@ -6570,18 +10496,18 @@ def _validate_macos_scope(
     }
 
 
-def _validate_operations_scope(
+def _load_operations_scope_artifacts(
     scope: Any,
     reader: ArtifactReader,
     candidate: dict[str, str],
-) -> dict[str, Any]:
+) -> tuple[LoadedArtifact, dict[str, LoadedArtifact]]:
     _exact_keys(scope, {"index"}, "operations scope")
     artifact = reader.load(scope["index"], "operations evidence index")
     document = artifact.document
     _require(isinstance(document, dict), "operations evidence index differs")
     records = document.get("responses")
     _require(isinstance(records, dict), "operations response index differs")
-    raw_responses = {}
+    response_artifacts = {}
     for role, record in records.items():
         _require(
             isinstance(role, str) and bool(role) and isinstance(record, dict),
@@ -6594,15 +10520,37 @@ def _validate_operations_scope(
             expected_media_types={MEDIA_TYPE_JSON},
             require_embedded_candidate=False,
         )
-        raw_responses[role] = loaded.document
+        response_artifacts[role] = loaded
+    return artifact, response_artifacts
+
+
+def _validate_operations_scope(
+    scope: Any,
+    reader: ArtifactReader,
+    candidate: dict[str, str],
+) -> dict[str, Any]:
+    artifact, response_artifacts = _load_operations_scope_artifacts(
+        scope, reader, candidate
+    )
     try:
         from benchmarks.issue123_operations import evaluate_operations
     except (ImportError, OSError) as error:
         raise EvidenceError("operations schema validator is unavailable") from error
     try:
-        return evaluate_operations(document, raw_responses, candidate)
+        result = evaluate_operations(
+            artifact.document,
+            {role: item.document for role, item in response_artifacts.items()},
+            candidate,
+        )
     except (ValueError, TypeError, KeyError) as error:
         raise EvidenceError("raw GitHub operational evidence differs") from error
+    _require(
+        isinstance(result, dict)
+        and result.get("final_acceptance") is False
+        and result.get("final_acceptance_authority") == OFFLINE_AUTHORITY,
+        "operations evidence is not a non-authoritative structural result",
+    )
+    return result
 
 
 def _validate_cpu_gpu_contract(
@@ -6703,6 +10651,203 @@ def _validate_cpu_gpu_contract(
     }
 
 
+def _correctness_archives_by_case(
+    value: Any,
+    manifest: dict[str, Any],
+    label: str,
+) -> dict[str, dict[str, Any]]:
+    required_cases = [
+        case["name"]
+        for group in ("correctness", "physical_checks")
+        for case in manifest[group]
+    ]
+    _require(
+        isinstance(value, list)
+        and [record.get("case") for record in value if isinstance(record, dict)]
+        == required_cases,
+        f"{label} case closure differs",
+    )
+    by_case = {}
+    for index, (record, case) in enumerate(zip(value, required_cases, strict=True)):
+        _exact_keys(
+            record,
+            {"case", "sha256", "size_bytes"},
+            f"{label} archive {index}",
+        )
+        _require(
+            record["case"] == case
+            and isinstance(record["sha256"], str)
+            and SHA256_RE.fullmatch(record["sha256"]) is not None
+            and type(record["size_bytes"]) is int
+            and 0 < record["size_bytes"] <= MAX_ARTIFACT_BYTES,
+            f"{label} archive {index} differs",
+        )
+        by_case[case] = record
+    return by_case
+
+
+def _validate_differential_correctness_source_bindings(
+    cpu: dict[str, Any],
+    policy: dict[str, Any],
+    single: dict[str, Any],
+    manifest: dict[str, Any],
+    trusted_runtime_receipts: tuple[LoadedArtifact, ...],
+) -> dict[str, Any]:
+    cpu_archives = _correctness_archives_by_case(
+        cpu.get("correctness_candidate_archives"), manifest, "CPU correctness"
+    )
+    cuda_by_mode = single.get("correctness_candidate_archives_by_mode")
+    _exact_keys(cuda_by_mode, {"eager", "graph"}, "CUDA correctness runtime modes")
+    cuda_eager_archives = _correctness_archives_by_case(
+        cuda_by_mode["eager"], manifest, "CUDA eager correctness"
+    )
+    _correctness_archives_by_case(
+        cuda_by_mode["graph"], manifest, "CUDA graph correctness"
+    )
+    _require(
+        isinstance(trusted_runtime_receipts, tuple)
+        and len(trusted_runtime_receipts) == len(SINGLE_GPU_DIFFERENTIAL_RUNTIME_MODES)
+        and all(
+            isinstance(receipt, LoadedArtifact) for receipt in trusted_runtime_receipts
+        ),
+        "two external single-GPU differential runtime receipts are required",
+    )
+    single_receipts = {}
+    for case, mode, receipt in zip(
+        ("single-gpu-2d", "single-gpu-3d"),
+        SINGLE_GPU_DIFFERENTIAL_RUNTIME_MODES,
+        trusted_runtime_receipts,
+        strict=True,
+    ):
+        _exact_keys(
+            receipt.descriptor,
+            {"path", "sha256", "size_bytes", "media_type"},
+            f"trusted {case} runtime receipt descriptor",
+        )
+        checked_path, current_raw = _bounded_regular_file_bytes(
+            receipt.path,
+            f"trusted {case} runtime receipt",
+            max_bytes=MAX_RUNTIME_RECEIPT_BYTES,
+        )
+        _require(
+            checked_path == receipt.path
+            and current_raw == receipt.raw
+            and receipt.raw == _canonical_json_bytes(receipt.document)
+            and receipt.descriptor.get("sha256") == _sha256(receipt.raw)
+            and receipt.descriptor.get("size_bytes") == len(receipt.raw)
+            and receipt.descriptor.get("media_type") == MEDIA_TYPE_JSON,
+            f"trusted {case} runtime receipt byte binding differs",
+        )
+        _validate_runtime_receipt_document(
+            receipt.document,
+            manifest,
+            cpu["candidate_evidence"],
+            mode,
+            f"trusted {case} runtime receipt",
+            expected_candidate_cases=(case,),
+        )
+        single_receipts[case] = receipt.document["candidate_archives"][0]
+
+    paired_sources = policy.get("differential_source_bindings")
+    single_sources = single.get("differential_source_bindings")
+    _require(
+        isinstance(paired_sources, list)
+        and [
+            {
+                "case": item.get("case"),
+                "device": item.get("device"),
+                "precision": item.get("precision"),
+            }
+            for item in paired_sources
+            if isinstance(item, dict)
+        ]
+        == _expected_completion_differential_records(manifest, "paired-real"),
+        "paired differential source binding closure differs",
+    )
+    _require(
+        isinstance(single_sources, list)
+        and [
+            {
+                "case": item.get("case"),
+                "device": item.get("device"),
+                "precision": item.get("precision"),
+            }
+            for item in single_sources
+            if isinstance(item, dict)
+        ]
+        == _expected_completion_differential_records(manifest, "single-gpu-cuda"),
+        "single-GPU differential source binding closure differs",
+    )
+
+    bound = []
+    for source in (*paired_sources, *single_sources):
+        _exact_keys(
+            source,
+            {
+                "case",
+                "device",
+                "precision",
+                "reference_source",
+                "candidate_source",
+            },
+            "differential source binding",
+        )
+        reference_source = _validate_descriptor(
+            source["reference_source"],
+            cpu["candidate_evidence"],
+            f"{source['case']} {source['device']} differential reference source",
+        )
+        candidate_source = _validate_descriptor(
+            source["candidate_source"],
+            cpu["candidate_evidence"],
+            f"{source['case']} {source['device']} differential candidate source",
+        )
+        _require(
+            reference_source["media_type"]
+            == candidate_source["media_type"]
+            == MEDIA_TYPE_NPZ,
+            f"{source['case']} {source['device']} differential sources are not NPZ",
+        )
+        if source["case"] in single_receipts:
+            role = source["case"]
+            archive = single_receipts[source["case"]]
+        elif source["device"] == "cpu" and source["precision"] == "float64":
+            role = "cpu"
+            archive = cpu_archives.get(source["case"])
+        elif source["device"] == "cuda:0" and source["precision"] == "float32":
+            role = "cuda-eager"
+            archive = cuda_eager_archives.get(source["case"])
+        else:
+            raise EvidenceError(
+                f"{source['case']} differential source has no trusted runtime role"
+            )
+        _require(
+            isinstance(archive, dict)
+            and candidate_source["sha256"] == archive["sha256"]
+            and candidate_source["size_bytes"] == archive["size_bytes"],
+            f"{source['case']} {source['device']} differential candidate source "
+            "differs from its externally attested runtime archive",
+        )
+        bound.append(
+            {
+                "case": source["case"],
+                "device": source["device"],
+                "precision": source["precision"],
+                "runtime_receipt_role": role,
+                "sha256": archive["sha256"],
+                "size_bytes": archive["size_bytes"],
+            }
+        )
+    _require(
+        len(bound) == 18,
+        "differential/correctness source binding count differs",
+    )
+    return {
+        "bound_source_count": len(bound),
+        "bindings": bound,
+    }
+
+
 def _empty_scope_result() -> dict[str, Any]:
     return {"satisfied": False, "errors": [], "details": None}
 
@@ -6711,6 +10856,738 @@ def _canonical_json_bytes(value: Any) -> bytes:
     return (json.dumps(value, allow_nan=False, indent=2, sort_keys=True) + "\n").encode(
         "utf-8"
     )
+
+
+def _compact_canonical_json_bytes(value: Any) -> bytes:
+    try:
+        rendered = json.dumps(
+            value,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+    except (TypeError, ValueError) as error:
+        raise EvidenceError("JSON value is not canonicalizable") from error
+    return (rendered + "\n").encode("utf-8")
+
+
+def _private_binding_modules() -> tuple[Any, Any]:
+    try:
+        from benchmarks import issue123_privacy as privacy
+        from benchmarks import issue123_publication as publication
+    except (ImportError, OSError) as error:
+        raise EvidenceError(
+            "private bundle binding interfaces are unavailable"
+        ) from error
+    return privacy, publication
+
+
+def _private_binding_hmac(salt: bytes, domain: str, value: Any) -> str:
+    privacy, _publication = _private_binding_modules()
+    raw = privacy.binding_canonical_json_bytes(value)
+    framed = (
+        privacy.TAGGED_DIGEST_PREFIX
+        + domain.encode("ascii")
+        + b"\x00"
+        + len(raw).to_bytes(8, "big")
+        + raw
+    )
+    return hmac.new(salt, framed, hashlib.sha256).hexdigest()
+
+
+def _bundle_path_identity(path: Path) -> dict[str, Any]:
+    metadata = path.stat()
+    return {
+        "path_sha256": hashlib.sha256(str(path).encode("utf-8")).hexdigest(),
+        "device": metadata.st_dev,
+        "inode": metadata.st_ino,
+    }
+
+
+def _load_inventory_index(index_path: Path | str) -> tuple[Path, bytes, dict[str, Any]]:
+    checked, raw = _bounded_regular_file_bytes(
+        Path(index_path), "completion bundle inventory index", max_bytes=MAX_INDEX_BYTES
+    )
+    _require(
+        checked.name == "completion-index.json",
+        "content-addressed bundle index must be named completion-index.json",
+    )
+    document = _strict_json_bytes(
+        raw, "completion bundle inventory index", max_bytes=MAX_INDEX_BYTES
+    )
+    _exact_keys(
+        document,
+        {
+            "schema_version",
+            "kind",
+            "issue",
+            "bundle",
+            "candidate_evidence",
+            "manifest",
+            "payloads",
+            "artifacts",
+        },
+        "completion bundle inventory index",
+    )
+    _require(
+        _is_exact_int(document["schema_version"], INDEX_SCHEMA_VERSION)
+        and document["kind"] == INDEX_KIND
+        and _is_exact_int(document["issue"], 123),
+        "completion bundle inventory index identity differs",
+    )
+    _exact_keys(
+        document["artifacts"],
+        {"cpu", "policy_paired_real", "single_gpu", "two_gpu", "macos", "operations"},
+        "completion bundle inventory scope mapping",
+    )
+    return checked, raw, document
+
+
+def _protected_frozen_inventory(
+    binding_context: Mapping[str, Any],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    privacy, _publication = _private_binding_modules()
+    technical = binding_context.get("technical_inventory")
+    _exact_keys(
+        technical,
+        {
+            "candidate_evidence",
+            "policy_sha256",
+            "scope_order",
+            "scope_artifacts",
+            "runtime_receipts",
+            "sources",
+        },
+        "protected technical inventory",
+    )
+    _require(
+        technical["scope_order"] == list(privacy.TECHNICAL_SCOPE_ORDER),
+        "protected technical scope order differs",
+    )
+    frozen_scopes = technical["scope_artifacts"]
+    _exact_keys(
+        frozen_scopes,
+        set(privacy.TECHNICAL_SCOPE_ORDER),
+        "protected first-five scope mappings",
+    )
+    _require(
+        all(
+            isinstance(frozen_scopes[scope], dict) and frozen_scopes[scope]
+            for scope in privacy.TECHNICAL_SCOPE_ORDER
+        ),
+        "protected first-five scope mappings are empty",
+    )
+    receipts = technical["runtime_receipts"]
+    _require(
+        isinstance(receipts, list) and len(receipts) == len(RUNTIME_RECEIPT_ROLES),
+        "protected runtime receipt closure differs",
+    )
+    normalized = []
+    for ordinal, (record, role) in enumerate(
+        zip(receipts, RUNTIME_RECEIPT_ROLES, strict=True)
+    ):
+        _exact_keys(
+            record,
+            {"role", "bundle_path", "sha256", "size_bytes"},
+            f"protected runtime receipt {ordinal}",
+        )
+        _canonical_bundle_path(
+            record["bundle_path"], f"protected runtime receipt {ordinal} path"
+        )
+        _require(
+            record["role"] == role
+            and isinstance(record["sha256"], str)
+            and SHA256_RE.fullmatch(record["sha256"]) is not None
+            and type(record["size_bytes"]) is int
+            and 0 < record["size_bytes"] <= MAX_RUNTIME_RECEIPT_BYTES,
+            f"protected runtime receipt {ordinal} differs",
+        )
+        normalized.append(dict(record))
+    _require(
+        len({item["bundle_path"] for item in normalized}) == len(normalized),
+        "protected runtime receipt paths are duplicated",
+    )
+    expected_root = privacy.tagged_canonical_sha256(
+        privacy.TECHNICAL_INPUT_INVENTORY_DOMAIN,
+        technical,
+    )
+    _require(
+        isinstance(binding_context.get("technical_input_root"), str)
+        and hmac.compare_digest(binding_context["technical_input_root"], expected_root),
+        "protected technical inventory root differs",
+    )
+    return copy.deepcopy(frozen_scopes), copy.deepcopy(normalized)
+
+
+def _require_bundle_matches_frozen_inventory(
+    document: Mapping[str, Any],
+    registered_payloads: list[Mapping[str, Any]],
+    frozen_scope_artifacts: Mapping[str, Any],
+    frozen_runtime_receipts: list[Mapping[str, Any]],
+) -> None:
+    privacy, _publication = _private_binding_modules()
+    projected = {
+        scope: document["artifacts"][scope] for scope in privacy.TECHNICAL_SCOPE_ORDER
+    }
+    _require(
+        projected == frozen_scope_artifacts,
+        "completion first-five mappings differ from protected inventory",
+    )
+    registry = {item["path"]: item for item in registered_payloads}
+    reconstructed = []
+    for record in frozen_runtime_receipts:
+        descriptor = registry.get(record["bundle_path"])
+        _require(
+            isinstance(descriptor, Mapping)
+            and descriptor["sha256"] == record["sha256"]
+            and descriptor["size_bytes"] == record["size_bytes"]
+            and descriptor["media_type"] == MEDIA_TYPE_JSON
+            and descriptor["candidate_evidence"] == document["candidate_evidence"],
+            "completion runtime receipt differs from protected inventory",
+        )
+        reconstructed.append(dict(record))
+    _require(
+        reconstructed == frozen_runtime_receipts,
+        "completion runtime receipt order differs from protected inventory",
+    )
+
+
+def _validated_bundle_inventory_value(
+    index_raw: bytes,
+    document: Mapping[str, Any],
+    descriptor_ledger: list[Mapping[str, Any]],
+    binding_context: Mapping[str, Any],
+) -> tuple[dict[str, Any], str]:
+    privacy, _publication = _private_binding_modules()
+    frozen_scopes, runtime_receipts = _protected_frozen_inventory(binding_context)
+    _require_bundle_matches_frozen_inventory(
+        document,
+        descriptor_ledger,
+        frozen_scopes,
+        runtime_receipts,
+    )
+    value = {
+        "index": {
+            "sha256": _sha256(index_raw),
+            "size_bytes": len(index_raw),
+        },
+        "scope_order": [
+            "cpu",
+            "policy_paired_real",
+            "single_gpu",
+            "two_gpu",
+            "macos",
+            "operations",
+        ],
+        "scope_artifacts": copy.deepcopy(document["artifacts"]),
+        "runtime_receipts": copy.deepcopy(runtime_receipts),
+        "payloads": [dict(item) for item in descriptor_ledger],
+    }
+    return value, privacy.tagged_canonical_sha256(
+        COMPLETION_BUNDLE_INVENTORY_DOMAIN, value
+    )
+
+
+def _bundle_inventory_from_context(
+    index_path: Path | str, binding_context: Mapping[str, Any]
+) -> dict[str, Any]:
+    privacy, _publication = _private_binding_modules()
+    index, index_raw, document = _load_inventory_index(index_path)
+    payloads = document["payloads"]
+    _require(isinstance(payloads, list), "completion payload registry differs")
+    reader = ArtifactReader(index.parent, document["candidate_evidence"], payloads)
+    ledger = []
+    identities = []
+    for descriptor in sorted(payloads, key=lambda item: item.get("path", "")):
+        validated = _validate_descriptor(
+            descriptor,
+            document["candidate_evidence"],
+            "completion inventory payload",
+        )
+        artifact = reader.load(
+            validated,
+            "completion inventory payload",
+            json_document=False,
+        )
+        ledger.append(dict(artifact.descriptor))
+        identities.append(
+            (artifact.path, artifact.path.stat().st_dev, artifact.path.stat().st_ino)
+        )
+    expected_files = {"completion-index.json", *(item["path"] for item in ledger)}
+    observed_files = set()
+    try:
+        for candidate in index.parent.rglob("*"):
+            metadata = candidate.lstat()
+            _require(
+                not stat.S_ISLNK(metadata.st_mode), "bundle contains a symbolic link"
+            )
+            if stat.S_ISREG(metadata.st_mode):
+                observed_files.add(candidate.relative_to(index.parent).as_posix())
+            else:
+                _require(
+                    stat.S_ISDIR(metadata.st_mode), "bundle contains a special file"
+                )
+    except OSError as error:
+        raise EvidenceError(
+            "bundle directory closure could not be inspected"
+        ) from error
+    _require(
+        observed_files == expected_files,
+        "reopened bundle contains missing or extra files",
+    )
+    value, root = _validated_bundle_inventory_value(
+        index_raw,
+        document,
+        ledger,
+        binding_context,
+    )
+    return {
+        "root": root,
+        "inventory": value,
+        "index_path": index,
+        "file_identities": identities,
+    }
+
+
+def completion_bundle_inventory(
+    index_path: Path | str,
+    protected_openings: Path | str | bytes | Mapping[str, Any],
+) -> dict[str, Any]:
+    """Reopen an exact completion directory and return its content address."""
+
+    privacy, _publication = _private_binding_modules()
+    _openings, context = privacy.load_private_openings(protected_openings)
+    state = _bundle_inventory_from_context(index_path, context)
+    return {
+        "root": state["root"],
+        "inventory": state["inventory"],
+    }
+
+
+def _operations_issue_response(
+    index_path: Path, index_document: Mapping[str, Any]
+) -> tuple[dict[str, Any], bytes, dict[str, Any]]:
+    reader = ArtifactReader(
+        index_path.parent,
+        index_document["candidate_evidence"],
+        index_document["payloads"],
+    )
+    operations_artifact, responses = _load_operations_scope_artifacts(
+        index_document["artifacts"]["operations"],
+        reader,
+        index_document["candidate_evidence"],
+    )
+    _require(
+        operations_artifact.document.get("schema_version") == 2
+        and "issue_123" in responses,
+        "bundle operations capture cannot prove issue #123 acknowledgment",
+    )
+    response = responses["issue_123"]
+    _require(
+        isinstance(response.document, dict),
+        "bundle issue #123 response is not an object",
+    )
+    return response.document, response.raw, response.descriptor
+
+
+def _checklist_observation(issue: Mapping[str, Any], expected: str) -> dict[str, Any]:
+    try:
+        from benchmarks import issue123_operations as operations
+
+        observation = operations._validate_post_bundle_checklist(issue, expected)
+        transition = operations.checklist_transition_sha256(issue, expected)
+    except (ImportError, TypeError, ValueError):
+        raise EvidenceError("issue final checklist evidence differs") from None
+    return {
+        **observation,
+        "checklist_transition_sha256": transition,
+    }
+
+
+def _load_reopen_receipt(
+    source: Path | str | bytes | Mapping[str, Any],
+) -> tuple[dict[str, Any], bytes]:
+    privacy, _publication = _private_binding_modules()
+    if isinstance(source, (Path, str)):
+        _path, raw = _bounded_regular_file_bytes(
+            Path(source), "bundle reopen receipt", max_bytes=MAX_JSON_BYTES
+        )
+        document = _strict_json_bytes(
+            raw, "bundle reopen receipt", max_bytes=MAX_JSON_BYTES
+        )
+        _require(
+            raw == privacy.binding_canonical_json_bytes(document),
+            "bundle reopen receipt is not canonical JSON",
+        )
+    elif type(source) is bytes:
+        raw = source
+        document = _strict_json_bytes(
+            raw, "bundle reopen receipt", max_bytes=MAX_JSON_BYTES
+        )
+        _require(
+            raw == privacy.binding_canonical_json_bytes(document),
+            "bundle reopen receipt is not canonical JSON",
+        )
+    else:
+        document = dict(source)
+        raw = privacy.binding_canonical_json_bytes(document)
+    return document, raw
+
+
+def _reopen_receipt_file_sha256(raw: bytes) -> str:
+    _document, canonical = _load_reopen_receipt(raw)
+    _require(
+        hmac.compare_digest(raw, canonical),
+        "bundle reopen receipt bytes are not canonical",
+    )
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def validate_bundle_reopen_receipt(
+    receipt: Path | str | bytes | Mapping[str, Any],
+    expected_stage: str,
+    protected_openings: Path | str | bytes | Mapping[str, Any],
+) -> dict[str, Any]:
+    """Authenticate a detached B0/B1 reopen receipt against the sidecar."""
+
+    privacy, _publication = _private_binding_modules()
+    openings, context = privacy.load_private_openings(protected_openings)
+    document, _raw = _load_reopen_receipt(receipt)
+    _exact_keys(
+        document,
+        {
+            "schema_version",
+            "kind",
+            "stage",
+            "observed_at",
+            "source_bundle",
+            "reopened_bundle",
+            "registered_payloads",
+            "technical_binding",
+            "issue_response",
+            "pre_acknowledgment_receipt_sha256",
+            "binding",
+        },
+        "bundle reopen receipt",
+    )
+    _require(
+        _is_exact_int(document["schema_version"], BUNDLE_REOPEN_RECEIPT_VERSION)
+        and document["kind"] == BUNDLE_REOPEN_RECEIPT_KIND
+        and document["stage"] == expected_stage
+        and expected_stage in {"pre_acknowledgment", "final"},
+        "bundle reopen receipt identity or stage differs",
+    )
+    observed_at = _timestamp(document["observed_at"], "bundle reopen observation time")
+    canonical_observed_at = (
+        observed_at.astimezone(dt.UTC)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+    _require(
+        document["observed_at"] == canonical_observed_at,
+        "bundle reopen observation time is not canonical UTC",
+    )
+    bundles = []
+    for label in ("source_bundle", "reopened_bundle"):
+        bundle = document[label]
+        _exact_keys(
+            bundle,
+            {"inventory_root", "index", "path_identity"},
+            f"bundle reopen {label}",
+        )
+        _exact_keys(
+            bundle["index"],
+            {"sha256", "size_bytes"},
+            f"bundle reopen {label} index",
+        )
+        _exact_keys(
+            bundle["path_identity"],
+            {"path_sha256", "device", "inode"},
+            f"bundle reopen {label} path identity",
+        )
+        _require(
+            isinstance(bundle["inventory_root"], str)
+            and SHA256_RE.fullmatch(bundle["inventory_root"]) is not None
+            and isinstance(bundle["index"]["sha256"], str)
+            and SHA256_RE.fullmatch(bundle["index"]["sha256"]) is not None
+            and type(bundle["index"]["size_bytes"]) is int
+            and 0 < bundle["index"]["size_bytes"] <= MAX_INDEX_BYTES
+            and isinstance(bundle["path_identity"]["path_sha256"], str)
+            and SHA256_RE.fullmatch(bundle["path_identity"]["path_sha256"]) is not None
+            and type(bundle["path_identity"]["device"]) is int
+            and bundle["path_identity"]["device"] >= 0
+            and type(bundle["path_identity"]["inode"]) is int
+            and bundle["path_identity"]["inode"] > 0,
+            f"bundle reopen {label} descriptor differs",
+        )
+        bundles.append(bundle)
+    source_bundle, reopened_bundle = bundles
+    _require(
+        source_bundle["inventory_root"] == reopened_bundle["inventory_root"]
+        and source_bundle["index"] == reopened_bundle["index"]
+        and source_bundle["path_identity"]["path_sha256"]
+        != reopened_bundle["path_identity"]["path_sha256"]
+        and (
+            source_bundle["path_identity"]["device"],
+            source_bundle["path_identity"]["inode"],
+        )
+        != (
+            reopened_bundle["path_identity"]["device"],
+            reopened_bundle["path_identity"]["inode"],
+        ),
+        "bundle reopen source/reopened identity or inventory differs",
+    )
+    payloads = document["registered_payloads"]
+    _require(
+        isinstance(payloads, list) and bool(payloads),
+        "bundle reopen registered payload closure differs",
+    )
+    validated_payloads = [
+        _validate_descriptor(
+            item,
+            context["candidate_evidence"],
+            f"bundle reopen registered payload {ordinal}",
+        )
+        for ordinal, item in enumerate(payloads)
+    ]
+    payload_paths = [item["path"] for item in validated_payloads]
+    _require(
+        payloads == validated_payloads
+        and payload_paths == sorted(payload_paths)
+        and len(payload_paths) == len(set(payload_paths)),
+        "bundle reopen registered payload order or uniqueness differs",
+    )
+    issue_response = document["issue_response"]
+    _exact_keys(
+        issue_response,
+        {
+            "state",
+            "lines",
+            "body_sha256",
+            "updated_at",
+            "checklist_transition_sha256",
+            "canonical_response_sha256",
+            "descriptor",
+        },
+        "bundle reopen issue response",
+    )
+    expected_state = (
+        "unchecked" if expected_stage == "pre_acknowledgment" else "checked"
+    )
+    checked_lines = (
+        "- [x] publish the final bundle",
+        "- [x] complete the post-bundle checklist",
+    )
+    expected_lines = (
+        tuple(line.replace("[x]", "[ ]") for line in checked_lines)
+        if expected_state == "unchecked"
+        else checked_lines
+    )
+    issue_descriptor = _validate_descriptor(
+        issue_response["descriptor"],
+        context["candidate_evidence"],
+        "bundle reopen issue response descriptor",
+    )
+    issue_updated_at = _timestamp(
+        issue_response["updated_at"], "bundle reopen issue update time"
+    )
+    _require(
+        issue_response["state"] == expected_state
+        and issue_response["lines"] == list(expected_lines)
+        and isinstance(issue_response["body_sha256"], str)
+        and SHA256_RE.fullmatch(issue_response["body_sha256"]) is not None
+        and isinstance(issue_response["checklist_transition_sha256"], str)
+        and SHA256_RE.fullmatch(issue_response["checklist_transition_sha256"])
+        is not None
+        and isinstance(issue_response["canonical_response_sha256"], str)
+        and SHA256_RE.fullmatch(issue_response["canonical_response_sha256"]) is not None
+        and issue_response["descriptor"] == issue_descriptor
+        and issue_descriptor in validated_payloads
+        and issue_updated_at <= observed_at,
+        "bundle reopen issue response authority differs",
+    )
+    previous_digest = document["pre_acknowledgment_receipt_sha256"]
+    _require(
+        (expected_stage == "pre_acknowledgment" and previous_digest is None)
+        or (
+            expected_stage == "final"
+            and isinstance(previous_digest, str)
+            and SHA256_RE.fullmatch(previous_digest) is not None
+        ),
+        "bundle reopen predecessor receipt binding differs",
+    )
+    expected_technical = {
+        key: context[key]
+        for key in (
+            "technical_input_root",
+            "public_projection_sha256",
+            "public_asset_ledger_sha256",
+        )
+    }
+    _require(
+        document["technical_binding"] == expected_technical,
+        "bundle reopen technical binding differs",
+    )
+    body = {key: value for key, value in document.items() if key != "binding"}
+    binding = document["binding"]
+    _exact_keys(binding, {"algorithm", "domain", "value"}, "bundle reopen binding")
+    expected_hmac = _private_binding_hmac(
+        openings.salt_for_private_verification(), PRIVATE_BUNDLE_BINDING_DOMAIN, body
+    )
+    _require(
+        binding["algorithm"] == "HMAC-SHA-256"
+        and binding["domain"] == PRIVATE_BUNDLE_BINDING_DOMAIN
+        and isinstance(binding["value"], str)
+        and hmac.compare_digest(binding["value"], expected_hmac),
+        "bundle reopen receipt authentication differs",
+    )
+    return document
+
+
+def record_bundle_reopen(
+    *,
+    source_index: Path | str,
+    reopened_index: Path | str,
+    stage: str,
+    protected_openings: Path | str,
+    pre_ack_response: Path | str | None = None,
+    pre_ack_receipt: Path | str | None = None,
+    output: Path | str | None = None,
+) -> bytes:
+    """Record a distinct, complete B0/B1 reopen without self-reference."""
+
+    privacy, _publication = _private_binding_modules()
+    if stage == "pre-acknowledgment":
+        stage = "pre_acknowledgment"
+    _require(stage in {"pre_acknowledgment", "final"}, "bundle reopen stage differs")
+    openings, context = privacy.load_private_openings(protected_openings)
+    source = _bundle_inventory_from_context(source_index, context)
+    reopened = _bundle_inventory_from_context(reopened_index, context)
+    _require(
+        source["root"] == reopened["root"]
+        and source["inventory"] == reopened["inventory"],
+        "source and reopened bundle inventories differ",
+    )
+    _require(
+        source["index_path"].parent != reopened["index_path"].parent
+        and (source["index_path"].stat().st_dev, source["index_path"].stat().st_ino)
+        != (reopened["index_path"].stat().st_dev, reopened["index_path"].stat().st_ino),
+        "source and reopened bundles are not distinct path/inode copies",
+    )
+    source_ids = {(device, inode) for _path, device, inode in source["file_identities"]}
+    reopened_ids = {
+        (device, inode) for _path, device, inode in reopened["file_identities"]
+    }
+    _require(
+        source_ids.isdisjoint(reopened_ids),
+        "source and reopened bundle payloads share file identities",
+    )
+    issue, issue_raw, issue_descriptor = _operations_issue_response(
+        reopened["index_path"],
+        _load_inventory_index(reopened["index_path"])[2],
+    )
+    expected_state = "unchecked" if stage == "pre_acknowledgment" else "checked"
+    issue_observation = {
+        **_checklist_observation(issue, expected_state),
+        "canonical_response_sha256": hashlib.sha256(issue_raw).hexdigest(),
+        "descriptor": issue_descriptor,
+    }
+    if stage == "pre_acknowledgment":
+        _require(
+            pre_ack_response is not None and pre_ack_receipt is None,
+            "pre-acknowledgment inputs differ",
+        )
+        _path, supplied_response = _bounded_regular_file_bytes(
+            Path(pre_ack_response),
+            "pre-acknowledgment issue response",
+            max_bytes=MAX_ARTIFACT_BYTES,
+        )
+        _require(
+            hmac.compare_digest(supplied_response, issue_raw),
+            "pre-acknowledgment issue response differs from reopened B0",
+        )
+        previous_digest = None
+    else:
+        _require(
+            pre_ack_receipt is not None and pre_ack_response is None,
+            "final reopen inputs differ",
+        )
+        previous = validate_bundle_reopen_receipt(
+            pre_ack_receipt, "pre_acknowledgment", protected_openings
+        )
+        _previous_document, previous_raw = _load_reopen_receipt(pre_ack_receipt)
+        _require(
+            previous["issue_response"]["state"] == "unchecked"
+            and previous["issue_response"]["canonical_response_sha256"]
+            != issue_observation["canonical_response_sha256"]
+            and previous["issue_response"]["checklist_transition_sha256"]
+            == issue_observation["checklist_transition_sha256"]
+            and _timestamp(issue_observation["updated_at"], "final checklist update")
+            >= _timestamp(previous["observed_at"], "pre-acknowledgment reopen time"),
+            "final checklist recapture does not follow the B0 acknowledgment",
+        )
+        previous_digest = _reopen_receipt_file_sha256(previous_raw)
+    observed_at = (
+        dt.datetime.now(dt.UTC)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+    body = {
+        "schema_version": BUNDLE_REOPEN_RECEIPT_VERSION,
+        "kind": BUNDLE_REOPEN_RECEIPT_KIND,
+        "stage": stage,
+        "observed_at": observed_at,
+        "source_bundle": {
+            "inventory_root": source["root"],
+            "index": source["inventory"]["index"],
+            "path_identity": _bundle_path_identity(source["index_path"].parent),
+        },
+        "reopened_bundle": {
+            "inventory_root": reopened["root"],
+            "index": reopened["inventory"]["index"],
+            "path_identity": _bundle_path_identity(reopened["index_path"].parent),
+        },
+        "registered_payloads": copy.deepcopy(reopened["inventory"]["payloads"]),
+        "technical_binding": {
+            key: context[key]
+            for key in (
+                "technical_input_root",
+                "public_projection_sha256",
+                "public_asset_ledger_sha256",
+            )
+        },
+        "issue_response": issue_observation,
+        "pre_acknowledgment_receipt_sha256": previous_digest,
+    }
+    document = {
+        **body,
+        "binding": {
+            "algorithm": "HMAC-SHA-256",
+            "domain": PRIVATE_BUNDLE_BINDING_DOMAIN,
+            "value": _private_binding_hmac(
+                openings.salt_for_private_verification(),
+                PRIVATE_BUNDLE_BINDING_DOMAIN,
+                body,
+            ),
+        },
+    }
+    raw = privacy.binding_canonical_json_bytes(document)
+    validate_bundle_reopen_receipt(raw, stage, protected_openings)
+    if output is not None:
+        output_path = Path(output)
+        _write_exclusive_private_file(
+            output_path,
+            raw,
+            "bundle reopen receipt",
+            forbidden_roots=(
+                source["index_path"].parent,
+                reopened["index_path"].parent,
+            ),
+        )
+    return raw
 
 
 def _read_assembly_source(
@@ -6786,6 +11663,25 @@ def _bind_embedded_descriptors(
                 f"{label} embedded descriptor is not registered",
             )
             used.add(descriptor["path"])
+            return
+        path_independent_keys = {"path", "sha256", "size_bytes", "media_type"}
+        if set(value) == path_independent_keys:
+            _canonical_bundle_path(value["path"], f"{label} path")
+            _require(
+                isinstance(value["sha256"], str)
+                and SHA256_RE.fullmatch(value["sha256"]) is not None
+                and type(value["size_bytes"]) is int
+                and 0 < value["size_bytes"] <= MAX_RUNTIME_RECEIPT_BYTES
+                and value["media_type"] == MEDIA_TYPE_JSON,
+                f"{label} path-independent descriptor differs",
+            )
+            registered = registry.get(value["path"])
+            _require(
+                isinstance(registered, dict)
+                and all(registered.get(name) == value[name] for name in value),
+                f"{label} embedded path-independent descriptor is not registered",
+            )
+            used.add(value["path"])
             return
         for key, item in value.items():
             _bind_embedded_descriptors(
@@ -6988,19 +11884,28 @@ def _structured_evidence_error(
         code = "invalid-evidence"
     else:
         code = "evidence-validation-error"
+    messages = {
+        "evidence-resource-limit": "evidence resource limit exceeded",
+        "evidence-io-error": "evidence input/output validation failed",
+        "invalid-evidence": "evidence validation failed closed",
+        "evidence-validation-error": "evidence validation failed closed",
+    }
     return {
         "code": code,
         "phase": phase,
         "scope": scope,
-        "message": str(error) or type(error).__name__,
+        "message": messages[code],
     }
 
 
 def evaluate_completion(
     index_path: Path | str,
     manifest_path: Path | str | None = None,
+    runtime_receipt_paths: list[Path | str] | tuple[Path | str, ...] | None = None,
+    *,
+    descriptor_access_log: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Evaluate all issue #123 scopes; any ambiguity produces a false result."""
+    """Validate issue #123 evidence offline without granting final authority."""
 
     supplied_index_path = Path(index_path)
     scope_names = (
@@ -7012,9 +11917,10 @@ def evaluate_completion(
         "operations",
     )
     output: dict[str, Any] = {
-        "schema_version": 2,
+        "schema_version": OUTPUT_SCHEMA_VERSION,
         "kind": OUTPUT_KIND,
         "issue": 123,
+        "evaluation_mode": OFFLINE_EVALUATION_MODE,
         "evidence_index": {
             "path": supplied_index_path.name,
             "size_bytes": None,
@@ -7029,6 +11935,37 @@ def evaluate_completion(
         "scopes": {name: _empty_scope_result() for name in scope_names},
         "cross_scope_details": {},
         "cross_scope_errors": [],
+        "structural_validation_satisfied": False,
+        "final_acceptance": False,
+        "final_acceptance_authority": OFFLINE_AUTHORITY,
+        "receipt_replay_authority": False,
+        "candidate_bundle_binding": {
+            "satisfied": False,
+            "technical_input_root": None,
+            "public_projection_sha256": None,
+            "public_asset_ledger_sha256": None,
+            "final_bundle_inventory_root": None,
+        },
+        "post_bundle": {
+            "satisfied": False,
+            "pre_acknowledgment_receipt": None,
+            "final_reopen_receipt": None,
+            "acknowledgment": None,
+        },
+        "baseline_authority": {
+            "satisfied": False,
+            "mode": None,
+            "authority_sha256": None,
+        },
+        "live_verification": {
+            "invocation_attempted": False,
+            "invocation_succeeded": False,
+            "authority": None,
+            "verified_at": None,
+            "operations_index": None,
+            "receipt": None,
+            "errors": [],
+        },
         "issue_completion_satisfied": False,
     }
     try:
@@ -7091,7 +12028,12 @@ def evaluate_completion(
             candidate_value,
             candidate_value.get("manifest_sha256"),
         )
-        reader = ArtifactReader(index_path.parent, candidate, payloads)
+        reader = ArtifactReader(
+            index_path.parent,
+            candidate,
+            payloads,
+            descriptor_access_log=descriptor_access_log,
+        )
         manifest_artifact = reader.load(
             index["manifest"],
             "bundled manifest",
@@ -7104,6 +12046,15 @@ def evaluate_completion(
         manifest_raw = manifest_artifact.raw
         manifest = manifest_artifact.document
         _require(isinstance(manifest, dict), "manifest root must be an object")
+        _trusted_path, trusted_manifest_raw, trusted_manifest = (
+            _trusted_manifest_bytes()
+        )
+        _require(
+            manifest_raw == trusted_manifest_raw
+            and manifest_artifact.descriptor["sha256"] == TRUSTED_MANIFEST_SHA256
+            and _type_exact_equal(manifest, trusted_manifest),
+            "bundled manifest bytes differ from the trusted repository manifest",
+        )
         if manifest_path is not None:
             _supplied_manifest_path, supplied_manifest_raw = (
                 _bounded_regular_file_bytes(
@@ -7113,8 +12064,8 @@ def evaluate_completion(
                 )
             )
             _require(
-                supplied_manifest_raw == manifest_raw,
-                "supplied manifest bytes differ from the bundled manifest",
+                supplied_manifest_raw == trusted_manifest_raw,
+                "supplied manifest bytes differ from the trusted repository manifest",
             )
         output["manifest"].update(
             path=manifest_artifact.descriptor["path"],
@@ -7122,6 +12073,9 @@ def evaluate_completion(
             sha256=_sha256(manifest_raw),
         )
         output["candidate_evidence"] = candidate
+        trusted_runtime_receipts = _load_trusted_runtime_receipts(
+            runtime_receipt_paths, manifest, candidate, reader.base
+        )
         _require(
             sum(item["size_bytes"] for item in payloads) == bundle["artifact_bytes"],
             "bundle artifact byte total differs",
@@ -7141,12 +12095,17 @@ def evaluate_completion(
             manifest,
             candidate,
             manifest_artifact.path,
+            trusted_runtime_receipts[0],
         ),
         "policy_paired_real": lambda: _validate_policy_scope(
             artifacts["policy_paired_real"], reader, manifest, candidate
         ),
         "single_gpu": lambda: _validate_single_gpu_scope(
-            artifacts["single_gpu"], reader, manifest, candidate
+            artifacts["single_gpu"],
+            reader,
+            manifest,
+            candidate,
+            trusted_runtime_receipts[1:3],
         ),
         "two_gpu": lambda: _validate_two_gpu_scope(
             artifacts["two_gpu"], reader, manifest, candidate
@@ -7201,6 +12160,24 @@ def evaluate_completion(
             }
     if cpu["satisfied"] and single["satisfied"]:
         try:
+            correctness_topology = _validate_global_correctness_archive_topology(
+                cpu["details"], single["details"], manifest
+            )
+        except Exception as error:
+            record = _structured_evidence_error(
+                error,
+                phase="correctness-archive-topology",
+            )
+            output["cross_scope_errors"].append(record)
+            for scoped in (cpu, single):
+                scoped["satisfied"] = False
+                scoped["errors"].append(record)
+        else:
+            output["cross_scope_details"][
+                "correctness_archive_topology"
+            ] = correctness_topology
+    if cpu["satisfied"] and single["satisfied"]:
+        try:
             comparison = _validate_cpu_gpu_contract(
                 cpu["details"],
                 single["details"],
@@ -7217,6 +12194,29 @@ def evaluate_completion(
             single["errors"].append(record)
         else:
             output["cross_scope_details"]["cpu_gpu"] = comparison
+
+    if cpu["satisfied"] and policy["satisfied"] and single["satisfied"]:
+        try:
+            source_bindings = _validate_differential_correctness_source_bindings(
+                cpu["details"],
+                policy["details"],
+                single["details"],
+                manifest,
+                trusted_runtime_receipts[3:],
+            )
+        except Exception as error:
+            record = _structured_evidence_error(
+                error,
+                phase="differential-runtime-binding",
+            )
+            output["cross_scope_errors"].append(record)
+            for scoped in (cpu, policy, single):
+                scoped["satisfied"] = False
+                scoped["errors"].append(record)
+        else:
+            output["cross_scope_details"][
+                "differential_runtime_bindings"
+            ] = source_bindings
 
     linux_scopes = {
         "cpu": cpu,
@@ -7276,32 +12276,2369 @@ def evaluate_completion(
                     phase="bundle-closure",
                 )
             )
-    output["issue_completion_satisfied"] = not output["cross_scope_errors"] and all(
-        output["scopes"][name]["satisfied"] for name in scope_names
-    )
+    for scoped, key in (
+        (cpu, "_correctness_archive_bindings"),
+        (single, "_correctness_archive_bindings_by_mode"),
+    ):
+        details = scoped.get("details")
+        if isinstance(details, dict):
+            details.pop(key, None)
+    output["structural_validation_satisfied"] = not output[
+        "cross_scope_errors"
+    ] and all(output["scopes"][name]["satisfied"] for name in scope_names)
     return output
 
 
+def _create_private_live_directory(
+    output_directory: Path | str,
+    forbidden_roots: tuple[Path, ...],
+) -> Path:
+    try:
+        supplied = Path(output_directory)
+    except TypeError as error:
+        raise EvidenceError("live output directory path is invalid") from error
+    _require(
+        supplied.name not in {"", ".", ".."}
+        and all(part not in {".", ".."} for part in supplied.parts),
+        "live output directory name is invalid",
+    )
+    _require(
+        not supplied.exists() and not supplied.is_symlink(),
+        "live output directory already exists",
+    )
+    try:
+        from benchmarks import issue123_privacy as privacy
+
+        destination, _preflight_parent = privacy.preflight_private_output_path(
+            supplied,
+            label="live output directory",
+            forbidden_roots=forbidden_roots,
+        )
+    except (ImportError, OSError, TypeError, ValueError):
+        failure = EvidenceError("live output directory overlaps protected evidence")
+    else:
+        failure = None
+    if failure is not None:
+        raise failure from None
+    parent = _ensure_directory_without_symlinks(
+        supplied.parent,
+        "live output parent",
+    )
+    _require(
+        destination == parent / supplied.name,
+        "live output directory identity differs",
+    )
+    try:
+        destination.mkdir(mode=0o700)
+        os.chmod(destination, 0o700)
+        metadata = destination.lstat()
+    except OSError as error:
+        raise EvidenceError("live output directory could not be created") from error
+    _require(
+        stat.S_ISDIR(metadata.st_mode)
+        and not stat.S_ISLNK(metadata.st_mode)
+        and stat.S_IMODE(metadata.st_mode) == 0o700,
+        "live output directory is not a private mode-0700 directory",
+    )
+    return destination.resolve(strict=True)
+
+
+def _create_private_subdirectory(parent: Path, name: str) -> Path:
+    _require(
+        re.fullmatch(r"[a-z0-9][a-z0-9._-]*", name) is not None,
+        "private subdirectory name is invalid",
+    )
+    destination = parent / name
+    _require(
+        not destination.exists() and not destination.is_symlink(),
+        f"private subdirectory {name} already exists",
+    )
+    try:
+        destination.mkdir(mode=0o700)
+        os.chmod(destination, 0o700)
+        metadata = destination.lstat()
+    except OSError as error:
+        raise EvidenceError(
+            f"private subdirectory {name} could not be created"
+        ) from error
+    _require(
+        stat.S_ISDIR(metadata.st_mode)
+        and not stat.S_ISLNK(metadata.st_mode)
+        and stat.S_IMODE(metadata.st_mode) == 0o700,
+        f"private subdirectory {name} is not mode 0700",
+    )
+    return destination
+
+
+def _ensure_private_relative_parent(root: Path, relative: PurePosixPath) -> Path:
+    current = root
+    for part in relative.parts:
+        current = current / part
+        try:
+            current.mkdir(mode=0o700)
+        except FileExistsError:
+            pass
+        except OSError as error:
+            raise EvidenceError(
+                "private staging directory could not be created"
+            ) from error
+        try:
+            metadata = current.lstat()
+        except OSError as error:
+            raise EvidenceError("private staging directory is unreadable") from error
+        _require(
+            stat.S_ISDIR(metadata.st_mode) and not stat.S_ISLNK(metadata.st_mode),
+            "private staging path is not a directory",
+        )
+        try:
+            os.chmod(current, 0o700)
+        except OSError as error:
+            raise EvidenceError(
+                "private staging directory mode could not be set"
+            ) from error
+    return current
+
+
+def _write_exclusive_private_file(
+    path: Path,
+    raw: bytes,
+    label: str,
+    *,
+    forbidden_roots: tuple[Path, ...] = (),
+    before_commit: Callable[[], None] | None = None,
+) -> Path:
+    try:
+        from benchmarks import issue123_privacy as privacy
+    except ImportError:
+        raise EvidenceError("private authority file could not be committed") from None
+    try:
+        return privacy.write_private_authority_file(
+            path,
+            raw,
+            label=label,
+            forbidden_roots=forbidden_roots,
+            before_commit=before_commit,
+        )
+    except privacy.PrivateAuthorityCommitError:
+        raise CommittedAuthorityError(
+            "private authority file was committed but final verification failed"
+        ) from None
+    except (OSError, TypeError, ValueError):
+        raise EvidenceError("private authority file could not be committed") from None
+
+
+def _prepare_operations_live_input(
+    index_snapshot: FileSnapshot,
+    offline_result: dict[str, Any],
+    destination: Path,
+    forbidden_roots: tuple[Path, ...],
+) -> tuple[Path, dict[str, Any], StagedOperationsSnapshots]:
+    current_index, index_raw = _snapshot_regular_file(
+        index_snapshot.path,
+        "completion evidence index",
+        max_bytes=MAX_INDEX_BYTES,
+    )
+    _require(
+        current_index == index_snapshot
+        and offline_result.get("evidence_index")
+        == {
+            "path": index_snapshot.path.name,
+            "size_bytes": index_snapshot.size_bytes,
+            "sha256": index_snapshot.sha256,
+        },
+        "completion index changed after structural validation",
+    )
+    index = _strict_json_bytes(
+        index_raw,
+        "completion evidence index",
+        max_bytes=MAX_INDEX_BYTES,
+    )
+    _require(isinstance(index, dict), "completion evidence index differs")
+    _exact_keys(
+        index,
+        {
+            "schema_version",
+            "kind",
+            "issue",
+            "bundle",
+            "candidate_evidence",
+            "manifest",
+            "payloads",
+            "artifacts",
+        },
+        "completion evidence index",
+    )
+    candidate = offline_result.get("candidate_evidence")
+    _require(
+        isinstance(candidate, dict) and index["candidate_evidence"] == candidate,
+        "completion candidate changed after structural validation",
+    )
+    payloads = index["payloads"]
+    _require(isinstance(payloads, list), "payload registry must be a list")
+    reader = ArtifactReader(index_snapshot.path.parent, candidate, payloads)
+    manifest_artifact = reader.load(index["manifest"], "bundled manifest")
+    _require(
+        offline_result.get("manifest")
+        == {
+            "path": manifest_artifact.descriptor["path"],
+            "size_bytes": len(manifest_artifact.raw),
+            "sha256": _sha256(manifest_artifact.raw),
+        },
+        "bundled manifest changed after structural validation",
+    )
+    artifacts = index["artifacts"]
+    _require(isinstance(artifacts, dict), "completion evidence scopes differ")
+    structural_operations = _validate_operations_scope(
+        artifacts.get("operations"), reader, candidate
+    )
+    _require(
+        _type_exact_equal(
+            structural_operations,
+            offline_result.get("scopes", {}).get("operations", {}).get("details"),
+        ),
+        "operations result changed after structural validation",
+    )
+    operations_index, response_artifacts = _load_operations_scope_artifacts(
+        artifacts["operations"], reader, candidate
+    )
+    _require(
+        len(response_artifacts) == LIVE_OPERATIONS_RESPONSE_COUNT,
+        "operations staging does not contain exactly 22 responses",
+    )
+    operations_descriptor = {
+        "size_bytes": len(operations_index.raw),
+        "sha256": _sha256(operations_index.raw),
+    }
+    _require(
+        operations_descriptor
+        == {
+            "size_bytes": operations_index.descriptor["size_bytes"],
+            "sha256": operations_index.descriptor["sha256"],
+        },
+        "operations index descriptor differs",
+    )
+    staging = _create_private_subdirectory(destination, LIVE_OPERATIONS_DIRECTORY)
+    response_snapshots = []
+    for role, artifact in sorted(response_artifacts.items()):
+        relative = _canonical_bundle_path(
+            artifact.descriptor["path"],
+            f"operations raw response {role} staging path",
+        )
+        _require(
+            relative.as_posix() != "operations-index.json",
+            "operations response collides with the staged index",
+        )
+        parent = _ensure_private_relative_parent(staging, relative.parent)
+        response_path = parent / relative.name
+        _write_exclusive_private_file(
+            response_path,
+            artifact.raw,
+            f"staged operations raw response {role}",
+            forbidden_roots=forbidden_roots,
+        )
+        response_snapshot, response_raw = _snapshot_regular_file(
+            response_path,
+            f"staged operations raw response {role}",
+            max_bytes=MAX_ARTIFACT_BYTES,
+        )
+        _require(
+            response_raw == artifact.raw
+            and response_snapshot.size_bytes == artifact.descriptor["size_bytes"]
+            and response_snapshot.sha256 == artifact.descriptor["sha256"],
+            f"staged operations raw response {role} differs after creation",
+        )
+        response_snapshots.append((role, response_snapshot))
+    staged_index = staging / "operations-index.json"
+    _write_exclusive_private_file(
+        staged_index,
+        operations_index.raw,
+        "staged operations evidence index",
+        forbidden_roots=forbidden_roots,
+    )
+    staged_index_snapshot, staged_index_raw = _snapshot_regular_file(
+        staged_index,
+        "staged operations evidence index",
+        max_bytes=MAX_JSON_BYTES,
+    )
+    _require(
+        staged_index_raw == operations_index.raw
+        and staged_index_snapshot.size_bytes == operations_descriptor["size_bytes"]
+        and staged_index_snapshot.sha256 == operations_descriptor["sha256"],
+        "staged operations evidence index differs after creation",
+    )
+    snapshots = StagedOperationsSnapshots(
+        index=staged_index_snapshot,
+        responses=tuple(response_snapshots),
+    )
+    all_snapshots = (snapshots.index, *(item for _role, item in snapshots.responses))
+    _require(
+        len(snapshots.responses) == LIVE_OPERATIONS_RESPONSE_COUNT
+        and len({item.path for item in all_snapshots}) == len(all_snapshots)
+        and len({item.identity[:2] for item in all_snapshots}) == len(all_snapshots),
+        "staged operations inputs are not 23 distinct files",
+    )
+    return staged_index, operations_descriptor, snapshots
+
+
+def _require_staged_operations_inputs_unchanged(
+    snapshots: StagedOperationsSnapshots,
+) -> None:
+    _require(
+        isinstance(snapshots, StagedOperationsSnapshots)
+        and len(snapshots.responses) == LIVE_OPERATIONS_RESPONSE_COUNT,
+        "staged operations snapshot closure differs",
+    )
+    _require_snapshot_unchanged(
+        snapshots.index,
+        "staged operations evidence index",
+        max_bytes=MAX_JSON_BYTES,
+    )
+    for role, snapshot in snapshots.responses:
+        _require_snapshot_unchanged(
+            snapshot,
+            f"staged operations raw response {role}",
+            max_bytes=MAX_ARTIFACT_BYTES,
+        )
+
+
+def _retained_file_identity(
+    metadata: os.stat_result,
+) -> tuple[int, int, int, int, int]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+    )
+
+
+def _retained_directory_identity(
+    metadata: os.stat_result,
+) -> tuple[int, int, int, int]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_mtime_ns,
+    )
+
+
+def _read_retained_file(
+    descriptor: int,
+    expected_size: int,
+    maximum: int,
+    *,
+    changed_message: str,
+) -> bytes:
+    _require(
+        0 <= expected_size <= maximum,
+        "live B1 registered file closure differs",
+    )
+    chunks = []
+    offset = 0
+    while offset < expected_size:
+        try:
+            chunk = os.pread(
+                descriptor,
+                min(1024 * 1024, expected_size - offset),
+                offset,
+            )
+        except OSError:
+            raise EvidenceError(changed_message) from None
+        _require(bool(chunk), changed_message)
+        chunks.append(chunk)
+        offset += len(chunk)
+    try:
+        extra = os.pread(descriptor, 1, expected_size)
+    except OSError:
+        raise EvidenceError(changed_message) from None
+    _require(not extra, changed_message)
+    return b"".join(chunks)
+
+
+def _enumerate_retained_tree(
+    root_fd: int,
+) -> tuple[set[str], set[str]]:
+    files: set[str] = set()
+    directories: set[str] = set()
+
+    def walk(directory_fd: int, prefix: PurePosixPath) -> None:
+        try:
+            with os.scandir(directory_fd) as iterator:
+                entries = sorted(iterator, key=lambda item: item.name)
+        except OSError:
+            raise EvidenceError(
+                "live B1 directory closure changed during verification"
+            ) from None
+        for entry in entries:
+            relative = (
+                PurePosixPath(entry.name)
+                if prefix == PurePosixPath(".")
+                else prefix / entry.name
+            )
+            try:
+                metadata = entry.stat(follow_symlinks=False)
+            except OSError:
+                raise EvidenceError(
+                    "live B1 directory closure changed during verification"
+                ) from None
+            if stat.S_ISLNK(metadata.st_mode):
+                raise EvidenceError(
+                    "live B1 directory closure changed during verification"
+                )
+            if stat.S_ISDIR(metadata.st_mode):
+                directories.add(relative.as_posix())
+                try:
+                    child_fd = os.open(
+                        entry.name,
+                        os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                        dir_fd=directory_fd,
+                    )
+                except OSError:
+                    raise EvidenceError(
+                        "live B1 directory closure changed during verification"
+                    ) from None
+                try:
+                    walk(child_fd, relative)
+                finally:
+                    os.close(child_fd)
+            elif stat.S_ISREG(metadata.st_mode):
+                files.add(relative.as_posix())
+            else:
+                raise EvidenceError(
+                    "live B1 directory closure changed during verification"
+                )
+
+    walk(root_fd, PurePosixPath("."))
+    return files, directories
+
+
+def _capture_retained_bundle_tree(
+    index_path: Path | str,
+    label: str,
+    binding_context: Mapping[str, Any],
+) -> RetainedBundleTree:
+    opened: list[int] = []
+    try:
+        checked_index, metadata = _path_without_symlinks(Path(index_path), label)
+        _require(
+            checked_index.name == "completion-index.json"
+            and stat.S_ISREG(metadata.st_mode),
+            "live B1 registered file closure differs",
+        )
+        root = checked_index.parent
+        root_fd = os.open(
+            root,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+        )
+        opened.append(root_fd)
+        root_metadata = os.fstat(root_fd)
+        root_directory = RetainedBundleDirectory(
+            PurePosixPath("."),
+            root_fd,
+            _retained_directory_identity(root_metadata),
+        )
+        index_fd = os.open(
+            "completion-index.json",
+            os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+            dir_fd=root_fd,
+        )
+        opened.append(index_fd)
+        index_metadata = os.fstat(index_fd)
+        _require(
+            stat.S_ISREG(index_metadata.st_mode)
+            and 0 < index_metadata.st_size <= MAX_INDEX_BYTES,
+            "live B1 registered file closure differs",
+        )
+        index_raw = _read_retained_file(
+            index_fd,
+            index_metadata.st_size,
+            MAX_INDEX_BYTES,
+            changed_message="live B1 registered file bytes changed during verification",
+        )
+        document = _strict_json_bytes(index_raw, label, max_bytes=MAX_INDEX_BYTES)
+        _exact_keys(
+            document,
+            {
+                "schema_version",
+                "kind",
+                "issue",
+                "bundle",
+                "candidate_evidence",
+                "manifest",
+                "payloads",
+                "artifacts",
+            },
+            label,
+        )
+        _require(
+            _is_exact_int(document["schema_version"], INDEX_SCHEMA_VERSION)
+            and document["kind"] == INDEX_KIND
+            and _is_exact_int(document["issue"], 123),
+            "live B1 registered file closure differs",
+        )
+        _exact_keys(
+            document["bundle"],
+            {"format", "path_contract", "artifact_count", "artifact_bytes"},
+            "live B1 bundle contract",
+        )
+        _exact_keys(
+            document["artifacts"],
+            {
+                "cpu",
+                "policy_paired_real",
+                "single_gpu",
+                "two_gpu",
+                "macos",
+                "operations",
+            },
+            "live B1 scope mapping",
+        )
+        payload_values = document["payloads"]
+        _require(
+            isinstance(payload_values, list)
+            and len(payload_values) <= MAX_RETAINED_BUNDLE_ENTRIES,
+            "live B1 registered file closure differs",
+        )
+        candidate = _candidate_evidence(
+            document["candidate_evidence"],
+            (
+                document["candidate_evidence"].get("manifest_sha256")
+                if isinstance(document["candidate_evidence"], Mapping)
+                else None
+            ),
+        )
+        ledger = [
+            _validate_descriptor(item, candidate, f"{label} payload {ordinal}")
+            for ordinal, item in enumerate(payload_values)
+        ]
+        paths = [item["path"] for item in ledger]
+        bundle = document["bundle"]
+        _require(
+            paths == sorted(paths)
+            and len(paths) == len(set(paths))
+            and bundle["format"] == BUNDLE_FORMAT
+            and bundle["path_contract"] == PATH_CONTRACT
+            and _is_exact_int(bundle["artifact_count"], len(ledger))
+            and type(bundle["artifact_bytes"]) is int
+            and bundle["artifact_bytes"] == sum(item["size_bytes"] for item in ledger),
+            "live B1 registered file closure differs",
+        )
+        expected_files = {"completion-index.json", *paths}
+        expected_directories: set[str] = set()
+        for value in paths:
+            parent = PurePosixPath(value).parent
+            while parent != PurePosixPath("."):
+                expected_directories.add(parent.as_posix())
+                parent = parent.parent
+        _require(
+            len(expected_files) + len(expected_directories)
+            <= MAX_RETAINED_BUNDLE_ENTRIES,
+            "live B1 registered file closure differs",
+        )
+        actual_files, actual_directories = _enumerate_retained_tree(root_fd)
+        _require(
+            actual_files == expected_files
+            and actual_directories == expected_directories,
+            "live B1 registered file closure differs",
+        )
+        directory_by_path = {PurePosixPath("."): root_directory}
+        retained_directories = []
+        for relative_value in sorted(
+            expected_directories, key=lambda value: (value.count("/"), value)
+        ):
+            relative = PurePosixPath(relative_value)
+            parent = directory_by_path[relative.parent]
+            directory_fd = os.open(
+                relative.name,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                dir_fd=parent.fd,
+            )
+            opened.append(directory_fd)
+            directory_metadata = os.fstat(directory_fd)
+            retained = RetainedBundleDirectory(
+                relative,
+                directory_fd,
+                _retained_directory_identity(directory_metadata),
+            )
+            directory_by_path[relative] = retained
+            retained_directories.append(retained)
+        retained_payloads = []
+        file_identities = {(index_metadata.st_dev, index_metadata.st_ino)}
+        for descriptor in ledger:
+            relative = PurePosixPath(descriptor["path"])
+            parent = directory_by_path[relative.parent]
+            payload_fd = os.open(
+                relative.name,
+                os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                dir_fd=parent.fd,
+            )
+            opened.append(payload_fd)
+            payload_metadata = os.fstat(payload_fd)
+            _require(
+                stat.S_ISREG(payload_metadata.st_mode)
+                and payload_metadata.st_size == descriptor["size_bytes"],
+                "live B1 registered file closure differs",
+            )
+            identity = (payload_metadata.st_dev, payload_metadata.st_ino)
+            _require(
+                identity not in file_identities,
+                "live B1 registered file identity changed during verification",
+            )
+            file_identities.add(identity)
+            raw = _read_retained_file(
+                payload_fd,
+                descriptor["size_bytes"],
+                MAX_ARTIFACT_BYTES,
+                changed_message="live B1 registered file bytes changed during verification",
+            )
+            _require(
+                _sha256(raw) == descriptor["sha256"],
+                "live B1 registered file bytes changed during verification",
+            )
+            _validate_media_payload(raw, descriptor["media_type"], label)
+            _require(
+                _retained_file_identity(os.fstat(payload_fd))
+                == _retained_file_identity(payload_metadata),
+                "live B1 registered file identity changed during verification",
+            )
+            retained_payloads.append(
+                RetainedBundleFile(
+                    relative,
+                    _canonical_json_bytes(descriptor),
+                    payload_fd,
+                    _retained_file_identity(payload_metadata),
+                    len(raw),
+                    _sha256(raw),
+                )
+            )
+        inventory, inventory_root = _validated_bundle_inventory_value(
+            index_raw,
+            document,
+            ledger,
+            binding_context,
+        )
+        index_file = RetainedBundleFile(
+            PurePosixPath("completion-index.json"),
+            None,
+            index_fd,
+            _retained_file_identity(index_metadata),
+            len(index_raw),
+            _sha256(index_raw),
+        )
+        expected_entry_types = tuple(
+            sorted(
+                [(value, "directory") for value in expected_directories]
+                + [(value, "file") for value in expected_files]
+            )
+        )
+        return RetainedBundleTree(
+            root=root,
+            root_directory=root_directory,
+            directories=tuple(retained_directories),
+            index=index_file,
+            payloads=tuple(retained_payloads),
+            expected_entry_types=expected_entry_types,
+            descriptor_ledger=tuple(_canonical_json_bytes(item) for item in ledger),
+            inventory_bytes=_canonical_json_bytes(inventory),
+            inventory_root=inventory_root,
+            index_semantics=index_raw,
+        )
+    except Exception:
+        for descriptor in reversed(opened):
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        raise
+
+
+def _retained_file_snapshot(
+    tree: RetainedBundleTree, retained: RetainedBundleFile
+) -> FileSnapshot:
+    identity = retained.identity
+    path = tree.root.joinpath(*retained.relative_path.parts)
+    return FileSnapshot(
+        path,
+        retained.size_bytes,
+        retained.sha256,
+        (identity[0], identity[1], identity[3], identity[4]),
+    )
+
+
+def _require_retained_bundle_tree_unchanged(tree: RetainedBundleTree) -> None:
+    try:
+        root_path, root_metadata = _path_without_symlinks(tree.root, "live B1 root")
+    except EvidenceError:
+        raise EvidenceError(
+            "live B1 directory closure changed during verification"
+        ) from None
+    _require(
+        root_path == tree.root
+        and _retained_directory_identity(root_metadata) == tree.root_directory.identity
+        and _retained_directory_identity(os.fstat(tree.root_directory.fd))
+        == tree.root_directory.identity,
+        "live B1 directory closure changed during verification",
+    )
+    directory_by_path = {PurePosixPath("."): tree.root_directory}
+    for retained in tree.directories:
+        directory_by_path[retained.relative_path] = retained
+        _require(
+            _retained_directory_identity(os.fstat(retained.fd)) == retained.identity,
+            "live B1 directory closure changed during verification",
+        )
+        parent = directory_by_path[retained.relative_path.parent]
+        try:
+            current = os.stat(
+                retained.relative_path.name,
+                dir_fd=parent.fd,
+                follow_symlinks=False,
+            )
+        except OSError:
+            raise EvidenceError(
+                "live B1 directory closure changed during verification"
+            ) from None
+        _require(
+            _retained_directory_identity(current) == retained.identity,
+            "live B1 directory closure changed during verification",
+        )
+    for retained in (tree.index, *tree.payloads):
+        try:
+            metadata = os.fstat(retained.fd)
+        except OSError:
+            raise EvidenceError(
+                "live B1 registered file identity changed during verification"
+            ) from None
+        _require(
+            _retained_file_identity(metadata) == retained.identity,
+            "live B1 registered file identity changed during verification",
+        )
+        raw = _read_retained_file(
+            retained.fd,
+            retained.size_bytes,
+            MAX_INDEX_BYTES if retained is tree.index else MAX_ARTIFACT_BYTES,
+            changed_message="live B1 registered file bytes changed during verification",
+        )
+        _require(
+            _sha256(raw) == retained.sha256,
+            "live B1 registered file bytes changed during verification",
+        )
+        parent = directory_by_path[retained.relative_path.parent]
+        try:
+            current = os.stat(
+                retained.relative_path.name,
+                dir_fd=parent.fd,
+                follow_symlinks=False,
+            )
+        except OSError:
+            raise EvidenceError(
+                "live B1 registered file identity changed during verification"
+            ) from None
+        _require(
+            (current.st_dev, current.st_ino)
+            == (retained.identity[0], retained.identity[1]),
+            "live B1 registered file identity changed during verification",
+        )
+    files, directories = _enumerate_retained_tree(tree.root_directory.fd)
+    current_types = tuple(
+        sorted(
+            [(value, "directory") for value in directories]
+            + [(value, "file") for value in files]
+        )
+    )
+    _require(
+        current_types == tree.expected_entry_types,
+        "live B1 directory closure changed during verification",
+    )
+    index_raw = _read_retained_file(
+        tree.index.fd,
+        tree.index.size_bytes,
+        MAX_INDEX_BYTES,
+        changed_message="live B1 registered file bytes changed during verification",
+    )
+    index = _strict_json_bytes(
+        index_raw, "retained live B1 index", max_bytes=MAX_INDEX_BYTES
+    )
+    ledger = tuple(
+        _canonical_json_bytes(
+            _validate_descriptor(
+                item,
+                index["candidate_evidence"],
+                f"retained live B1 payload {ordinal}",
+            )
+        )
+        for ordinal, item in enumerate(index["payloads"])
+    )
+    _require(
+        index_raw == tree.index_semantics and ledger == tree.descriptor_ledger,
+        "live B1 registered file closure differs",
+    )
+
+
+def _close_retained_bundle_tree(tree: RetainedBundleTree) -> None:
+    failed = False
+    owners = [
+        *tree.payloads,
+        tree.index,
+        *reversed(tree.directories),
+        tree.root_directory,
+    ]
+    for owner in owners:
+        descriptor = owner.fd
+        if descriptor < 0:
+            continue
+        object.__setattr__(owner, "fd", -1)
+        try:
+            os.close(descriptor)
+        except OSError:
+            failed = True
+    if failed:
+        raise EvidenceError("live B1 retained descriptors could not be closed")
+
+
+def _close_retained_bundle_trees(
+    trees: tuple[RetainedBundleTree, ...],
+    *,
+    primary_error: BaseException | None = None,
+) -> None:
+    """Attempt every owned-tree close once without masking a primary failure."""
+
+    cleanup_failed = False
+    for tree in trees:
+        try:
+            _close_retained_bundle_tree(tree)
+        except EvidenceError:
+            cleanup_failed = True
+    if cleanup_failed:
+        if primary_error is not None:
+            return
+        raise EvidenceError(
+            "live B1 retained descriptors could not be closed"
+        ) from None
+
+
+def _capture_detached_live_inputs(
+    manifest_path: Path | str | None,
+    runtime_receipt_paths: Any,
+    pre_acknowledgment_receipt: Path | str,
+    final_reopen_receipt: Path | str,
+) -> tuple[FileSnapshot, tuple[FileSnapshot, ...], FileSnapshot, FileSnapshot]:
+    manifest_snapshot, _manifest_raw = _snapshot_regular_file(
+        DEFAULT_MANIFEST if manifest_path is None else manifest_path,
+        "trusted completion manifest",
+        max_bytes=MAX_MANIFEST_BYTES,
+    )
+    runtime_snapshots = tuple(
+        _snapshot_regular_file(
+            path,
+            f"trusted {role} runtime receipt",
+            max_bytes=MAX_RUNTIME_RECEIPT_BYTES,
+        )[0]
+        for role, path in zip(
+            RUNTIME_RECEIPT_ROLES,
+            runtime_receipt_paths,
+            strict=True,
+        )
+    )
+    pre_ack_snapshot, _pre_ack_raw = _snapshot_regular_file(
+        pre_acknowledgment_receipt,
+        "pre-acknowledgment bundle reopen receipt",
+        max_bytes=MAX_JSON_BYTES,
+    )
+    final_reopen_snapshot, _final_reopen_raw = _snapshot_regular_file(
+        final_reopen_receipt,
+        "final bundle reopen receipt",
+        max_bytes=MAX_JSON_BYTES,
+    )
+    return (
+        manifest_snapshot,
+        runtime_snapshots,
+        pre_ack_snapshot,
+        final_reopen_snapshot,
+    )
+
+
+def _capture_core_live_inputs(
+    index_path: Path | str,
+    reopened_index: Path | str,
+    manifest_path: Path | str | None,
+    runtime_receipt_paths: Any,
+    protected_openings: Path | str,
+    pre_acknowledgment_receipt: Path | str,
+    final_reopen_receipt: Path | str,
+) -> LiveAuthoritySnapshots:
+    _require(
+        isinstance(runtime_receipt_paths, (list, tuple))
+        and len(runtime_receipt_paths) == len(RUNTIME_RECEIPT_ROLES),
+        "exactly five trusted runtime receipt paths are required",
+    )
+    openings_snapshot, _openings_raw = _snapshot_regular_file(
+        protected_openings,
+        "protected publication openings",
+        max_bytes=MAX_JSON_BYTES,
+    )
+    privacy, _publication = _private_binding_modules()
+    _openings, binding_context = privacy.load_private_openings(openings_snapshot.path)
+    source_bundle = _capture_retained_bundle_tree(
+        index_path,
+        "source live B1 index",
+        binding_context,
+    )
+    reopened_bundle: RetainedBundleTree | None = None
+    try:
+        reopened_bundle = _capture_retained_bundle_tree(
+            reopened_index,
+            "reopened live B1 index",
+            binding_context,
+        )
+        index_snapshot = _retained_file_snapshot(source_bundle, source_bundle.index)
+        reopened_snapshot = _retained_file_snapshot(
+            reopened_bundle, reopened_bundle.index
+        )
+        (
+            manifest_snapshot,
+            runtime_snapshots,
+            pre_ack_snapshot,
+            final_reopen_snapshot,
+        ) = _capture_detached_live_inputs(
+            manifest_path,
+            runtime_receipt_paths,
+            pre_acknowledgment_receipt,
+            final_reopen_receipt,
+        )
+        source_root = source_bundle.root
+        reopened_root = reopened_bundle.root
+        authority_snapshots = (
+            index_snapshot,
+            reopened_snapshot,
+            manifest_snapshot,
+            *runtime_snapshots,
+            openings_snapshot,
+            pre_ack_snapshot,
+            final_reopen_snapshot,
+        )
+        source_identities = {
+            source_bundle.root_directory.identity[:2],
+            *(item.identity[:2] for item in source_bundle.directories),
+            source_bundle.index.identity[:2],
+            *(item.identity[:2] for item in source_bundle.payloads),
+        }
+        reopened_identities = {
+            reopened_bundle.root_directory.identity[:2],
+            *(item.identity[:2] for item in reopened_bundle.directories),
+            reopened_bundle.index.identity[:2],
+            *(item.identity[:2] for item in reopened_bundle.payloads),
+        }
+        _require(
+            source_root != reopened_root
+            and source_bundle.root_directory.identity[:2]
+            != reopened_bundle.root_directory.identity[:2]
+            and index_snapshot.sha256 == reopened_snapshot.sha256
+            and index_snapshot.size_bytes == reopened_snapshot.size_bytes
+            and source_bundle.descriptor_ledger == reopened_bundle.descriptor_ledger
+            and source_bundle.inventory_bytes == reopened_bundle.inventory_bytes
+            and source_bundle.inventory_root == reopened_bundle.inventory_root
+            and source_bundle.expected_entry_types
+            == reopened_bundle.expected_entry_types
+            and source_identities.isdisjoint(reopened_identities)
+            and len({item.path for item in authority_snapshots})
+            == len(authority_snapshots)
+            and len({item.identity[:2] for item in authority_snapshots})
+            == len(authority_snapshots)
+            and len({item.sha256 for item in runtime_snapshots})
+            == len(runtime_snapshots)
+            and all(
+                not snapshot.path.is_relative_to(source_root)
+                and not snapshot.path.is_relative_to(reopened_root)
+                for snapshot in (
+                    manifest_snapshot,
+                    *runtime_snapshots,
+                    openings_snapshot,
+                    pre_ack_snapshot,
+                    final_reopen_snapshot,
+                )
+            ),
+            "source and reopened live B1 snapshot closure differs",
+        )
+        return LiveAuthoritySnapshots(
+            source_bundle=source_bundle,
+            reopened_bundle=reopened_bundle,
+            manifest=manifest_snapshot,
+            runtime_receipts=runtime_snapshots,
+            protected_openings=openings_snapshot,
+            pre_acknowledgment_receipt=pre_ack_snapshot,
+            final_reopen_receipt=final_reopen_snapshot,
+        )
+    except BaseException as error:
+        _close_retained_bundle_trees(
+            tuple(
+                tree for tree in (reopened_bundle, source_bundle) if tree is not None
+            ),
+            primary_error=error,
+        )
+        raise
+
+
+def _require_core_live_inputs_unchanged(
+    snapshots: LiveAuthoritySnapshots,
+) -> None:
+    _require_retained_bundle_tree_unchanged(snapshots.source_bundle)
+    _require_retained_bundle_tree_unchanged(snapshots.reopened_bundle)
+    _require_snapshot_unchanged(
+        snapshots.manifest,
+        "trusted completion manifest",
+        max_bytes=MAX_MANIFEST_BYTES,
+    )
+    for role, snapshot in zip(
+        RUNTIME_RECEIPT_ROLES,
+        snapshots.runtime_receipts,
+        strict=True,
+    ):
+        _require_snapshot_unchanged(
+            snapshot,
+            f"trusted {role} runtime receipt",
+            max_bytes=MAX_RUNTIME_RECEIPT_BYTES,
+        )
+    _require_snapshot_unchanged(
+        snapshots.protected_openings,
+        "protected publication openings",
+        max_bytes=MAX_JSON_BYTES,
+    )
+    _require_snapshot_unchanged(
+        snapshots.pre_acknowledgment_receipt,
+        "pre-acknowledgment bundle reopen receipt",
+        max_bytes=MAX_JSON_BYTES,
+    )
+    _require_snapshot_unchanged(
+        snapshots.final_reopen_receipt,
+        "final bundle reopen receipt",
+        max_bytes=MAX_JSON_BYTES,
+    )
+
+
+def _capture_publication_live_inputs(
+    *,
+    operations_module: Any,
+    publication_policy: Path | str,
+    publication_policy_sha256: str,
+    publication_assets: Mapping[str, Path | str],
+    bundle_root: Path,
+    core_snapshots: tuple[FileSnapshot, ...],
+) -> tuple[
+    FileSnapshot, dict[str, FileSnapshot], dict[str, Path], list[dict[str, Any]]
+]:
+    _require(
+        isinstance(publication_policy_sha256, str)
+        and SHA256_RE.fullmatch(publication_policy_sha256) is not None,
+        "caller-owned publication policy digest is malformed",
+    )
+    policy_snapshot, policy_raw = _snapshot_regular_file(
+        publication_policy,
+        "trusted publication policy",
+        max_bytes=operations_module.MAX_PUBLICATION_POLICY_BYTES,
+    )
+    policy_document = _strict_json_bytes(
+        policy_raw,
+        "trusted publication policy",
+        max_bytes=operations_module.MAX_PUBLICATION_POLICY_BYTES,
+    )
+    _require(
+        isinstance(policy_document, dict)
+        and policy_raw == _compact_canonical_json_bytes(policy_document),
+        "trusted publication policy is not canonical JSON",
+    )
+    _require(
+        policy_snapshot.sha256 == publication_policy_sha256,
+        "trusted publication policy differs from the caller-owned digest",
+    )
+    _require(
+        not policy_snapshot.path.is_relative_to(bundle_root),
+        "trusted publication policy must be outside the evidence bundle",
+    )
+    expected_assets = operations_module.TECHNICAL_RELEASE_ASSETS
+    _require(
+        isinstance(publication_assets, Mapping)
+        and set(publication_assets) == set(expected_assets),
+        "publication asset path closure differs",
+    )
+    asset_snapshots: dict[str, FileSnapshot] = {}
+    resolved_assets: dict[str, Path] = {}
+    asset_ledger = []
+    for role, name in expected_assets.items():
+        snapshot, _raw = _snapshot_regular_file(
+            publication_assets[role],
+            f"downloaded publication asset {role}",
+            max_bytes=operations_module.MAX_PUBLICATION_ASSET_BYTES,
+        )
+        _require(
+            snapshot.path.name == name,
+            f"downloaded publication asset {role} has the wrong filename",
+        )
+        _require(
+            not snapshot.path.is_relative_to(bundle_root),
+            f"downloaded publication asset {role} must be outside the evidence bundle",
+        )
+        asset_snapshots[role] = snapshot
+        resolved_assets[role] = snapshot.path
+        asset_ledger.append(
+            {
+                "role": role,
+                "name": name,
+                "size_bytes": snapshot.size_bytes,
+                "sha256": snapshot.sha256,
+            }
+        )
+    all_snapshots = (*core_snapshots, policy_snapshot, *asset_snapshots.values())
+    _require(
+        len({item.path for item in all_snapshots}) == len(all_snapshots)
+        and len({item.identity[:2] for item in all_snapshots}) == len(all_snapshots),
+        "live verification inputs are not distinct files",
+    )
+    return policy_snapshot, asset_snapshots, resolved_assets, asset_ledger
+
+
+def _require_publication_live_inputs_unchanged(
+    operations_module: Any,
+    policy_snapshot: FileSnapshot,
+    asset_snapshots: Mapping[str, FileSnapshot],
+) -> None:
+    _require_snapshot_unchanged(
+        policy_snapshot,
+        "trusted publication policy",
+        max_bytes=operations_module.MAX_PUBLICATION_POLICY_BYTES,
+    )
+    for role in operations_module.TECHNICAL_RELEASE_ASSETS:
+        _require_snapshot_unchanged(
+            asset_snapshots[role],
+            f"downloaded publication asset {role}",
+            max_bytes=operations_module.MAX_PUBLICATION_ASSET_BYTES,
+        )
+
+
+def _require_private_authority_file(snapshot: FileSnapshot, label: str) -> None:
+    try:
+        file_metadata = snapshot.path.lstat()
+        parent_metadata = snapshot.path.parent.lstat()
+    except OSError as error:
+        raise EvidenceError(f"{label} privacy metadata is unavailable") from error
+    _require(
+        stat.S_ISREG(file_metadata.st_mode)
+        and not stat.S_ISLNK(file_metadata.st_mode)
+        and stat.S_IMODE(file_metadata.st_mode) == 0o600
+        and stat.S_ISDIR(parent_metadata.st_mode)
+        and not stat.S_ISLNK(parent_metadata.st_mode)
+        and stat.S_IMODE(parent_metadata.st_mode) == 0o700,
+        f"{label} must be mode 0600 in a mode-0700 directory",
+    )
+
+
+def _validate_final_bundle_reopen_chain(
+    core_inputs: LiveAuthoritySnapshots,
+) -> dict[str, Any]:
+    """Authenticate O0/B0 -> O1/B1 and reopen the exact final B1 bytes."""
+
+    for snapshot, label in (
+        (core_inputs.protected_openings, "protected publication openings"),
+        (
+            core_inputs.pre_acknowledgment_receipt,
+            "pre-acknowledgment bundle receipt",
+        ),
+        (core_inputs.final_reopen_receipt, "final bundle receipt"),
+    ):
+        _require_private_authority_file(snapshot, label)
+    privacy, _publication = _private_binding_modules()
+    _openings, context = privacy.load_private_openings(
+        core_inputs.protected_openings.path
+    )
+    pre_receipt = validate_bundle_reopen_receipt(
+        core_inputs.pre_acknowledgment_receipt.path,
+        "pre_acknowledgment",
+        core_inputs.protected_openings.path,
+    )
+    final_receipt = validate_bundle_reopen_receipt(
+        core_inputs.final_reopen_receipt.path,
+        "final",
+        core_inputs.protected_openings.path,
+    )
+    _pre_document, pre_raw = _load_reopen_receipt(
+        core_inputs.pre_acknowledgment_receipt.path
+    )
+    _final_document, final_raw = _load_reopen_receipt(
+        core_inputs.final_reopen_receipt.path
+    )
+    pre_sha256 = _reopen_receipt_file_sha256(pre_raw)
+    _require(
+        final_receipt["pre_acknowledgment_receipt_sha256"] == pre_sha256,
+        "final bundle receipt does not bind the exact B0 receipt",
+    )
+    source = _bundle_inventory_from_context(core_inputs.source_index.path, context)
+    reopened = _bundle_inventory_from_context(core_inputs.reopened_index.path, context)
+    _require(
+        source["root"] == reopened["root"]
+        and source["inventory"] == reopened["inventory"],
+        "source and reopened final B1 inventories differ",
+    )
+    source_identity = _bundle_path_identity(source["index_path"].parent)
+    reopened_identity = _bundle_path_identity(reopened["index_path"].parent)
+    expected_source = {
+        "inventory_root": source["root"],
+        "index": source["inventory"]["index"],
+        "path_identity": source_identity,
+    }
+    expected_reopened = {
+        "inventory_root": reopened["root"],
+        "index": reopened["inventory"]["index"],
+        "path_identity": reopened_identity,
+    }
+    _require(
+        final_receipt["source_bundle"] == expected_source
+        and final_receipt["reopened_bundle"] == expected_reopened
+        and final_receipt["registered_payloads"] == reopened["inventory"]["payloads"],
+        "final receipt inventory does not describe the exact reopened B1",
+    )
+    source_file_ids = {
+        (device, inode) for _path, device, inode in source["file_identities"]
+    }
+    reopened_file_ids = {
+        (device, inode) for _path, device, inode in reopened["file_identities"]
+    }
+    _require(
+        source_file_ids.isdisjoint(reopened_file_ids),
+        "source and reopened final B1 payloads share file identities",
+    )
+    reopened_index_document = _load_inventory_index(reopened["index_path"])[2]
+    issue, issue_raw, issue_descriptor = _operations_issue_response(
+        reopened["index_path"], reopened_index_document
+    )
+    expected_issue = {
+        **_checklist_observation(issue, "checked"),
+        "canonical_response_sha256": _sha256(issue_raw),
+        "descriptor": issue_descriptor,
+    }
+    _require(
+        final_receipt["issue_response"] == expected_issue,
+        "final B1 checked issue response differs from its reopen receipt",
+    )
+    pre_observed_at = _timestamp(
+        pre_receipt["observed_at"], "pre-acknowledgment bundle observation"
+    )
+    final_updated_at = _timestamp(
+        final_receipt["issue_response"]["updated_at"],
+        "final checklist update",
+    )
+    final_observed_at = _timestamp(
+        final_receipt["observed_at"], "final bundle observation"
+    )
+    _require(
+        pre_receipt["source_bundle"]["inventory_root"]
+        == pre_receipt["reopened_bundle"]["inventory_root"]
+        and pre_receipt["source_bundle"]["inventory_root"] != source["root"]
+        and pre_receipt["technical_binding"] == final_receipt["technical_binding"]
+        and pre_receipt["issue_response"]["checklist_transition_sha256"]
+        == final_receipt["issue_response"]["checklist_transition_sha256"]
+        == expected_issue["checklist_transition_sha256"]
+        and pre_receipt["issue_response"]["canonical_response_sha256"]
+        != final_receipt["issue_response"]["canonical_response_sha256"]
+        and pre_observed_at <= final_updated_at <= final_observed_at,
+        "B0/O0 and B1/O1 fixed-point chronology differs",
+    )
+    try:
+        from benchmarks import issue123_operations as operations
+
+        post_bundle_expectation = operations.AuthenticatedPostBundleExpectation(
+            checked_lines=tuple(final_receipt["issue_response"]["lines"]),
+            o0_canonical_response_sha256=pre_receipt["issue_response"][
+                "canonical_response_sha256"
+            ],
+            o1_canonical_response_sha256=final_receipt["issue_response"][
+                "canonical_response_sha256"
+            ],
+            o1_body_sha256=final_receipt["issue_response"]["body_sha256"],
+            o1_updated_at=final_receipt["issue_response"]["updated_at"],
+            b0_inventory_root=pre_receipt["source_bundle"]["inventory_root"],
+            b0_reopen_receipt_sha256=pre_sha256,
+            b0_reopened_at=pre_receipt["observed_at"],
+            checklist_transition_sha256=final_receipt["issue_response"][
+                "checklist_transition_sha256"
+            ],
+        )
+    except (ImportError, TypeError, ValueError):
+        raise EvidenceError("authenticated post-bundle expectation differs") from None
+    return {
+        "final_bundle_inventory_root": source["root"],
+        "post_bundle_expectation": post_bundle_expectation,
+        "post_bundle_result": {
+            "pre_acknowledgment_receipt": {
+                "schema_version": BUNDLE_REOPEN_RECEIPT_VERSION,
+                "kind": BUNDLE_REOPEN_RECEIPT_KIND,
+                "size_bytes": len(pre_raw),
+                "sha256": pre_sha256,
+                "observed_at": pre_receipt["observed_at"],
+                "bundle_inventory_root": pre_receipt["source_bundle"]["inventory_root"],
+            },
+            "final_reopen_receipt": {
+                "schema_version": BUNDLE_REOPEN_RECEIPT_VERSION,
+                "kind": BUNDLE_REOPEN_RECEIPT_KIND,
+                "size_bytes": len(final_raw),
+                "sha256": _reopen_receipt_file_sha256(final_raw),
+                "observed_at": final_receipt["observed_at"],
+                "bundle_inventory_root": source["root"],
+            },
+        },
+    }
+
+
+class AuthenticatedPostBundleLease:
+    """Own retained B1 authority until the caller's final bytes are durable."""
+
+    __slots__ = ("_snapshots", "_chain", "expectation", "_closed")
+
+    def __init__(
+        self,
+        snapshots: LiveAuthoritySnapshots,
+        chain: dict[str, Any],
+    ) -> None:
+        self._snapshots = snapshots
+        self._chain = chain
+        self.expectation = chain["post_bundle_expectation"]
+        self._closed = False
+
+    def require_unchanged(self) -> None:
+        _require(not self._closed, "authenticated post-bundle lease is closed")
+        _require_core_live_inputs_unchanged(self._snapshots)
+
+    def _private_writer_roots(self) -> tuple[Path, Path]:
+        """Return only the canonical roots owned by the authenticated lease."""
+
+        _require(not self._closed, "authenticated post-bundle lease is closed")
+        return (
+            self._snapshots.source_bundle.root,
+            self._snapshots.reopened_bundle.root,
+        )
+
+    def _baseline_authority_set(self, operations_module: Any) -> Any:
+        """Derive the exact ordered baseline authority from retained final B1."""
+
+        _require(not self._closed, "authenticated post-bundle lease is closed")
+        self.require_unchanged()
+        authority = _validate_final_b1_baseline_descriptors(
+            self._snapshots.reopened_index.path,
+            operations_module,
+        )
+        self.require_unchanged()
+        return authority
+
+    def close(self, *, primary_error: BaseException | None = None) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        _close_retained_bundle_trees(
+            (
+                self._snapshots.reopened_bundle,
+                self._snapshots.source_bundle,
+            ),
+            primary_error=primary_error,
+        )
+
+
+@contextmanager
+def open_authenticated_post_bundle_transition(
+    *,
+    source_index: Path | str,
+    reopened_index: Path | str,
+    protected_openings: Path | str,
+    pre_ack_bundle_reopen_receipt: Path | str,
+    final_bundle_reopen_receipt: Path | str,
+    manifest_path: Path | str | None,
+    runtime_receipt_paths: list[Path | str] | tuple[Path | str, ...],
+):
+    """Hold exact source/reopened B1 authority for one same-process decision."""
+
+    snapshots = _capture_core_live_inputs(
+        source_index,
+        reopened_index,
+        manifest_path,
+        runtime_receipt_paths,
+        protected_openings,
+        pre_ack_bundle_reopen_receipt,
+        final_bundle_reopen_receipt,
+    )
+    lease: AuthenticatedPostBundleLease | None = None
+    primary_error: BaseException | None = None
+    try:
+        _require_core_live_inputs_unchanged(snapshots)
+        chain = _validate_final_bundle_reopen_chain(snapshots)
+        _require_core_live_inputs_unchanged(snapshots)
+        lease = AuthenticatedPostBundleLease(snapshots, chain)
+        yield lease
+    except BaseException as error:
+        primary_error = error
+        raise
+    finally:
+        if lease is None:
+            _close_retained_bundle_trees(
+                (snapshots.reopened_bundle, snapshots.source_bundle),
+                primary_error=primary_error,
+            )
+        else:
+            lease.close(primary_error=primary_error)
+
+
+def _validate_final_b1_baseline_descriptors(
+    index_path: Path,
+    operations_module: Any,
+) -> Any:
+    """Return the two exact baseline descriptors already validated inside B1."""
+
+    checked, _raw, document = _load_inventory_index(index_path)
+    cpu_scope = document["artifacts"]["cpu"]
+    _require(isinstance(cpu_scope, dict), "final B1 CPU scope mapping differs")
+    descriptors = cpu_scope.get("torch_baseline_artifacts")
+    _require(
+        isinstance(descriptors, list) and len(descriptors) == 2,
+        "final B1 baseline descriptor closure differs",
+    )
+    reader = ArtifactReader(
+        checked.parent,
+        document["candidate_evidence"],
+        document["payloads"],
+    )
+    expected = operations_module.PRODUCTION_BASELINE_AUTHORITY_SET
+    _require(
+        type(expected) is operations_module.BaselineAuthoritySet,
+        "operations baseline authority interface differs",
+    )
+    for ordinal, (descriptor, authority) in enumerate(
+        zip(descriptors, expected.assets, strict=True)
+    ):
+        artifact = reader.load(
+            descriptor,
+            f"final B1 baseline artifact {ordinal}",
+            json_document=False,
+        )
+        _require(
+            authority.ordinal == ordinal
+            and artifact.path.name == authority.name
+            and len(artifact.raw) == authority.size_bytes
+            and _sha256(artifact.raw) == authority.sha256,
+            f"final B1 baseline artifact {ordinal} differs",
+        )
+    return expected
+
+
+def _validate_current_live_receipt(
+    *,
+    operations_module: Any,
+    receipt: Any,
+    receipt_path: Path,
+    candidate: dict[str, str],
+    operations_descriptor: dict[str, Any],
+    publication_policy_sha256: str,
+    asset_ledger: list[dict[str, Any]],
+    post_bundle_expectation: Any,
+    baseline_descriptors: Any,
+    invocation_started_at: dt.datetime,
+    invocation_finished_at: dt.datetime,
+) -> dict[str, Any]:
+    _require(isinstance(receipt, dict), "live operations receipt is not an object")
+    _exact_keys(
+        receipt,
+        {
+            "schema_version",
+            "kind",
+            "authority",
+            "receipt_replay_authority",
+            "verified_at",
+            "candidate_evidence",
+            "repository",
+            "pull_request_number",
+            "operations_index",
+            "publication_validation",
+            "post_bundle_acknowledgment",
+            "baseline_validation",
+            "queries",
+            "same_process_live_accepted",
+        },
+        "live operations receipt",
+    )
+    _require(
+        _is_exact_int(
+            receipt["schema_version"],
+            operations_module.LIVE_VERIFICATION_RECEIPT_SCHEMA_VERSION,
+        )
+        and receipt["kind"] == operations_module.LIVE_VERIFICATION_RECEIPT_KIND
+        and receipt["authority"] == LIVE_AUTHORITY
+        and receipt["receipt_replay_authority"] is False
+        and receipt["same_process_live_accepted"] is True
+        and receipt["candidate_evidence"] == candidate
+        and receipt["repository"] == operations_module.REPOSITORY
+        and _is_exact_int(
+            receipt["pull_request_number"], operations_module.PULL_REQUEST_NUMBER
+        )
+        and receipt["operations_index"] == operations_descriptor,
+        "live operations receipt identity or authority differs",
+    )
+    verified_at = _timestamp(receipt["verified_at"], "live verification time")
+    canonical_verified_at = (
+        verified_at.astimezone(dt.UTC)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+    _require(
+        receipt["verified_at"] == canonical_verified_at
+        and invocation_started_at <= verified_at <= invocation_finished_at,
+        "live operations receipt was not created by the current invocation",
+    )
+    publication = receipt["publication_validation"]
+    _exact_keys(
+        publication,
+        {
+            "strict_four_byte_validator",
+            "receipt_sha256",
+            "trusted_policy_sha256",
+            "asset_ledger",
+            "release_identity_anchor",
+            "bindings",
+            "execution_claims",
+            "event_profiler",
+        },
+        "live publication validation",
+    )
+    _require(
+        publication["strict_four_byte_validator"] == "same-process-invoked"
+        and isinstance(publication["receipt_sha256"], str)
+        and SHA256_RE.fullmatch(publication["receipt_sha256"]) is not None
+        and publication["trusted_policy_sha256"] == publication_policy_sha256
+        and publication["asset_ledger"] == asset_ledger
+        and isinstance(publication["release_identity_anchor"], dict)
+        and isinstance(publication["bindings"], dict)
+        and isinstance(publication["execution_claims"], list)
+        and isinstance(publication["event_profiler"], dict),
+        "live publication validation is stale or substituted",
+    )
+    expected_acknowledgment = {
+        "checked_lines": list(post_bundle_expectation.checked_lines),
+        "o0_canonical_response_sha256": (
+            post_bundle_expectation.o0_canonical_response_sha256
+        ),
+        "o1_canonical_response_sha256": (
+            post_bundle_expectation.o1_canonical_response_sha256
+        ),
+        "o1_body_sha256": post_bundle_expectation.o1_body_sha256,
+        "o1_updated_at": post_bundle_expectation.o1_updated_at,
+        "b0_inventory_root": post_bundle_expectation.b0_inventory_root,
+        "b0_reopen_receipt_sha256": (post_bundle_expectation.b0_reopen_receipt_sha256),
+        "b0_reopened_at": post_bundle_expectation.b0_reopened_at,
+        "fresh_response_equal": True,
+    }
+    _require(
+        receipt["post_bundle_acknowledgment"] == expected_acknowledgment,
+        "live post-bundle acknowledgment is stale or substituted",
+    )
+    baseline = receipt["baseline_validation"]
+    _exact_keys(
+        baseline,
+        {
+            "release_identity",
+            "asset_ledger",
+            "observed_at",
+            "api_observations",
+            "authority_sha256",
+        },
+        "live baseline validation",
+    )
+    release_identity = baseline["release_identity"]
+    _exact_keys(
+        release_identity,
+        {
+            "repository",
+            "release_id",
+            "tag_name",
+            "api_url",
+            "html_url",
+            "tag_ref",
+        },
+        "live baseline release identity",
+    )
+    _exact_keys(
+        release_identity["tag_ref"],
+        {"ref", "object_type", "object_sha", "object_url"},
+        "live baseline tag identity",
+    )
+    repository = operations_module.REPOSITORY
+    release_id = release_identity["release_id"]
+    tag_name = operations_module.BASELINE_RELEASE_TAG
+    api_root = f"https://api.github.com/repos/{repository}"
+    web_root = f"https://github.com/{repository}"
+    _require(
+        release_identity["repository"] == repository
+        and type(release_id) is int
+        and release_id > 0
+        and release_identity["tag_name"] == tag_name
+        and release_identity["api_url"] == f"{api_root}/releases/{release_id}"
+        and release_identity["html_url"] == f"{web_root}/releases/tag/{tag_name}"
+        and release_identity["tag_ref"]["ref"] == f"refs/tags/{tag_name}"
+        and release_identity["tag_ref"]["object_type"] == "commit"
+        and release_identity["tag_ref"]["object_sha"]
+        == operations_module.BASELINE_V3_ROOT_COMMIT
+        and isinstance(release_identity["tag_ref"]["object_url"], str)
+        and release_identity["tag_ref"]["object_url"]
+        == (f"{api_root}/git/commits/" f"{operations_module.BASELINE_V3_ROOT_COMMIT}"),
+        "live baseline release/tag authority differs",
+    )
+    baseline_ledger = baseline["asset_ledger"]
+    _require(
+        isinstance(baseline_ledger, list)
+        and type(baseline_descriptors) is operations_module.BaselineAuthoritySet
+        and len(baseline_ledger) == len(baseline_descriptors.assets),
+        "live baseline asset closure differs",
+    )
+    reduced_baseline_ledger = []
+    for ordinal, item in enumerate(baseline_ledger):
+        _exact_keys(
+            item,
+            {
+                "thread_mode",
+                "name",
+                "asset_id",
+                "release_id",
+                "api_url",
+                "browser_download_url",
+                "size_bytes",
+                "sha256",
+            },
+            f"live baseline asset {ordinal}",
+        )
+        _require(
+            type(item["asset_id"]) is int
+            and item["asset_id"] > 0
+            and item["release_id"] == release_id
+            and item["api_url"] == f"{api_root}/releases/assets/{item['asset_id']}"
+            and item["browser_download_url"]
+            == (f"{web_root}/releases/download/{tag_name}/" f"{item['name']}"),
+            f"live baseline asset {ordinal} release identity differs",
+        )
+        reduced_baseline_ledger.append(
+            {key: item[key] for key in ("thread_mode", "name", "size_bytes", "sha256")}
+        )
+    _require(
+        reduced_baseline_ledger
+        == [
+            {
+                "thread_mode": asset.thread_mode,
+                "name": asset.name,
+                "size_bytes": asset.size_bytes,
+                "sha256": asset.sha256,
+            }
+            for asset in baseline_descriptors.assets
+        ]
+        and len({item["asset_id"] for item in baseline_ledger}) == len(baseline_ledger),
+        "live baseline bytes differ from reopened final B1",
+    )
+    observations = baseline["api_observations"]
+    expected_endpoints = [
+        f"repos/{repository}/releases/tags/{tag_name}",
+        f"repos/{repository}/git/ref/tags/{tag_name}",
+    ]
+    _require(
+        isinstance(observations, list)
+        and [item.get("endpoint") for item in observations if isinstance(item, dict)]
+        == expected_endpoints,
+        "live baseline API observation closure differs",
+    )
+    for ordinal, observation in enumerate(observations):
+        _exact_keys(
+            observation,
+            {
+                "endpoint",
+                "canonical_response_sha256",
+                "canonical_response_size_bytes",
+                "page_ledger_sha256",
+            },
+            f"live baseline API observation {ordinal}",
+        )
+        _require(
+            isinstance(observation["canonical_response_sha256"], str)
+            and SHA256_RE.fullmatch(observation["canonical_response_sha256"])
+            is not None
+            and type(observation["canonical_response_size_bytes"]) is int
+            and observation["canonical_response_size_bytes"] > 0
+            and isinstance(observation["page_ledger_sha256"], str)
+            and SHA256_RE.fullmatch(observation["page_ledger_sha256"]) is not None,
+            f"live baseline API observation {ordinal} differs",
+        )
+    baseline_observed_at = _timestamp(
+        baseline["observed_at"], "live baseline observation time"
+    )
+    canonical_baseline_observed_at = (
+        baseline_observed_at.astimezone(dt.UTC)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+    baseline_body = {
+        key: baseline[key] for key in baseline if key != "authority_sha256"
+    }
+    try:
+        from benchmarks import issue123_privacy as privacy
+
+        expected_baseline_sha256 = privacy.tagged_canonical_sha256(
+            operations_module.BASELINE_AUTHORITY_DOMAIN,
+            baseline_body,
+        )
+    except (ImportError, TypeError, ValueError) as error:
+        raise EvidenceError("live baseline authority digest is unavailable") from error
+    _require(
+        baseline["observed_at"] == canonical_baseline_observed_at
+        and invocation_started_at <= baseline_observed_at <= invocation_finished_at
+        and isinstance(baseline["authority_sha256"], str)
+        and hmac.compare_digest(baseline["authority_sha256"], expected_baseline_sha256),
+        "live baseline authority is stale or substituted",
+    )
+    queries = receipt["queries"]
+    _require(
+        isinstance(queries, list)
+        and [item.get("role") for item in queries if isinstance(item, dict)]
+        == list(operations_module.RESPONSE_ROLE_ORDER),
+        "live operations query closure or order differs",
+    )
+    for index, query in enumerate(queries):
+        _exact_keys(
+            query,
+            {
+                "role",
+                "canonical_response_sha256",
+                "canonical_response_size_bytes",
+                "page_count",
+                "page_ledger_sha256",
+            },
+            f"live operations query {index}",
+        )
+        _require(
+            isinstance(query["canonical_response_sha256"], str)
+            and SHA256_RE.fullmatch(query["canonical_response_sha256"]) is not None
+            and type(query["canonical_response_size_bytes"]) is int
+            and query["canonical_response_size_bytes"] > 0
+            and type(query["page_count"]) is int
+            and query["page_count"] > 0
+            and isinstance(query["page_ledger_sha256"], str)
+            and SHA256_RE.fullmatch(query["page_ledger_sha256"]) is not None,
+            f"live operations query {index} metadata differs",
+        )
+    receipt_snapshot, receipt_raw = _snapshot_regular_file(
+        receipt_path,
+        "live operations receipt",
+        max_bytes=MAX_JSON_BYTES,
+    )
+    parsed_receipt = _strict_json_bytes(
+        receipt_raw,
+        "live operations receipt",
+        max_bytes=MAX_JSON_BYTES,
+    )
+    _require(
+        receipt_snapshot.path == receipt_path.resolve(strict=True)
+        and stat.S_IMODE(receipt_snapshot.path.stat().st_mode) == 0o600
+        and receipt_raw == _compact_canonical_json_bytes(receipt)
+        and _type_exact_equal(parsed_receipt, receipt),
+        "live operations receipt bytes differ from the current invocation result",
+    )
+    return {
+        "path": LIVE_RECEIPT_NAME,
+        "size_bytes": receipt_snapshot.size_bytes,
+        "sha256": receipt_snapshot.sha256,
+        "media_type": MEDIA_TYPE_JSON,
+    }
+
+
+def _live_result_from_offline(offline_result: dict[str, Any]) -> dict[str, Any]:
+    result = copy.deepcopy(offline_result)
+    result["evaluation_mode"] = LIVE_EVALUATION_MODE
+    result["final_acceptance"] = False
+    result["issue_completion_satisfied"] = False
+    result["final_acceptance_authority"] = OFFLINE_AUTHORITY
+    result["receipt_replay_authority"] = False
+    result["live_verification"] = {
+        "invocation_attempted": False,
+        "invocation_succeeded": False,
+        "authority": None,
+        "verified_at": None,
+        "operations_index": None,
+        "receipt": None,
+        "errors": [],
+    }
+    return result
+
+
+def _append_live_error(result: dict[str, Any], error: Exception) -> None:
+    result["live_verification"]["errors"].append(
+        _structured_evidence_error(
+            error,
+            phase="operations-live-verification",
+            scope="operations",
+        )
+    )
+
+
+def _publish_authoritative_live_result(
+    *,
+    result: dict[str, Any],
+    operations: Any,
+    operations_lease: Any,
+    post_bundle_lease: AuthenticatedPostBundleLease,
+    core_inputs: LiveAuthoritySnapshots,
+    policy_snapshot: FileSnapshot,
+    asset_snapshots: Mapping[str, FileSnapshot],
+    staged_operations_snapshots: StagedOperationsSnapshots,
+    receipt_path: Path,
+    result_path: Path,
+    receipt: dict[str, Any],
+    receipt_descriptor: dict[str, Any],
+    operations_descriptor: dict[str, Any],
+    bundle_binding: dict[str, Any],
+    reopen_chain: dict[str, Any],
+) -> dict[str, Any]:
+    """Link authority only after the last retained-input barrier succeeds."""
+
+    authoritative_result = copy.deepcopy(result)
+    authoritative_result["candidate_bundle_binding"].update(
+        satisfied=True,
+        technical_input_root=bundle_binding["technical_input_root"],
+        public_projection_sha256=bundle_binding["public_projection_sha256"],
+        public_asset_ledger_sha256=bundle_binding["public_asset_ledger_sha256"],
+        final_bundle_inventory_root=reopen_chain["final_bundle_inventory_root"],
+    )
+    authoritative_result["post_bundle"].update(
+        satisfied=True,
+        pre_acknowledgment_receipt=reopen_chain["post_bundle_result"][
+            "pre_acknowledgment_receipt"
+        ],
+        final_reopen_receipt=reopen_chain["post_bundle_result"]["final_reopen_receipt"],
+        acknowledgment=receipt["post_bundle_acknowledgment"],
+    )
+    authoritative_result["baseline_authority"].update(
+        satisfied=True,
+        mode="live-release",
+        authority_sha256=receipt["baseline_validation"]["authority_sha256"],
+    )
+    _require(
+        authoritative_result["candidate_bundle_binding"]["satisfied"] is True
+        and authoritative_result["post_bundle"]["satisfied"] is True
+        and authoritative_result["baseline_authority"]["satisfied"] is True,
+        "final authority predicate closure differs",
+    )
+    authoritative_result["live_verification"].update(
+        invocation_succeeded=True,
+        authority=LIVE_AUTHORITY,
+        verified_at=receipt["verified_at"],
+        operations_index=operations_descriptor,
+        receipt=receipt_descriptor,
+    )
+    authoritative_result["final_acceptance"] = True
+    authoritative_result["issue_completion_satisfied"] = True
+    authoritative_result["final_acceptance_authority"] = LIVE_AUTHORITY
+    authoritative_raw = _canonical_json_bytes(authoritative_result)
+
+    def final_authority_barrier() -> None:
+        _require_publication_live_inputs_unchanged(
+            operations,
+            policy_snapshot,
+            asset_snapshots,
+        )
+        _require_staged_operations_inputs_unchanged(staged_operations_snapshots)
+        _receipt_snapshot, current_receipt_raw = _snapshot_regular_file(
+            receipt_path,
+            "live operations receipt",
+            max_bytes=operations.MAX_PUBLICATION_RECEIPT_BYTES,
+        )
+        _require(
+            len(current_receipt_raw) == receipt_descriptor["size_bytes"]
+            and _sha256(current_receipt_raw) == receipt_descriptor["sha256"]
+            and current_receipt_raw == _compact_canonical_json_bytes(receipt),
+            "live operations receipt changed before final authority",
+        )
+        operations_lease.require_unchanged()
+        # This call is deliberately last.  The shared writer performs the
+        # no-replace authority link as its immediately following operation.
+        post_bundle_lease.require_unchanged()
+
+    try:
+        committed_path = _write_exclusive_private_file(
+            result_path,
+            authoritative_raw,
+            "completion live result",
+            forbidden_roots=(
+                core_inputs.source_bundle.root,
+                core_inputs.reopened_bundle.root,
+            ),
+            before_commit=final_authority_barrier,
+        )
+        final_snapshot, final_raw = _snapshot_regular_file(
+            committed_path,
+            "committed completion live result",
+            max_bytes=MAX_JSON_BYTES,
+        )
+        final_document = _strict_json_bytes(
+            final_raw,
+            "committed completion live result",
+            max_bytes=MAX_JSON_BYTES,
+        )
+        _require(
+            final_snapshot.path == result_path.resolve(strict=True)
+            and stat.S_IMODE(final_snapshot.path.stat().st_mode) == 0o600
+            and final_raw == authoritative_raw
+            and _type_exact_equal(final_document, authoritative_result)
+            and final_document["final_acceptance"] is True
+            and final_document["issue_completion_satisfied"] is True,
+            "committed completion authority differs",
+        )
+        operations_lease.require_unchanged()
+        post_bundle_lease.require_unchanged()
+    except CommittedAuthorityError:
+        raise
+    except Exception as error:
+        if result_path.exists():
+            raise CommittedAuthorityError(
+                "completion authority was committed but final custody failed"
+            ) from None
+        _append_live_error(result, error)
+        raise EvidenceError("completion live result could not be emitted") from None
+    return final_document
+
+
+def _verify_completion_live_with_lease(
+    *,
+    lease: AuthenticatedPostBundleLease,
+    index_path: Path | str,
+    manifest_path: Path | str | None = None,
+    runtime_receipt_paths: list[Path | str] | tuple[Path | str, ...],
+    publication_policy: Path | str,
+    publication_policy_sha256: str,
+    publication_assets: Mapping[str, Path | str],
+    output_directory: Path | str,
+) -> dict[str, Any]:
+    """Make a final decision only through a current-process operations live check."""
+
+    core_inputs = lease._snapshots
+    offline_result = evaluate_completion(
+        index_path,
+        manifest_path,
+        runtime_receipt_paths,
+    )
+    result = _live_result_from_offline(offline_result)
+    if offline_result.get("structural_validation_satisfied") is not True:
+        _append_live_error(
+            result,
+            EvidenceError("offline structural validation is not satisfied"),
+        )
+        return result
+    index_snapshot = core_inputs.source_index
+    manifest_snapshot = core_inputs.manifest
+    runtime_snapshots = core_inputs.runtime_receipts
+    protected_bundle_roots = lease._private_writer_roots()
+    try:
+        _require(
+            offline_result.get("evidence_index", {}).get("size_bytes")
+            == index_snapshot.size_bytes
+            and offline_result.get("evidence_index", {}).get("sha256")
+            == index_snapshot.sha256
+            and offline_result.get("manifest", {}).get("size_bytes")
+            == manifest_snapshot.size_bytes
+            and offline_result.get("manifest", {}).get("sha256")
+            == manifest_snapshot.sha256,
+            "structural result is not bound to the snapshotted index and manifest",
+        )
+        lease.require_unchanged()
+        destination = _create_private_live_directory(
+            output_directory,
+            protected_bundle_roots,
+        )
+    except Exception as error:
+        _append_live_error(result, error)
+        return result
+
+    receipt_path = destination / LIVE_RECEIPT_NAME
+    result_path = destination / LIVE_RESULT_NAME
+    authority_linked = False
+    authority_publication_started = False
+    try:
+        from benchmarks import issue123_operations as operations
+        from benchmarks import issue123_privacy as privacy
+
+        _require(
+            tuple(operations.TECHNICAL_RELEASE_ASSETS)
+            == (
+                "technical_evidence",
+                "technical_summary",
+                "raw_timing",
+                "event_profiler",
+            ),
+            "operations publication asset interface is incompatible",
+        )
+        policy_snapshot, asset_snapshots, resolved_assets, asset_ledger = (
+            _capture_publication_live_inputs(
+                operations_module=operations,
+                publication_policy=publication_policy,
+                publication_policy_sha256=publication_policy_sha256,
+                publication_assets=publication_assets,
+                bundle_root=index_snapshot.path.parent,
+                core_snapshots=(
+                    index_snapshot,
+                    core_inputs.reopened_index,
+                    manifest_snapshot,
+                    *runtime_snapshots,
+                    core_inputs.protected_openings,
+                    core_inputs.pre_acknowledgment_receipt,
+                    core_inputs.final_reopen_receipt,
+                ),
+            )
+        )
+        _require(
+            all(
+                core_inputs.protected_openings.path.parent != snapshot.path.parent
+                for snapshot in asset_snapshots.values()
+            ),
+            "protected openings must remain outside public asset directories",
+        )
+        reopen_chain = lease._chain
+        lease.require_unchanged()
+        _policy_snapshot, policy_raw = _snapshot_regular_file(
+            policy_snapshot.path,
+            "trusted publication policy",
+            max_bytes=operations.MAX_PUBLICATION_POLICY_BYTES,
+        )
+        policy_document = _strict_json_bytes(
+            policy_raw,
+            "trusted publication policy",
+            max_bytes=operations.MAX_PUBLICATION_POLICY_BYTES,
+        )
+        _require(
+            isinstance(policy_document, dict),
+            "trusted publication policy is not an object",
+        )
+        runtime_receipt_mapping = {
+            role: snapshot.path
+            for role, snapshot in zip(
+                RUNTIME_RECEIPT_ROLES,
+                runtime_snapshots,
+                strict=True,
+            )
+        }
+        bundle_binding = privacy.verify_publication_bundle_binding(
+            index_path=core_inputs.reopened_index.path,
+            protected_openings=core_inputs.protected_openings.path,
+            policy=policy_document,
+            public_assets=resolved_assets,
+            runtime_receipt_paths=runtime_receipt_mapping,
+            manifest_path=manifest_snapshot.path,
+        )
+        _require(
+            bundle_binding.get("first_five_scopes_validated") is True
+            and bundle_binding.get("runtime_receipt_count")
+            == len(RUNTIME_RECEIPT_ROLES),
+            "final B1 publication binding is incomplete",
+        )
+        baseline_descriptors = lease._baseline_authority_set(operations)
+        lease.require_unchanged()
+        _require_publication_live_inputs_unchanged(
+            operations,
+            policy_snapshot,
+            asset_snapshots,
+        )
+        (
+            staged_index,
+            operations_descriptor,
+            staged_operations_snapshots,
+        ) = _prepare_operations_live_input(
+            index_snapshot,
+            offline_result,
+            destination,
+            protected_bundle_roots,
+        )
+        _require_publication_live_inputs_unchanged(
+            operations,
+            policy_snapshot,
+            asset_snapshots,
+        )
+        _require_staged_operations_inputs_unchanged(staged_operations_snapshots)
+        lease.require_unchanged()
+        invocation_started_at = dt.datetime.now(dt.UTC).replace(microsecond=0)
+        result["live_verification"]["invocation_attempted"] = True
+        with operations.open_verified_operations_live(
+            index_path=staged_index,
+            manifest=manifest_snapshot.path,
+            publication_policy=policy_snapshot.path,
+            publication_policy_sha256=publication_policy_sha256,
+            publication_assets=resolved_assets,
+            receipt_output=receipt_path,
+            post_bundle_lease=lease,
+            baseline_authority="live-release",
+        ) as operations_lease:
+            invocation_finished_at = dt.datetime.now(dt.UTC).replace(microsecond=0)
+            _require_staged_operations_inputs_unchanged(staged_operations_snapshots)
+            lease.require_unchanged()
+            _require_publication_live_inputs_unchanged(
+                operations,
+                policy_snapshot,
+                asset_snapshots,
+            )
+            receipt = operations_lease.receipt
+            receipt_descriptor = _validate_current_live_receipt(
+                operations_module=operations,
+                receipt=receipt,
+                receipt_path=receipt_path,
+                candidate=offline_result["candidate_evidence"],
+                operations_descriptor=operations_descriptor,
+                publication_policy_sha256=publication_policy_sha256,
+                asset_ledger=asset_ledger,
+                post_bundle_expectation=lease.expectation,
+                baseline_descriptors=baseline_descriptors,
+                invocation_started_at=invocation_started_at,
+                invocation_finished_at=invocation_finished_at,
+            )
+            operations_lease.require_unchanged()
+            lease.require_unchanged()
+            _require_publication_live_inputs_unchanged(
+                operations,
+                policy_snapshot,
+                asset_snapshots,
+            )
+            _require_staged_operations_inputs_unchanged(staged_operations_snapshots)
+            authority_publication_started = True
+            authoritative_result = _publish_authoritative_live_result(
+                result=result,
+                operations=operations,
+                operations_lease=operations_lease,
+                post_bundle_lease=lease,
+                core_inputs=core_inputs,
+                policy_snapshot=policy_snapshot,
+                asset_snapshots=asset_snapshots,
+                staged_operations_snapshots=staged_operations_snapshots,
+                receipt_path=receipt_path,
+                result_path=result_path,
+                receipt=receipt,
+                receipt_descriptor=receipt_descriptor,
+                operations_descriptor=operations_descriptor,
+                bundle_binding=bundle_binding,
+                reopen_chain=reopen_chain,
+            )
+            authority_linked = True
+    except CommittedAuthorityError:
+        raise
+    except Exception as error:
+        if authority_linked or result_path.exists():
+            raise CommittedAuthorityError(
+                "completion authority was committed but custody cleanup failed"
+            ) from None
+        if authority_publication_started:
+            raise EvidenceError("completion live result could not be emitted") from None
+        _append_live_error(result, error)
+    else:
+        return authoritative_result
+    try:
+        _write_exclusive_private_file(
+            result_path,
+            _canonical_json_bytes(result),
+            "completion live result",
+            forbidden_roots=(
+                core_inputs.source_bundle.root,
+                core_inputs.reopened_bundle.root,
+            ),
+        )
+    except Exception as error:
+        _append_live_error(result, error)
+        raise EvidenceError("completion live result could not be emitted") from error
+    return result
+
+
+def verify_completion_live(
+    *,
+    index_path: Path | str,
+    reopened_index: Path | str,
+    protected_openings: Path | str,
+    pre_ack_bundle_reopen_receipt: Path | str,
+    final_bundle_reopen_receipt: Path | str,
+    manifest_path: Path | str | None = None,
+    runtime_receipt_paths: list[Path | str] | tuple[Path | str, ...],
+    publication_policy: Path | str,
+    publication_policy_sha256: str,
+    publication_assets: Mapping[str, Path | str],
+    output_directory: Path | str,
+) -> dict[str, Any]:
+    """Verify final authority while retaining both exact B1 trees."""
+
+    manager = open_authenticated_post_bundle_transition(
+        source_index=index_path,
+        reopened_index=reopened_index,
+        protected_openings=protected_openings,
+        pre_ack_bundle_reopen_receipt=pre_ack_bundle_reopen_receipt,
+        final_bundle_reopen_receipt=final_bundle_reopen_receipt,
+        manifest_path=manifest_path,
+        runtime_receipt_paths=runtime_receipt_paths,
+    )
+    try:
+        lease = manager.__enter__()
+    except Exception as error:
+        offline_result = evaluate_completion(
+            index_path,
+            manifest_path,
+            runtime_receipt_paths,
+        )
+        result = _live_result_from_offline(offline_result)
+        _append_live_error(result, error)
+        return result
+    authoritative_linked = False
+    try:
+        result = _verify_completion_live_with_lease(
+            lease=lease,
+            index_path=index_path,
+            manifest_path=manifest_path,
+            runtime_receipt_paths=runtime_receipt_paths,
+            publication_policy=publication_policy,
+            publication_policy_sha256=publication_policy_sha256,
+            publication_assets=publication_assets,
+            output_directory=output_directory,
+        )
+        authoritative_linked = (
+            result.get("final_acceptance") is True
+            and result.get("issue_completion_satisfied") is True
+        )
+        return result
+    finally:
+        exit_arguments = sys.exc_info()
+        committed_cleanup_failed = False
+        try:
+            manager.__exit__(*exit_arguments)
+        except EvidenceError:
+            if exit_arguments[0] is None and authoritative_linked:
+                committed_cleanup_failed = True
+            else:
+                raise
+        if committed_cleanup_failed:
+            raise CommittedAuthorityError(
+                "completion authority was committed but custody cleanup failed"
+            ) from None
+
+
+class _CliUsageError(ValueError):
+    pass
+
+
+class _SafeArgumentParser(argparse.ArgumentParser):
+    def error(self, _message: str) -> None:
+        raise _CliUsageError("completion CLI usage differs") from None
+
+
 def _arguments(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = _SafeArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     assemble = commands.add_parser("assemble", help="create a relocatable bundle")
     assemble.add_argument("--specification", "--spec", type=Path, required=True)
     assemble.add_argument("--bundle", type=Path, required=True)
     assemble.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
+    record = commands.add_parser(
+        "record-reopen",
+        help="authenticate a distinct B0 or B1 content-addressed reopen",
+    )
+    record.add_argument("--source-index", type=Path, required=True)
+    record.add_argument("--reopened-index", type=Path, required=True)
+    record.add_argument(
+        "--stage",
+        choices=("pre-acknowledgment", "final"),
+        required=True,
+    )
+    record.add_argument("--private-openings", type=Path, required=True)
+    record.add_argument("--pre-ack-response", type=Path)
+    record.add_argument("--pre-ack-receipt", type=Path)
+    record.add_argument("--output", type=Path, required=True)
     evaluate = commands.add_parser("evaluate", help="validate a completed bundle")
     evaluate.add_argument("--index", type=Path, required=True)
-    evaluate.add_argument("--manifest", type=Path)
-    evaluate.add_argument("--output", type=Path)
+    evaluate.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     evaluate.add_argument(
+        "--runtime-receipts",
+        type=Path,
+        nargs=5,
+        metavar=(
+            "CPU",
+            "CUDA_EAGER",
+            "CUDA_GRAPH",
+            "SINGLE_GPU_2D",
+            "SINGLE_GPU_3D",
+        ),
+        required=True,
+        help=(
+            "trusted publication receipts in fixed CPU/eager/graph/"
+            "single-GPU-2D/single-GPU-3D order"
+        ),
+    )
+    evaluate.add_argument("--output", type=Path)
+    evaluation_enforcement = evaluate.add_mutually_exclusive_group()
+    evaluation_enforcement.add_argument(
+        "--enforce-structural",
+        action="store_true",
+        help="exit 2 unless the offline structural validation is satisfied",
+    )
+    evaluation_enforcement.add_argument(
         "--enforce",
         action="store_true",
-        help="exit 2 unless every issue #123 scope is independently satisfied",
+        help=(
+            "legacy final-acceptance gate; offline evaluation always exits 2 "
+            "because it has no live authority"
+        ),
+    )
+    verify = commands.add_parser(
+        "verify-live",
+        help="make the production decision through a same-process live check",
+    )
+    verify.add_argument("--index", type=Path, required=True)
+    verify.add_argument("--reopened-index", type=Path, required=True)
+    verify.add_argument("--private-openings", type=Path, required=True)
+    verify.add_argument(
+        "--pre-ack-bundle-reopen-receipt",
+        type=Path,
+        required=True,
+    )
+    verify.add_argument(
+        "--final-bundle-reopen-receipt",
+        type=Path,
+        required=True,
+    )
+    verify.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
+    verify.add_argument(
+        "--runtime-receipts",
+        type=Path,
+        nargs=5,
+        metavar=(
+            "CPU",
+            "CUDA_EAGER",
+            "CUDA_GRAPH",
+            "SINGLE_GPU_2D",
+            "SINGLE_GPU_3D",
+        ),
+        required=True,
+        help=(
+            "trusted publication receipts in fixed CPU/eager/graph/"
+            "single-GPU-2D/single-GPU-3D order"
+        ),
+    )
+    verify.add_argument("--publication-policy", type=Path, required=True)
+    verify.add_argument("--publication-policy-sha256", required=True)
+    verify.add_argument("--technical-evidence-asset", type=Path, required=True)
+    verify.add_argument("--technical-summary-asset", type=Path, required=True)
+    verify.add_argument("--raw-timing-asset", type=Path, required=True)
+    verify.add_argument("--event-profiler-asset", type=Path, required=True)
+    verify.add_argument("--output-directory", type=Path, required=True)
+    verify.add_argument(
+        "--enforce",
+        action="store_true",
+        required=True,
+        help="exit 2 unless this invocation obtains production final acceptance",
     )
     return parser.parse_args(argv)
 
 
-def main(argv: list[str] | None = None) -> int:
+def _main(argv: list[str] | None = None) -> int:
     args = _arguments(argv)
     if args.command == "assemble":
         index_path = assemble_evidence_bundle(
@@ -7311,19 +14648,94 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(index_path)
         return 0
-    result = evaluate_completion(args.index, args.manifest)
-    rendered = json.dumps(result, allow_nan=False, indent=2, sort_keys=True) + "\n"
-    if args.output is not None:
-        output = args.output.resolve()
-        _require(
-            output != args.index.resolve(),
-            "output must not overwrite the evidence index",
+    if args.command == "record-reopen":
+        record_bundle_reopen(
+            source_index=args.source_index,
+            reopened_index=args.reopened_index,
+            stage=args.stage,
+            protected_openings=args.private_openings,
+            pre_ack_response=args.pre_ack_response,
+            pre_ack_receipt=args.pre_ack_receipt,
+            output=args.output,
         )
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text(rendered, encoding="utf-8")
+        print("issue123-completion-record-reopen-ok")
+        return 0
+    if args.command == "evaluate":
+        result = evaluate_completion(args.index, args.manifest, args.runtime_receipts)
+        rendered = json.dumps(result, allow_nan=False, indent=2, sort_keys=True) + "\n"
+        if args.output is not None:
+            output = args.output.resolve()
+            _require(
+                output != args.index.resolve(),
+                "output must not overwrite the evidence index",
+            )
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(rendered, encoding="utf-8")
+        print(rendered, end="")
+        if args.enforce:
+            return 2
+        return (
+            2
+            if args.enforce_structural and not result["structural_validation_satisfied"]
+            else 0
+        )
+    result = verify_completion_live(
+        index_path=args.index,
+        reopened_index=args.reopened_index,
+        protected_openings=args.private_openings,
+        pre_ack_bundle_reopen_receipt=args.pre_ack_bundle_reopen_receipt,
+        final_bundle_reopen_receipt=args.final_bundle_reopen_receipt,
+        manifest_path=args.manifest,
+        runtime_receipt_paths=args.runtime_receipts,
+        publication_policy=args.publication_policy,
+        publication_policy_sha256=args.publication_policy_sha256,
+        publication_assets={
+            "technical_evidence": args.technical_evidence_asset,
+            "technical_summary": args.technical_summary_asset,
+            "raw_timing": args.raw_timing_asset,
+            "event_profiler": args.event_profiler_asset,
+        },
+        output_directory=args.output_directory,
+    )
+    rendered = json.dumps(result, allow_nan=False, indent=2, sort_keys=True) + "\n"
     print(rendered, end="")
-    return 2 if args.enforce and not result["issue_completion_satisfied"] else 0
+    return 0 if result["final_acceptance"] else 2
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Run the fixed-token completion command boundary."""
+
+    values = list(sys.argv[1:] if argv is None else argv)
+    command = (
+        values[0]
+        if values
+        and values[0]
+        in {
+            "assemble",
+            "record-reopen",
+            "evaluate",
+            "verify-live",
+        }
+        else None
+    )
+    try:
+        return _main(values)
+    except _CliUsageError:
+        print("issue123-completion-usage-failed", file=sys.stderr)
+        return 2
+    except (ImportError, OSError, EvidenceError, TypeError, ValueError):
+        token = (
+            f"issue123-completion-{command}-failed"
+            if command is not None
+            else "issue123-completion-usage-failed"
+        )
+        print(token, file=sys.stderr)
+        return 2
+
+
+def _cli(argv: list[str] | None = None) -> int:
+    return main(argv)
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(_cli())

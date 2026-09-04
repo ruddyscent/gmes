@@ -36,6 +36,17 @@ def load_torch_tuning():
     return _load_benchmark("torch_tuning.py")
 
 
+def _torch_checkpoint(state, *, auxiliaries=(), probes=None):
+    return {
+        "format": "gmes.torch.simulation",
+        "version": 1,
+        "metadata": {},
+        "state": state,
+        "auxiliaries": tuple(auxiliaries),
+        "probes": {} if probes is None else probes,
+    }
+
+
 class FieldUpdateBenchmarkTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -515,6 +526,154 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             )
         self.assertEqual(samples, [1.0, 1.0, 1.0])
         self.assertEqual(simulation.sample_starts, [0, 5] * 3)
+
+    def test_dynamic_state_finiteness_rejects_changed_nan_and_ignores_plan_inf(self):
+        import torch
+
+        state = {
+            name: torch.ones(2, dtype=torch.float32)
+            for name in ("ex", "ey", "ez", "hx", "hy", "hz")
+        }
+        state["bucket_0"] = torch.ones(2, dtype=torch.float32)
+        state["plan.open_interval"] = torch.tensor([float("inf")])
+        checkpoint = _torch_checkpoint(state)
+        advanced = copy.deepcopy(checkpoint)
+        advanced["state"]["bucket_0"].add_(1)
+        expected_buffers = sorted(
+            self.benchmark._checkpoint_dynamic_tensors(checkpoint)
+        )
+        finite = self.benchmark._dynamic_state_finiteness(
+            {"initial": checkpoint, "post_timed": advanced},
+            ["bucket_0"],
+            expected_buffers,
+        )
+        self.assertTrue(finite["passed"])
+        self.assertNotIn("plan.open_interval", finite["tracked_buffers"])
+
+        invalid = copy.deepcopy(advanced)
+        invalid["state"]["bucket_0"][0] = float("nan")
+        nonfinite = self.benchmark._dynamic_state_finiteness(
+            {"initial": checkpoint, "post_timed": invalid},
+            ["bucket_0"],
+            expected_buffers,
+        )
+        self.assertFalse(nonfinite["passed"])
+        self.assertEqual(
+            nonfinite["stages"]["post_timed"]["nonfinite_element_count"],
+            1,
+        )
+
+    def test_dynamic_state_finiteness_covers_unchanged_and_auxiliary_tensors(self):
+        import torch
+
+        fields = {
+            name: torch.ones(1, dtype=torch.float32)
+            for name in ("ex", "ey", "ez", "hx", "hy", "hz")
+        }
+        checkpoint = _torch_checkpoint(
+            {
+                **fields,
+                "unchanged": torch.tensor([float("inf")]),
+                "step_count": torch.tensor(0),
+            },
+            auxiliaries=(
+                _torch_checkpoint(
+                    {
+                        **copy.deepcopy(fields),
+                        "nested": torch.tensor([float("nan")]),
+                    },
+                    probes={"nested_ring": torch.ones(1)},
+                ),
+            ),
+            probes={"root_ring": torch.tensor([float("inf")])},
+        )
+        advanced = copy.deepcopy(checkpoint)
+        advanced["state"]["step_count"].add_(1)
+        expected_buffers = sorted(
+            self.benchmark._checkpoint_dynamic_tensors(checkpoint)
+        )
+        result = self.benchmark._dynamic_state_finiteness(
+            {"initial": checkpoint, "post_timed": advanced},
+            ["step_count"],
+            expected_buffers,
+        )
+        self.assertFalse(result["passed"])
+        self.assertIn("unchanged", result["tracked_buffers"])
+        self.assertIn("auxiliaries[0].state.nested", result["tracked_buffers"])
+        self.assertIn("probes.root_ring", result["tracked_buffers"])
+        self.assertIn("auxiliaries[0].probes.nested_ring", result["tracked_buffers"])
+        self.assertEqual(result["stages"]["initial"]["nonfinite_element_count"], 3)
+
+    def test_dynamic_state_finiteness_requires_complete_checkpoint_v1_schema(self):
+        import torch
+
+        state = {name: torch.ones(1) for name in ("ex", "ey", "ez", "hx", "hy", "hz")}
+        complete = _torch_checkpoint(
+            state,
+            auxiliaries=(_torch_checkpoint(copy.deepcopy(state)),),
+            probes={"ring": torch.ones(1)},
+        )
+        for path in ("auxiliaries", "probes", "nested-probes"):
+            with self.subTest(path=path):
+                incomplete = copy.deepcopy(complete)
+                if path == "nested-probes":
+                    del incomplete["auxiliaries"][0]["probes"]
+                else:
+                    del incomplete[path]
+                with self.assertRaisesRegex(ValueError, "closure differs"):
+                    self.benchmark._checkpoint_dynamic_tensors(incomplete)
+
+        non_tensor = copy.deepcopy(complete)
+        non_tensor["probes"]["ring"] = 1
+        with self.assertRaisesRegex(ValueError, "non-tensor leaf"):
+            self.benchmark._checkpoint_dynamic_tensors(non_tensor)
+
+        expected_buffers = sorted(self.benchmark._checkpoint_dynamic_tensors(complete))
+        omitted = copy.deepcopy(complete)
+        omitted["auxiliaries"] = ()
+        omitted["probes"] = {}
+        with self.assertRaisesRegex(ValueError, "inventory differs"):
+            self.benchmark._dynamic_state_finiteness(
+                {"initial": omitted, "post_timed": copy.deepcopy(omitted)},
+                [],
+                expected_buffers,
+            )
+
+        empty_auxiliary = _torch_checkpoint(
+            state,
+            auxiliaries=(_torch_checkpoint({}),),
+        )
+        with self.assertRaisesRegex(ValueError, "field closure"):
+            self.benchmark._checkpoint_dynamic_tensors(empty_auxiliary)
+
+    def test_checkpoint_tensor_flattening_does_not_retain_tensor_cycles(self):
+        import weakref
+
+        import torch
+
+        def flatten_once():
+            checkpoint = _torch_checkpoint(
+                {name: torch.ones(1) for name in ("ex", "ey", "ez", "hx", "hy", "hz")}
+            )
+            references = [weakref.ref(value) for value in checkpoint["state"].values()]
+            flattened = self.benchmark._checkpoint_dynamic_tensors(checkpoint)
+            return references, flattened
+
+        references, flattened = flatten_once()
+        self.assertTrue(all(reference() is not None for reference in references))
+        del flattened
+        self.assertTrue(all(reference() is None for reference in references))
+
+    def test_checksum_rejects_nonfinite_field_values(self):
+        import torch
+
+        fields = {"Ex": torch.tensor([float("inf")])}
+        simulation = SimpleNamespace(
+            device=torch.device("cpu"),
+            state=SimpleNamespace(fields=lambda: fields),
+        )
+        with self.assertRaisesRegex(ValueError, "non-finite"):
+            self.benchmark._checksum(simulation)
 
     def test_current_rss_reads_linux_proc_resident_pages(self):
         class Reader:
@@ -2196,7 +2355,7 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             "cpu_contract_id": manifest["performance_gates"]["cpu_acceptance"][
                 "contract_id"
             ],
-            "manifest_sha256": "f" * 64,
+            "manifest_sha256": self.benchmark.TRUSTED_MANIFEST_SHA256,
             "runner_sha256": "runner",
             "solver_sha256": "solver",
             "solver_abi": "abi",
@@ -2536,10 +2695,43 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
                     "manifest_sha256",
                 )
             }
-            correctness_evidence = {
+            runtime_receipt = {
                 "schema_version": 1,
+                "kind": "issue123-runtime-publication-receipt",
+                "final_sha": evidence["candidate_git_commit"],
+                "manifest_sha256": self.benchmark.TRUSTED_MANIFEST_SHA256,
+                "workflow": {
+                    "repository": "ruddyscent/gmes",
+                    "run_id": 123,
+                    "run_attempt": 1,
+                    "job_id": 456,
+                    "job_name": "correctness-cpu-eager",
+                },
+                "profiler_witness": {
+                    "name": "cpu-profiler.json",
+                    "sha256": "d" * 64,
+                    "size_bytes": 1,
+                    "media_type": "application/json",
+                },
+                "runtime_mode": {
+                    "device": "cpu",
+                    "precision": "float64",
+                    "graph_mode": "eager",
+                    "compile_policy": "eager",
+                    "compile_mode": "default",
+                },
+                "candidate_archives": [
+                    {"case": name, "sha256": "b" * 64, "size_bytes": 1}
+                    for name in required_correctness
+                ],
+            }
+            receipt_bytes = (
+                json.dumps(runtime_receipt, indent=2, sort_keys=True) + "\n"
+            ).encode()
+            correctness_evidence = {
+                "schema_version": 2,
                 "kind": "torch-correctness-evidence-index",
-                "contract_id": "complete-field-and-persistent-state-v1",
+                "contract_id": "complete-field-state-and-runtime-receipt-v2",
                 "manifest_contract_sha256": hashlib.sha256(
                     json.dumps(
                         manifest,
@@ -2555,6 +2747,12 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
                     "graph_mode": "eager",
                     "compile_policy": "eager",
                     "compile_mode": "default",
+                },
+                "runtime_receipt": {
+                    "path": "cpu-runtime-receipt.json",
+                    "sha256": hashlib.sha256(receipt_bytes).hexdigest(),
+                    "size_bytes": len(receipt_bytes),
+                    "media_type": "application/json",
                 },
                 "required_cases": required_correctness,
                 "artifacts": [
@@ -2629,6 +2827,7 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
                 None,
                 evidence,
                 correctness_evidence,
+                runtime_receipt,
             )
             self.assertEqual(
                 bound["acceptance_scope"], "cpu-performance-and-correctness"
@@ -2640,6 +2839,63 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
                 bound["issue_completion_blockers"],
                 ["gpu-policy-macos-evidence-not-bound"],
             )
+            invalid_runtime_modes = {
+                "device": {
+                    "device": "cuda:0",
+                    "precision": "float64",
+                    "graph_mode": "eager",
+                    "compile_policy": "eager",
+                    "compile_mode": "default",
+                },
+                "precision": {
+                    "device": "cpu",
+                    "precision": "float32",
+                    "graph_mode": "eager",
+                    "compile_policy": "eager",
+                    "compile_mode": "default",
+                },
+                "graph": {
+                    "device": "cpu",
+                    "precision": "float64",
+                    "graph_mode": "graph",
+                    "compile_policy": "compile",
+                    "compile_mode": "default",
+                },
+                "compile mode": {
+                    "device": "cuda:0",
+                    "precision": "float64",
+                    "graph_mode": "graph",
+                    "compile_policy": "compile",
+                    "compile_mode": "reduce-overhead",
+                },
+            }
+            for label, runtime_mode in invalid_runtime_modes.items():
+                with self.subTest(correctness_runtime=label):
+                    wrong_mode = json.loads(json.dumps(correctness_evidence))
+                    wrong_mode["runtime_mode"] = runtime_mode
+                    self.assertFalse(
+                        self.benchmark.correctness_binding_complete(
+                            wrong_mode,
+                            manifest,
+                            evidence,
+                            runtime_receipt=runtime_receipt,
+                            require_source_artifact=True,
+                        )
+                    )
+                    rejected = self.benchmark._aggregate_cpu_slice_outputs(
+                        [artifact(1), artifact(4)],
+                        manifest,
+                        Path("native.json"),
+                        torch_baseline,
+                        None,
+                        evidence,
+                        wrong_mode,
+                        runtime_receipt,
+                    )
+                    self.assertFalse(rejected["cpu_correctness_satisfied"])
+                    self.assertFalse(
+                        rejected["suite_acceptance"]["correctness_evidence_bound"]
+                    )
             tampered_correctness = json.loads(json.dumps(correctness_evidence))
             tampered_correctness["candidate_evidence"]["solver_abi"] = "tampered"
             unbound = self.benchmark._aggregate_cpu_slice_outputs(
@@ -2650,6 +2906,7 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
                 None,
                 evidence,
                 tampered_correctness,
+                runtime_receipt,
             )
             self.assertFalse(unbound["cpu_correctness_satisfied"])
             self.assertEqual(result["suite_acceptance"]["cpu_evaluated_cell_count"], 12)
@@ -3162,6 +3419,27 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             }
         return result
 
+    def test_cuda_memory_producer_rejects_peak_below_live_allocations(self):
+        device = SimpleNamespace(type="cuda")
+        self.assertTrue(
+            self.benchmark._cuda_memory_bounded(
+                device,
+                0,
+                4096,
+                4096,
+                8192,
+            )
+        )
+        self.assertFalse(
+            self.benchmark._cuda_memory_bounded(
+                device,
+                0,
+                10**12,
+                10**12,
+                1,
+            )
+        )
+
     def test_paired_real_gate_recomputes_timing_memory_and_trace_contracts(self):
         results = [
             self._cuda_evidence_case(name, complex_case=True)
@@ -3195,6 +3473,26 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             ] = "tampered"
             self.assertFalse(
                 self.benchmark._paired_real_cuda_gate(boundary_tamper)["passed"]
+            )
+
+            allocation_peak_tamper = json.loads(json.dumps(results))
+            allocation_peak_tamper[0]["memory"].update(
+                {
+                    "cuda_allocated_before_bytes": 10**12,
+                    "cuda_allocated_after_bytes": 10**12,
+                    "cuda_allocated_growth_bytes": 0,
+                    "cuda_peak_allocated_bytes": 1,
+                    "cuda_peak_reserved_bytes": 8192,
+                    "bounded": True,
+                }
+            )
+            tampered_gate = self.benchmark._paired_real_cuda_gate(
+                allocation_peak_tamper
+            )
+            self.assertFalse(tampered_gate["passed"])
+            self.assertIn(
+                "CUDA allocation metrics are invalid",
+                " ".join(tampered_gate["errors"]),
             )
 
     def test_region_invariance_gate_binds_raw_plans_and_profiled_launches(self):
@@ -3412,6 +3710,7 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             args.native_summary,
             args.torch_baseline_slice_artifacts,
             document,
+            None,
             None,
         )
         self.assertEqual(status, 2)

@@ -13,6 +13,33 @@ from gmes import pw_material
 class OpenMPConfigurationTest(unittest.TestCase):
     """Verify build reporting, threshold handling, and update execution."""
 
+    def test_swig_binding_uses_python3_iterator_and_vector_surface(self):
+        self.assertFalse(hasattr(pw_material.SwigPyIterator, "next"))
+        self.assertTrue(hasattr(pw_material.SwigPyIterator, "__next__"))
+        for vector_type in (
+            pw_material.OracleIndexVector,
+            pw_material.OracleStateVector,
+            pw_material.PwMaterialParamVector,
+        ):
+            with self.subTest(vector_type=vector_type.__name__):
+                for legacy_name in (
+                    "__nonzero__",
+                    "__getslice__",
+                    "__setslice__",
+                    "__delslice__",
+                ):
+                    self.assertFalse(hasattr(vector_type, legacy_name))
+                self.assertTrue(hasattr(vector_type, "__bool__"))
+                self.assertTrue(hasattr(vector_type, "__getitem__"))
+                self.assertTrue(hasattr(vector_type, "__setitem__"))
+
+        indices = pw_material.OracleIndexVector()
+        indices.append(7)
+        self.assertEqual(indices[0], 7)
+        states = pw_material.OracleStateVector()
+        states.append(1 + 2j)
+        self.assertEqual(states[0], 1 + 2j)
+
     def test_configuration_values_are_valid(self):
         self.assertIsInstance(pw_material.openmp_enabled(), bool)
         self.assertGreaterEqual(pw_material.openmp_max_threads(), 1)

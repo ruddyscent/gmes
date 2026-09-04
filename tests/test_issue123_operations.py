@@ -2787,7 +2787,7 @@ class Issue123OperationsTest(unittest.TestCase):
         self.assertEqual(command[command.index("--jq") + 1], ".")
         self.assertNotIn("--slurp", command)
 
-    def test_github_api_direct_success_ignores_stale_secondary_auth_status(self):
+    def test_github_api_direct_success_never_spawns_auth_status(self):
         completed = mock.Mock(
             stdout=(
                 "HTTP/2.0 200 OK\r\n"
@@ -2798,15 +2798,10 @@ class Issue123OperationsTest(unittest.TestCase):
                 '{"id":1}\n'
             ).encode()
         )
-        stale_secondary_status = operations.subprocess.CalledProcessError(
-            1,
-            ["gh", "auth", "status", "--hostname", "github.com"],
-            stderr=b"stale secondary account",
-        )
         with mock.patch.object(
             operations.subprocess,
             "run",
-            side_effect=(completed, stale_secondary_status),
+            return_value=completed,
         ) as run:
             raw, _capture = operations._github_api_capture(
                 "repos/ruddyscent/gmes/issues/123"
@@ -2815,23 +2810,18 @@ class Issue123OperationsTest(unittest.TestCase):
         self.assertEqual(run.call_count, 1)
         self.assertEqual(run.call_args.args[0][:2], ["gh", "api"])
 
-    def test_github_api_auth_diagnostic_preserves_initial_failure(self):
+    def test_github_api_failure_preserves_original_cause_without_status(self):
         api_error = operations.subprocess.CalledProcessError(
             1,
             ["gh", "api"],
             stderr=b"gh: Bad credentials (HTTP 401)",
-        )
-        diagnostic_error = operations.subprocess.CalledProcessError(
-            1,
-            ["gh", "auth", "status", "--hostname", "github.com"],
-            stderr=b"stale secondary account",
         )
         endpoint = "repos/ruddyscent/gmes/issues/123"
         with (
             mock.patch.object(
                 operations.subprocess,
                 "run",
-                side_effect=(api_error, diagnostic_error),
+                side_effect=api_error,
             ) as run,
             self.assertRaisesRegex(
                 operations.EvidenceError, "GitHub API request failed"
@@ -2839,43 +2829,12 @@ class Issue123OperationsTest(unittest.TestCase):
         ):
             operations._github_api_capture(endpoint)
         self.assertIs(raised.exception.__cause__, api_error)
-        self.assertEqual(run.call_count, 2)
+        self.assertEqual(run.call_count, 1)
         self.assertEqual(run.call_args_list[0].args[0][:2], ["gh", "api"])
         self.assertEqual(
             run.call_args_list[0].kwargs,
             {"check": True, "capture_output": True},
         )
-        self.assertEqual(
-            run.call_args_list[1].args[0],
-            ["gh", "auth", "status", "--hostname", "github.com"],
-        )
-        self.assertEqual(
-            run.call_args_list[1].kwargs,
-            {"check": False, "capture_output": True},
-        )
-
-    def test_github_api_non_auth_failure_skips_status_diagnosis(self):
-        endpoint = "repos/ruddyscent/gmes/issues/123"
-        for detail in (
-            b"gh: Not Found (HTTP 404)",
-            b"gh: API rate limit exceeded (HTTP 403)",
-            b"gh: endpoint policy denied (HTTP 403)",
-        ):
-            with (
-                self.subTest(detail=detail),
-                mock.patch.object(
-                    operations.subprocess,
-                    "run",
-                    side_effect=operations.subprocess.CalledProcessError(
-                        1, ["gh", "api"], stderr=detail
-                    ),
-                ) as run,
-                self.assertRaisesRegex(
-                    operations.EvidenceError, "GitHub API request failed"
-                ),
-            ):
-                operations._github_api_capture(endpoint)
-            self.assertEqual(run.call_count, 1)
 
     def test_capture_initial_api_failure_leaves_no_partial_output(self):
         output = self.root / "initial-api-failure-output"
@@ -2891,7 +2850,7 @@ class Issue123OperationsTest(unittest.TestCase):
             mock.patch.object(
                 operations.subprocess,
                 "run",
-                side_effect=(api_error, OSError("status unavailable")),
+                side_effect=api_error,
             ) as run,
             self.assertRaisesRegex(
                 operations.EvidenceError, "GitHub API request failed"
@@ -2906,7 +2865,7 @@ class Issue123OperationsTest(unittest.TestCase):
                 publication_receipt=self.publication_receipt_path,
                 output_directory=output,
             )
-        self.assertEqual(run.call_count, 2)
+        self.assertEqual(run.call_count, 1)
         self.assertFalse(output.exists())
 
     def test_github_api_graphql_command_pins_query_and_typed_pr(self):

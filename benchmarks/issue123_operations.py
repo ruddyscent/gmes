@@ -596,8 +596,6 @@ def _github_api_capture(
     try:
         completed = subprocess.run(command, check=True, capture_output=True)
     except subprocess.CalledProcessError as error:
-        if _github_authentication_failure(error):
-            _diagnose_github_authentication_failure()
         raise EvidenceError(f"GitHub API request failed: {endpoint}") from error
     except OSError as error:
         raise EvidenceError(f"GitHub API request failed: {endpoint}") from error
@@ -609,41 +607,6 @@ def _github_api_capture(
         graphql=graphql_variables is not None,
         label=label,
     )
-
-
-def _github_authentication_failure(error: subprocess.CalledProcessError) -> bool:
-    stderr = error.stderr
-    if isinstance(stderr, bytes):
-        detail = stderr.decode("utf-8", "replace").casefold()
-    elif isinstance(stderr, str):
-        detail = stderr.casefold()
-    else:
-        return False
-    if "rate limit" in detail:
-        return False
-    return any(
-        marker in detail
-        for marker in (
-            "http 401",
-            "bad credentials",
-            "authentication required",
-            "requires authentication",
-            "must be authenticated",
-            "resource not accessible by integration",
-            "insufficient scopes",
-        )
-    )
-
-
-def _diagnose_github_authentication_failure() -> None:
-    try:
-        subprocess.run(
-            ["gh", "auth", "status", "--hostname", "github.com"],
-            check=False,
-            capture_output=True,
-        )
-    except Exception:
-        pass
 
 
 def _github_api_raw(

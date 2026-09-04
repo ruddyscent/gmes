@@ -1166,8 +1166,9 @@ class Issue123OperationsTest(unittest.TestCase):
 
     def test_capture_and_completion_recompute_raw_api_evidence(self):
         output, index_path, scope_path = self._capture()
-        self.assertEqual(index_path.parent, output)
-        self.assertEqual(scope_path.parent, output)
+        expected_output = output.resolve()
+        self.assertEqual(index_path.parent, expected_output)
+        self.assertEqual(scope_path.parent, expected_output)
         self.assertFalse(index_path.parent.name.startswith("."))
         document = json.loads(index_path.read_text())
         scope = json.loads(scope_path.read_text())

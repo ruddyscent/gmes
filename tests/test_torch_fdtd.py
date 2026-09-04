@@ -1,5 +1,6 @@
 """Tests for the deliberately breaking Torch-native execution path."""
 
+import hashlib
 import json
 import os
 import unittest
@@ -10,18 +11,29 @@ import numpy as np
 import torch
 
 import gmes
+from benchmarks import issue123_completion
+from gmes.torch_dm2 import (
+    DM2_ITERATIONS_PER_CHUNK,
+    DM2_MAX_ITERATIONS,
+    DM2_PACKED_ITERATIONS_PER_CONDITION,
+)
 from gmes.torch_fdtd import (
+    BOUNDARY_SYNC_REPRESENTATION,
+    CUDA_GRAPH_EXECUTION_REPRESENTATION,
     DEFAULT_VIEW_MUTATION_REPRESENTATION,
     DIRECT_VIEW_MUTATION_REPRESENTATION,
     EXTERNAL_SOURCE_REPRESENTATION,
     FUNCTIONAL_DM2_REPRESENTATION,
     FUSED_SOURCE_REPRESENTATION,
+    LOCAL_COMPILED_REGION_TOPOLOGY,
     PACKED_DM2_REPRESENTATION,
+    TORCH_SOLVER_ABI,
     DistributedLaunch,
     TorchConfigurationError,
     TorchRuntimeConfig,
     TorchSimulation,
     _boundary_plane,
+    _compile_fullgraph,
     _field_region,
     torch_runtime_diagnostics,
 )
@@ -154,6 +166,72 @@ class TorchRuntimeConfigTest(unittest.TestCase):
                     runtime=config,
                 )
 
+    def test_cuda_graph_compile_explicitly_disables_inner_cudagraphs(self):
+        cases = (
+            ("default", {"triton.cudagraphs": False}),
+            ("reduce-overhead", {"triton.cudagraphs": False}),
+            (
+                "max-autotune",
+                {
+                    "triton.cudagraphs": False,
+                    "max_autotune": True,
+                    "coordinate_descent_tuning": True,
+                },
+            ),
+        )
+        for compile_mode, expected_options in cases:
+            with (
+                self.subTest(compile_mode=compile_mode),
+                mock.patch(
+                    "gmes.torch_fdtd.torch.compile",
+                    return_value=mock.sentinel.compiled,
+                ) as compile_function,
+            ):
+                function = mock.sentinel.function
+                result = _compile_fullgraph(
+                    function,
+                    TorchRuntimeConfig(
+                        device="cuda:0",
+                        compile_policy="compile",
+                        compile_mode=compile_mode,
+                        cpu_threads=1,
+                    ),
+                    torch.device("cuda:0"),
+                    dynamic=False,
+                    disable_cuda_graphs=True,
+                )
+
+            self.assertIs(result, mock.sentinel.compiled)
+            compile_function.assert_called_once_with(
+                function,
+                fullgraph=True,
+                dynamic=False,
+                options=expected_options,
+            )
+
+        runtime = TorchRuntimeConfig(
+            device="cuda:0",
+            compile_policy="compile",
+            compile_mode="reduce-overhead",
+            cpu_threads=1,
+        )
+        with mock.patch(
+            "gmes.torch_fdtd.torch.compile",
+            return_value=mock.sentinel.compiled,
+        ) as compile_function:
+            _compile_fullgraph(
+                mock.sentinel.function,
+                runtime,
+                torch.device("cuda:0"),
+                dynamic=False,
+            )
+        compile_function.assert_called_once_with(
+            mock.sentinel.function,
+            fullgraph=True,
+            dynamic=False,
+            mode="reduce-overhead",
+        )
+
     def test_oversubscribed_process_metadata_is_rejected(self):
         processors = os.cpu_count() or 1
         config = TorchRuntimeConfig(
@@ -169,6 +247,14 @@ class TorchRuntimeConfigTest(unittest.TestCase):
             )
 
     def test_compile_cache_key_tracks_execution_specialization(self):
+        self.assertEqual(TORCH_SOLVER_ABI, "torch-fdtd-regions-v15")
+        self.assertEqual(issue123_completion.TORCH_SOLVER_ABI, TORCH_SOLVER_ABI)
+        self.assertEqual(PACKED_DM2_REPRESENTATION, "single-carry-packed-loop-v2")
+        self.assertEqual(
+            CUDA_GRAPH_EXECUTION_REPRESENTATION,
+            "external-no-inner-cudagraph-regions+dm2-raw-fixed-masked-v1",
+        )
+        self.assertEqual(DM2_PACKED_ITERATIONS_PER_CONDITION, 3)
         common = {
             "space": gmes.Cartesian((2, 2, 0), 2),
             "geometry": _geometry(),
@@ -193,6 +279,12 @@ class TorchRuntimeConfigTest(unittest.TestCase):
         )
 
         self.assertEqual(len(first.compile_cache_key), 64)
+        self.assertEqual(
+            hashlib.sha256(
+                repr(first._compile_cache_key_preimage).encode()
+            ).hexdigest(),
+            first.compile_cache_key,
+        )
         self.assertEqual(first.compile_cache_key, second.compile_cache_key)
         self.assertEqual(
             first.diagnostics()["material_execution_representation"],
@@ -202,8 +294,27 @@ class TorchRuntimeConfigTest(unittest.TestCase):
         self.assertEqual(
             first.diagnostics()["compile_cache_key"], first.compile_cache_key
         )
+        self.assertEqual(first.diagnostics()["compile_solver_abi"], TORCH_SOLVER_ABI)
+        self.assertEqual(first._compile_cache_key_preimage[0], TORCH_SOLVER_ABI)
+        self.assertEqual(len(first._compile_cache_key_preimage), 31)
         self.assertEqual(
-            first.diagnostics()["compile_solver_abi"], "torch-fdtd-regions-v8"
+            first._compile_cache_key_preimage[6], LOCAL_COMPILED_REGION_TOPOLOGY
+        )
+        self.assertEqual(
+            first._compile_cache_key_preimage[21][1:4],
+            (
+                DM2_MAX_ITERATIONS,
+                DM2_ITERATIONS_PER_CHUNK,
+                DM2_PACKED_ITERATIONS_PER_CONDITION,
+            ),
+        )
+        self.assertEqual(
+            first._compile_cache_key_preimage[21][-1],
+            CUDA_GRAPH_EXECUTION_REPRESENTATION,
+        )
+        self.assertEqual(
+            first.diagnostics()["cuda_graph_execution_representation"],
+            CUDA_GRAPH_EXECUTION_REPRESENTATION,
         )
         self.assertEqual(
             first.diagnostics()["view_mutation_representation"],
@@ -216,6 +327,10 @@ class TorchRuntimeConfigTest(unittest.TestCase):
         self.assertEqual(
             first.diagnostics()["sources"]["execution_representation"],
             FUSED_SOURCE_REPRESENTATION,
+        )
+        self.assertEqual(
+            first.diagnostics()["boundaries"]["execution_representation"],
+            BOUNDARY_SYNC_REPRESENTATION,
         )
 
         three_dimensional = {
@@ -300,7 +415,21 @@ class TorchRuntimeConfigTest(unittest.TestCase):
             ],
             runtime=material_runtime,
         )
-        self.assertEqual(sparse.compile_cache_key, sparse_forced.compile_cache_key)
+        self.assertNotEqual(sparse.compile_cache_key, sparse_forced.compile_cache_key)
+        self.assertNotEqual(
+            sparse.diagnostics()["dispersive"]["execution_representation"],
+            sparse_forced.diagnostics()["dispersive"]["execution_representation"],
+        )
+        drude_buckets = [
+            bucket
+            for component in sparse.plan.components.values()
+            for bucket in component.buckets
+            if bucket.signature.model == "drude"
+        ]
+        self.assertTrue(drude_buckets)
+        self.assertTrue(
+            all(bucket.selected_policy == "compact" for bucket in drude_buckets)
+        )
         self.assertNotEqual(sparse.compile_cache_key, broad.compile_cache_key)
 
     def test_missing_cuda_has_actionable_error_and_no_fallback(self):
@@ -345,6 +474,145 @@ class TorchStateTest(unittest.TestCase):
                     self.assertTrue(torch.equal(actual, expected))
                     self.assertEqual(actual.storage_offset(), expected.storage_offset())
                     self.assertEqual(actual.stride(), expected.stride())
+
+    def test_fixed_state_rejects_buffer_replacement_or_conversion(self):
+        simulation = _simulation(bloch=(0.07, 0.11, 0.13))
+        addresses = {
+            name: value.data_ptr() for name, value in simulation.state.named_buffers()
+        }
+        with self.assertRaisesRegex(ValueError, "assign=True.*fixed"):
+            simulation.state.load_state_dict(simulation.state.state_dict(), assign=True)
+        with self.assertRaisesRegex(TorchConfigurationError, "fixed device and dtype"):
+            simulation.state.to(dtype=torch.float32)
+        self.assertEqual(
+            addresses,
+            {
+                name: value.data_ptr()
+                for name, value in simulation.state.named_buffers()
+            },
+        )
+
+    def test_batched_boundary_sync_preserves_order_and_skips_collapsed_axes(self):
+        bloch = (0.07, 0.11, 0.13)
+        rng = np.random.default_rng(37)
+        families = (
+            (("Ex", "Ey", "Ez"), True, "_sync_electric_boundaries"),
+            (("Hx", "Hy", "Hz"), False, "_sync_magnetic_boundaries"),
+        )
+
+        cases = (
+            ((3, 2, 2), None),
+            ((3, 2, 0), None),
+            ((3, 2, 2), 0),
+            ((3, 2, 2), 1),
+            ((3, 2, 2), 2),
+        )
+        for precision in ("float32", "float64"):
+            for active_bloch in (None, bloch):
+                for size, skip_axis in cases:
+                    with self.subTest(
+                        precision=precision,
+                        bloch=active_bloch is not None,
+                        size=size,
+                        skip_axis=skip_axis,
+                    ):
+                        self._assert_boundary_sync_matches_scalar_reference(
+                            rng=rng,
+                            families=families,
+                            precision=precision,
+                            bloch=active_bloch,
+                            size=size,
+                            skip_axis=skip_axis,
+                        )
+
+    def _assert_boundary_sync_matches_scalar_reference(
+        self, *, rng, families, precision, bloch, size, skip_axis
+    ):
+        simulation = _simulation(
+            size=size,
+            resolution=2,
+            precision=precision,
+            bloch=bloch,
+        )
+        values = {
+            name: (
+                rng.normal(size=simulation.plan.shapes[name])
+                if bloch is None
+                else rng.normal(size=simulation.plan.shapes[name])
+                + 1j * rng.normal(size=simulation.plan.shapes[name])
+            )
+            for name in _COMPONENTS
+        }
+        simulation.load_host_fields(values)
+        expected = {
+            name: field.clone() for name, field in simulation.state.fields().items()
+        }
+
+        for names, high_from_low, method_name in families:
+            for name in names:
+                component_axis = ("x", "y", "z").index(name[1].lower())
+                field = expected[name]
+                for axis in range(3):
+                    if (
+                        axis == component_axis
+                        or axis == skip_axis
+                        or simulation.plan.shapes[name][axis] <= 1
+                    ):
+                        continue
+                    destination_index = -1 if high_from_low else 0
+                    source_index = 0 if high_from_low else -1
+                    direction = 1 if high_from_low else -1
+                    destination = field.select(axis, destination_index)
+                    source = field.select(axis, source_index).clone()
+                    if bloch is None:
+                        destination.copy_(source)
+                    else:
+                        length = (
+                            simulation.plan.shapes[name][axis] - 1
+                        ) * simulation.plan.dr[axis]
+                        angle = direction * bloch[axis] * length
+                        cosine = float(np.cos(angle))
+                        sine = float(np.sin(angle))
+                        destination[..., 0].copy_(source[..., 0]).mul_(cosine)
+                        destination[..., 0].add_(source[..., 1], alpha=-sine)
+                        destination[..., 1].copy_(source[..., 0]).mul_(sine)
+                        destination[..., 1].add_(source[..., 1], alpha=cosine)
+
+            getattr(simulation, method_name)(skip_axis=skip_axis)
+            stages = simulation._boundary_sync_stages(
+                names,
+                high_from_low=high_from_low,
+                skip_axis=skip_axis,
+            )
+            self.assertIs(
+                stages,
+                simulation._boundary_sync_stages(
+                    names,
+                    high_from_low=high_from_low,
+                    skip_axis=skip_axis,
+                ),
+            )
+            expected_operations = sum(
+                simulation.state.field(name).numel() > 0
+                and axis != ("x", "y", "z").index(name[1].lower())
+                and axis != skip_axis
+                and simulation.plan.shapes[name][axis] > 1
+                for name in names
+                for axis in range(3)
+            )
+            self.assertEqual(
+                sum(len(stage[0]) for stage in stages), expected_operations
+            )
+            for destinations, sources, phases in stages:
+                if bloch is None:
+                    self.assertIsNone(phases)
+                else:
+                    self.assertIsNotNone(phases)
+                for destination, source in zip(destinations, sources):
+                    self.assertNotEqual(destination.data_ptr(), source.data_ptr())
+
+        for name, field in simulation.state.fields().items():
+            torch.testing.assert_close(field, expected[name])
 
     def test_yee_shapes_cover_collapsed_1d_2d_3d(self):
         for size in ((8, 0, 0), (8, 6, 0), (6, 5, 4), (0, 0, 0)):
@@ -454,6 +722,148 @@ class TorchStateTest(unittest.TestCase):
             torch.any(torch.isclose(values, torch.tensor(1 / 1.7, dtype=values.dtype)))
         )
         self.assertEqual(simulation.plan.material_ids_ex.dtype, torch.int32)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is unavailable")
+    def test_reduce_overhead_cuda_graph_uses_non_nested_half_steps(self):
+        torch._dynamo.reset()
+        self.addCleanup(torch._dynamo.reset)
+        poles = tuple(
+            gmes.DrudePole(
+                omega=0.6 + 0.1 * index,
+                gamma=0.03 + 0.01 * index,
+            )
+            for index in range(4)
+        )
+        simulation = TorchSimulation(
+            space=gmes.Cartesian((6, 5, 4), 3),
+            geometry=[
+                gmes.DefaultMedium(gmes.Dielectric(eps_inf=1.2)),
+                gmes.Block(
+                    gmes.Drude(eps_inf=1.2, dps=poles),
+                    center=(0, 0, 0),
+                    size=(6, 5, 4),
+                ),
+            ],
+            runtime=TorchRuntimeConfig(
+                device="cuda:0",
+                precision="float32",
+                compile_policy="compile",
+                compile_mode="reduce-overhead",
+                cpu_threads=1,
+            ),
+            bloch=(0.07, 0.11, 0.13),
+        )
+        rng = np.random.default_rng(123)
+        simulation.load_host_fields(
+            {
+                name: rng.normal(size=tuple(field.shape)).astype(np.float32) * 1e-3
+                for name, field in simulation.state.fields().items()
+            }
+        )
+        simulation.advance(1)
+        checkpoint = simulation.checkpoint()
+        addresses = simulation.buffer_addresses()
+
+        simulation.capture_cuda_graphs()
+        self.assertEqual(
+            sorted(simulation._cuda_graphs), ["electric_half", "magnetic_half"]
+        )
+        self.assertIsNot(
+            simulation._electric_cuda_graph_half, simulation._electric_half
+        )
+        self.assertIsNot(
+            simulation._magnetic_cuda_graph_half, simulation._magnetic_half
+        )
+        self.assertEqual(addresses, simulation.buffer_addresses())
+        restored = simulation.checkpoint()
+        for name, value in checkpoint["state"].items():
+            self.assertTrue(torch.equal(restored["state"][name], value), name)
+
+        simulation.advance(2)
+        captured = simulation.state.checkpoint()
+        simulation._cuda_graphs.clear()
+        torch.cuda.synchronize(simulation.device)
+        simulation.load_checkpoint(checkpoint).advance(2)
+        normal = simulation.state.checkpoint()
+        self.assertEqual(addresses, simulation.buffer_addresses())
+        for name, value in normal.items():
+            torch.testing.assert_close(captured[name], value, msg=name)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is unavailable")
+    def test_cuda_graph_capture_failure_rolls_back_state_and_registry(self):
+        simulation = TorchSimulation(
+            space=gmes.Cartesian((2, 2, 2), 2),
+            geometry=_geometry()
+            + [
+                gmes.Block(
+                    gmes.Dm2(
+                        eps_inf=1.4,
+                        mu_inf=1.1,
+                        omega=(0.7, 1.1),
+                        n_atom=(0.2, 0.4),
+                        rho30=-0.8,
+                        gamma=0.15,
+                        t1=2.5,
+                        t2=1.7,
+                        hbar=1.2,
+                        rtol=1e-4,
+                    ),
+                    center=(0, 0, 0),
+                    size=(1, 1, 1),
+                )
+            ],
+            runtime=TorchRuntimeConfig(
+                device="cuda:0",
+                precision="float32",
+                compile_policy="compile",
+                cpu_threads=1,
+            ),
+            dt=0.025,
+        )
+        rng = np.random.default_rng(123)
+        simulation.load_host_fields(
+            {
+                name: rng.normal(size=tuple(field.shape)).astype(np.float32) * 1e-3
+                for name, field in simulation.state.fields().items()
+            }
+        )
+        expected = simulation.checkpoint()
+        addresses = simulation.buffer_addresses()
+        normal_dm2_updates = simulation._dm2_updates
+        original_load_checkpoint = simulation.load_checkpoint
+        restore_calls = 0
+
+        def fail_first_restore(checkpoint):
+            nonlocal restore_calls
+            restore_calls += 1
+            if restore_calls == 1:
+                raise RuntimeError("injected CUDA graph checkpoint restore failure")
+            return original_load_checkpoint(checkpoint)
+
+        with (
+            mock.patch.object(
+                simulation,
+                "load_checkpoint",
+                side_effect=fail_first_restore,
+            ),
+            self.assertRaisesRegex(
+                RuntimeError,
+                "injected CUDA graph checkpoint restore failure",
+            ),
+        ):
+            simulation.capture_cuda_graphs()
+
+        self.assertEqual(restore_calls, 2)
+        self.assertEqual(simulation._cuda_graphs, {})
+        self.assertIs(simulation._dm2_updates, normal_dm2_updates)
+        self.assertEqual(simulation.buffer_addresses(), addresses)
+        actual = simulation.checkpoint()
+        self.assertEqual(actual["metadata"], expected["metadata"])
+        self.assertEqual(actual["auxiliaries"], expected["auxiliaries"])
+        for name, value in expected["state"].items():
+            self.assertTrue(torch.equal(actual["state"][name], value), name)
+        for name, value in expected["probes"].items():
+            self.assertTrue(torch.equal(actual["probes"][name], value), name)
 
 
 class TorchOracleTest(unittest.TestCase):

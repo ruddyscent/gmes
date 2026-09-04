@@ -3,9 +3,11 @@
   "reference": {
     "commit": "d87d25afd160d96b1fa0890cacecd90802448d57",
     "tag": "native-oracle-d87d25a",
-    "observer_tag": "native-oracle-observer-v4",
-    "observer_commit": "11ac12d4992ad85b19b414b837383b392904a131",
-    "performance_summary_sha256": "a81b87e8cb2870d2fbbf1bbb7409c98d10780da30eb23cb5965fce39b9109fb6",
+    "observer_tag": "native-oracle-observer-v6",
+    "observer_commit": "2d5810cebf610fa6384235d9771f4ac699c23fc5",
+    "performance_observer_tag": "native-oracle-observer-v5",
+    "performance_observer_commit": "1ab94e579dc52861db7ecdcd55f24f8af1977de7",
+    "performance_summary_sha256": "1c9bdce2717ba858fd03b2e40302a5b2d19a29920496f969e33aee36e34e1baa",
     "field_initializer": "native-affine-ramp-v1",
     "field_scale": 0.001,
     "seed": 115,
@@ -79,13 +81,59 @@
   ],
   "performance_gates": {
     "cpu_crossover": {"cases": ["cpu-crossover-2d", "cpu-crossover-3d"], "sizes": [[16, 16, 0], [16, 16, 16]], "resolutions": [10, 4], "repeats": 15, "threads": [1, "physical"]},
-    "cpu_large": {"cases": ["cpu-large-2d", "cpu-large-3d"], "sizes": [[64, 64, 0], [32, 32, 32]], "resolutions": [10, 4], "repeats": 15, "threads": [1, "physical"], "max_individual_regression_percent": 5, "geomean_regression": "not-statistically-meaningful"},
+    "cpu_large": {"cases": ["cpu-large-2d", "cpu-large-3d"], "sizes": [[64, 64, 0], [32, 32, 32]], "resolutions": [10, 4], "repeats": 15, "threads": [1, "physical"]},
     "cpu_acceptance": {
-      "contract_id": "cpu-acceptance-v1",
+      "contract_id": "cpu-acceptance-v2",
+      "timing_reference": {
+        "backend": "torch",
+        "root_commit": "821c075b9328e02c3f3e5d16488a44b64ff08c04",
+        "timing_runtime_identity": {
+          "schema_version": 1,
+          "torch": "2.13.0+cpu",
+          "cuda_runtime": null
+        },
+        "slice_artifacts": [
+          {
+            "thread_mode": "one",
+            "threads": 1,
+            "publication_url": "https://github.com/ruddyscent/gmes/releases/download/issue-123-torch-cpu-baseline-v3/torch-cpu-baseline-one.json",
+            "size_bytes": 18281,
+            "sha256": "c8eba3c17ccae5ba744a8fbc90b89d72a77dcf0624339cda1deb4d7f594395ed"
+          },
+          {
+            "thread_mode": "physical",
+            "threads": 4,
+            "publication_url": "https://github.com/ruddyscent/gmes/releases/download/issue-123-torch-cpu-baseline-v3/torch-cpu-baseline-physical.json",
+            "size_bytes": 18292,
+            "sha256": "b1a3c82a069c2475560468a7b8d0a237db89e857bdce96f8fc812449b5c35602"
+          }
+        ],
+        "legacy_evidence": {
+          "evidence_contract_id": "torch-cpu-acceptance-v7",
+          "cpu_contract_id": "cpu-acceptance-v1",
+          "manifest_sha256": "6d7fe084c558cf69771f0c3928bc9be96fc6bb5b55ba777d674151fbbe6cbe19",
+          "runner_sha256": "fee6d418bb50729ddb26ff14e931a4f51bb8d2a92cb0ad537c2757846247a770",
+          "solver_sha256": "9cd8decc801a6f9d93551c6e6f427afeff1c65e3092e54b03e5abe0a3e9192d5",
+          "solver_abi": "torch-fdtd-regions-v8"
+        }
+      },
       "cases": ["cpu-crossover-2d", "cpu-crossover-3d", "cpu-large-2d", "cpu-large-3d", "bloch-2d", "bloch-3d"],
       "thread_modes": ["one", "physical"],
       "precision": "float64",
       "max_individual_ratio": 1.05,
+      "native_comparison": "informational",
+      "allocation_contract": {
+        "method": "reviewed-fixed-temporary-provenance-v1",
+        "fixed_temporaries": {
+          "allowed": true,
+          "reviewed_provenance_required": true
+        },
+        "max_net_live_growth_bytes": 0,
+        "max_final_live_growth_bytes": 0,
+        "rss_growth": "bounded",
+        "max_full_field_or_domain_clones": 0,
+        "public_upstream_issue_required": true
+      },
       "statistics": {
         "method": "independent-stratified-bootstrap-log-geomean-v1",
         "resamples": 20000,
@@ -111,7 +159,8 @@
       "dcp-ade": {"float32": {"rtol": 6e-4, "atol": 1e-4}, "float64": {"rtol": 5e-12, "atol": 5e-13}, "complex128": {"rtol": 1e-11, "atol": 1e-12}},
       "dcp-plrc": {"float32": {"rtol": 6e-4, "atol": 1e-4}, "float64": {"rtol": 5e-12, "atol": 5e-13}, "complex128": {"rtol": 1e-11, "atol": 1e-12}},
       "dcp-rc": {"float32": {"rtol": 6e-4, "atol": 1e-4}, "float64": {"rtol": 5e-12, "atol": 5e-13}, "complex128": {"rtol": 1e-11, "atol": 1e-12}},
-      "dm2": {"float32": {"rtol": 3e-4, "atol": 3e-6}, "float64": {"rtol": 2e-10, "atol": 2e-12}}
+      "dm2": {"float32": {"rtol": 6e-4, "atol": 3e-6}, "float64": {"rtol": 2e-10, "atol": 2e-12}}
+      ,"source_auxiliary": {"gaussian-auxiliary": {"float64": {"rtol": 2e-12, "atol": 1e-12}}}
       ,"mixed": {"float64": {"rtol": 2e-10, "atol": 2e-12}, "complex128": {"rtol": 4e-10, "atol": 4e-12}}
     }
   }

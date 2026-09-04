@@ -280,7 +280,14 @@ class DispersiveOracleTest(unittest.TestCase):
 
     def test_forced_policies_are_exactly_equal(self):
         results = {}
+        compile_cache_keys = set()
+        representations = {}
         fields = None
+        expected_operations = {
+            "dense": "aten::masked_scatter_",
+            "compact": "aten::index_copy_",
+            "tiled": "aten::scatter_",
+        }
         for policy in ("dense", "compact", "tiled"):
             _, simulation = _native_and_torch("dcp-plrc", policy=policy)
             if fields is None:
@@ -289,7 +296,102 @@ class DispersiveOracleTest(unittest.TestCase):
                     name: rng.normal(size=tuple(field.shape)) * 1e-3
                     for name, field in simulation.state.fields().items()
                 }
-            simulation.load_host_fields(fields).advance(20)
+            simulation.load_host_fields(fields)
+            addresses = simulation.buffer_addresses()
+            with torch.profiler.profile(
+                activities=[torch.profiler.ProfilerActivity.CPU],
+                profile_memory=True,
+            ) as profile:
+                simulation.advance(20)
+            self.assertEqual(addresses, simulation.buffer_addresses())
+            results[policy] = simulation.state.host_snapshot()
+            diagnostics = simulation.diagnostics()["dispersive"]
+            representations[policy] = diagnostics["execution_representation"]
+            self.assertTrue(diagnostics["policy_executions"])
+            self.assertEqual(
+                {item["policy"] for item in diagnostics["policy_executions"]},
+                {policy},
+            )
+            self.assertEqual(
+                {
+                    item["execution_representation"]
+                    for item in diagnostics["policy_executions"]
+                },
+                {gmes.torch_plan.EXECUTION_REPRESENTATIONS[policy]},
+            )
+            operation_names = {event.key for event in profile.key_averages()}
+            observed_writes = operation_names & set(expected_operations.values())
+            self.assertEqual(observed_writes, {expected_operations[policy]})
+            expected_event = next(
+                event
+                for event in profile.key_averages()
+                if event.key == expected_operations[policy]
+            )
+            self.assertEqual(expected_event.self_cpu_memory_usage, 0)
+            compile_cache_keys.add(simulation.compile_cache_key)
+            plan_buffers = dict(simulation.plan.named_buffers())
+            for descriptor in simulation.plan.dispersive_buckets:
+                mask_name = f"{descriptor.prefix}_execution_mask"
+                targets_name = f"{descriptor.prefix}_execution_targets"
+                self.assertEqual(mask_name in plan_buffers, policy == "dense")
+                self.assertEqual(targets_name in plan_buffers, policy == "tiled")
+        self.assertEqual(len(set(representations.values())), 3)
+        self.assertEqual(len(compile_cache_keys), 3)
+        for component in _COMPONENTS:
+            np.testing.assert_array_equal(
+                results["dense"][component], results["compact"][component]
+            )
+            np.testing.assert_array_equal(
+                results["dense"][component], results["tiled"][component]
+            )
+
+    def test_compiled_forced_policies_keep_distinct_execution_identity(self):
+        results = {}
+        compile_cache_keys = set()
+        fields = None
+        for policy in ("dense", "compact", "tiled"):
+            _, simulation = _native_and_torch(
+                "dcp-plrc", policy=policy, compile_policy="compile"
+            )
+            if fields is None:
+                rng = np.random.default_rng(223)
+                fields = {
+                    name: rng.normal(size=tuple(field.shape)) * 1e-3
+                    for name, field in simulation.state.fields().items()
+                }
+            simulation.load_host_fields(fields)
+            addresses = simulation.buffer_addresses()
+            simulation.advance(2)
+            self.assertEqual(addresses, simulation.buffer_addresses())
+            results[policy] = simulation.state.host_snapshot()
+            compile_cache_keys.add(simulation.compile_cache_key)
+            self.assertEqual(
+                {
+                    item["execution_representation"]
+                    for item in simulation.diagnostics()["dispersive"][
+                        "policy_executions"
+                    ]
+                },
+                {gmes.torch_plan.EXECUTION_REPRESENTATIONS[policy]},
+            )
+        self.assertEqual(len(compile_cache_keys), 3)
+        for component in _COMPONENTS:
+            np.testing.assert_array_equal(
+                results["dense"][component], results["compact"][component]
+            )
+            np.testing.assert_array_equal(
+                results["dense"][component], results["tiled"][component]
+            )
+
+    def test_forced_policy_writes_preserve_paired_real_fields(self):
+        results = {}
+        for policy in ("dense", "compact", "tiled"):
+            _, simulation = _native_and_torch(
+                "drude", bloch=(0.07, 0.11, 0.13), policy=policy
+            )
+            addresses = simulation.buffer_addresses()
+            simulation.advance(5)
+            self.assertEqual(addresses, simulation.buffer_addresses())
             results[policy] = simulation.state.host_snapshot()
         for component in _COMPONENTS:
             np.testing.assert_array_equal(

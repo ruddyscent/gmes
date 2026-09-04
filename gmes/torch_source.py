@@ -1,7 +1,7 @@
 """Device-resident source lowering and execution for :mod:`gmes.torch_fdtd`."""
 
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import MappingProxyType
 from typing import Any, Protocol, cast
 
@@ -326,6 +326,10 @@ class TorchTransparentBatch(nn.Module):
     weights: torch.Tensor
     _sample_values: torch.Tensor
     _values: torch.Tensor
+    _outer_values: torch.Tensor
+    _envelope_step: torch.Tensor
+    _envelope_step_offset: torch.Tensor
+    _envelope: torch.Tensor
 
     def __init__(
         self,
@@ -378,6 +382,7 @@ class TorchTransparentBatch(nn.Module):
             for column, (sample, weight) in enumerate(values):
                 samples[row, column] = sample
                 weights[row, column] = weight
+        auxiliary_dtype = auxiliary.dtype
         self.register_buffer(
             "targets", torch.tensor(targets, device=device, dtype=torch.int64)
         )
@@ -385,22 +390,46 @@ class TorchTransparentBatch(nn.Module):
             "samples", torch.tensor(samples, device=device, dtype=torch.int64)
         )
         self.register_buffer(
-            "weights", torch.tensor(weights, device=device, dtype=dtype)
+            "weights", torch.tensor(weights, device=device, dtype=auxiliary_dtype)
         )
         plane = 2 if paired_real else 1
         self.register_buffer(
             "_sample_values",
-            torch.zeros(tuple(samples.shape) + (plane,), device=device, dtype=dtype),
+            torch.zeros(
+                tuple(samples.shape) + (plane,),
+                device=device,
+                dtype=auxiliary_dtype,
+            ),
             persistent=False,
         )
         self.register_buffer(
             "_values",
+            torch.zeros((len(targets), plane), device=device, dtype=auxiliary_dtype),
+            persistent=False,
+        )
+        self.register_buffer(
+            "_outer_values",
             torch.zeros((len(targets), plane), device=device, dtype=dtype),
             persistent=False,
         )
+        if gaussian_width is not None:
+            self.register_buffer(
+                "_envelope_step",
+                torch.zeros((), device=device, dtype=torch.int64),
+                persistent=False,
+            )
+            self.register_buffer(
+                "_envelope_step_offset",
+                auxiliary.state.step_count.detach().clone(),
+            )
+            self.register_buffer(
+                "_envelope",
+                torch.zeros((), device=device, dtype=auxiliary_dtype),
+                persistent=False,
+            )
 
     def apply(  # type: ignore[override]  # Source execution, not Module traversal
-        self, field: torch.Tensor, source_time: torch.Tensor
+        self, field: torch.Tensor, _source_time: torch.Tensor
     ) -> None:
         """Apply this transparent-source batch to ``field`` in place."""
 
@@ -417,13 +446,22 @@ class TorchTransparentBatch(nn.Module):
         self._sample_values.mul_(self.weights[..., None])
         torch.sum(self._sample_values, dim=1, out=self._values)
         if self.gaussian_width is not None:
-            envelope = torch.where(
-                source_time < self.gaussian_width,
-                torch.sin(0.5 * torch.pi * source_time / self.gaussian_width).square(),
-                torch.ones_like(source_time),
+            self._envelope_step.copy_(self.auxiliary.state.step_count).sub_(
+                self._envelope_step_offset
             )
-            self._values.mul_(envelope)
-        field.reshape(-1, plane).index_add_(0, self.targets, self._values)
+            self._envelope.copy_(self._envelope_step).mul_(
+                self.auxiliary.state.time_step
+            )
+            if self.gaussian_width > 0:
+                self._envelope.clamp_(max=self.gaussian_width)
+                self._envelope.mul_(
+                    0.5 * torch.pi / self.gaussian_width
+                ).sin_().square_()
+            else:
+                self._envelope.fill_(1.0)
+            self._values.mul_(self._envelope)
+        self._outer_values.copy_(self._values)
+        field.reshape(-1, plane).index_add_(0, self.targets, self._outer_values)
 
 
 class _SourceState(Protocol):
@@ -444,6 +482,8 @@ class _SourceSimulation(Protocol):
 class _AuxiliarySimulation(_SourceSimulation, Protocol):
     """Nested simulation lifecycle owned by transparent sources."""
 
+    runtime: Any
+    dtype: torch.dtype
     plan_identity: str
     compile_cache_key: str
 
@@ -575,6 +615,11 @@ def lower_sources(
 
     auxiliary_by_native: dict[int, tuple[Any, float | None]] = {}
     auxiliaries: list[Any] = []
+    auxiliary_runtime = (
+        runtime
+        if runtime.precision == "float64"
+        else replace(runtime, precision="float64")
+    )
     for source in legacy_sources:
         if not isinstance(source, TotalFieldScatteredField):
             continue
@@ -588,7 +633,7 @@ def lower_sources(
             space=base.space,
             geometry=base.geom_list,
             sources=base.src_list,
-            runtime=runtime,
+            runtime=auxiliary_runtime,
             dt=simulation.plan.dt,
             bloch=(0.0, 0.0, 0.0) if bloch is not None else None,
             _is_auxiliary=True,

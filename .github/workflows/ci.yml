@@ -27,7 +27,7 @@ jobs:
           - macos-latest
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           enable-cache: true
@@ -83,3 +83,94 @@ jobs:
       - name: Build distributions with macOS auto fallback
         if: runner.os == 'macOS'
         run: GMES_ENABLE_OPENMP=auto uv build
+      - name: Check out candidate head for canonical macOS evidence
+        if: runner.os == 'macOS' && github.event_name == 'pull_request'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          path: issue123-evidence-candidate
+          persist-credentials: false
+      - name: Build and exercise candidate macOS packages
+        if: runner.os == 'macOS' && github.event_name == 'pull_request'
+        env:
+          CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          CANDIDATE_DIR: ${{ github.workspace }}/issue123-evidence-candidate
+          EVIDENCE_DIR: ${{ runner.temp }}/issue-123-macos-evidence
+          RECORDS_DIR: ${{ runner.temp }}/issue-123-macos-command-records
+          WORK_DIR: ${{ runner.temp }}/issue-123-macos-work
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          test "$(git -C "$CANDIDATE_DIR" rev-parse HEAD)" = "$CANDIDATE_SHA"
+          test -z "$(git -C "$CANDIDATE_DIR" status --porcelain=v1 --untracked-files=all)"
+          mkdir -p "$EVIDENCE_DIR/packages" "$EVIDENCE_DIR/logs" "$RECORDS_DIR" "$WORK_DIR"
+          GMES_ENABLE_OPENMP=auto uv build --clear --no-create-gitignore --directory "$CANDIDATE_DIR" --out-dir "$EVIDENCE_DIR/packages"
+          wheels=("$EVIDENCE_DIR"/packages/*.whl)
+          sdists=("$EVIDENCE_DIR"/packages/*.tar.gz)
+          test "${#wheels[@]}" -eq 1
+          test "${#sdists[@]}" -eq 1
+          test -f "${wheels[0]}"
+          test -f "${sdists[0]}"
+          case "${wheels[0]}" in
+            *-cp314*-macosx_*_arm64.whl) ;;
+            *) exit 1 ;;
+          esac
+          python="$GITHUB_WORKSPACE/.venv/bin/python"
+          helper="$CANDIDATE_DIR/benchmarks/macos_ci_evidence.py"
+          record_probe() {
+            local probe_status stderr_path
+            probe_args=(record --role "$1")
+            if [[ -n "$2" ]]; then
+              probe_args+=(--mode "$2")
+            fi
+            probe_args+=(
+              --repository "$CANDIDATE_DIR"
+              --forbidden-root "$CANDIDATE_DIR"
+              --expected-package "$3"
+              --evidence-dir "$EVIDENCE_DIR"
+              --records-dir "$RECORDS_DIR"
+              --working-directory "$WORK_DIR"
+            )
+            if "$python" -I "$helper" "${probe_args[@]}"; then
+              return 0
+            else
+              probe_status=$?
+            fi
+            stderr_path="$EVIDENCE_DIR/logs/$1.stderr.txt"
+            printf 'macOS package probe %s failed with exit code %s; captured stderr (%s):\n' "$1" "$probe_status" "$stderr_path" >&2
+            if [[ -s "$stderr_path" ]]; then
+              tail -c 65536 "$stderr_path" >&2
+              printf '\n' >&2
+            else
+              printf '%s\n' '(no captured stderr was written)' >&2
+            fi
+            return "$probe_status"
+          }
+          GMES_ENABLE_OPENMP=auto UV_NO_CACHE=1 uv pip install \
+            --python "$python" --reinstall --no-deps "${wheels[0]}"
+          record_probe wheel-import "" "${wheels[0]}"
+          record_probe wheel-default-suite default "${wheels[0]}"
+          record_probe wheel-serial-suite serial "${wheels[0]}"
+          GMES_ENABLE_OPENMP=auto UV_NO_CACHE=1 uv pip install \
+            --python "$python" --reinstall --no-deps "${sdists[0]}"
+          record_probe sdist-import "" "${sdists[0]}"
+          record_probe sdist-default-suite default "${sdists[0]}"
+          GMES_ENABLE_OPENMP=0 UV_NO_CACHE=1 uv pip install \
+            --python "$python" --reinstall --no-deps "${sdists[0]}"
+          record_probe sdist-serial-suite serial "${sdists[0]}"
+          "$python" -I "$helper" capture \
+            --evidence-dir "$EVIDENCE_DIR" \
+            --records-dir "$RECORDS_DIR" \
+            --repository "$CANDIDATE_DIR" \
+            --manifest "$CANDIDATE_DIR/benchmarks/native_oracle_workloads.json" \
+            --candidate-commit "$CANDIDATE_SHA"
+          test -z "$(git -C "$CANDIDATE_DIR" status --porcelain=v1 --untracked-files=all)"
+      - name: Upload canonical macOS candidate evidence
+        if: runner.os == 'macOS' && github.event_name == 'pull_request'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: issue-123-macos-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/issue-123-macos-evidence
+          if-no-files-found: error
+          retention-days: 90
+          overwrite: true

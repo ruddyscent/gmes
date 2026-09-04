@@ -8,6 +8,7 @@ from torch import nn
 
 DM2_MAX_ITERATIONS = 100
 DM2_ITERATIONS_PER_CHUNK = 10
+DM2_PACKED_ITERATIONS_PER_CONDITION = 3
 _DM2_INVALID_CODE_OFFSET = DM2_MAX_ITERATIONS + 1
 
 
@@ -567,8 +568,7 @@ class TorchDm2BucketState(nn.Module):
             active = torch.logical_and(code >= 0, code < repetitions)
             return torch.any(active)
 
-        def body(value: Any) -> Any:
-            e_new, u_new, code = views(value)
+        def iteration(e_new: Any, u_new: Any, code: Any) -> Any:
             active = torch.logical_and(code >= 0, code < repetitions)
             e_previous = e_new
             u_previous = u_new
@@ -643,12 +643,18 @@ class TorchDm2BucketState(nn.Module):
             )
             code_next = torch.where(active, iterations_next, code)
             code_next = torch.where(finished, final_code, code_next)
+            return e_next, u_next, code_next
+
+        def body(value: Any) -> Any:
+            e_new, u_new, code = views(value)
+            for _ in range(DM2_PACKED_ITERATIONS_PER_CONDITION):
+                e_new, u_new, code = iteration(e_new, u_new, code)
             return (
                 torch.cat(
                     (
-                        e_next,
-                        u_next.reshape(-1),
-                        code_next,
+                        e_new,
+                        u_new.reshape(-1),
+                        code,
                     )
                 ),
             )
@@ -695,6 +701,7 @@ class TorchDm2BucketState(nn.Module):
 __all__ = [
     "DM2_ITERATIONS_PER_CHUNK",
     "DM2_MAX_ITERATIONS",
+    "DM2_PACKED_ITERATIONS_PER_CONDITION",
     "Dm2BucketMetadata",
     "TorchDm2BucketState",
 ]

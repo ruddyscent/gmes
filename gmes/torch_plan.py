@@ -29,7 +29,15 @@ COMPONENT_TYPES = {"Ex": Ex, "Ey": Ey, "Ez": Ez, "Hx": Hx, "Hy": Hy, "Hz": Hz}
 SINGLE_BUCKET_MODELS = frozenset(
     ("upml", "cpml", "drude", "lorentz", "dcp-ade", "dcp-plrc", "dcp-rc")
 )
+INDEXED_DISPERSIVE_MODELS = SINGLE_BUCKET_MODELS - frozenset(("upml", "cpml"))
 EXECUTION_POLICIES = frozenset(("auto", "dense", "compact", "tiled"))
+EXECUTION_REPRESENTATIONS = MappingProxyType(
+    {
+        "dense": "dense-mask-scatter-v1",
+        "compact": "compact-index-copy-v1",
+        "tiled": "tiled-index-scatter-v1",
+    }
+)
 
 type Shape3 = tuple[int, int, int]
 type Bounds3 = tuple[tuple[int, int], tuple[int, int], tuple[int, int]]
@@ -236,6 +244,11 @@ class MaterialBucketPlan:
             return len(self.tile_origins)
         return 1
 
+    @property
+    def execution_representation(self) -> str:
+        """Return the concrete steady-state write representation."""
+        return EXECUTION_REPRESENTATIONS[self.selected_policy]
+
 
 @dataclass(frozen=True)
 class ComponentPlan:
@@ -356,6 +369,7 @@ class ComponentPlan:
                         "state_shape": bucket.signature.state_shape,
                     },
                     "selected_policy": bucket.selected_policy,
+                    "execution_representation": bucket.execution_representation,
                     "decision": bucket.decision,
                     "targets": bucket.target_count,
                     "occupancy": bucket.occupancy,
@@ -659,6 +673,8 @@ def _select_policy(
     runs: Any,
     tiles: Any,
     width: Any,
+    avoid_dense_auto: bool = False,
+    avoid_tiled_auto: bool = False,
 ) -> Any:
     occupancy = count / active_count if active_count else 0.0
     fragmentation = runs / count if count else 0.0
@@ -669,14 +685,43 @@ def _select_policy(
         "compact": count * (2.15 + 0.18 * width) + launch,
         "tiled": tile_cells * (1.20 + 0.12 * width) + launch * 1.15,
     }
-    selected = min(costs, key=costs.__getitem__) if requested == "auto" else requested
-    reason = (
-        f"{selected} minimizes the static {device_type} cost model at "
-        f"occupancy={occupancy:.4f}, fragmentation={fragmentation:.4f}, "
-        f"state_width={width}"
+    selectable_costs = {
+        name: value
+        for name, value in costs.items()
+        if not (
+            requested == "auto"
+            and (
+                (avoid_dense_auto and name == "dense")
+                or (avoid_tiled_auto and name == "tiled")
+            )
+        )
+    }
+    selected = (
+        min(selectable_costs, key=selectable_costs.__getitem__)
         if requested == "auto"
-        else f"{selected} was forced for benchmark/debugging"
+        else requested
     )
+    if requested == "auto":
+        exclusions: list[str] = []
+        if avoid_dense_auto:
+            exclusions.append(
+                "dense is excluded because compiled CPU masked scatter "
+                "materializes a full-field temporary"
+            )
+        if avoid_tiled_auto:
+            exclusions.append(
+                "tiled is excluded because compiled CPU scatter "
+                "materializes a full-field temporary"
+            )
+        suffix = "" if not exclusions else "; " + "; ".join(exclusions)
+        cost_model = "eligible static" if exclusions else "static"
+        reason = (
+            f"{selected} minimizes the {cost_model} {device_type} cost model at "
+            f"occupancy={occupancy:.4f}, fragmentation={fragmentation:.4f}, "
+            f"state_width={width}{suffix}"
+        )
+    else:
+        reason = f"{selected} was forced for benchmark/debugging"
     return selected, reason, tuple(sorted(costs.items())), occupancy, fragmentation
 
 
@@ -695,6 +740,8 @@ class TorchExecutionPlanner:
         material_tile_size: int = 65536,
         execution_tile_size: int = 4096,
         cpml_sparse_residual: bool = False,
+        avoid_dense_auto: bool = False,
+        avoid_tiled_auto: bool = False,
     ) -> None:
         if policy not in EXECUTION_POLICIES:
             raise ValueError(
@@ -711,6 +758,8 @@ class TorchExecutionPlanner:
         self.material_tile_size = int(material_tile_size)
         self.execution_tile_size = int(execution_tile_size)
         self.cpml_sparse_residual = bool(cpml_sparse_residual)
+        self.avoid_dense_auto = bool(avoid_dense_auto)
+        self.avoid_tiled_auto = bool(avoid_tiled_auto)
 
     def build(self) -> tuple[ComponentPlan, ...]:
         """Build and validate all six component plans before tensor finalization."""
@@ -911,6 +960,14 @@ class TorchExecutionPlanner:
                 runs=runs,
                 tiles=tile_cells,
                 width=state_width,
+                avoid_dense_auto=(
+                    self.avoid_dense_auto
+                    and signature.model in INDEXED_DISPERSIVE_MODELS
+                ),
+                avoid_tiled_auto=(
+                    self.avoid_tiled_auto
+                    and signature.model in INDEXED_DISPERSIVE_MODELS
+                ),
             )
             if selected_policy == "tiled":
                 tile_origins = tile_ids.astype(np.int64) * self.execution_tile_size
@@ -1027,6 +1084,7 @@ __all__ = [
     "COMPONENTS",
     "ELECTRIC_COMPONENTS",
     "EXECUTION_POLICIES",
+    "EXECUTION_REPRESENTATIONS",
     "ComponentPlan",
     "CpmlResidualAxisPlan",
     "ExecutionSignature",

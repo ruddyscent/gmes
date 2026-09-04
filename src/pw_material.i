@@ -17,6 +17,19 @@
 %include <std_string.i>
 %include <std_complex.i>
 %include <std_except.i>
+%ignore swig::SwigPyIterator::next;
+%ignore std::vector<int>::__nonzero__;
+%ignore std::vector<int>::__getslice__;
+%ignore std::vector<int>::__setslice__;
+%ignore std::vector<int>::__delslice__;
+%ignore std::vector<std::complex<double>>::__nonzero__;
+%ignore std::vector<std::complex<double>>::__getslice__;
+%ignore std::vector<std::complex<double>>::__setslice__;
+%ignore std::vector<std::complex<double>>::__delslice__;
+%ignore std::vector<gmes::PwMaterialParam *>::__nonzero__;
+%ignore std::vector<gmes::PwMaterialParam *>::__getslice__;
+%ignore std::vector<gmes::PwMaterialParam *>::__setslice__;
+%ignore std::vector<gmes::PwMaterialParam *>::__delslice__;
 %include <std_vector.i>
 %include <exception.i>
 %include "numpy.i"

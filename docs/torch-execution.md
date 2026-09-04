@@ -153,16 +153,44 @@ only for its active targets. Mutable state and predictor--corrector scratch
 remain device-resident at fixed addresses; magnetic DM2 behavior shares the
 ordinary dielectric path.
 
-The corrector uses a device bool mask and a fixed schedule of ten compiled
-chunks with ten iterations each. Converged targets retain their field and
-state while unconverged targets continue, with the native 100-iteration limit,
+The corrector uses a device bool mask. Eager execution performs ten chunks of
+ten masked iterations; compiled CPU execution packs the carry and performs
+three masked iterations per `torch.while_loop` body, amortizing each lowered
+condition evaluation. Normal compiled CUDA execution keeps the functional
+device `torch.while_loop` and exits when all targets converge or the native
+100-iteration limit is reached.
+
+Explicit external CUDA Graph capture uses a separate fixed graph-only path.
+During capture, raw graph-safe stencil and material tensor regions call the
+preallocated DM2 prepare, ten masked chunks, and finalize operations. This
+records exactly 100 masked iterations without nesting Inductor control flow or
+an internal CUDA graph inside the external graph. The normal functional DM2
+update list is restored before `capture_cuda_graphs()` returns. Capture failure
+therefore leaves the ordinary path intact, and the latent non-graph path retains
+device-side early exit; after successful capture, `advance()` replays the fixed
+captured operations. Diagnostics and the compile-cache preimage identify this
+graph execution representation explicitly.
+
+For ordinary non-DM2 regions, a non-default CUDA compile mode may itself enable
+an internal Inductor CUDA Graph. Launching or lazily recording that graph while
+an explicit outer graph is capturing is unsupported. The explicit graph path
+therefore uses parallel `fullgraph=True`, `dynamic=False` region callables
+compiled with `triton.cudagraphs=False`, while normal non-graph stepping
+retains the requested compile mode. The graph path also retains the kernel
+tuning options of `max-autotune`. The outer graph still captures the compiled
+kernels, without nesting an internal graph.
+
+All paths preserve the exact native maximum of 100 iterations. Converged
+targets retain their field and state while unconverged targets continue, with
 zero-reference relative error, NaN handling, and tolerance semantics
-preserved. There is no `.item()` or host decision inside this schedule. Device-side
-asynchronous assertions validate each bucket's status without transferring a
-status tensor during successful advancement; failures identify the component
-and transition-width bucket without overwriting failed state. The explicit
-`simulation.diagnostics()["dm2"]` boundary transfers iteration counts and
-reports their per-bucket distributions.
+preserved. The solver does not call `.item()` or branch on convergence in
+Python. Current CPU Inductor lowers each `while_loop` condition through a
+scalar conversion, which the three-iteration body amortizes.
+Device-side asynchronous assertions validate each bucket's status without
+transferring a status tensor during successful advancement; failures identify
+the component and transition-width bucket without overwriting failed state.
+The explicit `simulation.diagnostics()["dm2"]` boundary transfers iteration
+counts and reports their per-bucket distributions.
 
 DM2 supports real fields only. Construction rejects a DM2 geometry combined
 with a Bloch vector instead of silently changing the field representation.
@@ -215,9 +243,12 @@ and current targets are normalized once with the native last-source-wins
 overlap rule, then grouped by Yee component. Continuous, bandpass, and
 differentiated-Gaussian oscillators execute from tensor parameters at the
 native electric and magnetic half-step times. TFSF faces are consolidated by
-unique target; their auxiliary Torch solver uses the parent's device, real
-precision, timestep, and paired-real layout. Gaussian modes are lowered during
-construction and their envelope remains tensor-native.
+unique target; their auxiliary Torch solver uses the parent's device,
+timestep, and paired-real layout, but retains the native incident solver's
+float64 state and arithmetic even for a float32 outer field. Interpolation is
+performed in float64 and cast once immediately before the outer field update.
+Gaussian modes are lowered during construction, and their envelope derives
+from the exact post-prewarm auxiliary integer step and float64 timestep.
 
 A third-party source must implement `lower_torch_source(context)` and return
 `TorchPointSourceRecord` values. The lowering hook runs once during
@@ -261,10 +292,20 @@ silently discarding them. Standard `TorchSimulationState.state_dict()` and
 `load_state_dict()` use the same virtual canonical entries, so PyTorch module
 serialization does not expose or lose the physical sparse layout.
 
-Periodic/Bloch halo scheduling remains outside compiled material kernels.
-Every active Yee component applies phase directly to paired-real tensors using
-persistent boundary scratch, including collapsed axes where source and
-destination slices alias.
+Periodic/Bloch boundary synchronization remains outside compiled material
+kernels and runs immediately before its next static electric or magnetic
+compute region. Boundary views are cached and grouped into two ordered stages:
+the first periodic axis of each field is updated before its second axis, so
+corner values retain the composed Bloch phase while independent components can
+use batched `torch._foreach_copy_` and `torch._foreach_mul_` calls. Paired-real
+phase scalars live in fixed registered, non-checkpoint boundary storage. Empty
+fields and axes with at most one plane are skipped, so a boundary update never
+uses aliased source and destination views. The diagnostic compatibility name
+`paired_real_scratch_bytes` reports this reserved boundary workspace even though
+the cached implementation only uses its first paired-real element for phase
+storage. State buffers cannot be replaced with `load_state_dict(assign=True)` or
+moved/converted after construction; create a new simulation for another device
+or dtype.
 
 ## Install a wheel variant
 
@@ -333,11 +374,12 @@ requested device's name and capability.
 `advance(steps)` is the throughput API; `step()` is only a one-step
 convenience. Both run under `torch.inference_mode()`. The timestep, source
 time, fields, dielectric coefficients, region IDs, and preallocated curl
-scratch are registered non-trainable buffers. For a local simulation, each
-complete electric and magnetic half-step is compiled with `fullgraph=True` and
-`dynamic=False`, reducing steady execution to two static regions. Distributed
-communication, geometry, sources, callbacks, snapshots, and I/O stay outside
-those graphs. The compilation cache key includes the solver ABI, PyTorch
+scratch are registered non-trainable buffers. For a local simulation, the
+electric and magnetic compute half-steps are compiled with `fullgraph=True` and
+`dynamic=False`, reducing steady execution to two static regions. Boundary
+synchronization, distributed communication, geometry, callbacks, snapshots,
+and I/O stay outside those graphs; fused local source updates stay inside the
+compute half-steps. The compilation cache key includes the solver ABI, PyTorch
 version, device capability, dtype, eager/compiled policy, compile mode, actual
 compiled-region and material representation, DM2 algorithm constants, grid
 spacing, timestep, Bloch vector, local/distributed topology, field shapes, and

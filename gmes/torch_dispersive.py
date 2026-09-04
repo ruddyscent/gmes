@@ -8,7 +8,11 @@ import numpy as np
 import torch
 from torch import nn
 
-from .torch_plan import ComponentPlan, MaterialBucketPlan
+from .torch_plan import (
+    EXECUTION_REPRESENTATIONS,
+    ComponentPlan,
+    MaterialBucketPlan,
+)
 
 DISPERSIVE_MODELS = frozenset(("drude", "lorentz", "dcp-ade", "dcp-plrc", "dcp-rc"))
 DISPERSIVE_GROUPING_SCOPES = ("combined", "two-level", "dcp-convolution")
@@ -51,6 +55,13 @@ class DispersiveBucket:
     point_count: int
     target_count: int
     state_width: int
+    execution_policy: str
+    execution_representation: str
+
+    def __post_init__(self) -> None:
+        expected = EXECUTION_REPRESENTATIONS.get(self.execution_policy)
+        if expected is None or self.execution_representation != expected:
+            raise ValueError("dispersive execution policy and representation disagree")
 
 
 @dataclass(frozen=True)
@@ -363,6 +374,29 @@ def register_plan_buffers(
         module.register_buffer(
             f"{prefix}_targets", _tensor(targets, dtype=torch.int64, device=device)
         )
+    channels = 2 if module.bloch is not None else 1
+    if bucket.selected_policy == "dense":
+        execution_mask = np.zeros(
+            (int(np.prod(component.shape)), channels), dtype=np.bool_
+        )
+        execution_mask[targets] = True
+        module.register_buffer(
+            f"{prefix}_execution_mask",
+            _tensor(execution_mask, dtype=torch.bool, device=device),
+        )
+    elif bucket.selected_policy == "tiled":
+        offsets = np.arange(bucket.tile_region_indices.shape[1], dtype=np.int64)
+        tiled_targets = bucket.tile_origins[:, None] + offsets[None, :]
+        tiled_targets = tiled_targets[bucket.tile_region_indices >= 0]
+        if not np.array_equal(tiled_targets, targets):
+            raise ValueError("tiled execution order changed compact bucket row order")
+        execution_targets = np.broadcast_to(
+            tiled_targets[:, None], (len(tiled_targets), channels)
+        ).copy()
+        module.register_buffer(
+            f"{prefix}_execution_targets",
+            _tensor(execution_targets, dtype=torch.int64, device=device),
+        )
     coordinates = np.stack(np.unravel_index(targets, component.shape), axis=1).astype(
         np.int64, copy=False
     )
@@ -428,6 +462,8 @@ def register_plan_buffers(
         point_count=points,
         target_count=len(targets),
         state_width=bucket.state_width,
+        execution_policy=bucket.selected_policy,
+        execution_representation=bucket.execution_representation,
     )
 
 
@@ -788,7 +824,19 @@ def update_bucket(
         getattr(state, f"{prefix}_gather_a"),
         getattr(state, f"{prefix}_response"),
     )
-    field.index_copy_(0, targets, field_new)
+    if descriptor.execution_policy == "dense":
+        field.masked_scatter_(
+            getattr(plan, f"{prefix}_execution_mask"),
+            field_new,
+        )
+    elif descriptor.execution_policy == "compact":
+        field.index_copy_(0, targets, field_new)
+    else:
+        field.scatter_(
+            0,
+            getattr(plan, f"{prefix}_execution_targets"),
+            field_new,
+        )
 
 
 def update_group(

@@ -213,6 +213,22 @@ uv build"""
         self.assertNotIn("it has no command-line wrapper", readme)
         self.assertNotIn("no receipt-input option exists", readme)
 
+    def test_issue123_operations_capture_authentication_is_direct_api_first(self):
+        readme = self.benchmarks_readme
+        start = readme.index("Capture operations only after that receipt")
+        stop = readme.index("The schema-v2 producer", start)
+        capture_section = readme[start:stop]
+        self.assertNotIn("gh auth status", capture_section)
+        self.assertNotIn("repeats the authenticated", capture_section)
+        self.assertIn(
+            "`capture` sends each fixed `gh api --hostname github.com` request "
+            "directly",
+            capture_section,
+        )
+        self.assertIn(
+            "rerun\n`capture` with a nonexistent output directory", capture_section
+        )
+
     def test_issue123_public_privacy_contract_is_documented_without_literals(self):
         readme = self.benchmarks_readme
         normalized = " ".join(readme.split())

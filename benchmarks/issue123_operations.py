@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -670,6 +671,28 @@ def _publication_receipt_envelope(
     }
 
 
+@contextmanager
+def _staged_operations_output(output_directory: Path, output_parent: Path):
+    """Publish one complete operations capture without a partial destination."""
+
+    temporary = Path(
+        tempfile.mkdtemp(prefix=f".{output_directory.name}.", dir=output_parent)
+    )
+    try:
+        yield temporary
+        _require(
+            not output_directory.exists() and not output_directory.is_symlink(),
+            "operations output appeared during assembly",
+        )
+        temporary.rename(output_directory)
+    except BaseException:
+        try:
+            shutil.rmtree(temporary)
+        except OSError:
+            pass
+        raise
+
+
 def capture_operations(
     *,
     repository: str,
@@ -709,8 +732,15 @@ def capture_operations(
     publication_receipt_record = _publication_receipt_envelope(
         publication_receipt, candidate
     )
-    output_directory = output_directory.resolve()
-    _require(not output_directory.exists(), "operations output already exists")
+    output_directory = Path(output_directory)
+    _require(
+        output_directory.name not in {"", ".", ".."},
+        "operations output directory name is invalid",
+    )
+    _require(
+        not output_directory.exists() and not output_directory.is_symlink(),
+        "operations output already exists",
+    )
     technical_release_endpoint = (
         f"repos/{repository}/releases/tags/{technical_release_tag}"
     )
@@ -724,224 +754,246 @@ def capture_operations(
         type(technical_release_id) is int and technical_release_id > 0,
         "technical release id differs",
     )
-    output_directory.mkdir(parents=True)
-    raw_directory = output_directory / "raw"
-    raw_directory.mkdir()
-    records: dict[str, dict[str, Any]] = {}
-    response_captures: dict[str, dict[str, Any]] = {}
+    try:
+        from benchmarks import issue123_completion as completion
+    except ImportError:
+        raise EvidenceError("operations output parent is unavailable") from None
+    try:
+        output_parent = completion._ensure_directory_without_symlinks(
+            output_directory.parent,
+            "operations output parent",
+        )
+    except OSError, TypeError, ValueError, completion.EvidenceError:
+        raise EvidenceError("operations output parent is unavailable") from None
+    output_directory = output_parent / output_directory.name
+    _require(
+        not output_directory.exists() and not output_directory.is_symlink(),
+        "operations output already exists",
+    )
+    with _staged_operations_output(output_directory, output_parent) as temporary:
+        raw_directory = temporary / "raw"
+        raw_directory.mkdir()
+        records: dict[str, dict[str, Any]] = {}
+        response_captures: dict[str, dict[str, Any]] = {}
 
-    def record(
-        role: str,
-        endpoint: str,
-        *,
-        raw: bytes,
-        response_capture: dict[str, Any],
-        parameters: dict[str, str] | None = None,
-        paginated: bool = False,
-        graphql_variables: dict[str, str | int] | None = None,
-    ) -> Any:
-        path = raw_directory / f"{role}.json"
-        path.write_bytes(raw)
-        records[role] = {
-            "request": {
-                "endpoint": endpoint,
-                "method": "POST" if graphql_variables is not None else "GET",
-                "headers": GITHUB_API_HEADERS,
-                "parameters": parameters or {},
-                "paginated": paginated,
-                "jq": "." if paginated else None,
-                "graphql": graphql_variables is not None,
-                "query": (
-                    PULL_REQUEST_CONTEXT_QUERY
-                    if graphql_variables is not None
-                    else None
-                ),
-                "variables": graphql_variables or {},
+        def record(
+            role: str,
+            endpoint: str,
+            *,
+            raw: bytes,
+            response_capture: dict[str, Any],
+            parameters: dict[str, str] | None = None,
+            paginated: bool = False,
+            graphql_variables: dict[str, str | int] | None = None,
+        ) -> Any:
+            path = raw_directory / f"{role}.json"
+            path.write_bytes(raw)
+            records[role] = {
+                "request": {
+                    "endpoint": endpoint,
+                    "method": "POST" if graphql_variables is not None else "GET",
+                    "headers": GITHUB_API_HEADERS,
+                    "parameters": parameters or {},
+                    "paginated": paginated,
+                    "jq": "." if paginated else None,
+                    "graphql": graphql_variables is not None,
+                    "query": (
+                        PULL_REQUEST_CONTEXT_QUERY
+                        if graphql_variables is not None
+                        else None
+                    ),
+                    "variables": graphql_variables or {},
+                },
+                "artifact": _descriptor(path, temporary, candidate),
+            }
+            response_captures[role] = response_capture
+            return _strict_json(raw, role)
+
+        def capture(
+            role: str,
+            endpoint: str,
+            *,
+            parameters: dict[str, str] | None = None,
+            paginated: bool = False,
+            graphql_variables: dict[str, str | int] | None = None,
+        ) -> Any:
+            raw, response_capture = _github_api_capture(
+                endpoint,
+                parameters=parameters,
+                paginated=paginated,
+                graphql_variables=graphql_variables,
+            )
+            return record(
+                role,
+                endpoint,
+                raw=raw,
+                response_capture=response_capture,
+                parameters=parameters,
+                paginated=paginated,
+                graphql_variables=graphql_variables,
+            )
+
+        record(
+            "technical_release",
+            technical_release_endpoint,
+            raw=technical_release_raw,
+            response_capture=technical_release_capture,
+        )
+        capture(
+            "technical_release_assets",
+            f"repos/{repository}/releases/{technical_release_id}/assets",
+            parameters={"per_page": str(PAGE_SIZE)},
+            paginated=True,
+        )
+        capture(
+            "technical_release_tag",
+            f"repos/{repository}/git/ref/tags/{technical_release_tag}",
+        )
+        capture(
+            "issue_123",
+            f"repos/{repository}/issues/{TARGET_ISSUE_NUMBER}",
+        )
+        capture(
+            "issue_123_comments",
+            f"repos/{repository}/issues/{TARGET_ISSUE_NUMBER}/comments",
+            parameters={"per_page": str(PAGE_SIZE)},
+            paginated=True,
+        )
+        capture("issue_115", f"repos/{repository}/issues/{HANDOFF_ISSUE_NUMBER}")
+        capture(
+            "issue_115_comments",
+            f"repos/{repository}/issues/{HANDOFF_ISSUE_NUMBER}/comments",
+            parameters={"per_page": str(PAGE_SIZE)},
+            paginated=True,
+        )
+        pull = capture(
+            "pull_request",
+            f"repos/{repository}/pulls/{pull_request_number}",
+        )
+        _require(isinstance(pull, dict), "pull request response differs")
+        base = pull.get("base")
+        head = pull.get("head")
+        _require(isinstance(base, dict) and isinstance(head, dict), "PR refs differ")
+        base_sha = base.get("sha")
+        head_sha = head.get("sha")
+        merge_sha = pull.get("merge_commit_sha")
+        _require(
+            all(
+                isinstance(value, str) and re.fullmatch(r"[0-9a-f]{40}", value)
+                for value in (base_sha, head_sha, merge_sha)
+            ),
+            "PR commits are incomplete",
+        )
+        _require(
+            pull.get("number") == PULL_REQUEST_NUMBER and head_sha == candidate_sha,
+            "PR head does not match the clean candidate",
+        )
+        capture(
+            "pull_request_comments",
+            f"repos/{repository}/issues/{PULL_REQUEST_NUMBER}/comments",
+            parameters={"per_page": str(PAGE_SIZE)},
+            paginated=True,
+        )
+        capture("candidate_commit", f"repos/{repository}/commits/{candidate_sha}")
+        capture(
+            "base_compare",
+            f"repos/{repository}/compare/{base_sha}...{head_sha}",
+        )
+        capture("ci_run", f"repos/{repository}/actions/runs/{ci_run_id}")
+        capture(
+            "ci_jobs",
+            f"repos/{repository}/actions/runs/{ci_run_id}/jobs",
+            parameters={"per_page": str(PAGE_SIZE)},
+            paginated=True,
+        )
+        capture("codeql_run", f"repos/{repository}/actions/runs/{codeql_run_id}")
+        capture(
+            "codeql_jobs",
+            f"repos/{repository}/actions/runs/{codeql_run_id}/jobs",
+            parameters={"per_page": str(PAGE_SIZE)},
+            paginated=True,
+        )
+        merge_ref = f"refs/pull/{pull_request_number}/merge"
+        capture(
+            "codeql_analyses",
+            f"repos/{repository}/code-scanning/analyses",
+            parameters={"per_page": str(PAGE_SIZE), "ref": merge_ref},
+            paginated=True,
+        )
+        capture(
+            "codeql_alerts",
+            f"repos/{repository}/code-scanning/alerts",
+            parameters={
+                "per_page": str(PAGE_SIZE),
+                "ref": merge_ref,
+                "state": "open",
             },
-            "artifact": _descriptor(path, output_directory, candidate),
+            paginated=True,
+        )
+        capture("ruleset", f"repos/{repository}/rulesets/{RULESET_ID}")
+        capture(
+            "check_runs",
+            f"repos/{repository}/commits/{head_sha}/check-runs",
+            parameters={"per_page": str(PAGE_SIZE)},
+            paginated=True,
+        )
+        capture(
+            "reviews",
+            f"repos/{repository}/pulls/{pull_request_number}/reviews",
+            parameters={"per_page": str(PAGE_SIZE)},
+            paginated=True,
+        )
+        capture(
+            "requested_reviewers",
+            f"repos/{repository}/pulls/{pull_request_number}/requested_reviewers",
+        )
+        owner, name = repository.split("/", 1)
+        capture(
+            "review_threads",
+            "graphql",
+            graphql_variables={
+                "owner": owner,
+                "name": name,
+                "number": pull_request_number,
+            },
+            paginated=True,
+        )
+        index = {
+            "schema_version": 2,
+            "kind": INDEX_KIND,
+            "candidate_evidence": candidate,
+            "repository": repository,
+            "target_issue_number": TARGET_ISSUE_NUMBER,
+            "handoff_issue_number": HANDOFF_ISSUE_NUMBER,
+            "pull_request_number": pull_request_number,
+            "ci_run_id": ci_run_id,
+            "codeql_run_id": codeql_run_id,
+            "technical_release_tag": technical_release_tag,
+            "technical_release_id": technical_release_id,
+            "publication_receipt": publication_receipt_record,
+            "responses": records,
+            "response_captures": response_captures,
         }
-        response_captures[role] = response_capture
-        return _strict_json(raw, role)
-
-    def capture(
-        role: str,
-        endpoint: str,
-        *,
-        parameters: dict[str, str] | None = None,
-        paginated: bool = False,
-        graphql_variables: dict[str, str | int] | None = None,
-    ) -> Any:
-        raw, response_capture = _github_api_capture(
-            endpoint,
-            parameters=parameters,
-            paginated=paginated,
-            graphql_variables=graphql_variables,
+        index_path = temporary / "operations-index.json"
+        index_path.write_text(
+            json.dumps(index, allow_nan=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
         )
-        return record(
-            role,
-            endpoint,
-            raw=raw,
-            response_capture=response_capture,
-            parameters=parameters,
-            paginated=paginated,
-            graphql_variables=graphql_variables,
+        scope_path = temporary / "scope.json"
+        scope_path.write_text(
+            json.dumps(
+                {"index": _descriptor(index_path, temporary, candidate)},
+                allow_nan=False,
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
         )
-
-    record(
-        "technical_release",
-        technical_release_endpoint,
-        raw=technical_release_raw,
-        response_capture=technical_release_capture,
+    return (
+        output_directory / "operations-index.json",
+        output_directory / "scope.json",
     )
-    capture(
-        "technical_release_assets",
-        f"repos/{repository}/releases/{technical_release_id}/assets",
-        parameters={"per_page": str(PAGE_SIZE)},
-        paginated=True,
-    )
-    capture(
-        "technical_release_tag",
-        f"repos/{repository}/git/ref/tags/{technical_release_tag}",
-    )
-    capture(
-        "issue_123",
-        f"repos/{repository}/issues/{TARGET_ISSUE_NUMBER}",
-    )
-    capture(
-        "issue_123_comments",
-        f"repos/{repository}/issues/{TARGET_ISSUE_NUMBER}/comments",
-        parameters={"per_page": str(PAGE_SIZE)},
-        paginated=True,
-    )
-    capture("issue_115", f"repos/{repository}/issues/{HANDOFF_ISSUE_NUMBER}")
-    capture(
-        "issue_115_comments",
-        f"repos/{repository}/issues/{HANDOFF_ISSUE_NUMBER}/comments",
-        parameters={"per_page": str(PAGE_SIZE)},
-        paginated=True,
-    )
-    pull = capture("pull_request", f"repos/{repository}/pulls/{pull_request_number}")
-    _require(isinstance(pull, dict), "pull request response differs")
-    base = pull.get("base")
-    head = pull.get("head")
-    _require(isinstance(base, dict) and isinstance(head, dict), "PR refs differ")
-    base_sha = base.get("sha")
-    head_sha = head.get("sha")
-    merge_sha = pull.get("merge_commit_sha")
-    _require(
-        all(
-            isinstance(value, str) and re.fullmatch(r"[0-9a-f]{40}", value)
-            for value in (base_sha, head_sha, merge_sha)
-        ),
-        "PR commits are incomplete",
-    )
-    _require(
-        pull.get("number") == PULL_REQUEST_NUMBER and head_sha == candidate_sha,
-        "PR head does not match the clean candidate",
-    )
-    capture(
-        "pull_request_comments",
-        f"repos/{repository}/issues/{PULL_REQUEST_NUMBER}/comments",
-        parameters={"per_page": str(PAGE_SIZE)},
-        paginated=True,
-    )
-    capture("candidate_commit", f"repos/{repository}/commits/{candidate_sha}")
-    capture(
-        "base_compare",
-        f"repos/{repository}/compare/{base_sha}...{head_sha}",
-    )
-    capture("ci_run", f"repos/{repository}/actions/runs/{ci_run_id}")
-    capture(
-        "ci_jobs",
-        f"repos/{repository}/actions/runs/{ci_run_id}/jobs",
-        parameters={"per_page": str(PAGE_SIZE)},
-        paginated=True,
-    )
-    capture("codeql_run", f"repos/{repository}/actions/runs/{codeql_run_id}")
-    capture(
-        "codeql_jobs",
-        f"repos/{repository}/actions/runs/{codeql_run_id}/jobs",
-        parameters={"per_page": str(PAGE_SIZE)},
-        paginated=True,
-    )
-    merge_ref = f"refs/pull/{pull_request_number}/merge"
-    capture(
-        "codeql_analyses",
-        f"repos/{repository}/code-scanning/analyses",
-        parameters={"per_page": str(PAGE_SIZE), "ref": merge_ref},
-        paginated=True,
-    )
-    capture(
-        "codeql_alerts",
-        f"repos/{repository}/code-scanning/alerts",
-        parameters={
-            "per_page": str(PAGE_SIZE),
-            "ref": merge_ref,
-            "state": "open",
-        },
-        paginated=True,
-    )
-    capture("ruleset", f"repos/{repository}/rulesets/{RULESET_ID}")
-    capture(
-        "check_runs",
-        f"repos/{repository}/commits/{head_sha}/check-runs",
-        parameters={"per_page": str(PAGE_SIZE)},
-        paginated=True,
-    )
-    capture(
-        "reviews",
-        f"repos/{repository}/pulls/{pull_request_number}/reviews",
-        parameters={"per_page": str(PAGE_SIZE)},
-        paginated=True,
-    )
-    capture(
-        "requested_reviewers",
-        f"repos/{repository}/pulls/{pull_request_number}/requested_reviewers",
-    )
-    owner, name = repository.split("/", 1)
-    capture(
-        "review_threads",
-        "graphql",
-        graphql_variables={
-            "owner": owner,
-            "name": name,
-            "number": pull_request_number,
-        },
-        paginated=True,
-    )
-    index = {
-        "schema_version": 2,
-        "kind": INDEX_KIND,
-        "candidate_evidence": candidate,
-        "repository": repository,
-        "target_issue_number": TARGET_ISSUE_NUMBER,
-        "handoff_issue_number": HANDOFF_ISSUE_NUMBER,
-        "pull_request_number": pull_request_number,
-        "ci_run_id": ci_run_id,
-        "codeql_run_id": codeql_run_id,
-        "technical_release_tag": technical_release_tag,
-        "technical_release_id": technical_release_id,
-        "publication_receipt": publication_receipt_record,
-        "responses": records,
-        "response_captures": response_captures,
-    }
-    index_path = output_directory / "operations-index.json"
-    index_path.write_text(
-        json.dumps(index, allow_nan=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    scope_path = output_directory / "scope.json"
-    scope_path.write_text(
-        json.dumps(
-            {"index": _descriptor(index_path, output_directory, candidate)},
-            allow_nan=False,
-            indent=2,
-            sort_keys=True,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    return index_path, scope_path
 
 
 RESPONSE_ROLE_ORDER = (

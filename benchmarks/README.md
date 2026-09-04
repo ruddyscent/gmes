@@ -1234,8 +1234,6 @@ current with `master`, required CI and CodeQL must be complete, and all review
 requests and conversations must be clear:
 
 ~~~sh
-gh auth status --hostname github.com
-
 uv run --no-sync python -m benchmarks.issue123_operations capture \
   --repository ruddyscent/gmes --pull-request 167 \
   --ci-run-id <CI> --codeql-run-id <CODEQL> \
@@ -1245,8 +1243,11 @@ uv run --no-sync python -m benchmarks.issue123_operations capture \
   --output-directory /tmp/issue-123-operations-o0
 ~~~
 
-`capture` repeats the authenticated `github.com` preflight internally. Both
-production modes pin every internal API request to `--hostname github.com`.
+`capture` sends each fixed `gh api --hostname github.com` request directly. If
+an API request fails because its credential state needs repair, repair the
+intended credential state outside this noninteractive command and rerun
+`capture` with a nonexistent output directory. Both production modes pin every
+internal API request to `--hostname github.com`.
 
 The schema-v2 producer preserves the exact response roles, in canonical query
 order: `technical_release`, `technical_release_assets`,

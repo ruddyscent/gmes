@@ -1083,8 +1083,10 @@ class Issue123OperationsTest(unittest.TestCase):
             if marker in comment["body"]
         )
 
-    def _capture(self, output_name="operations"):
+    def _capture(self, output_name="operations", *, before_capture=None):
         def capture(endpoint, **kwargs):
+            if before_capture is not None:
+                before_capture(endpoint)
             role_by_suffix = {
                 f"/releases/tags/{self.release_tag}": "technical_release",
                 f"/releases/{self.release_id}/assets": "technical_release_assets",
@@ -1164,6 +1166,9 @@ class Issue123OperationsTest(unittest.TestCase):
 
     def test_capture_and_completion_recompute_raw_api_evidence(self):
         output, index_path, scope_path = self._capture()
+        self.assertEqual(index_path.parent, output)
+        self.assertEqual(scope_path.parent, output)
+        self.assertFalse(index_path.parent.name.startswith("."))
         document = json.loads(index_path.read_text())
         scope = json.loads(scope_path.read_text())
         result = completion._validate_operations_scope(
@@ -2837,7 +2842,7 @@ class Issue123OperationsTest(unittest.TestCase):
         )
 
     def test_capture_initial_api_failure_leaves_no_partial_output(self):
-        output = self.root / "initial-api-failure-output"
+        output = self.root / "not-created" / "initial-api-failure-output"
         api_error = operations.subprocess.CalledProcessError(
             1,
             ["gh", "api"],
@@ -2867,6 +2872,58 @@ class Issue123OperationsTest(unittest.TestCase):
             )
         self.assertEqual(run.call_count, 1)
         self.assertFalse(output.exists())
+        self.assertFalse(output.parent.exists())
+
+    def test_capture_late_api_failure_cleans_staging_and_allows_retry(self):
+        output_name = "late-api-failure-output"
+        output = self.root / output_name
+
+        def fail_ci_jobs(endpoint):
+            if endpoint.endswith(f"/actions/runs/10/jobs"):
+                raise operations.EvidenceError("synthetic ci_jobs failure")
+
+        with self.assertRaisesRegex(operations.EvidenceError, "synthetic ci_jobs"):
+            self._capture(output_name, before_capture=fail_ci_jobs)
+        self.assertFalse(output.exists())
+        self.assertEqual(list(self.root.glob(f".{output_name}.*")), [])
+        retry_output, index_path, scope_path = self._capture(output_name)
+        self.assertEqual(retry_output, output)
+        self.assertTrue(index_path.is_file())
+        self.assertTrue(scope_path.is_file())
+
+    def test_capture_rejects_destination_appearing_during_assembly(self):
+        output_name = "appeared-during-assembly"
+        output = self.root / output_name
+        sentinel = output / "sentinel"
+
+        def create_foreign_destination(endpoint):
+            if endpoint == "graphql":
+                output.mkdir()
+                sentinel.write_text("foreign")
+
+        with self.assertRaisesRegex(
+            operations.EvidenceError, "appeared during assembly"
+        ):
+            self._capture(output_name, before_capture=create_foreign_destination)
+        self.assertEqual(sentinel.read_text(), "foreign")
+        self.assertEqual(list(self.root.glob(f".{output_name}.*")), [])
+
+    def test_capture_rejects_dangling_destination_symlink_during_assembly(self):
+        output_name = "dangling-output"
+        output = self.root / output_name
+        target = self.root / "absent-target"
+
+        def create_dangling_destination(endpoint):
+            if endpoint == "graphql":
+                output.symlink_to(target)
+
+        with self.assertRaisesRegex(
+            operations.EvidenceError, "appeared during assembly"
+        ):
+            self._capture(output_name, before_capture=create_dangling_destination)
+        self.assertTrue(output.is_symlink())
+        self.assertEqual(output.readlink(), target)
+        self.assertEqual(list(self.root.glob(f".{output_name}.*")), [])
 
     def test_github_api_graphql_command_pins_query_and_typed_pr(self):
         response = {

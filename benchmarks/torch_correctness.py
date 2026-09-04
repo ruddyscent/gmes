@@ -4936,6 +4936,14 @@ def _load_candidate_evidence(path):
     return value
 
 
+def _cli_success_token(command):
+    return {
+        "capture": "torch-correctness-capture-ok",
+        "index": "torch-correctness-index-ok",
+        "validate-index": "torch-correctness-validate-index-ok",
+    }[command]
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
@@ -5007,7 +5015,7 @@ def main():
             descriptor_root=args.descriptor_root,
             runtime_receipt=args.runtime_receipt,
         )
-    print(json.dumps(value, indent=2, sort_keys=True))
+    print(_cli_success_token(args.command))
     return 0
 
 

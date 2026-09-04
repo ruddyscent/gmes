@@ -9,9 +9,8 @@ bundle never define what evidence is expected.
 
 from __future__ import annotations
 
-from bisect import bisect_right
-import copy
 import codecs
+import copy
 import hashlib
 import hmac
 import io
@@ -28,14 +27,15 @@ import tarfile
 import unicodedata
 import zipfile
 import zlib
+from bisect import bisect_right
 from collections.abc import Mapping, MutableMapping, Sequence
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from enum import Enum
 from fractions import Fraction
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable
 from types import MappingProxyType
+from typing import Any, Callable
 
 import numpy as np
 

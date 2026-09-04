@@ -2387,7 +2387,9 @@ class Issue123CompletionTest(unittest.TestCase):
         reader = completion.ArtifactReader(self.directory, self.candidate)
         result = self.private_sdist_result(raw, (member,))
         with (
-            mock.patch.object(privacy, "_retain_private_sdist_fd", side_effect=retain) as retain_mock,
+            mock.patch.object(
+                privacy, "_retain_private_sdist_fd", side_effect=retain
+            ) as retain_mock,
             mock.patch.object(
                 privacy,
                 "_validate_private_sdist_raw_first",
@@ -2439,7 +2441,9 @@ class Issue123CompletionTest(unittest.TestCase):
         descriptor = self.write_private_sdist()
         reader = completion.ArtifactReader(self.directory, self.candidate)
         artifact, inventory = reader.load_private_sdist(descriptor, "unmocked sdist")
-        self.assertEqual(artifact.raw, (self.directory / descriptor["path"]).read_bytes())
+        self.assertEqual(
+            artifact.raw, (self.directory / descriptor["path"]).read_bytes()
+        )
         self.assertEqual(inventory.archive_sha256, descriptor["sha256"])
         self.assertEqual(inventory.archive_size, descriptor["size_bytes"])
         self.assertGreaterEqual(inventory.member_count, 1)
@@ -2595,7 +2599,11 @@ class Issue123CompletionTest(unittest.TestCase):
         self.assertNotIn("synthetic-close-marker", repr(caught.exception))
 
     def test_macos_scope_has_one_authoritative_v2_definition(self):
-        source_path = Path(__file__).resolve().parents[1] / "benchmarks" / "issue123_completion.py"
+        source_path = (
+            Path(__file__).resolve().parents[1]
+            / "benchmarks"
+            / "issue123_completion.py"
+        )
         self.assertEqual(source_path.resolve(), Path(completion.__file__).resolve())
         source = source_path.read_text(encoding="utf-8")
         tree = ast.parse(source)

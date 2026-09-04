@@ -8,8 +8,8 @@ import stat
 import statistics
 import tempfile
 import traceback
-import unittest
 import unicodedata
+import unittest
 import zipfile
 from pathlib import Path
 from unittest import mock

@@ -2009,7 +2009,7 @@ class ArtifactReader:
             if not path_failure:
                 path, metadata = _path_without_symlinks(path, label)
                 metadata = path.lstat()
-        except (EvidenceError, OSError):
+        except EvidenceError, OSError:
             path_failure = True
         if path_failure or path is None or metadata is None:
             raise EvidenceError("macOS sdist source is invalid") from None
@@ -2022,7 +2022,7 @@ class ArtifactReader:
         expected_identity = _artifact_descriptor_identity(metadata)
         try:
             from benchmarks import issue123_privacy as privacy
-        except (ImportError, OSError):
+        except ImportError, OSError:
             raise EvidenceError("macOS sdist privacy validation failed") from None
         privacy_failure = False
         result: Any = None
@@ -3987,7 +3987,7 @@ def _public_torch_versions_match(first: Any, second: Any) -> bool:
         from benchmarks.torch_cpu_baseline import public_torch_version
 
         return public_torch_version(first) == public_torch_version(second)
-    except (ImportError, TypeError, ValueError):
+    except ImportError, TypeError, ValueError:
         return False
 
 
@@ -11197,7 +11197,7 @@ def _checklist_observation(issue: Mapping[str, Any], expected: str) -> dict[str,
 
         observation = operations._validate_post_bundle_checklist(issue, expected)
         transition = operations.checklist_transition_sha256(issue, expected)
-    except (ImportError, TypeError, ValueError):
+    except ImportError, TypeError, ValueError:
         raise EvidenceError("issue final checklist evidence differs") from None
     return {
         **observation,
@@ -12314,7 +12314,7 @@ def _create_private_live_directory(
             label="live output directory",
             forbidden_roots=forbidden_roots,
         )
-    except (ImportError, OSError, TypeError, ValueError):
+    except ImportError, OSError, TypeError, ValueError:
         failure = EvidenceError("live output directory overlaps protected evidence")
     else:
         failure = None
@@ -12423,7 +12423,7 @@ def _write_exclusive_private_file(
         raise CommittedAuthorityError(
             "private authority file was committed but final verification failed"
         ) from None
-    except (OSError, TypeError, ValueError):
+    except OSError, TypeError, ValueError:
         raise EvidenceError("private authority file could not be committed") from None
 
 
@@ -13563,7 +13563,7 @@ def _validate_final_bundle_reopen_chain(
                 "checklist_transition_sha256"
             ],
         )
-    except (ImportError, TypeError, ValueError):
+    except ImportError, TypeError, ValueError:
         raise EvidenceError("authenticated post-bundle expectation differs") from None
     return {
         "final_bundle_inventory_root": source["root"],
@@ -14723,7 +14723,7 @@ def main(argv: list[str] | None = None) -> int:
     except _CliUsageError:
         print("issue123-completion-usage-failed", file=sys.stderr)
         return 2
-    except (ImportError, OSError, EvidenceError, TypeError, ValueError):
+    except ImportError, OSError, EvidenceError, TypeError, ValueError:
         token = (
             f"issue123-completion-{command}-failed"
             if command is not None

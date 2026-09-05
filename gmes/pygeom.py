@@ -11,7 +11,6 @@ from typing import Any, Protocol, cast
 import numpy as np
 from numpy.typing import NDArray
 
-type Index3 = tuple[int, int, int]
 type Vector3 = Sequence[float] | NDArray[np.float64]
 type RealArray = NDArray[np.float64]
 type BoolArray = NDArray[np.bool_]
@@ -33,13 +32,6 @@ class _MaterialSpace(Protocol):
     @property
     def half_size(self) -> RealArray:
         """Return half the simulation-domain extent."""
-
-
-class _NativeMaterial(Protocol):
-    """Minimal native updater returned by material lowering hooks."""
-
-    def attach(self, idx: Index3, parameter: Any) -> None:
-        """Attach one native update record."""
 
 
 def norm(p: Vector3) -> float:
@@ -91,113 +83,6 @@ class Material(object):
     def display_info(self, indent: int = 0) -> None:
         """Display the parameter values."""
         raise NotImplementedError
-
-    def get_pw_material_ex(
-        self,
-        idx: Index3,
-        coords: Vector3,
-        underneath: Material | None = None,
-        cmplx: bool = False,
-    ) -> _NativeMaterial | None:
-        """Return an ElectricParam structure of the given point.
-
-        Arguments:
-            idx -- (local) array index of the target point
-            coords -- (global) space coordinate of the target point
-            complex -- whether the EM field has complex value. Default is False.
-            underneath -- underneath material object of the target point.
-
-        """
-        raise NotImplementedError
-
-    def get_pw_material_ey(
-        self,
-        idx: Index3,
-        coords: Vector3,
-        underneath: Material | None = None,
-        cmplx: bool = False,
-    ) -> _NativeMaterial | None:
-        """Return an ElectricParam structure of the given point.
-
-        Arguments:
-            idx -- (local) array index of the target point
-            coords -- (global) space coordinate of the target point
-            complex -- whether the EM field has complex value. Default is False.
-            underneath -- underneath material object of the target point.
-
-        """
-        raise NotImplementedError
-
-    def get_pw_material_ez(
-        self,
-        idx: Index3,
-        coords: Vector3,
-        underneath: Material | None = None,
-        cmplx: bool = False,
-    ) -> _NativeMaterial | None:
-        """Return an ElectricParam structure of the given point.
-
-        Arguments:
-            idx -- (local) array index of the target point
-            coords -- (global) space coordinate of the target point
-            complex -- whether the EM field has complex value. Default is False.
-            underneath -- underneath material object of the target point.
-
-        """
-        raise NotImplementedError
-
-    def get_pw_material_hx(
-        self,
-        idx: Index3,
-        coords: Vector3,
-        underneath: Material | None = None,
-        cmplx: bool = False,
-    ) -> _NativeMaterial | None:
-        """Return a MagneticParam structure of the given point.
-
-        Arguments:
-            idx -- (local) array index of the target point
-            coords -- (global) space coordinate of the target point
-            complex -- whether the EM field has complex value. Default is False.
-            underneath -- underneath material object of the target point.
-
-        """
-        raise NotImplementedError
-
-    def get_pw_material_hy(
-        self,
-        idx: Index3,
-        coords: Vector3,
-        underneath: Material | None = None,
-        cmplx: bool = False,
-    ) -> _NativeMaterial | None:
-        """Return a MagneticParam structure of the given point.
-
-        Arguments:
-            idx -- (local) array index of the target point
-            coords -- (global) space coordinate of the target point
-            complex -- whether the EM field has complex value. Default is False.
-            underneath -- underneath material object of the target point.
-
-        """
-        raise NotImplementedError
-
-    def get_pw_material_hz(
-        self,
-        idx: Index3,
-        coords: Vector3,
-        underneath: Material | None = None,
-        cmplx: bool = False,
-    ) -> _NativeMaterial | None:
-        """Return a MagneticParam structure of the given point.
-
-        Arguments:
-            idx -- (local) array index of the target point
-            coords -- (global) space coordinate of the target point
-            complex -- whether the EM field has complex value. Default is False.
-            underneath -- underneath material object of the target point.
-
-        """
 
     def init(self, space: _MaterialSpace, param: object | None = None) -> None:
         """Initialize material coefficients for a Cartesian simulation space."""

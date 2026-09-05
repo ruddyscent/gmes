@@ -12,12 +12,11 @@ on:
       - "VERSION"
       - "build-constraints.txt"
       - "docs/releasing.md"
+      - "gmes/**"
       - "pyproject.toml"
       - "setup.py"
-      - "src/**"
       - "tests/test_packaging.py"
       - "tests/test_release.py"
-      - "utils/macos_build.py"
       - "utils/release.py"
   push:
     tags:
@@ -39,7 +38,6 @@ jobs:
       release-title: ${{ steps.identity.outputs.release-title }}
       tag: ${{ steps.identity.outputs.tag }}
       version: ${{ steps.identity.outputs.version }}
-
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -67,10 +65,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os:
-          - ubuntu-24.04
-          - macos-15
-
+        os: [ubuntu-24.04, macos-15]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -80,45 +75,24 @@ jobs:
           cache-suffix: ${{ github.job }}
           enable-cache: true
           version: "0.12.5"
-      - name: Install Python
-        run: uv python install 3.14
-      - name: Install native dependencies on Linux
-        if: runner.os == 'Linux'
+      - name: Install Python and locked CPU test environment
         run: |
-          sudo apt-get update
-          sudo apt-get install --yes libopenmpi-dev openmpi-bin swig
-      - name: Install native dependencies on macOS
-        if: runner.os == 'macOS'
-        run: |
-          if brew tap | grep --fixed-strings --line-regexp --quiet "aws/tap"; then
-            brew untap aws/tap
-          fi
-          brew install swig
-          swig -version
-      - name: Install Linux test environment
-        if: runner.os == 'Linux'
-        run: uv sync --locked --extra hdf5 --extra plot --extra mpi
-      - name: Install macOS test environment
-        if: runner.os == 'macOS'
-        run: uv sync --locked --extra hdf5 --extra plot
+          uv python install 3.14
+          uv sync --locked --extra torch-cpu --extra hdf5
       - name: Run quality checks
         run: |
           uv run --no-sync python -m isort --check-only gmes examples tests utils setup.py
           uv run --no-sync python -m black --check gmes examples tests utils setup.py
           uv run --no-sync python -m mypy
-          uv run --no-sync python -m mypy.stubtest --mypy-config-file pyproject.toml gmes.constant gmes.pw_material
+          uv run --no-sync python -m mypy.stubtest --mypy-config-file pyproject.toml gmes.constant
           uv run --no-sync python -m pylint $(git ls-files 'gmes/*.py') setup.py
-      - name: Run complete unit-test suite
+      - name: Run complete supported CPU suite
         run: uv run --no-sync python -m unittest discover -v
-      - name: Run MPI deployment smoke test
-        if: runner.os == 'Linux'
-        run: uv run --no-sync mpiexec --oversubscribe -n 10 python tests/mpi_deployment_smoke.py
 
-  build-sdist:
-    name: Build and test sdist
+  build-distributions:
+    name: Build and test universal distributions
     needs: metadata
     runs-on: ubuntu-24.04
-
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -128,46 +102,63 @@ jobs:
           cache-suffix: ${{ github.job }}
           enable-cache: true
           version: "0.12.5"
-      - name: Install Python and native build dependencies
+      - name: Build one universal wheel and source distribution
         run: |
           uv python install 3.14
-          sudo apt-get update
-          sudo apt-get install --yes build-essential swig
-      - name: Build isolated source distribution
-        run: uv build --sdist --clear --out-dir release-dist
-      - name: Validate source distribution
+          uv build --clear --out-dir release-dist
+          test "$(find release-dist -maxdepth 1 -name '*.whl' | wc -l)" -eq 1
+          test "$(find release-dist -maxdepth 1 -name '*.tar.gz' | wc -l)" -eq 1
+          test "$(find release-dist -maxdepth 1 -name 'gmes-*-py3-none-any.whl' | wc -l)" -eq 1
+      - name: Validate exact archives
         env:
           RELEASE_TAG: ${{ needs.metadata.outputs.tag }}
         run: |
-          python3 utils/release.py --tag "${RELEASE_TAG}" --archive release-dist/*.tar.gz
+          python3 utils/release.py --tag "${RELEASE_TAG}" \
+            --archive release-dist/*.whl --archive release-dist/*.tar.gz
           uvx --from twine==6.2.0 twine check release-dist/*
-      - name: Install and import from the source distribution
+      - name: Verify clean installed wheel and source distribution origins
         run: |
-          uv venv --python 3.14 "${RUNNER_TEMP}/gmes-sdist"
-          uv pip install --python "${RUNNER_TEMP}/gmes-sdist/bin/python" release-dist/*.tar.gz
-          cd "${RUNNER_TEMP}"
-          "${RUNNER_TEMP}/gmes-sdist/bin/python" -c \
-            "import gmes, gmes._constant, gmes._pw_material, gmes.material, gmes.pygeom"
+          for archive in "${GITHUB_WORKSPACE}"/release-dist/*.whl "${GITHUB_WORKSPACE}"/release-dist/*.tar.gz; do
+            environment="${RUNNER_TEMP}/gmes-$(basename "${archive}")"
+            uv venv --clear --python 3.14 "${environment}"
+            (
+              cd "${GITHUB_WORKSPACE}"
+              UV_PROJECT_ENVIRONMENT="${environment}" uv sync --locked --no-install-project \
+                --extra torch-cpu --extra hdf5
+            )
+            "${environment}/bin/python" -m ensurepip
+            "${environment}/bin/python" -m pip --version
+            "${environment}/bin/python" -m pip install --no-deps \
+              --constraint "${GITHUB_WORKSPACE}/build-constraints.txt" \
+              setuptools==84.0.0 wheel==0.48.0
+            digest="$(shasum -a 256 "${archive}" | awk '{print $1}')"
+            installer=(--no-deps --no-index --force-reinstall)
+            if [[ "${archive}" == *.tar.gz ]]; then
+              installer+=(--no-build-isolation)
+            fi
+            "${environment}/bin/python" -m pip install "${installer[@]}" \
+              "gmes @ file://${archive}#sha256=${digest}"
+            (
+              cd "${RUNNER_TEMP}"
+              "${environment}/bin/python" -c \
+                "import gmes; from pathlib import Path; assert not Path(gmes.__file__).resolve().is_relative_to(Path('${GITHUB_WORKSPACE}').resolve())"
+            )
+          done
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: distribution-sdist
-          path: release-dist/*.tar.gz
+          name: release-distributions-source
+          path: release-dist/*
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 30
 
-  build-wheels:
-    name: Build and test wheel / ${{ matrix.platform }}
-    needs: metadata
+  verify-cpu-artifacts:
+    name: Verify installed release artifacts / ${{ matrix.os }}
+    needs: build-distributions
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: ubuntu-24.04
-            platform: linux-x86_64
-          - os: macos-15
-            platform: macos-arm64
-
+        os: [ubuntu-24.04, macos-15]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -177,41 +168,63 @@ jobs:
           cache-suffix: ${{ github.job }}
           enable-cache: true
           version: "0.12.5"
-      - name: Install SWIG on macOS
-        if: runner.os == 'macOS'
+      - name: Install Python for clean CPU artifact environments
         run: |
-          if brew tap | grep --fixed-strings --line-regexp --quiet "aws/tap"; then
-            brew untap aws/tap
-          fi
-          brew install swig
-          swig -version
-      - name: Build, repair, and smoke-test wheel
-        run: |
-          uvx \
-            --from cibuildwheel==4.2.0 \
-            cibuildwheel \
-            --output-dir wheelhouse
-      - name: Validate wheel metadata and contents
+          uv python install 3.14
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-distributions-source
+          path: ${{ runner.temp }}/release-distributions
+      - name: Verify each installed release archive on CPU
         env:
-          RELEASE_TAG: ${{ needs.metadata.outputs.tag }}
+          EVIDENCE_DIR: ${{ runner.temp }}/issue-124-release-package-evidence
         run: |
-          python3 utils/release.py --tag "${RELEASE_TAG}" --archive wheelhouse/*.whl
-          uvx --from twine==6.2.0 twine check wheelhouse/*
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          archives=("$RUNNER_TEMP"/release-distributions/*.whl "$RUNNER_TEMP"/release-distributions/*.tar.gz)
+          test "${#archives[@]}" -eq 2
+          for archive in "${archives[@]}"; do
+            environment="$RUNNER_TEMP/gmes-release-$(basename "$archive")"
+            uv venv --clear --python 3.14 "$environment"
+            (
+              cd "$GITHUB_WORKSPACE"
+              UV_PROJECT_ENVIRONMENT="$environment" uv sync --locked --no-install-project \
+                --extra torch-cpu --extra hdf5
+            )
+            "$environment/bin/python" -m ensurepip
+            "$environment/bin/python" -m pip --version
+            "$environment/bin/python" -m pip install --no-deps \
+              --constraint "$GITHUB_WORKSPACE/build-constraints.txt" \
+              setuptools==84.0.0 wheel==0.48.0
+            digest="$(shasum -a 256 "$archive" | awk '{print $1}')"
+            installer=(--no-deps --no-index --force-reinstall)
+            if [[ "$archive" == *.tar.gz ]]; then
+              installer+=(--no-build-isolation)
+            fi
+            "$environment/bin/python" -m pip install "${installer[@]}" \
+              "gmes @ file://${archive}#sha256=${digest}"
+            (
+              cd "$RUNNER_TEMP"
+              "$environment/bin/python" -I "$GITHUB_WORKSPACE/benchmarks/package_cutover.py" \
+                --candidate-label "release-${GITHUB_SHA}-${{ matrix.os }}-$(basename "$archive")" \
+                --archive "$archive" \
+                --forbidden-root "$GITHUB_WORKSPACE" \
+                --device cpu \
+                --required-device-count 0 \
+                --evidence-dir "$EVIDENCE_DIR/$(basename "$archive")"
+            )
+          done
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: distribution-${{ matrix.platform }}
-          path: wheelhouse/*.whl
+          name: issue-124-release-cpu-${{ matrix.os }}
+          path: ${{ runner.temp }}/issue-124-release-package-evidence
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 30
 
   assemble:
     name: Verify collected distributions
-    needs:
-      - metadata
-      - build-sdist
-      - build-wheels
+    needs: [metadata, build-distributions, verify-cpu-artifacts]
     runs-on: ubuntu-24.04
-
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -221,16 +234,14 @@ jobs:
           version: "0.12.5"
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          pattern: distribution-*
+          name: release-distributions-source
           path: downloaded-artifacts
       - name: Reject missing, duplicate, or unexpected files
         env:
           RELEASE_TAG: ${{ needs.metadata.outputs.tag }}
         run: |
-          python3 utils/release.py \
-            --tag "${RELEASE_TAG}" \
-            --collect-dir downloaded-artifacts \
-            --dist-dir dist
+          python3 utils/release.py --tag "${RELEASE_TAG}" \
+            --collect-dir downloaded-artifacts --dist-dir dist
           uvx --from twine==6.2.0 twine check dist/*
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -242,10 +253,7 @@ jobs:
   publish-pypi:
     name: Publish verified files to PyPI
     if: github.ref_type == 'tag'
-    needs:
-      - metadata
-      - quality
-      - assemble
+    needs: [metadata, quality, assemble]
     runs-on: ubuntu-24.04
     environment:
       name: pypi
@@ -253,7 +261,6 @@ jobs:
     permissions:
       contents: read
       id-token: write
-
     steps:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -268,50 +275,35 @@ jobs:
   verify-pypi:
     name: Verify clean installation from PyPI
     if: github.ref_type == 'tag'
-    needs:
-      - metadata
-      - publish-pypi
+    needs: [metadata, publish-pypi]
     runs-on: ubuntu-24.04
-
     steps:
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           ignore-empty-workdir: true
           version: "0.12.5"
-      - name: Install published wheel into a clean environment
+      - name: Install published universal wheel into a clean environment
         env:
           VERSION: ${{ needs.metadata.outputs.version }}
         run: |
           uv python install 3.14
           uv venv --python 3.14 "${RUNNER_TEMP}/gmes-pypi"
           for attempt in {1..12}; do
-            if uv pip install \
-              --python "${RUNNER_TEMP}/gmes-pypi/bin/python" \
-              --only-binary :all: \
-              --refresh-package gmes \
-              "gmes==${VERSION}"; then
-              break
-            fi
-            if [[ "${attempt}" == "12" ]]; then
-              exit 1
-            fi
+            if uv pip install --python "${RUNNER_TEMP}/gmes-pypi/bin/python" \
+              --only-binary :all: --refresh-package gmes "gmes==${VERSION}"; then break; fi
+            test "${attempt}" != "12" || exit 1
             sleep 10
           done
           cd "${RUNNER_TEMP}"
-          "${RUNNER_TEMP}/gmes-pypi/bin/python" -c \
-            "import gmes, gmes._constant, gmes._pw_material, gmes.material, gmes.pygeom"
+          "${RUNNER_TEMP}/gmes-pypi/bin/python" -c "import gmes"
 
   github-release:
     name: Create GitHub Release
     if: github.ref_type == 'tag'
-    needs:
-      - metadata
-      - assemble
-      - verify-pypi
+    needs: [metadata, assemble, verify-pypi]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
-
     steps:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -324,7 +316,5 @@ jobs:
           RELEASE_TAG: ${{ needs.metadata.outputs.tag }}
           RELEASE_TITLE: ${{ needs.metadata.outputs.release-title }}
         run: |
-          gh release create "${RELEASE_TAG}" dist/* \
-            --generate-notes \
-            --title "${RELEASE_TITLE}" \
-            --verify-tag
+          gh release create "${RELEASE_TAG}" dist/* --generate-notes \
+            --title "${RELEASE_TITLE}" --verify-tag

@@ -1,8 +1,12 @@
 """Validate release identity and built distribution contents."""
 
 import argparse
+import base64
+import csv
+import hashlib
 import re
 import shutil
+import stat
 import tarfile
 import tomllib
 import zipfile
@@ -10,10 +14,7 @@ from datetime import date
 from pathlib import Path, PurePosixPath
 
 PROJECT_NAME = "gmes"
-EXPECTED_WHEEL_PLATFORMS = {
-    "manylinux_2_34_x86_64",
-    "macosx_11_0_arm64",
-}
+UNIVERSAL_WHEEL_TAG = "py3-none-any"
 REQUIRED_SDIST_PATHS = {
     "CHANGELOG.md",
     "LICENSE",
@@ -22,42 +23,54 @@ REQUIRED_SDIST_PATHS = {
     "VERSION",
     "build-constraints.txt",
     "gmes/__init__.py",
+    "gmes/constant.py",
+    "gmes/constant.pyi",
+    "gmes/file_io.py",
+    "gmes/geometry.py",
     "gmes/material.py",
     "gmes/pygeom.py",
+    "gmes/py.typed",
+    "gmes/source.py",
+    "gmes/torch_distributed.py",
+    "gmes/torch_dispersive.py",
+    "gmes/torch_dm2.py",
+    "gmes/torch_fdtd.py",
+    "gmes/torch_output.py",
+    "gmes/torch_plan.py",
+    "gmes/torch_source.py",
     "pyproject.toml",
     "setup.py",
-    "src/constant.cc",
-    "src/constant.hh",
-    "src/constant.i",
-    "src/cpp23_support.hh",
-    "src/numpy.i",
-    "src/pw_material.i",
 }
 REQUIRED_WHEEL_MODULES = {
     "gmes/__init__.py",
     "gmes/constant.py",
+    "gmes/constant.pyi",
+    "gmes/file_io.py",
+    "gmes/geometry.py",
     "gmes/material.py",
     "gmes/pygeom.py",
-    "gmes/pw_material.py",
+    "gmes/py.typed",
+    "gmes/source.py",
+    "gmes/torch_distributed.py",
+    "gmes/torch_dispersive.py",
+    "gmes/torch_dm2.py",
+    "gmes/torch_fdtd.py",
+    "gmes/torch_output.py",
+    "gmes/torch_plan.py",
+    "gmes/torch_source.py",
 }
-FORBIDDEN_SDIST_PATHS = {
-    "src/material.c",
-    "src/material.cpp",
-    "src/material.pyx",
-    "src/pygeom.c",
-    "src/pygeom.cpp",
-    "src/pygeom.pyx",
-}
-NATIVE_MODULE_PREFIXES = (
+RETIRED_GMES_PATH_PREFIXES = (
     "gmes/_constant.",
     "gmes/_pw_material.",
-)
-FORBIDDEN_WHEEL_MODULE_PREFIXES = (
-    "gmes/material.",
-    "gmes/pygeom.",
+    "gmes/fdtd.py",
+    "gmes/pw_material.",
+    "gmes/pw_source.py",
+    "gmes/show.py",
+    "src/",
 )
 FORBIDDEN_DIRECTORY_NAMES = {".git", "__pycache__", "build", "dist"}
 FORBIDDEN_ARCHIVE_SUFFIXES = {".h5", ".hdf5", ".pyc", ".pyo"}
+NATIVE_ARCHIVE_SUFFIXES = {".a", ".dll", ".dylib", ".lib", ".o", ".obj", ".pyd", ".so"}
 
 
 def read_version(project_root):
@@ -113,6 +126,8 @@ def _normalized_sdist_paths(archive, version):
     paths = set()
     with tarfile.open(archive, "r:gz") as distribution:
         for member in distribution.getmembers():
+            if member.issym() or member.islnk():
+                raise RuntimeError(f"sdist contains link member {member.name!r}")
             path = PurePosixPath(member.name)
             if path.is_absolute() or ".." in path.parts:
                 raise RuntimeError(f"unsafe sdist path: {member.name}")
@@ -122,7 +137,10 @@ def _normalized_sdist_paths(archive, version):
                 )
             relative = PurePosixPath(*path.parts[1:])
             if relative.parts:
-                paths.add(relative.as_posix())
+                name = relative.as_posix()
+                if name in paths:
+                    raise RuntimeError(f"sdist contains duplicate member {name!r}")
+                paths.add(name)
     return paths
 
 
@@ -133,6 +151,11 @@ def _reject_generated_products(paths, archive_kind):
             raise RuntimeError(f"{archive_kind} contains generated directory {name!r}")
         if path.suffix.lower() in FORBIDDEN_ARCHIVE_SUFFIXES:
             raise RuntimeError(f"{archive_kind} contains generated file {name!r}")
+
+
+def _is_native_archive_member(name):
+    path = PurePosixPath(name)
+    return path.suffix.lower() in NATIVE_ARCHIVE_SUFFIXES or ".so." in path.name.lower()
 
 
 def verify_sdist(archive, version):
@@ -146,20 +169,18 @@ def verify_sdist(archive, version):
     missing = REQUIRED_SDIST_PATHS - paths
     if missing:
         raise RuntimeError(f"sdist is missing required paths: {sorted(missing)}")
-    retired_extension_sources = FORBIDDEN_SDIST_PATHS & paths
-    if retired_extension_sources:
+    retired_members = sorted(
+        name for name in paths if name.startswith(RETIRED_GMES_PATH_PREFIXES)
+    )
+    if retired_members:
         raise RuntimeError(
-            "sdist contains retired Python extension sources: "
-            f"{sorted(retired_extension_sources)}"
+            f"sdist contains retired native or proxy members: {retired_members}"
         )
     if not any(name.startswith("tests/test_") for name in paths):
         raise RuntimeError("sdist does not contain the unit tests")
     if not any(name.startswith("examples/") and name.endswith(".py") for name in paths):
         raise RuntimeError("sdist does not contain the examples")
-    compiled_suffixes = {".dll", ".dylib", ".o", ".obj", ".so"}
-    compiled = sorted(
-        name for name in paths if PurePosixPath(name).suffix in compiled_suffixes
-    )
+    compiled = sorted(name for name in paths if _is_native_archive_member(name))
     if compiled:
         raise RuntimeError(f"sdist contains compiled build products: {compiled}")
     _reject_generated_products(paths, "sdist")
@@ -175,7 +196,7 @@ def verify_sdist(archive, version):
 
 def _wheel_platform(filename, version):
     pattern = re.compile(
-        rf"^{PROJECT_NAME}-{re.escape(version)}-cp314-cp314-(.+)\.whl$"
+        rf"^{PROJECT_NAME}-{re.escape(version)}-({re.escape(UNIVERSAL_WHEEL_TAG)})\.whl$"
     )
     match = pattern.fullmatch(filename)
     if match is None:
@@ -192,77 +213,133 @@ def _verify_core_metadata(metadata, version, archive_kind):
         raise RuntimeError(f"{archive_kind} metadata does not contain the README")
 
 
+def _verify_wheel_record(distribution, paths, record_name):
+    """Require one complete SHA-256 RECORD matching every wheel member."""
+    try:
+        rows = list(
+            csv.reader(distribution.read(record_name).decode("utf-8").splitlines())
+        )
+    except UnicodeDecodeError as error:
+        raise RuntimeError("wheel RECORD must be UTF-8") from error
+    records = {}
+    for row in rows:
+        if len(row) != 3 or not row[0] or row[0] in records:
+            raise RuntimeError(
+                "wheel RECORD must contain unique path, hash, and size rows"
+            )
+        records[row[0]] = row[1:]
+    if set(records) != paths:
+        raise RuntimeError("wheel RECORD members do not match archive members")
+    for name, (digest, size) in records.items():
+        if name == record_name:
+            if digest or size:
+                raise RuntimeError(
+                    "wheel RECORD self-entry must not have a digest or size"
+                )
+            continue
+        if not digest.startswith("sha256=") or not size.isdecimal():
+            raise RuntimeError(
+                "wheel RECORD requires SHA-256 digests and decimal sizes"
+            )
+        payload = distribution.read(name)
+        expected = base64.urlsafe_b64encode(hashlib.sha256(payload).digest()).rstrip(
+            b"="
+        )
+        if digest.partition("=")[2].encode("ascii") != expected or int(size) != len(
+            payload
+        ):
+            raise RuntimeError(f"wheel RECORD digest or size differs for {name!r}")
+
+
 def verify_wheel(archive, version):
     """Check wheel tags, modules, metadata, and cleanliness."""
     archive = Path(archive)
-    platform = _wheel_platform(archive.name, version)
-    if platform not in EXPECTED_WHEEL_PLATFORMS:
-        raise RuntimeError(f"unsupported wheel platform {platform!r}")
+    wheel_tag = _wheel_platform(archive.name, version)
 
+    dist_info = f"{PROJECT_NAME}-{version}.dist-info"
+    metadata_name = f"{dist_info}/METADATA"
+    wheel_name = f"{dist_info}/WHEEL"
+    record_name = f"{dist_info}/RECORD"
+    license_name = f"{dist_info}/licenses/LICENSE"
     with zipfile.ZipFile(archive) as distribution:
-        paths = set(distribution.namelist())
-        for name in paths:
+        members = distribution.infolist()
+        paths = {member.filename for member in members}
+        if len(paths) != len(members):
+            raise RuntimeError("wheel contains duplicate members")
+        for member in members:
+            name = member.filename
             path = PurePosixPath(name)
-            if path.is_absolute() or ".." in path.parts:
+            mode = member.external_attr >> 16
+            kind = stat.S_IFMT(mode)
+            if member.is_dir() or kind not in (0, stat.S_IFREG):
+                raise RuntimeError(f"wheel contains non-regular member {name!r}")
+            if not name or path.is_absolute() or ".." in path.parts:
                 raise RuntimeError(f"unsafe wheel path: {name}")
 
         missing = REQUIRED_WHEEL_MODULES - paths
         if missing:
             raise RuntimeError(f"wheel is missing Python modules: {sorted(missing)}")
-        for prefix in NATIVE_MODULE_PREFIXES:
-            if not any(
-                name.startswith(prefix) and name.endswith(".so") for name in paths
-            ):
-                raise RuntimeError(f"wheel is missing native module {prefix!r}")
-        retired_extensions = sorted(
+        retired_members = sorted(
+            name for name in paths if name.startswith(RETIRED_GMES_PATH_PREFIXES)
+        )
+        if retired_members:
+            raise RuntimeError(
+                f"wheel contains retired native or proxy members: {retired_members}"
+            )
+        native_members = sorted(
+            name for name in paths if _is_native_archive_member(name)
+        )
+        if native_members:
+            raise RuntimeError(f"wheel contains native members: {native_members}")
+        if not {metadata_name, wheel_name, record_name, license_name} <= paths:
+            raise RuntimeError("wheel is missing required dist-info metadata")
+        unexpected_dist_info = sorted(
             name
             for name in paths
-            if name.endswith(".so")
-            and any(
-                name.startswith(prefix) for prefix in FORBIDDEN_WHEEL_MODULE_PREFIXES
-            )
+            if ".dist-info/" in name and not name.startswith(f"{dist_info}/")
         )
-        if retired_extensions:
+        if unexpected_dist_info:
             raise RuntimeError(
-                f"wheel contains retired Python extensions: {retired_extensions}"
+                f"wheel contains unexpected dist-info metadata: {unexpected_dist_info}"
             )
-
-        metadata_names = [
-            name for name in paths if name.endswith(".dist-info/METADATA")
-        ]
-        license_names = [
-            name for name in paths if ".dist-info/licenses/LICENSE" in name
-        ]
-        if len(metadata_names) != 1 or len(license_names) != 1:
-            raise RuntimeError(
-                "wheel must contain one metadata file and the GPL license"
-            )
-        metadata = distribution.read(metadata_names[0]).decode("utf-8")
+        metadata = distribution.read(metadata_name).decode("utf-8")
         _verify_core_metadata(metadata, version, "wheel")
+        wheel_metadata = distribution.read(wheel_name).decode("utf-8")
+        fields = {}
+        for line in wheel_metadata.splitlines():
+            if ": " in line:
+                key, value = line.split(": ", 1)
+                fields.setdefault(key, []).append(value)
+        if fields.get("Wheel-Version") != ["1.0"]:
+            raise RuntimeError("wheel must declare Wheel-Version: 1.0")
+        if fields.get("Root-Is-Purelib") != ["true"]:
+            raise RuntimeError("wheel must declare Root-Is-Purelib: true")
+        if fields.get("Tag") != [UNIVERSAL_WHEEL_TAG]:
+            raise RuntimeError("wheel must declare the universal py3-none-any tag")
+        _verify_wheel_record(distribution, paths, record_name)
 
     _reject_generated_products(paths, "wheel")
-    return platform
+    return wheel_tag
 
 
 def verify_distribution_set(dist_directory, version):
-    """Require exactly one sdist and the two declared supported wheels."""
+    """Require exactly one sdist and one universal pure-Python wheel."""
     dist_directory = Path(dist_directory)
     archives = sorted(path for path in dist_directory.iterdir() if path.is_file())
     sdist = [path for path in archives if path.name.endswith(".tar.gz")]
     wheels = [path for path in archives if path.suffix == ".whl"]
     unexpected = [path.name for path in archives if path not in sdist + wheels]
-    if len(sdist) != 1 or len(wheels) != 2 or unexpected:
+    if len(sdist) != 1 or len(wheels) != 1 or unexpected:
         raise RuntimeError(
-            "release must contain exactly one sdist and two wheels; "
+            "release must contain exactly one sdist and one universal wheel; "
             f"found {[path.name for path in archives]}"
         )
 
     verify_sdist(sdist[0], version)
-    platforms = {verify_wheel(wheel, version) for wheel in wheels}
-    if platforms != EXPECTED_WHEEL_PLATFORMS:
+    wheel_tags = {verify_wheel(wheel, version) for wheel in wheels}
+    if wheel_tags != {UNIVERSAL_WHEEL_TAG}:
         raise RuntimeError(
-            f"wheel platforms {sorted(platforms)} do not match "
-            f"{sorted(EXPECTED_WHEEL_PLATFORMS)}"
+            f"wheel tags {sorted(wheel_tags)} do not match {UNIVERSAL_WHEEL_TAG!r}"
         )
 
 

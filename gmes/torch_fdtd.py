@@ -3,7 +3,7 @@
 import hashlib
 import os
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from math import sqrt
 from os import PathLike
 from pathlib import Path
@@ -66,7 +66,8 @@ from .torch_source import (
     TorchPointSourceRecord,
     TorchSourceLoweringContext,
     TorchSourcePlan,
-    lower_sources,
+    materialize_sources,
+    prepare_sources,
 )
 
 
@@ -1647,6 +1648,14 @@ class TorchSimulation:
                 + ", ".join(unsupported_models)
             )
 
+        prepared_sources = prepare_sources(
+            sources,
+            context=TorchSourceLoweringContext(
+                space, geom_tree, bloch is not None, runtime.dtype, device, time_step
+            ),
+            component_plans=component_plans,
+        )
+
         plan = TorchSimulationPlan(
             component_plans,
             dr=dr,
@@ -1994,11 +2003,15 @@ class TorchSimulation:
         simulation_factory = (
             type(self) if _auxiliary_factory is None else _auxiliary_factory
         )
-        self.sources = lower_sources(
-            sources,
-            simulation=self,
+        auxiliary_runtime = (
+            runtime
+            if runtime.precision == "float64"
+            else replace(runtime, precision="float64")
+        )
+        self.sources = materialize_sources(
+            prepared_sources,
             simulation_factory=simulation_factory,
-            runtime=runtime,
+            runtime=auxiliary_runtime,
             bloch=bloch,
         )
         self._is_auxiliary = bool(_is_auxiliary)

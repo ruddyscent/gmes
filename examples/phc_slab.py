@@ -105,7 +105,7 @@ def run(size=SIZE, resolution=RESOLUTION, until=UNTIL):
         + make_line_defect(size[0])
         + [Shell(material=Cpml(), thickness=PML_THICK)]
     )
-    space = Cartesian(size=size, resolution=resolution, parallel=True)
+    space = Cartesian(size=size, resolution=resolution)
     src_list = [
         PointSource(
             src_time=Continuous(freq=FREQ),
@@ -114,12 +114,13 @@ def run(size=SIZE, resolution=RESOLUTION, until=UNTIL):
         )
     ]
 
-    simulation = fdtd.FDTD(space, geom_list, src_list)
-    simulation.init()
-    simulation.show_permittivity(Ez, Z, 0)
-    simulation.show_field(Hz, Z, 0)
-    simulation.show_field(Hz, Y, 0)
-    simulation.step_until_t(until)
+    simulation = TorchSimulation(
+        space=space,
+        geometry=geom_list,
+        sources=src_list,
+        runtime=TorchRuntimeConfig(device="cpu", cpu_threads=1),
+    )
+    simulation.advance(max(1, round(until / simulation.plan.dt)))
     return simulation
 
 

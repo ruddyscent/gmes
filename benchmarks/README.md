@@ -10,15 +10,8 @@ Torch tuning starts.
 
 `native-oracle-d87d25a` points exactly to
 `d87d25afd160d96b1fa0890cacecd90802448d57`, the final post-#113 native
-solver.  It is the immutable physics source and can be built in isolation:
-
-```sh
-git worktree add --detach /tmp/gmes-native-source native-oracle-d87d25a
-cd /tmp/gmes-native-source
-uv sync --locked --extra hdf5
-uv run --no-sync python -m unittest discover -v
-uv build
-```
+solver. It is immutable historical physics evidence, not a current checkout
+build or runtime dependency.
 
 That commit predates the read-only C++ state exporters required to inspect
 private dispersive/PML state.  The companion
@@ -29,28 +22,12 @@ actual observer checkout commit. The already completed 12-cell native timing
 matrix remains byte-pinned to `native-oracle-observer-v5`; the manifest keeps
 that performance observer provenance separate from the v6 correctness pin.
 
-Keep controller, reference, and candidate environments separate.  The
-controller starts Python with `-I`, removes import-related environment
-variables, changes to an empty temporary directory, and rejects a `gmes`
-import that is not below the requested checkout.
-
-```sh
-git worktree add --detach /tmp/gmes-native-observer native-oracle-observer-v6
-cd /tmp/gmes-native-observer
-uv sync --locked --extra hdf5
-
-cd /path/to/controller-checkout
-uv run --no-sync python benchmarks/run_isolated_oracle.py \
-  --checkout /tmp/gmes-native-observer \
-  --python /tmp/gmes-native-observer/.venv/bin/python \
-  --manifest "$PWD/benchmarks/native_oracle_workloads.json" \
-  --case mixed-3d \
-  --output /tmp/gmes-oracle/reference-mixed-3d.npz
-```
-
-`native_oracle.py capture` always constructs the legacy native `gmes.FDTD`
-solver. Repeating this command from another checkout is useful only as a
-native-to-native runner smoke test; it is not Torch correctness evidence.
+Keep controller, reference, and candidate environments separate. The isolated
+runner starts Python with `-I`, removes import-related environment variables,
+changes to an empty temporary directory, and accepts only a checkout whose Git
+HEAD exactly equals the manifest's `observer_commit`. It executes that pinned
+checkout's historical runner; candidate `native_oracle.py` is reader and
+validator only and has no capture or benchmark command.
 `torch_correctness.py capture` independently reconstructs the canonical
 starting state from the backend-neutral manifest, verifies that reconstruction
 against every descriptor-bound native `step/0` array, and then advances the
@@ -98,29 +75,13 @@ volumetric DM2.
 
 ## Measurements and gates
 
-Set thread counts before importing the native module or Torch.  Use an
-otherwise idle host, fixed clock/power settings where available, and the same
-workload, dtype, thread count, and replicate count for both sides.
-
-```sh
-uv run --no-sync python benchmarks/native_oracle.py benchmark \
-  --case cpu-crossover-2d --threads 1 --warmup 5 --steps 100 --repeats 15 \
-  > /tmp/gmes-oracle/native-cpu-crossover-2d-t1.json
-```
-
-Capture all six CPU acceptance cases at one and four threads into a directory
-containing only those 12 cell JSON files. Assemble them without sanitizing or
-rewriting the source bytes:
-
-```sh
-uv run --no-sync python benchmarks/native_summary.py \
-  --output /tmp/gmes-oracle/native-summary.json \
-  /tmp/gmes-oracle/cells/*.json
-# Linux
-sha256sum /tmp/gmes-oracle/native-summary.json
-# macOS
-shasum -a 256 /tmp/gmes-oracle/native-summary.json
-```
+The accepted native 12-cell timing matrix is historical-only:
+`native-oracle-observer-v5` at
+`1ab94e579dc52861db7ecdcd55f24f8af1977de7`, with deterministic summary
+SHA-256 `1c9bdce2717ba858fd03b2e40302a5b2d19a29920496f969e33aee36e34e1baa`.
+`native_summary.py` and `native_oracle.py` continue to validate the strict
+schemas, provenance, byte accounting, tags, commits, and digests without
+regenerating those records from a candidate checkout.
 
 The assembler requires the exact six-case × two-thread matrix, the frozen
 benchmark contract and 1/4-thread pins, clean observer commit, one normalized
@@ -192,12 +153,12 @@ manifest, runner inputs, solver inputs and ABI, clean candidate commit, host
 identity, and byte hashes of its Torch baseline inputs.
 
 Native comparisons remain required, recomputed, and published for all 12
-workload/thread cells, but their timing ratios are informational. The blocking
-timing checks compare the candidate with the matching same-host Torch baseline:
-no individual cell may exceed `1.05x`, and the deterministic one-sided bootstrap
-of the 12-cell log-geometric-mean ratio must find no significant regression.
-Both reference and candidate raw samples are checked for positivity, replicate
-count, reported-summary consistency, and relative MAD before comparison.
+workload/thread cells, but their timing ratios are informational. The historical
+`1.05x` and one-sided-bootstrap criteria remain recorded comparison metadata;
+for #124 they do not block correctness acceptance. Any speed or scaling
+shortfall must be tracked in a later performance issue. Both reference and
+candidate raw samples are checked for positivity, replicate count,
+reported-summary consistency, and relative MAD before comparison.
 
 The baseline JSON bytes are part of the frozen contract, not merely examples.
 They are sanitized public Release assets, not tracked repository files. The
@@ -441,9 +402,9 @@ escapes fail closed.
 Differential schema 5 retains a complete `reference_source` and
 `candidate_source` descriptor on every record in addition to the compact
 grouped projections. Create both scopes from a clean candidate checkout. The
-isolated runner must use the pinned `native-oracle-observer-v6` worktree for
-every native reference; running `native_oracle.py capture` in the candidate
-checkout is not an equivalent reference. Start with a fresh bundle directory
+isolated runner must use the pinned `native-oracle-observer-v6` checkout for
+every native reference; candidate checkouts cannot capture native references.
+Start with a fresh bundle directory
 so the producer's exact source and output closures cannot include stale files:
 
 ```sh
@@ -856,9 +817,11 @@ uv run --no-sync python -m benchmarks.torch_two_gpu \
 
 Repeat with `--case strong-homogeneous` and
 `--case strong-imbalanced`. JSON output records every timing sample,
-one-versus-two throughput, the 1.6 strong or 0.8 weak gate, rank-local memory,
-halo bytes, fixed-address validation, exact decomposition, PyTorch/CUDA/NCCL
-versions, both GPU models, peer-access status, and `nvidia-smi topo -m`.
+one-versus-two throughput, the historical 1.6 strong or 0.8 weak thresholds,
+rank-local memory, halo bytes, fixed-address validation, exact decomposition,
+PyTorch/CUDA/NCCL versions, both GPU models, peer-access status, and
+`nvidia-smi topo -m`. Those thresholds are nonblocking for #124; record any
+shortfall for later performance work without weakening numerical checks.
 The parent binds each completed child JSON and its exact raw stdout/stderr by
 bundle-relative typed descriptors. Per-rank Chrome traces remain in the
 requested trace directory and separate
@@ -1485,44 +1448,12 @@ Generated evidence remains in CI artifacts, `/tmp`, or the SHA-256-pinned
 Release assets documented above; no generated baseline artifact belongs in the
 repository.
 
-## Existing native microbenchmarks
+## Historical native microbenchmarks
 
-`geometry_mapping.py` isolates bounded geometry-to-region lowering for all
-built-in primitives, default-only 2-D and 3-D grids, heterogeneous and
-overlapping scenes, collapsed dimensions, complex-mode coordinates, and an
-independently reported custom pointwise fallback. It hashes complete material
-and underlying-region maps so reference and candidate runs also verify mapping
-parity:
-
-```sh
-uv run --no-sync python benchmarks/geometry_mapping.py --repeats 7
-```
-
-Compare every case median, the built-in geometric mean, map hashes, and peak
-RSS. Generated JSON results are machine-specific and should not be committed.
-
-`field_updates.py` measures simulation construction, `FDTD.init()`, and
-complete FDTD time steps separately. It retains the #99 small, 2-D, 3-D,
-dispersive, Lorentz, DCP, DM2, PML, heterogeneous, and Bloch/complex cases.
-Run each configuration in a separate process so OpenMP and GMES read their
-runtime settings before the first native update:
-
-```sh
-uv run --no-sync python benchmarks/field_updates.py --threads 1
-uv run --no-sync python benchmarks/field_updates.py --threads 4
-uv run --no-sync python benchmarks/field_updates.py --threads 4 --threshold 0
-uv run --no-sync python benchmarks/field_updates.py \
-  --threads 4 --threshold 1000000000
-```
-
-Compare the raw and median construction, initialization, and step samples,
-field checksum/shapes, material update sizes, native update-plan bytes, and
-peak RSS. The default `GMES_OPENMP_THRESHOLD=8192` keeps small loops serial.
-A threshold of zero forces eligible loops through OpenMP; a value larger than
-the grids provides an OpenMP-linked serial reference. Rebuild after changing
-`GMES_ENABLE_OPENMP`, but not for threshold or `OMP_NUM_THREADS` changes.
-For MPI runs, set the OpenMP thread count explicitly and avoid assigning more
-total workers than physical cores.
-
-See [the OpenMP benchmark notes](../docs/openmp-benchmark.md) for the reference
-measurements and threshold rationale.
+`geometry_mapping.py` and `field_updates.py` are read-only provenance readers.
+They report the immutable reference tag/commit, performance observer tag/commit,
+and summary digest; they never instantiate native FDTD, lower geometry, or
+profile field updates in a candidate checkout. The retained mapping/update
+records remain available to schema and digest validators. Current performance
+measurement uses the Torch benchmark providers and their fixed baseline
+contracts.

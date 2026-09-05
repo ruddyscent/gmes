@@ -11,10 +11,16 @@ Reference: R. W. Ziolkowski, J. M. Arnold, and D. M. Gogny,
 from argparse import ArgumentParser
 from pathlib import Path
 
-from ziolkowski1995_gain import generate as generate_gain
-from ziolkowski1995_pump_probe import generate as generate_pump_probe
-from ziolkowski1995_sit import generate as generate_sit
-from ziolkowski1995_ultrafast import generate as generate_ultrafast
+try:  # Package import for tests and installed examples.
+    from .ziolkowski1995_gain import generate as generate_gain
+    from .ziolkowski1995_pump_probe import generate as generate_pump_probe
+    from .ziolkowski1995_sit import generate as generate_sit
+    from .ziolkowski1995_ultrafast import generate as generate_ultrafast
+except ImportError:  # Direct ``python examples/ziolkowski1995.py`` execution.
+    from ziolkowski1995_gain import generate as generate_gain
+    from ziolkowski1995_pump_probe import generate as generate_pump_probe
+    from ziolkowski1995_sit import generate as generate_sit
+    from ziolkowski1995_ultrafast import generate as generate_ultrafast
 
 
 def parse_args():

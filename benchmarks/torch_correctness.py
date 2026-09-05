@@ -3,6 +3,7 @@
 
 import argparse
 import hashlib
+import io
 import json
 import math
 import os
@@ -11,6 +12,7 @@ import struct
 import zipfile
 from contextlib import ExitStack, contextmanager
 from copy import deepcopy
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 import numpy as np
@@ -18,7 +20,7 @@ import numpy as np
 import gmes
 import gmes.torch_fdtd
 import gmes.torch_source
-from benchmarks import native_oracle
+from benchmarks import historical_probes, native_oracle
 from benchmarks.native_oracle import COMPONENT_NAMES
 from gmes.torch_source import TorchPointSourceBatch, TorchTransparentBatch
 
@@ -35,6 +37,7 @@ TRUSTED_MANIFEST_SHA256 = (
 
 MAX_CORRECTNESS_JSON_BYTES = 16 * 1024**2
 MAX_CORRECTNESS_NPZ_BYTES = 4 * 1024**3
+MAX_PROBE_SNAPSHOT_BYTES = 128 * 1024**2
 MAX_CORRECTNESS_NPZ_MEMBERS = 16_384
 MAX_CORRECTNESS_NPY_HEADER_BYTES = 64 * 1024
 MAX_CORRECTNESS_NPY_PAYLOAD_BYTES = 2 * 1024**3
@@ -43,6 +46,18 @@ MAX_CORRECTNESS_TOTAL_ARRAY_BYTES = 8 * 1024**3
 _ZIP_EOCD = struct.Struct("<4s4H2LH")
 _ZIP_CENTRAL_HEADER = struct.Struct("<4s6H3L5H2L")
 _ZIP_LOCAL_HEADER = struct.Struct("<4s5H3L2H")
+
+
+@dataclass(frozen=True)
+class _BoundedNpzSnapshot:
+    """One immutable, preflighted candidate byte stream."""
+
+    raw: bytes
+    sha256: str
+    size_bytes: int
+    member_count: int
+    array_payload_bytes: int
+
 
 _POINT_SOURCE_LIVE_ARRAYS = (
     "overwrite_targets",
@@ -395,6 +410,82 @@ def _open_bounded_npz(path):
     except (MemoryError, RecursionError) as error:
         raise ValueError(
             "NPZ parsing exceeded the bounded resource contract"
+        ) from error
+
+
+def _read_bounded_npz_snapshot(path):
+    """Read one candidate into immutable bounded bytes after strict preflight."""
+    path = Path(path).resolve(strict=True)
+    descriptor = path.stat()
+    if (
+        not stat.S_ISREG(descriptor.st_mode)
+        or descriptor.st_size <= 0
+        or descriptor.st_size > MAX_PROBE_SNAPSHOT_BYTES
+    ):
+        raise ValueError("probe candidate exceeds the immutable snapshot byte bound")
+    try:
+        with path.open("rb") as handle:
+            opened = os.fstat(handle.fileno())
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or opened.st_size <= 0
+                or opened.st_size > MAX_PROBE_SNAPSHOT_BYTES
+            ):
+                raise ValueError(
+                    "probe candidate exceeds the immutable snapshot byte bound"
+                )
+            preflight = _preflight_npz_file(handle, str(path))
+            handle.seek(0)
+            raw = _read_exact(
+                handle, preflight["size_bytes"], f"{path} immutable NPZ snapshot"
+            )
+            if handle.read(1):
+                raise ValueError("NPZ grew while its immutable snapshot was read")
+            after = os.fstat(handle.fileno())
+        if (
+            after.st_size != preflight["size_bytes"]
+            or hashlib.sha256(raw).hexdigest() != preflight["sha256"]
+        ):
+            raise ValueError("NPZ changed while its immutable snapshot was read")
+        return _BoundedNpzSnapshot(
+            raw=raw,
+            sha256=preflight["sha256"],
+            size_bytes=preflight["size_bytes"],
+            member_count=preflight["member_count"],
+            array_payload_bytes=preflight["array_payload_bytes"],
+        )
+    except (MemoryError, RecursionError) as error:
+        raise ValueError(
+            "NPZ snapshot exceeded the bounded resource contract"
+        ) from error
+
+
+@contextmanager
+def _open_bounded_npz_snapshot(snapshot):
+    """Open only a verified immutable NPZ snapshot, never its original path."""
+    if not isinstance(snapshot, _BoundedNpzSnapshot):
+        raise ValueError("NPZ snapshot type differs")
+    if (
+        type(snapshot.raw) is not bytes
+        or snapshot.size_bytes != len(snapshot.raw)
+        or snapshot.size_bytes <= 0
+        or snapshot.size_bytes > MAX_PROBE_SNAPSHOT_BYTES
+        or hashlib.sha256(snapshot.raw).hexdigest() != snapshot.sha256
+    ):
+        raise ValueError("NPZ immutable snapshot descriptor differs")
+    try:
+        archive = np.load(io.BytesIO(snapshot.raw), allow_pickle=False)
+        try:
+            yield archive
+        except MemoryError as error:
+            raise ValueError(
+                "NPZ allocation failed within the immutable snapshot contract"
+            ) from error
+        finally:
+            archive.close()
+    except (MemoryError, RecursionError) as error:
+        raise ValueError(
+            "NPZ immutable snapshot parsing exceeded the bounded resource contract"
         ) from error
 
 
@@ -1333,115 +1424,78 @@ def _expected_transparent_live_buffers(workload, dt, backend, reference):
 def _derive_transparent_source_contract(workload, dt, backend, reference):
     if workload.get("source", "point") not in {"tfsf", "gaussian"}:
         return None
-    simulation = native_oracle.build_simulation(workload, gmes)
-    simulation.init()
+    simulation = _build_torch_simulation(
+        workload,
+        dt=dt,
+        threads=1,
+        device=backend["device"],
+        precision=backend["precision"],
+        graph_mode=backend["graph_mode"],
+        compile_mode=backend["compile_mode"],
+    )
     if not np.array_equal(
-        np.asarray(simulation.time_step.dt, dtype=np.float64),
+        np.asarray(simulation.space.dt, dtype=np.float64),
         np.asarray(dt, dtype=np.float64),
     ):
         raise ValueError("transparent source time step differs from the workload")
 
-    auxiliary_by_id = {}
     auxiliaries = []
-    for native_ordinal, source in enumerate(simulation.src_list):
-        native_auxiliary = getattr(source, "aux_fdtd", None)
-        if native_auxiliary is None:
-            continue
-        solver = _transparent_auxiliary_solver(native_auxiliary)
-        gaussian_width = (
-            float(source.src_time.width)
-            if isinstance(source, gmes.GaussianBeam)
-            else None
-        )
-        auxiliary = {
-            "candidate_ordinal": len(auxiliaries),
-            "native_ordinal": native_ordinal,
-            "solver": solver,
-            "gaussian_width": gaussian_width,
-            "initial_step_count": int(solver.time_step.n),
+    auxiliary_by_id = {}
+    for ordinal, auxiliary in enumerate(simulation.sources.auxiliaries):
+        source_batches = [
+            batch
+            for batch in simulation.sources.batches
+            if isinstance(batch, TorchTransparentBatch) and batch.auxiliary is auxiliary
+        ]
+        if not source_batches:
+            raise ValueError("transparent auxiliary has no Torch source batch")
+        gaussian_widths = {
+            batch.gaussian_width
+            for batch in source_batches
+            if batch.gaussian_width is not None
         }
-        auxiliaries.append(auxiliary)
-        auxiliary_by_id[id(native_auxiliary)] = auxiliary
-        auxiliary_by_id[id(solver)] = auxiliary
-
-    native_records = []
-    batches = []
-    for component_type, updaters in sorted(
-        simulation.pw_source.items(), key=lambda item: item[0].__name__
-    ):
-        component = component_type.__name__
-        main_shape = tuple(simulation.field[component_type].shape)
-        for updater in sorted(
-            updaters.values(), key=lambda value: type(value).__name__
-        ):
-            if not type(updater).__name__.startswith("Transparent"):
-                continue
-            ordered = sorted(updater._param.items())
-            native_records.append(
-                {
-                    "component": component,
-                    "native_type": type(updater).__name__,
-                    "parameters": ordered,
-                }
-            )
-            grouped = {}
-            for target, parameter in updater._param.items():
-                auxiliary = auxiliary_by_id.get(id(parameter.aux_fdtd))
-                if auxiliary is None:
-                    raise ValueError(
-                        "transparent source parameter has no workload auxiliary"
-                    )
-                grouped.setdefault(auxiliary["candidate_ordinal"], []).append(
-                    (target, parameter)
-                )
-            for auxiliary_ordinal, parameters in grouped.items():
-                auxiliary = auxiliaries[auxiliary_ordinal]
-                auxiliary_component = "Hy" if component.startswith("E") else "Ex"
-                auxiliary_shape = tuple(
-                    auxiliary["solver"].field[getattr(gmes, auxiliary_component)].shape
-                )
-                batch = _transparent_batch_arrays(
-                    component,
-                    parameters,
-                    main_shape=main_shape,
-                    auxiliary_shape=auxiliary_shape,
-                    gaussian_width=auxiliary["gaussian_width"],
-                    dt=dt,
-                    dr=tuple(float(value) for value in simulation.space.dr),
-                )
-                batch.update(
-                    auxiliary_ordinal=auxiliary_ordinal,
-                    auxiliary_component=auxiliary_component,
-                )
-                batches.append(batch)
-    native_records.sort(key=lambda item: (item["component"], item["native_type"]))
-    batches.sort(
-        key=lambda item: (
-            item["component"],
-            item["native_type"],
-            item["auxiliary_ordinal"],
-        )
-    )
-    for batch_ordinal, batch in enumerate(batches):
-        batch["batch_ordinal"] = batch_ordinal
-
-    device_type = backend["device"].split(":", 1)[0]
-    for auxiliary in auxiliaries:
-        solver = auxiliary["solver"]
+        if len(gaussian_widths) > 1:
+            raise ValueError("transparent auxiliary has inconsistent Gaussian width")
         space, component_plans = _build_expected_component_plans(
-            solver.space,
-            solver.geom_list,
+            auxiliary.space,
+            auxiliary.geometry,
             dt=dt,
             precision="float64",
-            device_type=device_type,
+            device_type=backend["device"].split(":", 1)[0],
             compile_policy=backend["compile_policy"],
         )
-        auxiliary["space"] = space
-        auxiliary["component_plans"] = component_plans
+        auxiliary = {
+            "candidate_ordinal": ordinal,
+            "gaussian_width": next(iter(gaussian_widths), None),
+            "initial_step_count": int(_host(auxiliary.state.step_count)),
+            "space": space,
+            "component_plans": component_plans,
+        }
+        auxiliaries.append(auxiliary)
+        auxiliary_by_id[id(source_batches[0].auxiliary)] = ordinal
+
+    batches = {}
+    for ordinal, batch in enumerate(simulation.sources.batches):
+        if not isinstance(batch, TorchTransparentBatch):
+            raise ValueError("transparent workload contains a non-transparent batch")
+        try:
+            auxiliary_ordinal = auxiliary_by_id[id(batch.auxiliary)]
+        except KeyError as error:
+            raise ValueError("transparent batch has an unknown auxiliary") from error
+        batches[ordinal] = {
+            "batch_ordinal": ordinal,
+            "component": batch.component,
+            "native_type": f"Transparent{batch.component}",
+            "targets": _host(batch.targets).astype(np.int64, copy=False),
+            "samples": _host(batch.samples).astype(np.int64, copy=False),
+            "weights": _host(batch.weights).astype(np.float64, copy=False),
+            "gaussian_width": batch.gaussian_width,
+            "auxiliary_ordinal": auxiliary_ordinal,
+            "auxiliary_component": batch.auxiliary_component,
+        }
     return {
-        "simulation": simulation,
-        "native_records": tuple(native_records),
-        "batches": tuple(batches),
+        "native_records": None,
+        "batches": batches,
         "auxiliaries": tuple(auxiliaries),
         "live_buffers": _expected_transparent_live_buffers(
             workload, dt, backend, reference
@@ -1805,7 +1859,118 @@ def _candidate_provenance():
     return records, source
 
 
-def capture_torch_candidate(
+def _probe_time_step(resolved):
+    records = {record[0]: record for record in resolved.capture["arrays"]}
+    try:
+        time_record = records["step/0/time"]
+        sample = next(item for item in time_record[5] if item[0] == 2)
+        dt = float(sample[2][0])
+    except (KeyError, StopIteration, TypeError, ValueError) as error:
+        raise ValueError(
+            "historical probe has no exact step/0 time-step sentinel"
+        ) from error
+    if time_record[1] != "float64" or time_record[2] != [3] or sample[1] != [2]:
+        raise ValueError("historical probe step/0 time contract differs")
+    if not math.isfinite(dt) or dt <= 0.0:
+        raise ValueError("historical probe time step is invalid")
+    return dt
+
+
+def _historical_probe_input(bundle, resolved, trust):
+    required_trust = {
+        "expected_manifest_sha256",
+        "expected_manifest_bytes",
+        "expected_fixture_sha256",
+        "expected_fixture_bytes",
+    }
+    if not isinstance(trust, dict) or set(trust) != required_trust:
+        raise ValueError("historical probe caller trust anchors differ")
+    side = bundle.side
+    fixture = side["fixture"]
+    if (
+        trust["expected_fixture_sha256"] != fixture["compressed_sha256"]
+        or trust["expected_fixture_bytes"] != fixture["compressed_bytes"]
+    ):
+        raise ValueError("historical probe fixture trust anchors differ")
+    return {
+        "fixture_schema_version": side["fixture_schema_version"],
+        "fixture_kind": side["kind"],
+        "bundle_manifest_sha256": trust["expected_manifest_sha256"],
+        "bundle_manifest_bytes": trust["expected_manifest_bytes"],
+        "fixture_sha256": trust["expected_fixture_sha256"],
+        "fixture_bytes": trust["expected_fixture_bytes"],
+        "profile": resolved.profile_id,
+        "profile_sha256": side["profiles"][resolved.profile_id]["sha256"],
+        "case": resolved.case,
+        "capture_id": f"{resolved.profile_id}:{resolved.case}",
+        "probe_projection_sha256": resolved.capture["probe_projection"]["sha256"],
+        "source_manifest_sha256": side["provenance"]["source_manifest_sha256"],
+        "native_oracle_sha256": side["provenance"]["native_oracle_sha256"],
+        "historical_observer": deepcopy(side["provenance"]["historical_observer"]),
+        "sampling_algorithm": side["sampling"]["algorithm"],
+        "runtime": dict(resolved.runtime),
+        "authority": "sampled-test-only; not full-array native authority",
+    }
+
+
+def _resolved_probe_workload(bundle, resolved, manifest):
+    """Resolve one probe workload from its complete reviewed runtime binding."""
+    required = ("profile_id", "case", "manifest", "runtime", "consumer_line", "capture")
+    if any(not hasattr(resolved, name) for name in required):
+        raise ValueError("resolved historical probe descriptor differs")
+    if resolved.manifest != manifest:
+        raise ValueError("resolved historical probe manifest differs")
+    runtime = resolved.runtime
+    runtime_keys = {"device", "precision", "graph_mode", "compile_mode"}
+    if not isinstance(runtime, dict) or set(runtime) != runtime_keys:
+        raise ValueError("resolved historical probe runtime differs")
+    validated_runtime = _runtime_contract(**runtime)
+    if any(validated_runtime[key] != runtime[key] for key in runtime_keys):
+        raise ValueError("resolved historical probe runtime differs")
+    try:
+        profile_sha256 = bundle.side["profiles"][resolved.profile_id]["sha256"]
+        projection_sha256 = resolved.capture["probe_projection"]["sha256"]
+        bindings = bundle.side["runtime_bindings"]
+    except (KeyError, TypeError) as error:
+        raise ValueError("resolved historical probe binding differs") from error
+    matches = [
+        binding
+        for binding in bindings
+        if binding.get("profile") == resolved.profile_id
+        and binding.get("profile_sha256") == profile_sha256
+        and binding.get("case") == resolved.case
+        and binding.get("runtime") == runtime
+        and binding.get("test_line") == resolved.consumer_line
+        and binding.get("capture_id") == f"{resolved.profile_id}:{resolved.case}"
+        and binding.get("probe_projection_sha256") == projection_sha256
+    ]
+    if len(matches) != 1:
+        raise ValueError("resolved historical probe binding is missing or ambiguous")
+    workloads = [
+        spec
+        for group in ("correctness", "physical_checks")
+        for spec in manifest[group]
+        if isinstance(spec, dict) and spec.get("name") == resolved.case
+    ]
+    if len(workloads) != 1:
+        raise ValueError("resolved historical probe workload is missing or ambiguous")
+    return workloads[0]
+
+
+def _initializer_contract(manifest):
+    return {
+        "mode": "independent-workload-replay-v1",
+        "field_initializer": manifest["reference"]["field_initializer"],
+        "seed": manifest["reference"]["seed"],
+        "field_scale": manifest["reference"]["field_scale"],
+        "precondition_steps": manifest["reference"]["precondition_steps"],
+        "field_origin": "manifest-initializer",
+        "source_origin": "live-torch-plan",
+        "material_origin": "live-torch-plan",
+    }
+
+
+def _capture_torch_candidate(
     reference_path,
     manifest,
     output,
@@ -1815,23 +1980,64 @@ def capture_torch_candidate(
     precision="float64",
     graph_mode="eager",
     compile_mode="default",
+    resolved_probe=None,
+    probe_bundle=None,
+    probe_trust=None,
 ):
     """Independently execute Torch and emit a strict schema-2 candidate."""
     mode = _runtime_contract(device, precision, graph_mode, compile_mode)
-    reference_path = Path(reference_path).resolve(strict=True)
     output = Path(output).resolve()
-    if output == reference_path:
-        raise ValueError("candidate output must differ from the native reference")
-    with _open_bounded_npz(reference_path) as reference:
-        reference_metadata = native_oracle._validate_archive(
-            reference, manifest, "reference"
-        )
-        spec = reference_metadata["workload"]
-        dt = float(np.asarray(reference["step/0/time"])[2])
-        input_arrays = {
-            key: _array_descriptor(reference[key])
-            for key in sorted(reference.files)
-            if key.startswith(("map/", "step/0/"))
+    if resolved_probe is None:
+        reference_path = Path(reference_path).resolve(strict=True)
+        if output == reference_path:
+            raise ValueError("candidate output must differ from the native reference")
+        with _open_bounded_npz(reference_path) as reference:
+            reference_metadata = native_oracle._validate_archive(
+                reference, manifest, "reference"
+            )
+            spec = reference_metadata["workload"]
+            dt = float(np.asarray(reference["step/0/time"])[2])
+            input_arrays = {
+                key: _array_descriptor(reference[key])
+                for key in sorted(reference.files)
+                if key.startswith(("map/", "step/0/"))
+            }
+        input_metadata = {
+            "input_archive": {
+                "sha256": _sha256(reference_path),
+                "size_bytes": reference_path.stat().st_size,
+                "media_type": "application/x-npz",
+                "prefix": "step/0",
+            },
+            "input_step_zero_contract": {
+                "array_contract": "native-step-zero-and-maps-v1",
+                "array_bytes": sum(
+                    descriptor["size_bytes"] for descriptor in input_arrays.values()
+                ),
+                "arrays": input_arrays,
+                "reconstruction": _initializer_contract(manifest),
+            },
+        }
+    else:
+        if reference_path is not None or probe_bundle is None:
+            raise ValueError("probe candidate input mode differs")
+        expected_runtime = {
+            key: mode[key]
+            for key in ("device", "precision", "graph_mode", "compile_mode")
+        }
+        if (
+            resolved_probe.manifest != manifest
+            or resolved_probe.runtime != expected_runtime
+        ):
+            raise ValueError("resolved historical probe runtime/manifest differs")
+        spec = _resolved_probe_workload(probe_bundle, resolved_probe, manifest)
+        dt = _probe_time_step(resolved_probe)
+        reference_metadata = None
+        input_metadata = {
+            "historical_probe_input": _historical_probe_input(
+                probe_bundle, resolved_probe, probe_trust
+            ),
+            "input_initializer_contract": _initializer_contract(manifest),
         }
     simulation = _build_torch_simulation(
         spec,
@@ -1842,10 +2048,11 @@ def capture_torch_candidate(
         graph_mode=graph_mode,
         compile_mode=compile_mode,
     )
-    for name in COMPONENT_NAMES:
-        shape = tuple(reference_metadata["maps"][name]["shape"])
-        if tuple(simulation.plan.shapes[name]) != shape:
-            raise ValueError(f"Torch field shape differs for {name}")
+    if reference_metadata is not None:
+        for name in COMPONENT_NAMES:
+            shape = tuple(reference_metadata["maps"][name]["shape"])
+            if tuple(simulation.plan.shapes[name]) != shape:
+                raise ValueError(f"Torch field shape differs for {name}")
     initial_fields = native_oracle.initial_field_values(
         simulation.plan.shapes,
         manifest["reference"]["seed"],
@@ -1922,29 +2129,7 @@ def capture_torch_candidate(
                 for auxiliary in simulation.sources.auxiliaries
             ],
             "manifest_contract_sha256": _canonical_sha256(manifest),
-            "input_archive": {
-                "sha256": _sha256(reference_path),
-                "size_bytes": reference_path.stat().st_size,
-                "media_type": "application/x-npz",
-                "prefix": "step/0",
-            },
-            "input_step_zero_contract": {
-                "array_contract": "native-step-zero-and-maps-v1",
-                "array_bytes": sum(
-                    descriptor["size_bytes"] for descriptor in input_arrays.values()
-                ),
-                "arrays": input_arrays,
-                "reconstruction": {
-                    "mode": "independent-workload-replay-v1",
-                    "field_initializer": manifest["reference"]["field_initializer"],
-                    "seed": manifest["reference"]["seed"],
-                    "field_scale": manifest["reference"]["field_scale"],
-                    "precondition_steps": manifest["reference"]["precondition_steps"],
-                    "field_origin": "manifest-initializer",
-                    "source_origin": "live-torch-plan",
-                    "material_origin": "live-torch-plan",
-                },
-            },
+            **input_metadata,
             "logical_map_source": "live-torch-plan",
             "actual_geometry_and_coefficients": actual_geometry,
             "plan_identity": simulation.plan_identity,
@@ -1987,13 +2172,72 @@ def capture_torch_candidate(
     arrays["metadata.json"] = np.asarray(json.dumps(metadata, sort_keys=True))
     output.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(output, **arrays)
-    validation = compare_torch_archives(reference_path, output, manifest)
-    if validation != {"passed": True, "failures": []}:
+    if resolved_probe is None:
+        validation = compare_torch_archives(reference_path, output, manifest)
+    else:
+        validation = compare_torch_candidate_to_probe(
+            resolved_probe,
+            probe_bundle,
+            output,
+            manifest,
+            trust=probe_trust,
+        )
+    if not validation["passed"]:
         raise ValueError(
-            "independent Torch reconstruction differs from native step/0 contract: "
+            "independent Torch reconstruction differs from its correctness input: "
             f"{validation['failures'][:1]}"
         )
     return metadata
+
+
+def capture_torch_candidate(
+    reference_path,
+    manifest,
+    output,
+    *,
+    threads=1,
+    device="cpu",
+    precision="float64",
+    graph_mode="eager",
+    compile_mode="default",
+):
+    """Independently execute Torch from a complete native schema-2 archive."""
+    return _capture_torch_candidate(
+        reference_path,
+        manifest,
+        output,
+        threads=threads,
+        device=device,
+        precision=precision,
+        graph_mode=graph_mode,
+        compile_mode=compile_mode,
+    )
+
+
+def capture_torch_candidate_from_probe(
+    resolved,
+    bundle,
+    manifest,
+    output,
+    *,
+    trust,
+    threads=1,
+):
+    """Execute Torch for one exact, reviewed V5 sampled-test binding."""
+    runtime = resolved.runtime
+    return _capture_torch_candidate(
+        None,
+        manifest,
+        output,
+        threads=threads,
+        device=runtime["device"],
+        precision=runtime["precision"],
+        graph_mode=runtime["graph_mode"],
+        compile_mode=runtime["compile_mode"],
+        resolved_probe=resolved,
+        probe_bundle=bundle,
+        probe_trust=trust,
+    )
 
 
 class _BaseArchiveView:
@@ -3079,6 +3323,11 @@ def _validate_reference_transparent_sources(archive, metadata, contract):
     if contract is None:
         return
     expected_records = contract["native_records"]
+    if expected_records is None:
+        raise ValueError(
+            "full historical transparent validation requires observer-native "
+            "source descriptors"
+        )
     for step in ("0", *(str(value) for value in metadata["capture_steps"])):
         actual_records = metadata["steps"][step]["sources"]["updaters"]
         ordinals = {component: 0 for component in COMPONENT_NAMES}
@@ -3123,40 +3372,47 @@ def _validate_reference_transparent_sources(archive, metadata, contract):
                 raise ValueError("native transparent source record counts differ")
 
 
-def _validate_torch_candidate_archive(archive, manifest, *, transparent_contract=None):
+def _validate_torch_candidate_archive(
+    archive, manifest, *, transparent_contract=None, allow_probe=False
+):
     metadata = native_oracle._validate_archive(
         _BaseArchiveView(archive), manifest, "candidate"
     )
     if metadata["backend"] != "torch":
         raise ValueError("candidate correctness archive is not Torch")
     backend = metadata.get("backend_metadata")
+    common_keys = {
+        "producer",
+        "solver_abi",
+        "cuda_graph_execution_representation",
+        "device",
+        "precision",
+        "graph_mode",
+        "compile_policy",
+        "compile_mode",
+        "resolved_device",
+        "paired_real",
+        "auxiliary_precisions",
+        "manifest_contract_sha256",
+        "logical_map_source",
+        "actual_geometry_and_coefficients",
+        "plan_identity",
+        "compile_cache_key",
+        "cuda_graph_regions",
+        "array_contract",
+        "torch_array_bytes",
+        "torch_arrays",
+        "source_arrays",
+    }
+    legacy_input = {"input_archive", "input_step_zero_contract"}
+    probe_input = {"historical_probe_input", "input_initializer_contract"}
+    has_legacy = bool(legacy_input & set(backend))
+    has_probe = bool(probe_input & set(backend))
+    if has_legacy == has_probe or (has_probe and not allow_probe):
+        raise ValueError("Torch correctness candidate input mode is invalid")
     _exact_keys(
         backend,
-        {
-            "producer",
-            "solver_abi",
-            "cuda_graph_execution_representation",
-            "device",
-            "precision",
-            "graph_mode",
-            "compile_policy",
-            "compile_mode",
-            "resolved_device",
-            "paired_real",
-            "auxiliary_precisions",
-            "manifest_contract_sha256",
-            "input_archive",
-            "input_step_zero_contract",
-            "logical_map_source",
-            "actual_geometry_and_coefficients",
-            "plan_identity",
-            "compile_cache_key",
-            "cuda_graph_regions",
-            "array_contract",
-            "torch_array_bytes",
-            "torch_arrays",
-            "source_arrays",
-        },
+        common_keys | (probe_input if has_probe else legacy_input),
         "Torch correctness backend_metadata",
     )
     mode = _runtime_contract(
@@ -3189,24 +3445,76 @@ def _validate_torch_candidate_archive(archive, manifest, *, transparent_contract
         precision != "float64" for precision in auxiliary_precisions
     ):
         raise ValueError("Torch auxiliary precision metadata is invalid")
-    _exact_keys(
-        backend["input_archive"],
-        {"sha256", "size_bytes", "media_type", "prefix"},
-        "Torch correctness input_archive",
-    )
-    input_archive = backend["input_archive"]
-    if (
-        not _hex_string(input_archive["sha256"], 64)
-        or type(input_archive["size_bytes"]) is not int
-        or input_archive["size_bytes"] < 1
-        or input_archive["media_type"] != "application/x-npz"
-        or input_archive["prefix"] != "step/0"
-    ):
-        raise ValueError("Torch correctness input archive descriptor is invalid")
-    if not _input_step_zero_contract_complete(
-        backend["input_step_zero_contract"], manifest
-    ):
-        raise ValueError("Torch native step/0 input contract is invalid")
+    if has_probe:
+        historical_input = backend["historical_probe_input"]
+        expected_keys = {
+            "fixture_schema_version",
+            "fixture_kind",
+            "bundle_manifest_sha256",
+            "bundle_manifest_bytes",
+            "fixture_sha256",
+            "fixture_bytes",
+            "profile",
+            "profile_sha256",
+            "case",
+            "capture_id",
+            "probe_projection_sha256",
+            "source_manifest_sha256",
+            "native_oracle_sha256",
+            "historical_observer",
+            "sampling_algorithm",
+            "runtime",
+            "authority",
+        }
+        _exact_keys(historical_input, expected_keys, "Torch historical_probe_input")
+        digest_keys = {
+            "bundle_manifest_sha256",
+            "fixture_sha256",
+            "profile_sha256",
+            "probe_projection_sha256",
+            "source_manifest_sha256",
+            "native_oracle_sha256",
+        }
+        if (
+            any(not _hex_string(historical_input[key], 64) for key in digest_keys)
+            or historical_input["fixture_schema_version"] != 8
+            or historical_input["fixture_kind"] != "pre-cutover-native-numeric-probes"
+            or type(historical_input["bundle_manifest_bytes"]) is not int
+            or historical_input["bundle_manifest_bytes"] < 1
+            or type(historical_input["fixture_bytes"]) is not int
+            or historical_input["fixture_bytes"] < 1
+            or historical_input["case"] != metadata["workload"]["name"]
+            or historical_input["capture_id"]
+            != f"{historical_input['profile']}:{historical_input['case']}"
+            or historical_input["runtime"]
+            != {
+                key: mode[key]
+                for key in ("device", "precision", "graph_mode", "compile_mode")
+            }
+            or historical_input["authority"]
+            != "sampled-test-only; not full-array native authority"
+            or backend["input_initializer_contract"] != _initializer_contract(manifest)
+        ):
+            raise ValueError("Torch historical probe input contract is invalid")
+    else:
+        _exact_keys(
+            backend["input_archive"],
+            {"sha256", "size_bytes", "media_type", "prefix"},
+            "Torch correctness input_archive",
+        )
+        input_archive = backend["input_archive"]
+        if (
+            not _hex_string(input_archive["sha256"], 64)
+            or type(input_archive["size_bytes"]) is not int
+            or input_archive["size_bytes"] < 1
+            or input_archive["media_type"] != "application/x-npz"
+            or input_archive["prefix"] != "step/0"
+        ):
+            raise ValueError("Torch correctness input archive descriptor is invalid")
+        if not _input_step_zero_contract_complete(
+            backend["input_step_zero_contract"], manifest
+        ):
+            raise ValueError("Torch native step/0 input contract is invalid")
     expected_geometry = _initialized_geometry_metadata(
         metadata["workload"], np.asarray(archive["step/0/time"])[2]
     )
@@ -3885,6 +4193,70 @@ def _comparison_dtype(candidate_metadata, key, expected, actual):
 def _is_source_array(key):
     parts = key.split("/")
     return len(parts) > 2 and parts[2] == "source"
+
+
+def _compare_probe_snapshot(snapshot, resolved):
+    comparator = getattr(historical_probes, "compare_candidate_bytes", None)
+    if not callable(comparator):
+        raise ValueError("historical probe byte-snapshot comparator is unavailable")
+    return comparator(snapshot.raw, resolved)
+
+
+def compare_torch_candidate_to_probe(
+    resolved, bundle, candidate_path, manifest, *, trust, include_tolerances=False
+):
+    """Validate one probe candidate structurally, then compare bounded samples."""
+    try:
+        snapshot = _read_bounded_npz_snapshot(candidate_path)
+        with _open_bounded_npz_snapshot(snapshot) as candidate:
+            try:
+                metadata = _validate_torch_candidate_archive(
+                    candidate, manifest, allow_probe=True
+                )
+                expected_input = _historical_probe_input(bundle, resolved, trust)
+                if not native_oracle._same_json_value(
+                    metadata["backend_metadata"]["historical_probe_input"],
+                    expected_input,
+                ):
+                    raise ValueError("Torch historical probe binding differs")
+                result = _compare_probe_snapshot(snapshot, resolved)
+            except (
+                AttributeError,
+                IndexError,
+                KeyError,
+                OverflowError,
+                TypeError,
+                UnicodeError,
+                ValueError,
+            ) as error:
+                result = {
+                    "passed": False,
+                    "failures": [
+                        {"key": "candidate/archive-contract", "error": str(error)}
+                    ],
+                    "tolerance_results": [],
+                }
+    except (
+        AttributeError,
+        EOFError,
+        IndexError,
+        KeyError,
+        MemoryError,
+        OSError,
+        OverflowError,
+        TypeError,
+        UnicodeError,
+        ValueError,
+        zipfile.BadZipFile,
+    ) as error:
+        result = {
+            "passed": False,
+            "failures": [{"key": "archive/container", "error": str(error)}],
+            "tolerance_results": [],
+        }
+    if include_tolerances:
+        return result
+    return {"passed": result["passed"], "failures": result["failures"]}
 
 
 def compare_torch_archives(

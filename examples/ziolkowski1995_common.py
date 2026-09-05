@@ -16,7 +16,7 @@ Reference:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from math import pi, sin
+from math import pi, sqrt
 from pathlib import Path
 from time import perf_counter
 
@@ -32,9 +32,18 @@ from gmes import (
     Ex,
     PointSource,
     Shell,
-    TEMzFDTD,
+    TorchProbeSpec,
+    TorchRuntimeConfig,
+    TorchSimulation,
 )
-from gmes.source import SrcTime
+from gmes.source import (
+    PaperSourceTime,
+    PumpProbe,
+    SechSinePulse,
+    SmoothSine,
+    UltrafastPulse,
+    UltrafastPulseTrain,
+)
 
 PAPER_C = 3.0e8
 PAPER_EPS0 = 8.854187817e-12
@@ -129,112 +138,6 @@ class GmesUnits:
 
 
 UNITS = GmesUnits()
-
-
-class PaperSourceTime(SrcTime):
-    """Base class for real-valued source functions used by the paper."""
-
-    def init(self, cmplx):
-        if cmplx:
-            raise ValueError("Ziolkowski reproductions require real fields")
-
-    def display_info(self, indent=0):
-        print(" " * indent + self.__class__.__name__)
-
-
-class SechSinePulse(PaperSourceTime):
-    """Finite 20-cycle SIT pulse from Eqs. (21), (22), and (25)."""
-
-    def __init__(self, omega: float, pulse_width: float):
-        self.omega = float(omega)
-        self.pulse_width = float(pulse_width)
-
-    def envelope(self, time: float) -> float:
-        if not 0 <= time <= self.pulse_width:
-            return 0.0
-        gamma = (time - self.pulse_width / 2) / (self.pulse_width / 2)
-        return 1 / np.cosh(10 * gamma)
-
-    def oscillator(self, time):
-        return self.envelope(time) * sin(self.omega * time)
-
-
-class UltrafastPulse(PaperSourceTime):
-    """Twice continuously differentiable zero-area pulse from Eq. (28)."""
-
-    SHAPE_FACTOR = -4.201355
-
-    def __init__(self, pulse_width: float):
-        self.pulse_width = float(pulse_width)
-
-    def oscillator(self, time):
-        if not 0 <= time <= self.pulse_width:
-            return 0.0
-        x_value = 2 * time / self.pulse_width - 1
-        return self.SHAPE_FACTOR * x_value * (1 - x_value**2) ** 3
-
-
-class UltrafastPulseTrain(PaperSourceTime):
-    """Two-pulse excitation used for Fig. 9."""
-
-    def __init__(
-        self, pulse_width: float, alpha: float = 0.96, delay_periods: float = 3
-    ):
-        self.pulse = UltrafastPulse(pulse_width)
-        self.pulse_width = float(pulse_width)
-        self.alpha = float(alpha)
-        self.delay = float(delay_periods) * self.pulse_width
-
-    def oscillator(self, time):
-        return self.pulse.oscillator(time) + self.alpha * self.pulse.oscillator(
-            time - self.delay
-        )
-
-
-class SmoothSine(PaperSourceTime):
-    """Resonant sinusoid from Ziolkowski et al. (1995), Eq. (29).
-
-    The printed definition of ``x`` is inconsistent with the five-period
-    interval. The monotone half-window below follows the paper's description
-    of a smooth turn-on and the absence of a precursor in Fig. 10. See
-    ``VERIFICATION.md`` for the equation audit.
-    """
-
-    def __init__(self, omega: float, period: float):
-        self.omega = float(omega)
-        self.period = float(period)
-        self.rise_time = 5 * self.period
-
-    def envelope(self, time: float) -> float:
-        if time < 0:
-            return 0.0
-        if time >= self.rise_time:
-            return 1.0
-        x_value = time / self.rise_time - 1
-        return (1 - x_value**2) ** 4
-
-    def oscillator(self, time):
-        return self.envelope(time) * sin(self.omega * time)
-
-
-class PumpProbe(PaperSourceTime):
-    """Ultrafast pump followed by the weak resonant probe in Fig. 12.
-
-    The probe uses the same corrected monotone interpretation of Ziolkowski
-    et al. (1995), Eq. (29), as Fig. 10. See ``SmoothSine`` and
-    ``VERIFICATION.md`` for the equation audit.
-    """
-
-    def __init__(self, omega: float, pulse_width: float, beta: float, delay: float):
-        self.pump = UltrafastPulse(pulse_width)
-        self.probe = SmoothSine(omega, pulse_width)
-        self.beta = float(beta)
-        self.delay = float(delay)
-
-    def oscillator(self, time):
-        return self.pump.oscillator(time) + self.beta * self.probe.oscillator(
-            time - self.delay
-        )
 
 
 @dataclass(frozen=True)
@@ -424,7 +327,11 @@ def pump_probe_scenario(delay_periods: int, quick: bool = False) -> Scenario:
     )
 
 
-def make_simulation(scenario: Scenario, verbose: bool = False) -> TEMzFDTD:
+def make_simulation(
+    scenario: Scenario,
+    verbose: bool = False,
+    probes: tuple[TorchProbeSpec, ...] = (),
+) -> TorchSimulation:
     """Construct the paper's one-dimensional Ex/Hy configuration."""
 
     space = Cartesian(size=(0, 0, scenario.domain_um), resolution=scenario.resolution)
@@ -456,63 +363,89 @@ def make_simulation(scenario: Scenario, verbose: bool = False) -> TEMzFDTD:
         component=Ex,
         amp=UNITS.electric_field(scenario.amplitude_v_m),
     )
-    simulation = TEMzFDTD(
-        space,
-        geometry,
-        [source],
+    runtime = TorchRuntimeConfig(device="cpu", precision="float64", cpu_threads=1)
+    simulation = TorchSimulation(
+        space=space,
+        geometry=geometry,
+        sources=(source,),
+        probes=probes,
+        runtime=runtime,
         courant_ratio=0.5,
-        verbose=verbose,
     )
-    simulation.init()
+    if verbose:
+        print(
+            f"TorchSimulation device={simulation.device}, dtype={simulation.dtype}, "
+            f"dt={simulation.plan.dt:g}"
+        )
     return simulation
 
 
-def _dm2_electric(simulation: TEMzFDTD):
-    return next(
-        material
-        for material in simulation.pw_material[Ex].values()
-        if material.name() == "Dm2Electric"
+def _step_count(simulation: TorchSimulation) -> int:
+    """Return the explicit integer solver clock outside the advance loop."""
+
+    return int(simulation.state.step_count.detach().cpu())
+
+
+def _physical_dm2_populations(
+    simulation: TorchSimulation, count: int
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Map the public physical DM2 snapshot onto the sampled Ex line.
+
+    ``dm2_state_snapshot`` has already undone the decaying transformed-state
+    representation used by the fixed Torch DM2 update.  The bucket targets are
+    flattened Ex indices, so only their z coordinates belong in this 1-D view.
+    Cells outside the DM2 block retain the native example's zero population.
+    """
+
+    populations = np.zeros((3, count), dtype=float)
+    shape = simulation.plan.shapes["Ex"]
+    for bucket in simulation.dm2_state_snapshot():
+        if bucket["component"] != "Ex":
+            continue
+        targets = np.asarray(bucket["targets"], dtype=np.intp)
+        z_indices = np.unravel_index(targets, shape)[2]
+        rho = np.asarray(bucket["rho"], dtype=float)
+        inside = (z_indices >= 0) & (z_indices < count)
+        for rho_index in range(3):
+            populations[rho_index, z_indices[inside]] = rho[inside, 0, rho_index]
+    return populations[0], populations[1], populations[2]
+
+
+def sample_snapshot(simulation: TorchSimulation) -> SpatialSnapshot:
+    """Transfer one Ex-line field/population snapshot after bounded advance."""
+
+    count = int(simulation.space.whole_field_size[2])
+    distance = np.arange(count, dtype=float) * simulation.plan.dr[2]
+    fields = simulation.host_snapshot()
+    electric = np.asarray(fields["Ex"], dtype=float)[0, 0, :count]
+    return SpatialSnapshot(
+        distance,
+        electric,
+        *_physical_dm2_populations(simulation, count),
     )
 
 
-def sample_snapshot(simulation: TEMzFDTD) -> SpatialSnapshot:
-    count = int(simulation.space.whole_field_size[2])
-    distance = np.arange(count, dtype=float) * simulation.dz
-    electric = np.array(simulation.ex[0, 0, :count], copy=True)
-    dm2 = _dm2_electric(simulation)
-    time = simulation.time_step.t
-    populations = []
-    for rho_index in range(3):
-        populations.append(
-            np.fromiter(
-                (
-                    dm2.get_rho((0, 0, index), 0, rho_index, time)
-                    for index in range(count)
-                ),
-                dtype=float,
-                count=count,
-            )
-        )
-    return SpatialSnapshot(distance, electric, *populations)
-
-
 def run_snapshots(
-    simulation: TEMzFDTD, times_s: tuple[float, ...]
+    simulation: TorchSimulation, times_s: tuple[float, ...]
 ) -> dict[float, SpatialSnapshot]:
     """Advance once and capture snapshots at the nearest time steps."""
 
     targets = {
-        int(round(UNITS.time(time_s) / simulation.time_step.dt)): time_s
+        int(round(UNITS.time(time_s) / simulation.plan.dt)): time_s
         for time_s in times_s
     }
     snapshots = {}
     final_step = max(targets)
+    current_step = _step_count(simulation)
+    if final_step < current_step:
+        raise ValueError("snapshot times must not precede the simulation state")
     started = perf_counter()
-    while simulation.time_step.n < final_step:
-        simulation.step()
-        step = int(round(simulation.time_step.n))
-        if step in targets:
-            snapshots[targets[step]] = sample_snapshot(simulation)
+    for step in sorted(targets):
+        if step < current_step:
+            continue
+        simulation.advance(step - current_step)
+        current_step = step
+        snapshots[targets[step]] = sample_snapshot(simulation)
     elapsed = perf_counter() - started
     print(
         f"completed {final_step:,} steps over "
@@ -521,7 +454,7 @@ def run_snapshots(
     return snapshots
 
 
-def _nearest_index(simulation: TEMzFDTD, distance_um: float) -> int:
+def _nearest_index(simulation: TorchSimulation, distance_um: float) -> int:
     coordinate = distance_um - simulation.space.half_size[2]
     return int(simulation.space.space_to_ex_index(0, 0, coordinate)[2])
 
@@ -537,22 +470,45 @@ def run_gain(
 ) -> GainResult:
     """Run a gain case and record the probes used by Figs. 10 and 12."""
 
-    simulation = make_simulation(scenario, verbose=verbose)
+    if isinstance(sample_stride, bool) or not isinstance(sample_stride, int):
+        raise TypeError("sample_stride must be an integer")
+    if sample_stride < 1:
+        raise ValueError("sample_stride must be positive")
     input_point = scenario.medium_start_um - 10 / scenario.resolution
     output_point = scenario.medium_end_um + 10 / scenario.resolution
-    input_index = _nearest_index(simulation, input_point)
-    output_index = _nearest_index(simulation, output_point)
-    final_step = int(round(UNITS.time(duration_s) / simulation.time_step.dt))
-    times = []
-    input_field = []
-    output_field = []
+    # A zero-sized Cartesian axis retains the grid spacing, so the generic
+    # Torch Courant limit is the three-axis value even for this 1-D line.
+    dt = 0.5 / (sqrt(3) * scenario.resolution)
+    final_step = int(round(UNITS.time(duration_s) / dt))
+    if final_step < 1:
+        raise ValueError("duration_s must include at least one simulation step")
+    simulation = make_simulation(
+        scenario,
+        verbose=verbose,
+        probes=(
+            TorchProbeSpec(
+                Ex,
+                (0, 0, input_point - scenario.domain_um / 2),
+                capacity=final_step,
+                coordinates="space",
+            ),
+            TorchProbeSpec(
+                Ex,
+                (0, 0, output_point - scenario.domain_um / 2),
+                capacity=final_step,
+                coordinates="space",
+            ),
+        ),
+    )
+    if not np.isclose(simulation.plan.dt, dt, rtol=0, atol=1e-15):
+        raise RuntimeError("paper probe clock does not match the planned Courant step")
     started = perf_counter()
-    while simulation.time_step.n < final_step:
-        simulation.step()
-        if int(round(simulation.time_step.n)) % sample_stride == 0:
-            times.append(UNITS.time_si(simulation.time_step.t))
-            input_field.append(simulation.ex[0, 0, input_index])
-            output_field.append(simulation.ex[0, 0, output_index])
+    simulation.advance(final_step)
+    input_samples, output_samples = simulation.flush_probes()
+    sample_indices = slice(sample_stride - 1, None, sample_stride)
+    times = UNITS.time_si(input_samples.times[sample_indices])
+    input_field = input_samples.values[sample_indices]
+    output_field = output_samples.values[sample_indices]
     elapsed = perf_counter() - started
     print(
         f"completed {final_step:,} steps over {scenario.cells:,} cells in "
@@ -561,7 +517,7 @@ def run_gain(
     if normalization_amplitude_v_m is None:
         normalization_amplitude_v_m = scenario.amplitude_v_m
     normalization_amplitude = UNITS.electric_field(normalization_amplitude_v_m)
-    sample_interval_s = sample_stride * UNITS.time_si(simulation.time_step.dt)
+    sample_interval_s = sample_stride * UNITS.time_si(simulation.plan.dt)
     input_intensity = carrier_intensity(
         np.asarray(input_field),
         sample_interval_s,

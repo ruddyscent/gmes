@@ -28,19 +28,13 @@ _T = TypeVar("_T")
 
 
 class _CartComm(Protocol):
-    """MPI-compatible operations used by Cartesian."""
+    """Cartesian metadata and local communicator operations."""
 
     def Get_topo(self) -> tuple[Index3, Index3, Index3]:
         """Return Cartesian dimensions, periods, and coordinates."""
 
     def Get_size(self) -> int:
         """Return the communicator size."""
-
-    def recv(self, source: int | None = None) -> object:
-        """Receive an object from a rank."""
-
-    def send(self, obj: object, dest: int = 0) -> None:
-        """Send an object to a rank."""
 
     def Shift(self, direction: int, disp: int) -> tuple[int, int]:
         """Return source and destination ranks for a Cartesian shift."""
@@ -213,10 +207,10 @@ class Cartesian(object):
     dt -- the time differential
     whole_field_size -- the total array size for the each component of
         the electromagnetic field except the communication buffers
-    my_id -- mpi rank of this node
-    numprocs -- the number of mpi nodes
-    cart_comm -- mpi Cartesian communicator
-    my_cart_idx -- the coordinates of this node in mpi Cartesian communicator
+    my_id -- local rank (0 for a serial grid)
+    numprocs -- number of ranks (1 for a serial grid)
+    cart_comm -- Cartesian topology metadata and local communicator operations
+    my_cart_idx -- the coordinates of this rank in the Cartesian topology
     general_field_size -- the general array size for the each component of
         the electromagnetic field except the communication buffers
     my_field_size -- the specific array size for the each component of
@@ -236,9 +230,16 @@ class Cartesian(object):
         size -- a length three sequence consists of non-negative numbers
         resolution -- number of sections of one unit. scalar or 3-tuple
             (default 15)
-        parallel -- whether space be divided into segments (default False)
+        parallel -- must be False; use TorchDistributedSimulation for
+            distributed execution
 
         """
+        if parallel:
+            raise NotImplementedError(
+                "Cartesian(parallel=True) is unsupported; "
+                "use TorchDistributedSimulation for distributed execution"
+            )
+
         try:
             if len(cast(Sequence[float], resolution)) == 3:
                 self.res = array(resolution, np.double)
@@ -259,21 +260,6 @@ class Cartesian(object):
         self.my_id = 0
         self.numprocs = 1
         self.cart_comm = AuxiCartComm((1, 1, 1), (1, 1, 1))
-        try:
-            if parallel:
-                # mpi4py is an optional runtime backend without a base install.
-                from mpi4py import MPI
-
-                self.my_id = MPI.COMM_WORLD.rank
-                self.numprocs = MPI.COMM_WORLD.size
-                self.cart_comm = cast(
-                    _CartComm,
-                    MPI.COMM_WORLD.Create_cart(
-                        self.find_best_deploy(), (True, True, True)
-                    ),
-                )
-        except ImportError:
-            pass
 
         self.my_cart_idx = self.cart_comm.Get_topo()[2]
 
@@ -287,22 +273,12 @@ class Cartesian(object):
         self.global_field_offset = self.general_field_size * self.my_cart_idx
 
     def bcast(self, obj: _T | None = None, root: int | None = None) -> _T | None:
-        """Same with the Broadcast but, it handles for unknown root among
-        the nodes.
-
-        """
-        size = self.cart_comm.Get_size()
-        if size == 1:
-            return obj
-
-        if root is None:
-            from mpi4py import MPI
-
-            obj = cast(_T, self.cart_comm.recv(source=MPI.ANY_SOURCE))
-        else:
-            for dest in range(size):
-                if dest != root:
-                    self.cart_comm.send(obj, dest)
+        """Return the local object; multi-rank object broadcasts are unsupported."""
+        if self.numprocs != 1 or self.cart_comm.Get_size() != 1:
+            raise NotImplementedError(
+                "Cartesian.bcast() supports serial grids only; "
+                "use TorchDistributedSimulation for distributed execution"
+            )
 
         return obj
 

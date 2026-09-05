@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Capture, compare, and benchmark the immutable native FDTD oracle."""
+"""Validate immutable historical native archives and benchmark records.
+
+Candidate checkouts run the retained Torch providers.  Native capture and
+timing execution are deliberately restricted to the manifest-pinned historical
+observer checkout.
+"""
 
 import argparse
 import hashlib
@@ -391,22 +396,6 @@ def _checkout_provenance(checkout, source):
     }
 
 
-def _timing_summary(samples):
-    values = [float(value) for value in samples]
-    sample_median = median(values)
-    absolute_deviations = [abs(value - sample_median) for value in values]
-    return {
-        "raw_seconds": values,
-        "median_seconds": sample_median,
-        "p95_seconds": _percentile95(values),
-        "population_stdev_seconds": pstdev(values),
-        "relative_mad": (
-            median(absolute_deviations) / sample_median if sample_median else 0.0
-        ),
-        "repetitions": len(values),
-    }
-
-
 def material_from_name(name, gmes):
     """Build one material strategy from its backend-neutral manifest name."""
     drude_poles = tuple(
@@ -657,29 +646,15 @@ def _build_sources(spec, gmes):
 
 
 def build_simulation(spec, gmes):
-    """Build a native simulation solely from one JSON workload object."""
-    space = gmes.Cartesian(size=tuple(spec["size"]), resolution=spec["resolution"])
-    if spec["recipe"] == "mixed":
-        geometry = _mixed_geometry(spec, gmes)
-    elif spec["recipe"] == "coverage":
-        geometry = _coverage_geometry(spec, gmes)
-    elif spec["recipe"] == "heterogeneous":
-        geometry = _heterogeneous_geometry(spec, gmes)
-    else:
-        material_name = spec["material"]
-        if material_name in {"upml", "cpml"}:
-            geometry = [
-                gmes.DefaultMedium(material_from_name("dielectric", gmes)),
-                gmes.Shell(
-                    material=material_from_name(material_name, gmes),
-                    thickness=spec.get("pml_thickness", 1),
-                ),
-            ]
-        else:
-            geometry = [gmes.DefaultMedium(material_from_name(material_name, gmes))]
-    kwargs = {"bloch": (0.07, 0.11, 0.13)} if spec.get("complex") else {}
-    return gmes.FDTD(
-        space, geometry, _build_sources(spec, gmes), verbose=False, **kwargs
+    """Reject native construction in the candidate checkout.
+
+    Historical captures are executable only by ``run_isolated_oracle.py`` from
+    the manifest-pinned observer checkout.  This module remains a reader and
+    archive validator for those immutable records.
+    """
+    raise RuntimeError(
+        "native simulation construction is retired in this checkout; use the "
+        "manifest-pinned historical observer"
     )
 
 
@@ -707,126 +682,11 @@ def initial_field_values(shapes, seed, scale=1e-3, *, complex_fields=False):
     return result
 
 
-def initialize_fields(simulation, seed, scale=1e-3):
-    """Fill every active field with fixed-seed nonzero values."""
-    shapes = {
-        component.__name__: tuple(field.shape)
-        for component, field in simulation.field.items()
-    }
-    values = initial_field_values(
-        shapes,
-        seed,
-        scale,
-        complex_fields=simulation.cmplx,
-    )
-    for component, field in simulation.field.items():
-        field[...] = values[component.__name__]
-        if not np.all(field != 0):
-            raise AssertionError("oracle seed unexpectedly produced a zero field value")
-
-
-def _component_maps(simulation):
-    arrays = {}
-    metadata = {}
-    for component, field in simulation.field.items():
-        axes = simulation.space.component_coordinate_axes(component, field.shape)
-        lowered = simulation.geom_tree.lower_grid(
-            *axes, 0, field.size, component=component
-        )
-        name = component.__name__
-        arrays[f"map/{name}/material_ids"] = np.asarray(lowered.material_ids).copy()
-        arrays[f"map/{name}/underlying_ids"] = np.asarray(lowered.underlying_ids).copy()
-        metadata[name] = {
-            "shape": list(field.shape),
-            "dtype": str(field.dtype),
-            "active_cells": int(field.size),
-            "material_regions": int(np.unique(lowered.material_ids).size),
-            "underlying_regions": int(
-                np.unique(lowered.underlying_ids[lowered.underlying_ids >= 0]).size
-            ),
-        }
-    return arrays, metadata
-
-
 def _linear_run_count(indices, shape):
     if not len(indices):
         return 0
     linear = np.sort(np.ravel_multi_index(indices.T, shape))
     return int(1 + np.count_nonzero(np.diff(linear) != 1))
-
-
-def _updater_strategies(simulation, native_type):
-    family = native_type
-    for component in COMPONENT_NAMES:
-        family = family.replace(f"{component}Real", "").replace(f"{component}Cmplx", "")
-    compatible = {
-        "DcpPlrc": {"DcpPlrc", "DcpRc"},
-    }.get(family, {family})
-    strategies = sorted(
-        {
-            type(geometry.material).__name__
-            for geometry in simulation.geom_list
-            if type(geometry.material).__name__ in compatible
-        }
-    )
-    return strategies or [family]
-
-
-def _updater_records(simulation, step, arrays, prefix="state"):
-    records = []
-    for component, updaters in sorted(
-        simulation.pw_material.items(), key=lambda item: item[0].__name__
-    ):
-        ordered = sorted(
-            updaters.items(),
-            key=lambda item: (type(item[0]).__name__, type(item[1]).__name__),
-        )
-        for ordinal, (material_descriptor, updater) in enumerate(ordered):
-            native_type = type(updater).__name__
-            strategies = _updater_strategies(simulation, native_type)
-            strategy = "+".join(strategies)
-            record_prefix = (
-                f"step/{step}/{prefix}/{component.__name__}/{ordinal}-{strategy}"
-            )
-            indices = np.asarray(updater.oracle_indices(), dtype=np.intc).reshape(-1, 3)
-            state = np.asarray(updater.oracle_state(), dtype=np.complex128)
-            arrays[f"{record_prefix}/indices"] = indices
-            arrays[f"{record_prefix}/values"] = state
-            run_count = _linear_run_count(indices, simulation.field[component].shape)
-            cells = int(updater.idx_size())
-            plan_bytes = int(updater.plan_bytes())
-            index_bytes = int(updater.oracle_index_bytes())
-            parameter_bytes = int(updater.oracle_parameter_bytes())
-            records.append(
-                {
-                    "component": component.__name__,
-                    "strategy": strategy,
-                    "strategies": strategies,
-                    "native_type": native_type,
-                    "cells": cells,
-                    "coverage": cells / simulation.field[component].size,
-                    "fragmentation_runs": run_count,
-                    "fragmentation_ratio": run_count / cells if cells else 0.0,
-                    "state_values": int(state.size),
-                    "state_nonzero_values": int(np.count_nonzero(state)),
-                    "state_width": state.size / cells if cells else 0.0,
-                    "state_key": f"{record_prefix}/values",
-                    "state_bytes": int(updater.oracle_state_bytes()),
-                    "plan_bytes": plan_bytes,
-                    "index_bytes": index_bytes,
-                    "parameter_bytes": parameter_bytes,
-                    "live_updater_bytes": (plan_bytes + index_bytes + parameter_bytes),
-                    "plan_runs": int(updater.plan_run_count()),
-                    "bucket_signature": [
-                        component.__name__,
-                        strategy,
-                        native_type,
-                        int(updater.idx_size()),
-                        int(state.size),
-                    ],
-                }
-            )
-    return records
 
 
 def _source_param_values(parameter, time):
@@ -848,205 +708,20 @@ def _source_param_values(parameter, time):
     return values
 
 
-def _source_records(simulation, step, arrays):
-    records = []
-    for component, updaters in sorted(
-        simulation.pw_source.items(), key=lambda item: item[0].__name__
-    ):
-        for ordinal, updater in enumerate(
-            sorted(updaters.values(), key=lambda value: type(value).__name__)
-        ):
-            ordered = sorted(updater._param.items())
-            indices = np.asarray([index for index, _ in ordered], dtype=np.intc)
-            if not len(indices):
-                indices = np.empty((0, 3), dtype=np.intc)
-            values = np.asarray(
-                [
-                    value
-                    for _, parameter in ordered
-                    for value in _source_param_values(parameter, simulation.time_step.t)
-                ],
-                dtype=np.complex128,
-            )
-            record_prefix = (
-                f"step/{step}/source/{component.__name__}/"
-                f"{ordinal}-{type(updater).__name__}"
-            )
-            arrays[f"{record_prefix}/indices"] = indices
-            arrays[f"{record_prefix}/values"] = values
-            records.append(
-                {
-                    "component": component.__name__,
-                    "native_type": type(updater).__name__,
-                    "cells": len(ordered),
-                    "state_values": int(values.size),
-                }
-            )
-
-    auxiliary = []
-    for ordinal, source in enumerate(simulation.src_list):
-        aux_fdtd = getattr(source, "aux_fdtd", None)
-        if aux_fdtd is None:
-            continue
-        # GaussianBeam wraps the actual auxiliary FDTD in a source-time
-        # adapter.  Serialize the solver state, not that adapter object.
-        nested = getattr(aux_fdtd, "aux_fdtd", None)
-        if not hasattr(aux_fdtd, "time_step") and nested is not None:
-            aux_fdtd = nested
-        aux_prefix = f"step/{step}/source_aux/{ordinal}-{type(source).__name__}"
-        arrays[f"{aux_prefix}/time"] = np.asarray(
-            [aux_fdtd.time_step.n, aux_fdtd.time_step.t, aux_fdtd.time_step.dt]
-        )
-        for component, field in aux_fdtd.field.items():
-            arrays[f"{aux_prefix}/field/{component.__name__}"] = field.copy()
-        aux_records = _updater_records(
-            aux_fdtd, step, arrays, prefix=f"source_aux_material/{ordinal}"
-        )
-        auxiliary.append(
-            {
-                "source": type(source).__name__,
-                "fields": {
-                    component.__name__: list(field.shape)
-                    for component, field in aux_fdtd.field.items()
-                },
-                "materials": aux_records,
-            }
-        )
-    return {"updaters": records, "auxiliary": auxiliary}
-
-
-def _physical_observables(simulation, step, arrays):
-    prefix = f"step/{step}/physical"
-    energy = 0.0
-    maximum = 0.0
-    boundary_low = 0.0
-    boundary_high = 0.0
-    finite = True
-    for component, field in simulation.field.items():
-        magnitude = np.abs(field)
-        energy += float(np.sum(magnitude * magnitude))
-        maximum = max(maximum, float(np.max(magnitude)))
-        boundary_low += float(np.sum(magnitude[0] * magnitude[0]))
-        boundary_high += float(np.sum(magnitude[-1] * magnitude[-1]))
-        finite = finite and bool(np.isfinite(field).all())
-        transverse_axes = tuple(range(1, field.ndim))
-        line = np.mean(field, axis=transverse_axes) if transverse_axes else field
-        arrays[f"{prefix}/spectrum/{component.__name__}"] = np.abs(np.fft.fft(line))
-    arrays[f"{prefix}/summary"] = np.asarray(
-        [energy, maximum, boundary_low, boundary_high, float(finite)]
+def _source_records(*_args, **_kwargs):
+    """Reject candidate-checkout use of the retired native source adapter."""
+    raise RuntimeError(
+        "native source-record capture is retired in this checkout; use the "
+        "manifest-pinned historical observer"
     )
-    return {
-        "energy": energy,
-        "maximum_abs_field": maximum,
-        "boundary_low_energy": boundary_low,
-        "boundary_high_energy": boundary_high,
-        "finite": finite,
-    }
-
-
-def _snapshot(simulation, step, arrays):
-    for component, field in simulation.field.items():
-        arrays[f"step/{step}/field/{component.__name__}"] = field.copy()
-    arrays[f"step/{step}/time"] = np.asarray(
-        [simulation.time_step.n, simulation.time_step.t, simulation.time_step.dt]
-    )
-    return {
-        "materials": _updater_records(simulation, step, arrays),
-        "sources": _source_records(simulation, step, arrays),
-        "physical": _physical_observables(simulation, step, arrays),
-    }
 
 
 def capture_case(spec, manifest, output):
-    """Capture complete maps, fields, and persistent updater states into NPZ."""
-    import gmes
-
-    reference_source = Path(gmes.__file__).resolve()
-    expected_checkout = os.environ.get("GMES_ORACLE_EXPECTED_CHECKOUT")
-    source_checkout = (
-        Path(expected_checkout).resolve()
-        if expected_checkout
-        else _git_checkout(reference_source)
+    """Reject generation of a native archive in the candidate checkout."""
+    raise RuntimeError(
+        "native oracle capture is retired in this checkout; invoke the pinned "
+        "historical observer through run_isolated_oracle.py"
     )
-    if not reference_source.is_relative_to(source_checkout):
-        raise RuntimeError(
-            "isolated oracle imported gmes outside the requested checkout: "
-            f"{reference_source}"
-        )
-    controller_source = Path(__file__).resolve()
-    provenance = {
-        "source": _checkout_provenance(source_checkout, reference_source),
-        "controller": _checkout_provenance(
-            _git_checkout(controller_source), controller_source
-        ),
-    }
-    simulation = build_simulation(spec, gmes)
-    simulation.init()
-    reference = manifest["reference"]
-    initialize_fields(simulation, reference["seed"], reference["field_scale"])
-    for _ in range(reference["precondition_steps"]):
-        simulation.step()
-
-    arrays, map_metadata = _component_maps(simulation)
-    step_records = {"0": _snapshot(simulation, 0, arrays)}
-    current = 0
-    capture_steps = spec.get("capture_steps", reference["capture_steps"])
-    for target in capture_steps:
-        while current < target:
-            simulation.step()
-            current += 1
-        step_records[str(target)] = _snapshot(simulation, target, arrays)
-
-    all_records = [
-        record for snapshot in step_records.values() for record in snapshot["materials"]
-    ]
-    final_records = step_records[str(current)]["materials"]
-    active_cells = sum(record["cells"] for record in final_records)
-    state_bytes = sum(record["state_bytes"] for record in final_records)
-    plan_bytes = sum(record["plan_bytes"] for record in final_records)
-    index_bytes = sum(record["index_bytes"] for record in final_records)
-    parameter_bytes = sum(record["parameter_bytes"] for record in final_records)
-    geometry_metadata = [
-        {
-            "geometry": type(geometry).__name__,
-            "material": _json_value(geometry.material),
-        }
-        for geometry in simulation.geom_list
-    ]
-    metadata = {
-        "schema_version": ARCHIVE_SCHEMA_VERSION,
-        "backend": "native",
-        "workload": spec,
-        "reference": _correctness_reference_contract(reference),
-        "capture_steps": capture_steps,
-        "input_state": {
-            "archive_prefix": "step/0",
-            "precondition_steps": reference["precondition_steps"],
-            "relative_capture_steps": True,
-        },
-        "maps": map_metadata,
-        "steps": step_records,
-        "geometry_and_coefficients": geometry_metadata,
-        "active_cells": active_cells,
-        "state_bytes": state_bytes,
-        "plan_bytes": plan_bytes,
-        "index_bytes": index_bytes,
-        "parameter_bytes": parameter_bytes,
-        "live_updater_bytes": plan_bytes + index_bytes + parameter_bytes,
-        "archive_array_bytes": int(sum(value.nbytes for value in arrays.values())),
-        "nonzero_seed": True,
-        "nonzero_persistent_state": all(
-            record["state_values"] == 0 or record["state_nonzero_values"] > 0
-            for record in all_records
-        ),
-        "provenance": provenance,
-        "reference_source": str(reference_source),
-    }
-    arrays["metadata.json"] = np.asarray(json.dumps(metadata, sort_keys=True))
-    output = Path(output)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(output, **arrays)
-    return metadata
 
 
 def _reject_json_constant(value):
@@ -1883,243 +1558,12 @@ def tolerance_for_key(manifest, backend, key, dtype):
     return backend_tolerances["mixed"].get(dtype, {"rtol": 0.0, "atol": 0.0})
 
 
-def peak_rss_bytes():
-    maximum = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    return int(maximum if platform.system() == "Darwin" else maximum * 1024)
-
-
-def current_rss_bytes():
-    if platform.system() == "Linux":
-        fields = Path("/proc/self/statm").read_text().split()
-        return int(fields[1]) * os.sysconf("SC_PAGE_SIZE")
-    output = _command_output(["ps", "-o", "rss=", "-p", str(os.getpid())])
-    return int(output) * 1024 if output else None
-
-
-def _percentile95(samples):
-    return float(np.percentile(np.asarray(samples), 95))
-
-
-def environment_metadata(gmes):
-    """Return reproducibility metadata without requiring optional Torch/CUDA."""
-    try:
-        gpu = (
-            subprocess.run(
-                [
-                    "nvidia-smi",
-                    "--query-gpu=index,name,driver_version,memory.total,pstate,power.limit",
-                    "--format=csv,noheader",
-                ],
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-            .stdout.strip()
-            .splitlines()
-        )
-        topology = subprocess.run(
-            ["nvidia-smi", "topo", "-m"],
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout
-    except FileNotFoundError, subprocess.CalledProcessError:
-        gpu, topology = [], None
-    checkout = ROOT.parent
-    lockfile = checkout / "uv.lock"
-    try:
-        import torch
-
-        torch_metadata = {
-            "version": torch.__version__,
-            "cuda_build": torch.version.cuda,
-        }
-    except ImportError:
-        torch_metadata = None
-    cpu_topology = _command_output(["lscpu", "-p=CORE,SOCKET"])
-    physical_cores = None
-    if cpu_topology:
-        physical_cores = len(
-            {
-                line
-                for line in cpu_topology.splitlines()
-                if line and not line.startswith("#")
-            }
-        )
-    return {
-        "platform": platform.platform(),
-        "hostname": platform.node(),
-        "os": platform.uname()._asdict(),
-        "python": platform.python_version(),
-        "python_executable": sys.executable,
-        "numpy": np.__version__,
-        "gmes_version": importlib.metadata.version("gmes"),
-        "gmes_source": str(Path(gmes.__file__).resolve()),
-        "native_extension": str(Path(gmes._pw_material.__file__).resolve()),
-        "git_commit": _command_output(
-            ["git", "-C", str(checkout), "rev-parse", "HEAD"]
-        ),
-        "git_status": _command_output(
-            ["git", "-C", str(checkout), "status", "--short"]
-        ),
-        "uv_lock_sha256": (
-            hashlib.sha256(lockfile.read_bytes()).hexdigest()
-            if lockfile.is_file()
-            else None
-        ),
-        "python_compiler": platform.python_compiler(),
-        "python_build_cflags": sysconfig.get_config_var("CFLAGS"),
-        "cxx_version": _command_output(["c++", "--version"]),
-        "swig_version": _command_output(["swig", "-version"]),
-        "extension_compile_standard": "c++23",
-        "build_environment": {
-            name: os.environ.get(name)
-            for name in (
-                "CC",
-                "CXX",
-                "CFLAGS",
-                "CXXFLAGS",
-                "LDFLAGS",
-                "GMES_ENABLE_OPENMP",
-                "GMES_OPENMP_PREFIX",
-                "MACOSX_DEPLOYMENT_TARGET",
-            )
-        },
-        "openmp_enabled": bool(gmes.pw_material.openmp_enabled()),
-        "openmp_threads": int(gmes.pw_material.openmp_max_threads()),
-        "omp_num_threads": os.environ.get("OMP_NUM_THREADS"),
-        "cpu_count_logical": os.cpu_count(),
-        "cpu_count_physical": physical_cores,
-        "cpu_topology": cpu_topology,
-        "cpu_model": _command_output(["lscpu"]),
-        "memory_bytes": int(os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")),
-        "gpu": gpu,
-        "gpu_topology": topology,
-        "torch": torch_metadata,
-    }
-
-
 def benchmark_case(spec, manifest, repeats, warmup, steps):
-    """Emit the backend-neutral timing schema used by native and Torch runners."""
-    import gmes
-
-    construction = []
-    lowering = []
-    geometry_mapping = []
-    simulation = None
-    for _ in range(repeats):
-        start = perf_counter()
-        simulation = build_simulation(spec, gmes)
-        construction.append(perf_counter() - start)
-        start = perf_counter()
-        simulation.init()
-        lowering.append(perf_counter() - start)
-        start = perf_counter()
-        _component_maps(simulation)
-        geometry_mapping.append(perf_counter() - start)
-        initialize_fields(
-            simulation,
-            manifest["reference"]["seed"],
-            manifest["reference"]["field_scale"],
-        )
-    start = perf_counter()
-    for _ in range(warmup):
-        simulation.step()
-    warmup_seconds = perf_counter() - start
-    one_step_samples = []
-    for _ in range(repeats):
-        simulation = build_simulation(spec, gmes)
-        simulation.init()
-        initialize_fields(
-            simulation,
-            manifest["reference"]["seed"],
-            manifest["reference"]["field_scale"],
-        )
-        for _ in range(warmup):
-            simulation.step()
-        start = perf_counter()
-        simulation.step()
-        one_step_samples.append(perf_counter() - start)
-    samples = []
-    rss_samples = [current_rss_bytes()]
-    for _ in range(repeats):
-        simulation = build_simulation(spec, gmes)
-        simulation.init()
-        initialize_fields(
-            simulation,
-            manifest["reference"]["seed"],
-            manifest["reference"]["field_scale"],
-        )
-        for _ in range(warmup):
-            simulation.step()
-        start = perf_counter()
-        for _ in range(steps):
-            simulation.step()
-        samples.append(perf_counter() - start)
-        rss_samples.append(current_rss_bytes())
-    final_records = _updater_records(simulation, "benchmark", {})
-    elapsed_cells = sum(record["cells"] for record in final_records) * steps
-    return {
-        "schema_version": 2,
-        "backend": "native",
-        "workload": spec,
-        "benchmark_contract": {
-            "initializer": FIELD_INITIALIZER,
-            "seed": manifest["reference"]["seed"],
-            "field_scale": manifest["reference"]["field_scale"],
-            "warmup_steps": warmup,
-            "steps_per_repeat": steps,
-            "repetitions": repeats,
-            "timer": "time.perf_counter",
-            "sample_start": "independently-rebuilt-post-warmup-state",
-        },
-        "environment": environment_metadata(gmes),
-        "measurements": {
-            "construction": _timing_summary(construction),
-            "geometry_mapping": _timing_summary(geometry_mapping),
-            "native_initialization_and_plan_lowering": _timing_summary(lowering),
-            "host_to_device_transfer": {
-                "raw_seconds": [0.0] * repeats,
-                "median_seconds": 0.0,
-                "p95_seconds": 0.0,
-            },
-            "eager_warmup_seconds": warmup_seconds,
-            "cold_compile": None,
-            "cached_compile": None,
-            "one_step": _timing_summary(one_step_samples),
-            "advance": {
-                **_timing_summary(samples),
-                "steps_per_repeat": steps,
-                "steps_per_second": steps / median(samples),
-                "cells_per_second": elapsed_cells / median(samples),
-            },
-        },
-        "memory": {
-            "peak_rss_bytes": peak_rss_bytes(),
-            "rss_samples_bytes": rss_samples,
-            "rss_growth_bytes": (
-                rss_samples[-1] - rss_samples[0]
-                if all(value is not None for value in rss_samples)
-                else None
-            ),
-            "live_field_bytes": sum(
-                field.nbytes for field in simulation.field.values()
-            ),
-            "live_plan_bytes": sum(record["plan_bytes"] for record in final_records),
-            "live_index_bytes": sum(record["index_bytes"] for record in final_records),
-            "live_parameter_bytes": sum(
-                record["parameter_bytes"] for record in final_records
-            ),
-            "live_updater_bytes": sum(
-                record["live_updater_bytes"] for record in final_records
-            ),
-            "live_state_bytes": sum(record["state_bytes"] for record in final_records),
-            "cuda_allocated_peak_bytes": None,
-            "cuda_reserved_peak_bytes": None,
-        },
-        "updaters": final_records,
-        "profiler": None,
-    }
+    """Reject native timing generation in the candidate checkout."""
+    raise RuntimeError(
+        "native benchmark execution is retired in this checkout; retain the "
+        "manifest-pinned historical summary instead"
+    )
 
 
 def find_case(manifest, name):
@@ -2140,49 +1584,18 @@ def main():
     subparsers = parser.add_subparsers(dest="command", required=True)
     describe = subparsers.add_parser("describe")
     describe.add_argument("--case")
-    capture = subparsers.add_parser("capture")
-    capture.add_argument("--case", required=True)
-    capture.add_argument("--output", type=Path, required=True)
     compare = subparsers.add_parser("compare")
     compare.add_argument("--reference", type=Path, required=True)
     compare.add_argument("--candidate", type=Path, required=True)
-    benchmark = subparsers.add_parser("benchmark")
-    benchmark.add_argument("--case", required=True)
-    benchmark.add_argument("--repeats", type=int, default=11)
-    benchmark.add_argument("--warmup", type=int, default=3)
-    benchmark.add_argument("--steps", type=int, default=20)
-    benchmark.add_argument("--threads", type=int, default=1)
     args = parser.parse_args()
     manifest = load_manifest(args.manifest)
     if args.command == "describe":
         value = find_case(manifest, args.case) if args.case else manifest
-    elif args.command == "capture":
-        value = capture_case(find_case(manifest, args.case), manifest, args.output)
     elif args.command == "compare":
         value = compare_archives(args.reference, args.candidate, manifest)
         if not value["passed"]:
             print(json.dumps(value, indent=2, sort_keys=True))
             raise SystemExit(1)
-    else:
-        if args.repeats < 1 or args.warmup < 0 or args.steps < 1 or args.threads < 1:
-            parser.error(
-                "repeats, steps, and threads must be positive; "
-                "warmup must be nonnegative"
-            )
-        for variable in (
-            "OMP_NUM_THREADS",
-            "OPENBLAS_NUM_THREADS",
-            "MKL_NUM_THREADS",
-            "NUMEXPR_NUM_THREADS",
-        ):
-            os.environ[variable] = str(args.threads)
-        value = benchmark_case(
-            find_case(manifest, args.case),
-            manifest,
-            args.repeats,
-            args.warmup,
-            args.steps,
-        )
     print(json.dumps(value, indent=2, sort_keys=True))
 
 

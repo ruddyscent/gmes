@@ -1,8 +1,9 @@
 """Device-resident source lowering and execution for :mod:`gmes.torch_fdtd`."""
 
-from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, replace
-from types import MappingProxyType
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass
+from math import isfinite
+from numbers import Real
 from typing import Any, Protocol, cast
 
 import numpy as np
@@ -10,41 +11,24 @@ import torch
 from torch import nn
 
 from . import constant as const
-from .pw_source import PointSourceElectric, PointSourceMagnetic, TransparentParam
 from .source import (
+    AuxiliarySourceSpec,
     Bandpass,
     Continuous,
     DifferentiatedGaussian,
     GaussianBeam,
+    PaperSourceTime,
     PointSource,
+    PointSourceRecord,
+    PumpProbe,
+    SechSinePulse,
+    SmoothSine,
+    TfsfFaceRule,
     TotalFieldScatteredField,
+    UltrafastPulse,
+    UltrafastPulseTrain,
 )
-from .torch_plan import COMPONENTS
-
-_POINT_COMPONENTS = MappingProxyType(
-    {
-        const.Ex: ("Ex", False),
-        const.Ey: ("Ey", False),
-        const.Ez: ("Ez", False),
-        const.Hx: ("Hx", False),
-        const.Hy: ("Hy", False),
-        const.Hz: ("Hz", False),
-        const.Jx: ("Ex", True),
-        const.Jy: ("Ey", True),
-        const.Jz: ("Ez", True),
-        const.Mx: ("Hx", True),
-        const.My: ("Hy", True),
-        const.Mz: ("Hz", True),
-    }
-)
-_FACE_NAMES = {
-    const.MinusX: "-x",
-    const.PlusX: "+x",
-    const.MinusY: "-y",
-    const.PlusY: "+y",
-    const.MinusZ: "-z",
-    const.PlusZ: "+z",
-}
+from .torch_plan import COMPONENTS, ComponentPlan
 
 
 @dataclass(frozen=True)
@@ -75,27 +59,161 @@ class TorchPointSourceRecord:
     current_scale: float | None = None
 
 
-def _time_parameters(source_time: Any) -> Any:
+class _TorchPointSourceLowerer(Protocol):
+    """Third-party hook that emits exact Torch point-source records."""
+
+    def lower_torch_source(
+        self, context: TorchSourceLoweringContext
+    ) -> Iterable[TorchPointSourceRecord]:
+        """Lower this source once using the immutable host context."""
+
+
+class _SourceRuntime(Protocol):
+    """Runtime property required while constructing nested sources."""
+
+    @property
+    def precision(self) -> str:
+        """Return the immutable precision selected for this runtime."""
+
+
+def _finite_scalar(value: object, name: str) -> float:
+    """Convert a required source scalar while rejecting malformed values."""
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, Real):
+        raise TypeError(f"{name} must be a finite real scalar")
+    try:
+        result = float(cast(Any, value))
+    except (TypeError, ValueError) as error:
+        raise TypeError(f"{name} must be a finite real scalar") from error
+    if not isfinite(result):
+        raise ValueError(f"{name} must be finite")
+    return result
+
+
+@dataclass(frozen=True)
+class _PreparedPointRecord:
+    """Fully host-validated point update ready for tensor allocation."""
+
+    component: str
+    target: int
+    model: int
+    parameters: tuple[float, ...]
+    amplitude: float
+    current_scale: float | None
+
+
+@dataclass(frozen=True)
+class _PreparedTransparentRecord:
+    """Fully host-validated transparent update ready for tensor allocation."""
+
+    target: int
+    terms: tuple[tuple[int, float], ...]
+
+
+@dataclass(frozen=True)
+class _PreparedSourceSet:
+    """Host-only lowering result; deliberately contains no Torch tensors."""
+
+    context: TorchSourceLoweringContext
+    paired_real: bool
+    points: dict[str, tuple[_PreparedPointRecord, ...]]
+    transparent: dict[str, dict[int, tuple[_PreparedTransparentRecord, ...]]]
+    specs: dict[int, AuxiliarySourceSpec]
+
+
+def _index3(
+    value: object, *, name: str, shape: tuple[int, int, int]
+) -> tuple[int, int, int]:
+    if not isinstance(value, tuple) or len(value) != 3:
+        raise TypeError(f"{name} must be a three-integer tuple")
+    if any(
+        isinstance(item, bool) or not isinstance(item, (int, np.integer))
+        for item in value
+    ):
+        raise TypeError(f"{name} must be a three-integer tuple")
+    result = tuple(int(item) for item in value)
+    if any(
+        item < 0 or item >= limit for item, limit in zip(result, shape, strict=True)
+    ):
+        raise ValueError(f"{name} is outside its component shape")
+    return cast(tuple[int, int, int], result)
+
+
+def _component_shapes(space: Any) -> dict[str, tuple[int, int, int]]:
+    nx, ny, nz = (int(value) for value in space.my_field_size)
+    return {
+        "Ex": (nx, ny + 1, nz + 1),
+        "Ey": (nx + 1, ny, nz + 1),
+        "Ez": (nx + 1, ny + 1, nz),
+        "Hx": (nx, ny + 1, nz + 1),
+        "Hy": (nx + 1, ny, nz + 1),
+        "Hz": (nx + 1, ny + 1, nz),
+    }
+
+
+def _time_parameters(source_time: Any) -> tuple[int, tuple[float, ...]]:
+    """Validate a built-in waveform before it can reach tensor allocation."""
     if isinstance(source_time, Continuous):
-        return 0, (
-            source_time.freq,
-            source_time.phase,
-            source_time.start,
-            source_time.end,
-            source_time.width,
-            0.0,
-        )
+        freq = _finite_scalar(source_time.freq, "Continuous.freq")
+        phase = _finite_scalar(source_time.phase, "Continuous.phase")
+        start = _finite_scalar(source_time.start, "Continuous.start")
+        end = float(source_time.end)
+        if not (isfinite(end) or end == float("inf")):
+            raise ValueError("Continuous.end must be finite or +inf")
+        width = _finite_scalar(source_time.width, "Continuous.width")
+        if freq < 0 or width < 0:
+            raise ValueError("Continuous frequency and width must be nonnegative")
+        return 0, (freq, phase, start, end, width, 0.0)
     if isinstance(source_time, Bandpass):
-        return 1, (
-            source_time.freq,
-            source_time.phase,
-            source_time.width,
-            source_time.peak_time,
-            source_time.cutoff,
-            0.0,
-        )
+        freq = _finite_scalar(source_time.freq, "Bandpass.freq")
+        phase = _finite_scalar(source_time.phase, "Bandpass.phase")
+        width = _finite_scalar(source_time.width, "Bandpass.width")
+        peak = _finite_scalar(source_time.peak_time, "Bandpass.peak_time")
+        cutoff = _finite_scalar(source_time.cutoff, "Bandpass.cutoff")
+        if freq <= 0 or width <= 0 or cutoff < 0:
+            raise ValueError(
+                "Bandpass frequency/width must be positive and cutoff nonnegative"
+            )
+        return 1, (freq, phase, width, peak, cutoff, 0.0)
     if isinstance(source_time, DifferentiatedGaussian):
-        return 2, (source_time.tw, source_time.t0, 0.0, 0.0, 0.0, 0.0)
+        width = _finite_scalar(source_time.tw, "DifferentiatedGaussian.tw")
+        center = _finite_scalar(source_time.t0, "DifferentiatedGaussian.t0")
+        if width <= 0:
+            raise ValueError("DifferentiatedGaussian.tw must be positive")
+        return 2, (width, center, 0.0, 0.0, 0.0, 0.0)
+    if isinstance(source_time, SechSinePulse):
+        omega = _finite_scalar(source_time.omega, "SechSinePulse.omega")
+        width = _finite_scalar(source_time.pulse_width, "SechSinePulse.pulse_width")
+        if width <= 0:
+            raise ValueError("SechSinePulse.pulse_width must be positive")
+        return 3, (omega, width, 0.0, 0.0, 0.0, 0.0)
+    if isinstance(source_time, UltrafastPulse):
+        width = _finite_scalar(source_time.pulse_width, "UltrafastPulse.pulse_width")
+        if width <= 0:
+            raise ValueError("UltrafastPulse.pulse_width must be positive")
+        return 4, (width, 0.0, 0.0, 0.0, 0.0, 0.0)
+    if isinstance(source_time, UltrafastPulseTrain):
+        width = _finite_scalar(
+            source_time.pulse_width, "UltrafastPulseTrain.pulse_width"
+        )
+        alpha = _finite_scalar(source_time.alpha, "UltrafastPulseTrain.alpha")
+        delay = _finite_scalar(source_time.delay, "UltrafastPulseTrain.delay")
+        if width <= 0:
+            raise ValueError("UltrafastPulseTrain.pulse_width must be positive")
+        return 5, (width, alpha, delay, 0.0, 0.0, 0.0)
+    if isinstance(source_time, SmoothSine):
+        omega = _finite_scalar(source_time.omega, "SmoothSine.omega")
+        period = _finite_scalar(source_time.period, "SmoothSine.period")
+        if period <= 0:
+            raise ValueError("SmoothSine.period must be positive")
+        return 6, (omega, period, 0.0, 0.0, 0.0, 0.0)
+    if isinstance(source_time, PumpProbe):
+        omega = _finite_scalar(source_time.probe.omega, "PumpProbe.omega")
+        width = _finite_scalar(source_time.pump.pulse_width, "PumpProbe.pulse_width")
+        beta = _finite_scalar(source_time.beta, "PumpProbe.beta")
+        delay = _finite_scalar(source_time.delay, "PumpProbe.delay")
+        if width <= 0:
+            raise ValueError("PumpProbe.pulse_width must be positive")
+        return 7, (omega, width, beta, delay, 0.0, 0.0)
     raise TypeError(
         f"unsupported Torch source-time model {type(source_time).__name__!r}; "
         "use Continuous, Bandpass, DifferentiatedGaussian, or an explicit "
@@ -144,12 +262,93 @@ def _evaluate_time(
 
     gaussian_offset = (time - parameters[:, 1]) / parameters[:, 0]
     gaussian_real = -2 * gaussian_offset * torch.exp(-gaussian_offset.square())
+
+    sech_gamma = (time - 0.5 * parameters[:, 1]) / (0.5 * parameters[:, 1])
+    sech_real = torch.where(
+        (time >= 0) & (time <= parameters[:, 1]),
+        torch.sin(parameters[:, 0] * time) / torch.cosh(10 * sech_gamma),
+        torch.zeros_like(time + parameters[:, 0]),
+    )
+
+    ultrafast_x = 2 * time / parameters[:, 0] - 1
+    ultrafast_shape = -4.201355 * ultrafast_x * (1 - ultrafast_x.square()).pow(3)
+    ultrafast_real = torch.where(
+        (time >= 0) & (time <= parameters[:, 0]),
+        ultrafast_shape,
+        torch.zeros_like(ultrafast_shape),
+    )
+
+    delayed_ultrafast_time = time - parameters[:, 2]
+    delayed_ultrafast_x = 2 * delayed_ultrafast_time / parameters[:, 0] - 1
+    delayed_ultrafast = (
+        -4.201355 * delayed_ultrafast_x * (1 - delayed_ultrafast_x.square()).pow(3)
+    )
+    train_real = ultrafast_real + parameters[:, 1] * torch.where(
+        (delayed_ultrafast_time >= 0) & (delayed_ultrafast_time <= parameters[:, 0]),
+        delayed_ultrafast,
+        torch.zeros_like(delayed_ultrafast),
+    )
+
+    smooth_rise = 5 * parameters[:, 1]
+    smooth_x = time / smooth_rise - 1
+    smooth_envelope = torch.where(
+        time < 0,
+        torch.zeros_like(smooth_x),
+        torch.where(
+            time >= smooth_rise,
+            torch.ones_like(smooth_x),
+            (1 - smooth_x.square()).pow(4),
+        ),
+    )
+    smooth_real = smooth_envelope * torch.sin(parameters[:, 0] * time)
+
+    probe_time = time - parameters[:, 3]
+    probe_rise = 5 * parameters[:, 1]
+    probe_x = probe_time / probe_rise - 1
+    probe_envelope = torch.where(
+        probe_time < 0,
+        torch.zeros_like(probe_x),
+        torch.where(
+            probe_time >= probe_rise,
+            torch.ones_like(probe_x),
+            (1 - probe_x.square()).pow(4),
+        ),
+    )
+    pump_x = 2 * time / parameters[:, 1] - 1
+    pump_real = torch.where(
+        (time >= 0) & (time <= parameters[:, 1]),
+        -4.201355 * pump_x * (1 - pump_x.square()).pow(3),
+        torch.zeros_like(pump_x),
+    )
+    pump_probe_real = pump_real + parameters[:, 2] * probe_envelope * torch.sin(
+        parameters[:, 0] * probe_time
+    )
     zero = torch.zeros_like(gaussian_real)
 
     real = torch.where(
         model == 0,
         continuous_real,
-        torch.where(model == 1, bandpass_real, gaussian_real),
+        torch.where(
+            model == 1,
+            bandpass_real,
+            torch.where(
+                model == 2,
+                gaussian_real,
+                torch.where(
+                    model == 3,
+                    sech_real,
+                    torch.where(
+                        model == 4,
+                        ultrafast_real,
+                        torch.where(
+                            model == 5,
+                            train_real,
+                            torch.where(model == 6, smooth_real, pump_probe_real),
+                        ),
+                    ),
+                ),
+            ),
+        ),
     )
     if not paired_real:
         output[:, 0].copy_(real)
@@ -185,7 +384,6 @@ class TorchPointSourceBatch(nn.Module):
         component: Any,
         records: Any,
         *,
-        shape: Any,
         paired_real: Any,
         device: Any,
         dtype: Any,
@@ -195,15 +393,13 @@ class TorchPointSourceBatch(nn.Module):
         self.paired_real = paired_real
         overwrite: list[tuple[int, int, tuple[float, ...], float, float]] = []
         additive: list[tuple[int, int, tuple[float, ...], float, float]] = []
-        # PwSource.merge() has last-source-wins semantics at one target.  Make
-        # that decision here, before any indexed device write occurs.
-        normalized = {}
+        # Point-source overwrite semantics are last-source-wins at one target.
+        # Make that decision here, before any indexed device write occurs.
+        normalized: dict[int, _PreparedPointRecord] = {}
         for record in records:
-            normalized[tuple(record.target)] = record
-        for target, record in normalized.items():
-            model, parameters = _time_parameters(record.source_time)
-            linear = int(np.ravel_multi_index(target, shape))
-            item = (linear, model, parameters, float(record.amplitude))
+            normalized[record.target] = record
+        for record in normalized.values():
+            item = (record.target, record.model, record.parameters, record.amplitude)
             scale = 1.0 if record.current_scale is None else record.current_scale
             (additive if record.current_scale is not None else overwrite).append(
                 item + (scale,)
@@ -266,7 +462,7 @@ class TorchPointSourceBatch(nn.Module):
 
         plane = 2 if self.paired_real else 1
         flat = field.reshape(-1, plane)
-        for prefix, additive in (("additive", True), ("overwrite", False)):
+        for prefix, additive in (("overwrite", False), ("additive", True)):
             targets = getattr(self, f"{prefix}_targets")
             if targets.numel() == 0:
                 continue
@@ -283,34 +479,6 @@ class TorchPointSourceBatch(nn.Module):
                 flat.index_add_(0, targets, values)
             else:
                 flat.index_copy_(0, targets, values)
-
-
-def _transparent_coefficient(
-    component: Any, face: Any, parameter: Any, dt: Any, dr: Any
-) -> Any:
-    axis = {
-        const.MinusX: 0,
-        const.PlusX: 0,
-        const.MinusY: 1,
-        const.PlusY: 1,
-        const.MinusZ: 2,
-        const.PlusZ: 2,
-    }[face]
-    signs = {
-        "Ex": {"-y": -1, "+y": 1, "-z": 1, "+z": -1},
-        "Ey": {"-z": -1, "+z": 1, "-x": 1, "+x": -1},
-        "Ez": {"-x": -1, "+x": 1, "-y": 1, "+y": -1},
-        "Hx": {"-y": 1, "+y": -1, "-z": -1, "+z": 1},
-        "Hy": {"-z": 1, "+z": -1, "-x": -1, "+x": 1},
-        "Hz": {"-x": 1, "+x": -1, "-y": -1, "+y": 1},
-    }
-    material = parameter.eps_inf if component.startswith("E") else parameter.mu_inf
-    return (
-        signs[component][_FACE_NAMES[face]]
-        * dt
-        * parameter.amp[face]
-        / (material * dr[axis])
-    )
 
 
 class TorchTransparentBatch(nn.Module):
@@ -334,51 +502,37 @@ class TorchTransparentBatch(nn.Module):
     def __init__(
         self,
         component: Any,
-        parameters: Any,
+        records: Iterable[_PreparedTransparentRecord],
         *,
-        shape: Any,
         auxiliary: Any,
         gaussian_width: Any,
-        dt: Any,
-        dr: Any,
         paired_real: Any,
         device: Any,
         dtype: Any,
     ) -> None:
         super().__init__()
+        records = tuple(records)
         self.component = component
         self.auxiliary = auxiliary
         self.auxiliary_component = "Hy" if component.startswith("E") else "Ex"
         self.paired_real = paired_real
         self.gaussian_width = gaussian_width
-        aux_shape = auxiliary.plan.shapes[self.auxiliary_component]
+        grouped: dict[int, list[tuple[int, float]]] = {}
+        for record in records:
+            terms = grouped.setdefault(record.target, [])
+            terms.extend(record.terms)
         targets = []
-        terms = []
-        for target, parameter in parameters.items():
-            target_terms = []
-            for face in parameter.face_list:
-                coefficient = _transparent_coefficient(
-                    component, face, parameter, dt, dr
-                )
-                for sample, weight in (
-                    (parameter.samp_idx0[face], parameter.r0[face]),
-                    (parameter.samp_idx1[face], parameter.r1[face]),
-                ):
-                    target_terms.append(
-                        (
-                            int(np.ravel_multi_index(sample, aux_shape)),
-                            coefficient * weight,
-                        )
-                    )
-            consolidated: dict[int, float] = {}
-            for sample, weight in target_terms:
-                consolidated[sample] = consolidated.get(sample, 0.0) + weight
-            targets.append(int(np.ravel_multi_index(target, shape)))
-            terms.append(tuple(consolidated.items()))
-        width = max((len(row) for row in terms), default=0)
-        samples = np.zeros((len(terms), width), dtype=np.int64)
-        weights = np.zeros((len(terms), width), dtype=np.float64)
-        for row, values in enumerate(terms):
+        rows = []
+        for target, terms in grouped.items():
+            merged: dict[int, float] = {}
+            for sample, weight in terms:
+                merged[sample] = merged.get(sample, 0.0) + weight
+            targets.append(target)
+            rows.append(tuple(merged.items()))
+        width = max((len(row) for row in rows), default=0)
+        samples = np.zeros((len(rows), width), dtype=np.int64)
+        weights = np.zeros((len(rows), width), dtype=np.float64)
+        for row, values in enumerate(rows):
             for column, (sample, weight) in enumerate(values):
                 samples[row, column] = sample
                 weights[row, column] = weight
@@ -396,9 +550,7 @@ class TorchTransparentBatch(nn.Module):
         self.register_buffer(
             "_sample_values",
             torch.zeros(
-                tuple(samples.shape) + (plane,),
-                device=device,
-                dtype=auxiliary_dtype,
+                tuple(samples.shape) + (plane,), device=device, dtype=auxiliary_dtype
             ),
             persistent=False,
         )
@@ -419,8 +571,7 @@ class TorchTransparentBatch(nn.Module):
                 persistent=False,
             )
             self.register_buffer(
-                "_envelope_step_offset",
-                auxiliary.state.step_count.detach().clone(),
+                "_envelope_step_offset", auxiliary.state.step_count.detach().clone()
             )
             self.register_buffer(
                 "_envelope",
@@ -490,6 +641,9 @@ class _AuxiliarySimulation(_SourceSimulation, Protocol):
     def step(self) -> object:
         """Advance the auxiliary simulation once."""
 
+    def advance(self, steps: int) -> object:
+        """Advance the auxiliary simulation by a positive step count."""
+
     def checkpoint(self) -> Mapping[str, object]:
         """Return auxiliary checkpoint data."""
 
@@ -550,198 +704,197 @@ class TorchSourcePlan(nn.Module):
             auxiliary.step()
 
 
-def _is_owned_target(simulation: Any, component: Any, target: Any) -> Any:
-    shape = simulation.plan.shapes[component]
-    target = tuple(int(value) for value in target)
-    if len(target) != 3 or any(
-        value < 0 or value >= limit for value, limit in zip(target, shape)
-    ):
-        return False
-    linear = int(np.ravel_multi_index(target, shape))
-    return simulation.plan.components[component].ownership.reshape(-1)[linear] >= 0
-
-
-def lower_sources(
-    sources: Any,
-    *,
-    simulation: Any,
-    simulation_factory: Any,
-    runtime: Any,
-    bloch: Any,
-) -> Any:
-    """Lower legacy built-ins or explicit extension records exactly once."""
-    sources = tuple(sources)
-    if not sources:
-        return TorchSourcePlan((), ())
-    context = TorchSourceLoweringContext(
-        simulation.space,
-        simulation.geom_tree,
-        simulation.state.paired_real,
-        simulation.dtype,
-        simulation.device,
-        simulation.plan.dt,
-    )
-    extension_records: dict[str, list[TorchPointSourceRecord]] = {
-        name: [] for name in COMPONENTS
-    }
-    legacy_sources: list[Any] = []
-    for source in sources:
-        if type(source) in (PointSource, TotalFieldScatteredField, GaussianBeam):
-            if isinstance(source, PointSource) and source.filename is not None:
-                raise ValueError(
-                    "PointSource filename output is unsupported by TorchSimulation; "
-                    "use an explicit bounded probe/output adapter"
-                )
-            source.init(
-                simulation.geom_tree, simulation.space, simulation.state.paired_real
+def _validate_auxiliary_spec(spec: AuxiliarySourceSpec) -> None:
+    if not isinstance(spec, AuxiliarySourceSpec):
+        raise TypeError("TFSF auxiliary_spec must be an AuxiliarySourceSpec")
+    if not isinstance(spec.prewarm_steps, (int, np.integer)) or spec.prewarm_steps < 0:
+        raise ValueError("TFSF prewarm_steps must be a nonnegative integer")
+    if spec.gaussian_width is not None:
+        _finite_scalar(spec.gaussian_width, "TFSF gaussian_width")
+    for source in spec.sources:
+        if type(source) is not PointSource:
+            raise TypeError(
+                "TFSF auxiliary sources must be built-in PointSource values"
             )
-            legacy_sources.append(source)
-            continue
+        _time_parameters(source.src_time)
+        _finite_scalar(source.amp, "TFSF auxiliary point amplitude")
+
+
+def prepare_sources(
+    sources: Iterable[object],
+    *,
+    context: TorchSourceLoweringContext,
+    component_plans: Iterable[ComponentPlan],
+) -> _PreparedSourceSet:
+    """Lower and validate every source before any Torch plan/state allocation."""
+    plans = {plan.name: plan for plan in component_plans}
+    if set(plans) != set(COMPONENTS):
+        raise ValueError("component_plans must describe every Yee component")
+    points: dict[str, list[_PreparedPointRecord]] = {name: [] for name in COMPONENTS}
+    transparent: dict[str, dict[int, list[_PreparedTransparentRecord]]] = {
+        name: {} for name in COMPONENTS
+    }
+    specs: dict[int, AuxiliarySourceSpec] = {}
+    owners: dict[tuple[str, int], int] = {}
+    for source in tuple(sources):
+        builtin = type(source) in (PointSource, TotalFieldScatteredField, GaussianBeam)
         lower = getattr(source, "lower_torch_source", None)
         if lower is None:
             raise TypeError(
-                f"unsupported legacy source {type(source).__name__!r}; implement "
-                "lower_torch_source(context) to emit TorchPointSourceRecord values"
+                f"unsupported source {type(source).__name__!r}; implement "
+                "lower_torch_source(context)"
             )
-        lowered_records = tuple(lower(context))
-        for record in lowered_records:
-            if not isinstance(record, TorchPointSourceRecord):
-                raise TypeError(
-                    "lower_torch_source() must emit TorchPointSourceRecord values"
+        output = lower(context)  # Extensions are called and consumed exactly once.
+        for record in output:
+            if builtin and type(record) is PointSourceRecord:
+                record = TorchPointSourceRecord(
+                    record.component,
+                    record.target,
+                    record.source_time,
+                    record.amplitude,
+                    record.current_scale,
                 )
-            if record.component not in COMPONENTS:
-                raise ValueError(f"unknown source component {record.component!r}")
-            extension_records[record.component].append(record)
-
-    auxiliary_by_native: dict[int, tuple[Any, float | None]] = {}
-    auxiliaries: list[Any] = []
-    auxiliary_runtime = (
-        runtime
-        if runtime.precision == "float64"
-        else replace(runtime, precision="float64")
-    )
-    for source in legacy_sources:
-        if not isinstance(source, TotalFieldScatteredField):
-            continue
-        native_auxiliary = source.aux_fdtd
-        base: Any = (
-            cast(Any, native_auxiliary).aux_fdtd
-            if isinstance(source, GaussianBeam)
-            else native_auxiliary
-        )
-        auxiliary = simulation_factory(
-            space=base.space,
-            geometry=base.geom_list,
-            sources=base.src_list,
-            runtime=auxiliary_runtime,
-            dt=simulation.plan.dt,
-            bloch=(0.0, 0.0, 0.0) if bloch is not None else None,
-            _is_auxiliary=True,
-        )
-        if isinstance(source, GaussianBeam) and base.time_step.n:
-            auxiliary.advance(int(base.time_step.n))
-        auxiliary_by_native[id(native_auxiliary)] = (
-            auxiliary,
-            source.src_time.width if isinstance(source, GaussianBeam) else None,
-        )
-        auxiliaries.append(auxiliary)
-
-    batches: list[TorchPointSourceBatch | TorchTransparentBatch] = []
-    for component in COMPONENTS:
-        merged: dict[type[Any], Any] = {}
-        getter_name = f"get_pw_source_{component.lower()}"
-        for source in legacy_sources:
-            pointwise = getattr(source, getter_name)(
-                np.empty(simulation.plan.shapes[component]),
-                simulation.space,
-                simulation.geom_tree,
-            )
-            if pointwise is None:
-                continue
-            source_type = type(pointwise)
-            if source_type in merged:
-                merged[source_type].merge(pointwise)
-            else:
-                merged[source_type] = pointwise
-        for pointwise in merged.values():
-            if isinstance(pointwise, (PointSourceElectric, PointSourceMagnetic)):
-                records: list[TorchPointSourceRecord] = []
-                for target, parameter in pointwise._param.items():
-                    if not _is_owned_target(simulation, component, target):
-                        continue
-                    _, current = _POINT_COMPONENTS[parameter.comp]
-                    scale = None
-                    if current:
-                        material = (
-                            parameter.eps_inf
-                            if component.startswith("E")
-                            else parameter.mu_inf
-                        )
-                        scale = -simulation.plan.dt / material
-                    records.append(
-                        TorchPointSourceRecord(
-                            component,
-                            (int(target[0]), int(target[1]), int(target[2])),
-                            parameter.src_time,
-                            parameter.amp,
+            if type(record) is TorchPointSourceRecord:
+                if record.component not in plans:
+                    raise ValueError(f"unknown source component {record.component!r}")
+                target = _index3(
+                    record.target,
+                    name="source target",
+                    shape=plans[record.component].shape,
+                )
+                model, parameters = _time_parameters(record.source_time)
+                if context.paired_real and isinstance(
+                    record.source_time, PaperSourceTime
+                ):
+                    raise ValueError("Ziolkowski reproductions require real fields")
+                amplitude = _finite_scalar(record.amplitude, "source amplitude")
+                scale = (
+                    None
+                    if record.current_scale is None
+                    else _finite_scalar(record.current_scale, "source current_scale")
+                )
+                linear = int(
+                    np.ravel_multi_index(target, plans[record.component].shape)
+                )
+                if plans[record.component].ownership.reshape(-1)[linear] >= 0:
+                    points[record.component].append(
+                        _PreparedPointRecord(
+                            record.component,
+                            linear,
+                            model,
+                            parameters,
+                            amplitude,
                             scale,
                         )
                     )
-                batches.append(
-                    TorchPointSourceBatch(
-                        component,
-                        records,
-                        shape=simulation.plan.shapes[component],
-                        paired_real=simulation.state.paired_real,
-                        device=simulation.device,
-                        dtype=simulation.dtype,
-                    )
+            elif builtin and type(record) is TfsfFaceRule:
+                if record.component not in plans:
+                    raise ValueError(f"unknown TFSF component {record.component!r}")
+                expected = "Hy" if record.component.startswith("E") else "Ex"
+                if record.sample_component != expected:
+                    raise ValueError("incompatible direct TFSF sample component")
+                _validate_auxiliary_spec(record.auxiliary_spec)
+                target = _index3(
+                    record.target,
+                    name="TFSF target",
+                    shape=plans[record.component].shape,
                 )
-            elif all(
-                isinstance(value, TransparentParam)
-                for value in pointwise._param.values()
-            ):
-                by_auxiliary: dict[int, dict[tuple[int, ...], TransparentParam]] = {}
-                for target, parameter in pointwise._param.items():
-                    if not _is_owned_target(simulation, component, target):
-                        continue
-                    by_auxiliary.setdefault(id(parameter.aux_fdtd), {})[
-                        target
-                    ] = parameter
-                for native_auxiliary_id, parameters in by_auxiliary.items():
-                    auxiliary, gaussian_width = auxiliary_by_native[native_auxiliary_id]
-                    batches.append(
-                        TorchTransparentBatch(
-                            component,
-                            parameters,
-                            shape=simulation.plan.shapes[component],
-                            auxiliary=auxiliary,
-                            gaussian_width=gaussian_width,
-                            dt=simulation.plan.dt,
-                            dr=simulation.plan.dr,
-                            paired_real=simulation.state.paired_real,
-                            device=simulation.device,
-                            dtype=simulation.dtype,
-                        )
+                aux_shape = _component_shapes(record.auxiliary_spec.space)[expected]
+                sample0 = _index3(record.sample0, name="TFSF sample0", shape=aux_shape)
+                sample1 = _index3(record.sample1, name="TFSF sample1", shape=aux_shape)
+                coefficient = _finite_scalar(record.coefficient, "TFSF coefficient")
+                weight0 = _finite_scalar(record.weight0, "TFSF weight0")
+                weight1 = _finite_scalar(record.weight1, "TFSF weight1")
+                linear = int(
+                    np.ravel_multi_index(target, plans[record.component].shape)
+                )
+                spec_id = id(record.auxiliary_spec)
+                owner = owners.setdefault((record.component, linear), spec_id)
+                if owner != spec_id:
+                    raise ValueError(
+                        "overlapping TFSF rules for one field target must use the same auxiliary specification"
                     )
-            else:  # pragma: no cover - guards future legacy subclasses
+                specs.setdefault(spec_id, record.auxiliary_spec)
+                if plans[record.component].ownership.reshape(-1)[linear] >= 0:
+                    terms = (
+                        (
+                            int(np.ravel_multi_index(sample0, aux_shape)),
+                            coefficient * weight0,
+                        ),
+                        (
+                            int(np.ravel_multi_index(sample1, aux_shape)),
+                            coefficient * weight1,
+                        ),
+                    )
+                    transparent[record.component].setdefault(spec_id, []).append(
+                        _PreparedTransparentRecord(linear, terms)
+                    )
+            else:
+                if not builtin and type(record) is not TorchPointSourceRecord:
+                    raise TypeError(
+                        "third-party lower_torch_source() must emit exact TorchPointSourceRecord values"
+                    )
                 raise TypeError(
-                    f"unsupported pointwise source {type(pointwise).__name__!r}"
+                    "built-in source lowering emitted an unsupported record"
                 )
-        owned_extension_records = [
-            record
-            for record in extension_records[component]
-            if _is_owned_target(simulation, component, record.target)
-        ]
-        if owned_extension_records:
+    return _PreparedSourceSet(
+        context,
+        context.paired_real,
+        {name: tuple(records) for name, records in points.items()},
+        {
+            name: {spec_id: tuple(records) for spec_id, records in values.items()}
+            for name, values in transparent.items()
+        },
+        specs,
+    )
+
+
+def materialize_sources(
+    prepared: _PreparedSourceSet,
+    *,
+    simulation_factory: Callable[..., _AuxiliarySimulation],
+    runtime: _SourceRuntime,
+    bloch: Sequence[float] | None,
+) -> TorchSourcePlan:
+    """Allocate a source plan from an already validated host-only lowering."""
+    auxiliaries: list[_AuxiliarySimulation] = []
+    auxiliary_by_spec: dict[int, _AuxiliarySimulation] = {}
+    for spec_id, spec in prepared.specs.items():
+        auxiliary = simulation_factory(
+            space=spec.space,
+            geometry=spec.geometry,
+            sources=spec.sources,
+            runtime=runtime,
+            dt=prepared.context.dt,
+            bloch=(0.0, 0.0, 0.0) if prepared.paired_real else None,
+            _is_auxiliary=True,
+        )
+        if spec.prewarm_steps:
+            auxiliary.advance(spec.prewarm_steps)
+        auxiliary_by_spec[spec_id] = auxiliary
+        auxiliaries.append(auxiliary)
+    batches: list[TorchPointSourceBatch | TorchTransparentBatch] = []
+    for component in COMPONENTS:
+        if prepared.points[component]:
             batches.append(
                 TorchPointSourceBatch(
                     component,
-                    owned_extension_records,
-                    shape=simulation.plan.shapes[component],
-                    paired_real=simulation.state.paired_real,
-                    device=simulation.device,
-                    dtype=simulation.dtype,
+                    prepared.points[component],
+                    paired_real=prepared.paired_real,
+                    device=prepared.context.device,
+                    dtype=prepared.context.dtype,
+                )
+            )
+        for spec_id, records in prepared.transparent[component].items():
+            batches.append(
+                TorchTransparentBatch(
+                    component,
+                    records,
+                    auxiliary=auxiliary_by_spec[spec_id],
+                    gaussian_width=prepared.specs[spec_id].gaussian_width,
+                    paired_real=prepared.paired_real,
+                    device=prepared.context.device,
+                    dtype=prepared.context.dtype,
                 )
             )
     return TorchSourcePlan(batches, auxiliaries)
@@ -751,4 +904,6 @@ __all__ = [
     "TorchPointSourceRecord",
     "TorchSourceLoweringContext",
     "TorchSourcePlan",
+    "materialize_sources",
+    "prepare_sources",
 ]

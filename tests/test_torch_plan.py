@@ -346,7 +346,7 @@ class ExecutionPolicyTest(unittest.TestCase):
                 results["dense"][name], results["tiled"][name]
             )
 
-    def test_const_and_dummy_paths_match_native_from_nonzero_fields(self):
+    def test_const_and_dummy_paths_match_across_torch_policies(self):
         geometry = [
             gmes.DefaultMedium(gmes.Dielectric(eps_inf=1.7, mu_inf=1.05)),
             gmes.Block(
@@ -360,34 +360,54 @@ class ExecutionPolicyTest(unittest.TestCase):
                 size=(0.7, 1.5, 1.5),
             ),
         ]
-        native = gmes.FDTD(gmes.Cartesian((2, 2, 2), 3), geometry, verbose=False)
-        native.init()
-        simulation = gmes.TorchSimulation(
-            space=gmes.Cartesian((2, 2, 2), 3),
-            geometry=geometry,
-            runtime=gmes.TorchRuntimeConfig(device="cpu", cpu_threads=2),
-        )
         rng = np.random.default_rng(1717)
-        fields = {}
-        for component, native_field in native.field.items():
-            values = rng.normal(size=native_field.shape) * 1e-3
-            native_field[...] = values
-            fields[component.__name__] = values.copy()
-        simulation.load_host_fields(fields)
-        native.step()
-        simulation.step()
-        actual = simulation.state.host_snapshot()
-        for component, native_field in native.field.items():
-            np.testing.assert_allclose(
-                actual[component.__name__],
-                native_field,
-                rtol=1e-13,
-                atol=1e-15,
-                err_msg=component.__name__,
+        fields = None
+        results = {}
+        for policy in ("dense", "compact", "tiled"):
+            simulation = gmes.TorchSimulation(
+                space=gmes.Cartesian((2, 2, 2), 3),
+                geometry=geometry,
+                runtime=gmes.TorchRuntimeConfig(
+                    device="cpu",
+                    cpu_threads=2,
+                    execution_policy=policy,
+                    planner_tile_size=8,
+                ),
             )
-        addresses = simulation.buffer_addresses()
-        simulation.advance(4)
-        self.assertEqual(addresses, simulation.buffer_addresses())
+            if fields is None:
+                fields = {
+                    name: rng.normal(size=tuple(value.shape)) * 1e-3
+                    for name, value in simulation.state.fields().items()
+                }
+            simulation.load_host_fields(fields)
+            addresses = simulation.buffer_addresses()
+            simulation.step()
+            actual = simulation.state.host_snapshot()
+            results[policy] = actual
+            for name, component in simulation.plan.components.items():
+                self.assertTrue(
+                    {"const", "dummy"}.issubset(
+                        {bucket.signature.model for bucket in component.buckets}
+                    )
+                )
+                initial = fields[name].reshape(-1)
+                updated = actual[name].reshape(-1)
+                for bucket in component.buckets:
+                    if bucket.signature.model == "const":
+                        np.testing.assert_array_equal(updated[bucket.targets], 0.25)
+                    elif bucket.signature.model == "dummy":
+                        np.testing.assert_array_equal(
+                            updated[bucket.targets], initial[bucket.targets]
+                        )
+            simulation.advance(4)
+            self.assertEqual(addresses, simulation.buffer_addresses())
+        for name in gmes.torch_plan.COMPONENTS:
+            np.testing.assert_array_equal(
+                results["dense"][name], results["compact"][name]
+            )
+            np.testing.assert_array_equal(
+                results["dense"][name], results["tiled"][name]
+            )
 
     def test_policy_buffers_are_finalized_once_and_non_trainable(self):
         simulation = gmes.TorchSimulation(

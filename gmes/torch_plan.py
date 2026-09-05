@@ -452,34 +452,45 @@ def _stencil(name: Any, shapes: Any) -> Any:
 
 
 def _model_and_state(material: Any, component: Any) -> Any:
+    """Return the Torch execution model or reject an unsupported material.
+
+    A plan must never silently turn an unknown ``Material`` subclass into a
+    no-op bucket.  The caller builds every component before allocating Torch
+    plan/state buffers, so rejection here remains deterministic and
+    allocation-free.
+    """
     magnetic = component not in ELECTRIC_COMPONENTS
-    if isinstance(material, Dummy):
+    material_type = type(material)
+    if material_type is Dummy:
         return "dummy", ()
-    if isinstance(material, Const):
+    if material_type is Const:
         return "const", ()
-    if isinstance(material, Upml):
+    if material_type is Upml:
         return "upml", (1,)
-    if isinstance(material, Cpml):
+    if material_type is Cpml:
         return "cpml", (2,)
-    if magnetic and isinstance(material, (Drude, Lorentz, DcpAde, DcpPlrc, DcpRc, Dm2)):
+    if magnetic and material_type in (Drude, Lorentz, DcpAde, DcpPlrc, DcpRc, Dm2):
         return "dielectric", ()
-    if type(material) is Dielectric:
+    if material_type is Dielectric:
         return "dielectric", ()
-    if isinstance(material, Drude):
+    if material_type is Drude:
         return "drude", (len(material.dps),)
-    if isinstance(material, Lorentz):
+    if material_type is Lorentz:
         return "lorentz", (len(material.lps),)
-    if isinstance(material, DcpAde):
+    if material_type is DcpAde:
         return "dcp-ade", (len(material.dps), len(material.cps))
-    if isinstance(material, DcpRc):
+    if material_type is DcpRc:
         return "dcp-rc", (len(material.dps), len(material.cps))
-    if isinstance(material, DcpPlrc):
+    if material_type is DcpPlrc:
         return "dcp-plrc", (len(material.dps), len(material.cps))
-    if isinstance(material, Dm2):
+    if material_type is Dm2:
         if len(material.omega) != len(material.n_atom):
             raise ValueError("Dm2 omega and n_atom must have equal lengths")
         return "dm2", (len(material.omega),)
-    return f"custom:{type(material).__module__}.{type(material).__qualname__}", ()
+    raise NotImplementedError(
+        "Torch execution does not support material type "
+        f"{material_type.__module__}.{material_type.__qualname__}"
+    )
 
 
 def _coefficient_descriptor(material: Any, component: Any, underlying: Any) -> Any:

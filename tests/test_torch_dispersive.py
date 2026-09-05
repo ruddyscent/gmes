@@ -9,6 +9,7 @@ import numpy as np
 import torch
 
 import gmes
+from gmes import torch_dispersive
 
 _COMPONENTS = ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")
 _CAPTURE_STEPS = (1, 2, 5, 20, 100)
@@ -117,19 +118,19 @@ def _mixed_pml_geometry():
     return geometry
 
 
-def _seed_native(native, *, complex_fields):
+def _seed_reference(reference, *, complex_fields):
     rng = np.random.default_rng(119)
     fields = {}
-    for component, field in native.field.items():
+    for name, field in reference.state.host_snapshot().items():
         values = rng.normal(size=field.shape) * 1e-3
         if complex_fields:
             values = values + 1j * rng.normal(size=field.shape) * 1e-3
-        field[...] = values
-        fields[component.__name__] = values.copy()
+        fields[name] = values
+    reference.load_host_fields(fields)
     return fields
 
 
-def _native_and_torch(
+def _reference_and_torch(
     model,
     *,
     bloch=None,
@@ -142,13 +143,17 @@ def _native_and_torch(
     points=2,
     device="cpu",
 ):
-    native = gmes.FDTD(
-        gmes.Cartesian(size, resolution),
-        _geometry(model, poles=poles, points=points),
+    reference = gmes.TorchSimulation(
+        space=gmes.Cartesian(size, resolution),
+        geometry=_geometry(model, poles=poles, points=points),
         bloch=bloch,
-        verbose=False,
+        runtime=gmes.TorchRuntimeConfig(
+            device="cpu",
+            precision="float64",
+            cpu_threads=2,
+            execution_policy="dense",
+        ),
     )
-    native.init()
     simulation = gmes.TorchSimulation(
         space=gmes.Cartesian(size, resolution),
         geometry=_geometry(model, poles=poles, points=points),
@@ -161,12 +166,12 @@ def _native_and_torch(
             compile_policy=compile_policy,
         ),
     )
-    fields = _seed_native(native, complex_fields=bloch is not None)
+    fields = _seed_reference(reference, complex_fields=bloch is not None)
     simulation.load_host_fields(fields)
-    return native, simulation
+    return reference, simulation
 
 
-def _assert_fields(test, native, simulation, *, model, complex_fields):
+def _assert_fields(test, reference, simulation, *, model, complex_fields):
     if complex_fields:
         tolerance_name = (
             "complex64" if simulation.dtype == torch.float32 else "complex128"
@@ -175,24 +180,223 @@ def _assert_fields(test, native, simulation, *, model, complex_fields):
         tolerance_name = "float32" if simulation.dtype == torch.float32 else "float64"
     tolerance = _TOLERANCES[model][tolerance_name]
     actual = simulation.state.host_snapshot()
-    for component, field in native.field.items():
-        test.assertTrue(np.all(np.isfinite(actual[component.__name__])))
+    expected = reference.state.host_snapshot()
+    for name, field in expected.items():
+        test.assertTrue(np.all(np.isfinite(actual[name])))
         np.testing.assert_allclose(
-            actual[component.__name__],
+            actual[name],
             field,
             rtol=tolerance["rtol"],
             atol=tolerance["atol"],
-            err_msg=f"{model}:{component.__name__}",
+            err_msg=f"{model}:{name}",
         )
 
 
 class DispersiveOracleTest(unittest.TestCase):
+    def test_scalar_recurrences_match_explicit_independent_equations(self):
+        for model, coefficients in (
+            ("drude", (0.2, 0.7, -0.3)),
+            ("lorentz", (-0.4, 0.6, 0.25)),
+        ):
+            with self.subTest(model=model):
+                a = np.asarray(coefficients, dtype=np.float64).reshape(3, 1, 1)
+                c = np.asarray((0.4, -0.2, 0.8), dtype=np.float64).reshape(3, 1)
+                previous = np.asarray([[[0.3]]], dtype=np.float64)
+                current = np.asarray([[[-0.1]]], dtype=np.float64)
+                field_now = np.asarray([[0.5]], dtype=np.float64)
+                curl = np.asarray([[-0.25]], dtype=np.float64)
+                pole_work = (
+                    a[0, :, :, None] * previous
+                    + a[1, :, :, None] * current
+                    + a[2, :, :, None] * field_now[None, :, :]
+                )
+                response = np.sum(pole_work - current, axis=0)
+                expected_field = (
+                    c[0, :, None] * curl
+                    + c[1, :, None] * response
+                    + c[2, :, None] * field_now
+                )
+                tensors = [
+                    torch.from_numpy(value.copy())
+                    for value in (a, c, previous, current)
+                ]
+                work = torch.zeros_like(tensors[2])
+                delta = torch.zeros_like(tensors[2])
+                actual_field = torch.zeros_like(torch.from_numpy(field_now))
+                actual_response = torch.zeros_like(actual_field)
+                torch_dispersive._update_two_level_tensors(
+                    *tensors,
+                    work,
+                    delta,
+                    torch.from_numpy(field_now),
+                    actual_field,
+                    torch.from_numpy(curl),
+                    actual_response,
+                )
+                np.testing.assert_allclose(actual_field.numpy(), expected_field)
+                np.testing.assert_allclose(tensors[2].numpy(), current)
+                np.testing.assert_allclose(tensors[3].numpy(), pole_work)
+
+        a = np.asarray((0.2, 0.7, -0.3), dtype=np.float64).reshape(3, 1, 1)
+        b = np.asarray((0.1, 0.6, -0.2, 0.3, 0.4), dtype=np.float64).reshape(5, 1, 1)
+        c = np.asarray((0.4, -0.2, 0.15, 0.8), dtype=np.float64).reshape(4, 1)
+        field_old = np.asarray([[0.2]], dtype=np.float64)
+        field_now = np.asarray([[0.5]], dtype=np.float64)
+        pole_old = np.asarray([[[0.3]]], dtype=np.float64)
+        pole_now = np.asarray([[[-0.1]]], dtype=np.float64)
+        point_old = np.asarray([[[0.4]]], dtype=np.float64)
+        point_now = np.asarray([[[-0.2]]], dtype=np.float64)
+        curl = np.asarray([[-0.25]], dtype=np.float64)
+        response = np.sum(
+            pole_now - a[1, :, :, None] * pole_now - a[0, :, :, None] * pole_old,
+            axis=0,
+        )
+        response += np.sum(
+            point_now - b[1, :, :, None] * point_now - b[0, :, :, None] * point_old,
+            axis=0,
+        )
+        expected_field = (
+            c[0, :, None] * curl
+            + c[1, :, None] * response
+            + c[2, :, None] * field_old
+            + c[3, :, None] * field_now
+        )
+        field_combo = field_old + 2.0 * field_now + expected_field
+        expected_pole = (
+            a[0, :, :, None] * pole_old
+            + a[1, :, :, None] * pole_now
+            + a[2, :, :, None] * field_combo[None, :, :]
+        )
+        expected_point = (
+            b[0, :, :, None] * point_old
+            + b[1, :, :, None] * point_now
+            + b[2, :, :, None] * field_old[None, :, :]
+            + b[3, :, :, None] * field_now[None, :, :]
+            + b[4, :, :, None] * expected_field[None, :, :]
+        )
+        simulation = _reference_and_torch("dcp-ade", points=1)[0]
+        descriptor = next(
+            item
+            for item in simulation.plan.dispersive_buckets
+            if item.component == "Ex"
+        )
+        prefix = descriptor.prefix
+        for suffix, value in (
+            ("a", a),
+            ("b", b),
+            ("c", c),
+        ):
+            getattr(simulation.plan, f"{prefix}_{suffix}").copy_(
+                torch.from_numpy(value)
+            )
+        for suffix, value in (
+            ("field_old", field_old),
+            ("pole_old", pole_old),
+            ("pole_now", pole_now),
+            ("point_old", point_old),
+            ("point_now", point_now),
+        ):
+            target = getattr(simulation.state, f"{prefix}_{suffix}")
+            target.copy_(torch.from_numpy(np.broadcast_to(value, target.shape).copy()))
+        torch_dispersive._update_dcp_ade(
+            simulation.plan,
+            simulation.state,
+            descriptor,
+            torch.from_numpy(
+                np.broadcast_to(field_now, (descriptor.target_count, 1)).copy()
+            ),
+            getattr(simulation.state, f"{prefix}_field_new"),
+            torch.from_numpy(
+                np.broadcast_to(curl, (descriptor.target_count, 1)).copy()
+            ),
+            getattr(simulation.state, f"{prefix}_response"),
+            getattr(simulation.state, f"{prefix}_gather_a"),
+        )
+        np.testing.assert_allclose(
+            getattr(simulation.state, f"{prefix}_field_new").numpy(),
+            np.broadcast_to(expected_field, (descriptor.target_count, 1)),
+        )
+        np.testing.assert_allclose(
+            getattr(simulation.state, f"{prefix}_pole_now").numpy(),
+            np.broadcast_to(
+                expected_pole,
+                getattr(simulation.state, f"{prefix}_pole_now").shape,
+            ),
+        )
+        np.testing.assert_allclose(
+            getattr(simulation.state, f"{prefix}_point_now").numpy(),
+            np.broadcast_to(
+                expected_point,
+                getattr(simulation.state, f"{prefix}_point_now").shape,
+            ),
+        )
+
+        for model, scale in (("dcp-plrc", 1.0), ("dcp-rc", -0.75)):
+            with self.subTest(model=model):
+                a = np.asarray((0.2, -0.1, 0.7), dtype=np.float64).reshape(3, 1, 1)
+                b = scale * np.asarray(
+                    ((0.3, -0.2), (-0.1, 0.4), (0.6, 0.25)),
+                    dtype=np.float64,
+                ).reshape(3, 1, 1, 2)
+                c = np.asarray((0.4, 0.8, -0.2), dtype=np.float64).reshape(3, 1)
+                pole_state = np.asarray([[[0.15]]], dtype=np.float64)
+                point_state = np.asarray([[[[0.25, -0.35]]]], dtype=np.float64)
+                field_now = np.asarray([[0.5]], dtype=np.float64)
+                curl = np.asarray([[-0.25]], dtype=np.float64)
+                response = np.sum(pole_state, axis=0)
+                response += np.sum(point_state[..., 0], axis=0)
+                expected_field = (
+                    c[0, :, None] * curl
+                    + c[1, :, None] * field_now
+                    + c[2, :, None] * response
+                )
+                expected_pole = (
+                    a[0, :, :, None] * expected_field[None, :, :]
+                    + a[1, :, :, None] * field_now[None, :, :]
+                    + a[2, :, :, None] * pole_state
+                )
+                expected_point = np.empty_like(point_state)
+                expected_point[..., 0] = (
+                    b[0, ..., 0, None] * expected_field[None, :, :]
+                    + b[1, ..., 0, None] * field_now[None, :, :]
+                    + b[2, ..., 0, None] * point_state[..., 0]
+                    - b[2, ..., 1, None] * point_state[..., 1]
+                )
+                expected_point[..., 1] = (
+                    b[0, ..., 1, None] * expected_field[None, :, :]
+                    + b[1, ..., 1, None] * field_now[None, :, :]
+                    + b[2, ..., 0, None] * point_state[..., 1]
+                    + b[2, ..., 1, None] * point_state[..., 0]
+                )
+                tensors = [
+                    torch.from_numpy(value.copy())
+                    for value in (a, b, c, pole_state, point_state)
+                ]
+                pole_work = torch.zeros_like(tensors[3])
+                point_work = torch.zeros_like(tensors[4])
+                actual_field = torch.zeros_like(torch.from_numpy(field_now))
+                actual_response = torch.zeros_like(actual_field)
+                point_response = torch.zeros_like(actual_field)
+                torch_dispersive._update_dcp_convolution_tensors(
+                    *tensors,
+                    pole_work,
+                    point_work,
+                    torch.from_numpy(field_now),
+                    actual_field,
+                    torch.from_numpy(curl),
+                    actual_response,
+                    point_response,
+                )
+                np.testing.assert_allclose(actual_field.numpy(), expected_field)
+                np.testing.assert_allclose(tensors[3].numpy(), expected_pole)
+                np.testing.assert_allclose(tensors[4].numpy(), expected_point)
+
     def test_all_families_match_capture_steps_from_nonzero_fields_and_state(self):
         for model in ("drude", "lorentz", "dcp-ade", "dcp-plrc", "dcp-rc"):
             with self.subTest(model=model):
-                native, simulation = _native_and_torch(model)
-                native.step()
-                native.step()
+                reference, simulation = _reference_and_torch(model)
+                reference.step()
+                reference.step()
                 simulation.advance(2)
                 persistent = {
                     name: value
@@ -209,31 +413,31 @@ class DispersiveOracleTest(unittest.TestCase):
                     increment = capture - completed
                     simulation.advance(increment)
                     for _ in range(increment):
-                        native.step()
+                        reference.step()
                     _assert_fields(
                         self,
-                        native,
+                        reference,
                         simulation,
                         model=model,
                         complex_fields=False,
                     )
                     completed = capture
 
-    def test_paired_real_complex_recurrences_match_native(self):
+    def test_paired_real_complex_recurrences_match_dense_reference(self):
         bloch = (0.07, 0.11, 0.13)
         for model in ("drude", "lorentz", "dcp-ade", "dcp-plrc", "dcp-rc"):
             with self.subTest(model=model):
-                native, simulation = _native_and_torch(
+                reference, simulation = _reference_and_torch(
                     model,
                     bloch=bloch,
                     compile_policy="compile" if model == "dcp-plrc" else "eager",
                 )
                 simulation.advance(5)
                 for _ in range(5):
-                    native.step()
+                    reference.step()
                 _assert_fields(
                     self,
-                    native,
+                    reference,
                     simulation,
                     model=model,
                     complex_fields=True,
@@ -243,13 +447,16 @@ class DispersiveOracleTest(unittest.TestCase):
 
         previous_threads = torch.get_num_threads()
         self.addCleanup(torch.set_num_threads, previous_threads)
-        native = gmes.FDTD(
-            gmes.Cartesian((8, 2, 2), 2),
-            _mixed_geometry(),
+        reference = gmes.TorchSimulation(
+            space=gmes.Cartesian((8, 2, 2), 2),
+            geometry=_mixed_geometry(),
             bloch=bloch,
-            verbose=False,
+            runtime=gmes.TorchRuntimeConfig(
+                device="cpu",
+                cpu_threads=2,
+                execution_policy="dense",
+            ),
         )
-        native.init()
         simulation = gmes.TorchSimulation(
             space=gmes.Cartesian((8, 2, 2), 2),
             geometry=_mixed_geometry(),
@@ -262,13 +469,13 @@ class DispersiveOracleTest(unittest.TestCase):
             ),
         )
         self.assertIsNotNone(simulation._dispersive_overlay)
-        simulation.load_host_fields(_seed_native(native, complex_fields=True))
+        simulation.load_host_fields(_seed_reference(reference, complex_fields=True))
         simulation.advance(5)
         for _ in range(5):
-            native.step()
+            reference.step()
         _assert_fields(
             self,
-            native,
+            reference,
             simulation,
             model="mixed",
             complex_fields=True,
@@ -289,7 +496,7 @@ class DispersiveOracleTest(unittest.TestCase):
             "tiled": "aten::scatter_",
         }
         for policy in ("dense", "compact", "tiled"):
-            _, simulation = _native_and_torch("dcp-plrc", policy=policy)
+            _, simulation = _reference_and_torch("dcp-plrc", policy=policy)
             if fields is None:
                 rng = np.random.default_rng(219)
                 fields = {
@@ -350,7 +557,7 @@ class DispersiveOracleTest(unittest.TestCase):
         compile_cache_keys = set()
         fields = None
         for policy in ("dense", "compact", "tiled"):
-            _, simulation = _native_and_torch(
+            _, simulation = _reference_and_torch(
                 "dcp-plrc", policy=policy, compile_policy="compile"
             )
             if fields is None:
@@ -386,7 +593,7 @@ class DispersiveOracleTest(unittest.TestCase):
     def test_forced_policy_writes_preserve_paired_real_fields(self):
         results = {}
         for policy in ("dense", "compact", "tiled"):
-            _, simulation = _native_and_torch(
+            _, simulation = _reference_and_torch(
                 "drude", bloch=(0.07, 0.11, 0.13), policy=policy
             )
             addresses = simulation.buffer_addresses()
@@ -401,17 +608,17 @@ class DispersiveOracleTest(unittest.TestCase):
                 results["dense"][component], results["tiled"][component]
             )
 
-    def test_collapsed_1d_2d_and_3d_fields_match_native(self):
+    def test_collapsed_1d_2d_and_3d_fields_match_dense_reference(self):
         for size in ((4, 0, 0), (4, 3, 0), (2, 2, 2)):
             for model in ("drude", "dcp-rc"):
                 with self.subTest(size=size, model=model):
-                    native, simulation = _native_and_torch(model, size=size)
+                    reference, simulation = _reference_and_torch(model, size=size)
                     simulation.advance(5)
                     for _ in range(5):
-                        native.step()
+                        reference.step()
                     _assert_fields(
                         self,
-                        native,
+                        reference,
                         simulation,
                         model=model,
                         complex_fields=False,
@@ -420,13 +627,13 @@ class DispersiveOracleTest(unittest.TestCase):
     def test_float32_all_families_match_performance_tolerance(self):
         for model in ("drude", "lorentz", "dcp-ade", "dcp-plrc", "dcp-rc"):
             with self.subTest(model=model):
-                native, simulation = _native_and_torch(model, precision="float32")
+                reference, simulation = _reference_and_torch(model, precision="float32")
                 simulation.advance(20)
                 for _ in range(20):
-                    native.step()
+                    reference.step()
                 _assert_fields(
                     self,
-                    native,
+                    reference,
                     simulation,
                     model=model,
                     complex_fields=False,
@@ -486,13 +693,15 @@ class DispersiveOracleTest(unittest.TestCase):
 
     def test_compiled_bulk_phases_preserve_dispersive_oracle_and_storage(self):
         torch._dynamo.reset()
-        native, simulation = _native_and_torch("dcp-plrc", compile_policy="compile")
+        reference, simulation = _reference_and_torch(
+            "dcp-plrc", compile_policy="compile"
+        )
         simulation.advance(5)
         for _ in range(5):
-            native.step()
+            reference.step()
         _assert_fields(
             self,
-            native,
+            reference,
             simulation,
             model="dcp-plrc",
             complex_fields=False,
@@ -503,35 +712,35 @@ class DispersiveOracleTest(unittest.TestCase):
         self.assertEqual(graphs, torch._dynamo.utils.counters["stats"]["unique_graphs"])
         self.assertEqual(addresses, simulation.buffer_addresses())
 
-    def test_zero_width_conductive_variants_match_native(self):
+    def test_zero_width_conductive_variants_match_dense_reference(self):
         for model in ("drude", "lorentz", "dcp-ade", "dcp-plrc", "dcp-rc"):
             with self.subTest(model=model):
-                native, simulation = _native_and_torch(model, poles=0, points=0)
+                reference, simulation = _reference_and_torch(model, poles=0, points=0)
                 simulation.advance(20)
                 for _ in range(20):
-                    native.step()
+                    reference.step()
                 _assert_fields(
                     self,
-                    native,
+                    reference,
                     simulation,
                     model=model,
                     complex_fields=False,
                 )
 
     def test_long_run_pulse_spectrum_boundary_energy_and_stability(self):
-        native, simulation = _native_and_torch(
+        reference, simulation = _reference_and_torch(
             "dcp-plrc", size=(12, 0, 0), resolution=4
         )
         fields = {}
-        for component, field in native.field.items():
+        for name, field in reference.state.host_snapshot().items():
             values = np.zeros(field.shape)
-            if component.__name__ == "Ey":
+            if name == "Ey":
                 x = np.arange(field.shape[0])
                 values[:, 0, 0] = (
                     np.exp(-0.5 * ((x - field.shape[0] * 0.28) / 2.0) ** 2) * 1e-3
                 )
-            field[...] = values
-            fields[component.__name__] = values.copy()
+            fields[name] = values
+        reference.load_host_fields(fields)
         simulation.load_host_fields(fields)
 
         completed = 0
@@ -539,55 +748,58 @@ class DispersiveOracleTest(unittest.TestCase):
             increment = capture - completed
             simulation.advance(increment)
             for _ in range(increment):
-                native.step()
+                reference.step()
             actual = simulation.state.host_snapshot()
             _assert_fields(
                 self,
-                native,
+                reference,
                 simulation,
                 model="dcp-plrc",
                 complex_fields=False,
             )
-            native_line = next(
-                field[:, 0, 0]
-                for component, field in native.field.items()
-                if component.__name__ == "Ey"
-            )
+            reference_snapshot = reference.state.host_snapshot()
+            reference_line = reference_snapshot["Ey"][:, 0, 0]
             torch_line = actual["Ey"][:, 0, 0]
             np.testing.assert_allclose(
                 np.abs(np.fft.rfft(torch_line)),
-                np.abs(np.fft.rfft(native_line)),
+                np.abs(np.fft.rfft(reference_line)),
                 rtol=1e-11,
                 atol=1e-12,
             )
-            native_energy = sum(
-                float(np.sum(np.abs(field) ** 2)) for field in native.field.values()
+            reference_energy = sum(
+                float(np.sum(np.abs(field) ** 2))
+                for field in reference_snapshot.values()
             )
             torch_energy = sum(
                 float(np.sum(np.abs(actual[name]) ** 2)) for name in _COMPONENTS
             )
-            self.assertAlmostEqual(torch_energy, native_energy, places=16)
+            self.assertAlmostEqual(torch_energy, reference_energy, places=16)
             self.assertLess(float(np.max(np.abs(torch_line))), 1e-3)
             completed = capture
 
     def test_mixed_families_share_one_complete_field_execution(self):
-        native = gmes.FDTD(
-            gmes.Cartesian((8, 2, 2), 2), _mixed_geometry(), verbose=False
+        reference = gmes.TorchSimulation(
+            space=gmes.Cartesian((8, 2, 2), 2),
+            geometry=_mixed_geometry(),
+            runtime=gmes.TorchRuntimeConfig(
+                device="cpu",
+                cpu_threads=2,
+                execution_policy="dense",
+            ),
         )
-        native.init()
         simulation = gmes.TorchSimulation(
             space=gmes.Cartesian((8, 2, 2), 2),
             geometry=_mixed_geometry(),
             runtime=gmes.TorchRuntimeConfig(device="cpu", cpu_threads=2),
         )
-        simulation.load_host_fields(_seed_native(native, complex_fields=False)).advance(
-            20
-        )
+        simulation.load_host_fields(
+            _seed_reference(reference, complex_fields=False)
+        ).advance(20)
         for _ in range(20):
-            native.step()
+            reference.step()
         _assert_fields(
             self,
-            native,
+            reference,
             simulation,
             model="mixed",
             complex_fields=False,
@@ -598,18 +810,18 @@ class DispersiveOracleTest(unittest.TestCase):
         )
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA is unavailable")
-    def test_cuda_eager_float32_all_families_match_native(self):
+    def test_cuda_eager_float32_all_families_match_cpu_reference(self):
         for model in ("drude", "lorentz", "dcp-ade", "dcp-plrc", "dcp-rc"):
             with self.subTest(model=model):
-                native, simulation = _native_and_torch(
+                reference, simulation = _reference_and_torch(
                     model, precision="float32", device="cuda:0"
                 )
                 simulation.advance(5)
                 for _ in range(5):
-                    native.step()
+                    reference.step()
                 _assert_fields(
                     self,
-                    native,
+                    reference,
                     simulation,
                     model=model,
                     complex_fields=False,
@@ -618,7 +830,7 @@ class DispersiveOracleTest(unittest.TestCase):
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA is unavailable")
     def test_cuda_compiled_float32_has_stable_storage_and_allocation(self):
         torch._dynamo.reset()
-        native, simulation = _native_and_torch(
+        reference, simulation = _reference_and_torch(
             "dcp-plrc",
             precision="float32",
             compile_policy="compile",
@@ -626,10 +838,10 @@ class DispersiveOracleTest(unittest.TestCase):
         )
         simulation.advance(5)
         for _ in range(5):
-            native.step()
+            reference.step()
         _assert_fields(
             self,
-            native,
+            reference,
             simulation,
             model="dcp-plrc",
             complex_fields=False,
@@ -649,12 +861,15 @@ class DispersiveOracleTest(unittest.TestCase):
         self.addCleanup(torch.set_num_threads, previous_threads)
         for experimental in (False, True):
             with self.subTest(experimental=experimental):
-                native = gmes.FDTD(
-                    gmes.Cartesian((8, 6, 0), 4),
-                    _mixed_pml_geometry(),
-                    verbose=False,
+                reference = gmes.TorchSimulation(
+                    space=gmes.Cartesian((8, 6, 0), 4),
+                    geometry=_mixed_pml_geometry(),
+                    runtime=gmes.TorchRuntimeConfig(
+                        device="cpu",
+                        cpu_threads=2,
+                        execution_policy="dense",
+                    ),
                 )
-                native.init()
                 simulation = gmes.TorchSimulation(
                     space=gmes.Cartesian((8, 6, 0), 4),
                     geometry=_mixed_pml_geometry(),
@@ -669,16 +884,18 @@ class DispersiveOracleTest(unittest.TestCase):
                     self.assertIsNotNone(simulation._dispersive_overlay)
                 else:
                     self.assertIsNone(simulation._dispersive_overlay)
-                simulation.load_host_fields(_seed_native(native, complex_fields=False))
+                simulation.load_host_fields(
+                    _seed_reference(reference, complex_fields=False)
+                )
                 completed = 0
                 for capture in _CAPTURE_STEPS:
                     increment = capture - completed
                     simulation.advance(increment)
                     for _ in range(increment):
-                        native.step()
+                        reference.step()
                     _assert_fields(
                         self,
-                        native,
+                        reference,
                         simulation,
                         model="mixed",
                         complex_fields=False,

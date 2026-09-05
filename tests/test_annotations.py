@@ -14,13 +14,11 @@ from gmes.source import Src, SrcTime
 PACKAGE_ROOT = Path(gmes.__file__).resolve().parent
 SOURCE_MODULES = (
     "__init__",
-    "fdtd",
+    "constant",
     "file_io",
     "geometry",
     "material",
-    "pw_source",
     "pygeom",
-    "show",
     "source",
     "torch_dispersive",
     "torch_distributed",

@@ -1,500 +1,153 @@
+"""Retained geometry lowering coverage for the Torch material planner."""
+
 import unittest
-from unittest.mock import patch
 
 import numpy as np
 
-import gmes.fdtd as fdtd_module
-import gmes.material as material_module
-from gmes import (
-    FDTD,
-    Cartesian,
-    Continuous,
-    Cpml,
-    DcpAde,
-    DcpPlrc,
-    DefaultMedium,
-    Dielectric,
-    Dm2,
-    Drude,
-    DrudePole,
-    Ez,
-    Lorentz,
-    LorentzPole,
-    PointSource,
-    Shell,
-    Sphere,
-    TMzFDTD,
-    Upml,
-)
-from gmes.pw_material import (
-    ConstElectricParamReal,
-    ConstExReal,
-    DielectricElectricParamReal,
-    DielectricExReal,
-    DummyElectricParamReal,
-    UpmlElectricParamReal,
-    UpmlExReal,
-)
+import gmes
+from gmes.pygeom import GeomBoxTree
+
+_COMPONENT_TYPES = {
+    "Ex": gmes.Ex,
+    "Ey": gmes.Ey,
+    "Ez": gmes.Ez,
+    "Hx": gmes.Hx,
+    "Hy": gmes.Hy,
+    "Hz": gmes.Hz,
+}
 
 
-class BulkAttachmentTest(unittest.TestCase):
-    def dielectric_parameters(self, *values):
-        parameters = []
-        for value in values:
-            parameter = DielectricElectricParamReal()
-            parameter.eps_inf = value
-            parameters.append(parameter)
-        return parameters
+def _runtime():
+    """Return the explicit eager CPU configuration used by mapping regressions."""
+    return gmes.TorchRuntimeConfig(
+        device="cpu", precision="float64", execution_policy="dense", cpu_threads=1
+    )
 
-    def test_bulk_attachment_preserves_index_parameter_order(self):
-        indices = np.array(((2, 0, 0), (0, 0, 0), (1, 0, 0)), dtype=np.intc)
-        material = DielectricExReal()
 
-        returned = material.attach_many(
-            indices, self.dielectric_parameters(4.0, 2.0, 3.0)
-        )
+def _geometry(sphere_type=gmes.Sphere):
+    """Build nested dielectric regions clipped by a CPML shell."""
+    return [
+        gmes.DefaultMedium(gmes.Dielectric(1)),
+        sphere_type(gmes.Dielectric(2), radius=0.6),
+        sphere_type(gmes.Dielectric(3), radius=0.3),
+        gmes.Shell(gmes.Cpml()),
+    ]
 
-        self.assertIs(returned, material)
-        self.assertEqual(material.idx_size(), 3)
-        self.assertEqual(material.get_eps_inf((2, 0, 0)), 4.0)
-        self.assertEqual(material.get_eps_inf((0, 0, 0)), 2.0)
-        self.assertEqual(material.get_eps_inf((1, 0, 0)), 3.0)
 
-    def test_bulk_attachment_matches_coordinate_dependent_individual_attachment(self):
-        indices = np.array(((1, 1, 1), (2, 1, 1)), dtype=np.intc)
-        parameters = []
-        for c1 in (0.25, 0.75):
-            parameter = UpmlElectricParamReal()
-            parameter.eps_inf = 1
-            parameter.d = 0
-            parameter.c1 = c1
-            parameter.c2 = 1
-            parameter.c3 = 0
-            parameter.c4 = 1
-            parameter.c5 = 1
-            parameter.c6 = 0
-            parameters.append(parameter)
-
-        bulk = UpmlExReal()
-        bulk.attach_many(indices, parameters)
-        individual = UpmlExReal()
-        for index, parameter in zip(indices, parameters, strict=True):
-            individual.attach(index, parameter)
-
-        bulk_fields = [np.zeros((4, 3, 3)) for _ in range(3)]
-        individual_fields = [np.zeros((4, 3, 3)) for _ in range(3)]
-        bulk_fields[1][2, 2, 1] = 1
-        individual_fields[1][2, 2, 1] = 1
-        for step in range(3):
-            bulk.update_all(*bulk_fields, 1, 1, 1, step)
-            individual.update_all(*individual_fields, 1, 1, 1, step)
-
-        for actual, expected in zip(bulk_fields, individual_fields, strict=True):
-            np.testing.assert_array_equal(actual, expected)
-
-    def test_bulk_attachment_rejects_invalid_inputs_atomically(self):
-        valid = np.array(((0, 0, 0),), dtype=np.intc)
-        material = DielectricExReal()
-        material.attach_many(valid, self.dielectric_parameters(2.0))
-
-        invalid_cases = (
-            ([(1, 0, 0)], self.dielectric_parameters(3.0), TypeError),
-            (
-                np.array(((1, 0, 0),), dtype=np.int64),
-                self.dielectric_parameters(3.0),
-                TypeError,
-            ),
-            (
-                np.array((1, 0, 0), dtype=np.intc),
-                self.dielectric_parameters(3.0),
-                ValueError,
-            ),
-            (
-                np.zeros((1, 4), dtype=np.intc),
-                self.dielectric_parameters(3.0),
-                ValueError,
-            ),
-            (
-                np.zeros((2, 3), dtype=np.intc)[:, ::-1],
-                self.dielectric_parameters(3.0, 4.0),
-                ValueError,
-            ),
-            (
-                np.array(((1, 0, 0),), dtype=np.intc),
-                self.dielectric_parameters(3.0, 4.0),
-                ValueError,
-            ),
-            (
-                np.array(((-1, 0, 0),), dtype=np.intc),
-                self.dielectric_parameters(3.0),
-                IndexError,
-            ),
-            (
-                np.array(((1, 0, 0), (1, 0, 0)), dtype=np.intc),
-                self.dielectric_parameters(3.0, 4.0),
-                ValueError,
-            ),
-            (valid, self.dielectric_parameters(3.0), ValueError),
-            (
-                np.array(((1, 0, 0),), dtype=np.intc),
-                [DummyElectricParamReal()],
-                TypeError,
+def _simulation(size, sphere_type=gmes.Sphere, *, source=False):
+    """Create one supported eager geometry/planner realization."""
+    sources = ()
+    if source:
+        sources = (
+            gmes.PointSource(
+                gmes.Continuous(freq=0.8, width=0.5),
+                center=(0, 0, 0),
+                component=gmes.Ez,
             ),
         )
-
-        for indices, parameters, exception in invalid_cases:
-            with self.subTest(exception=exception.__name__, indices=indices):
-                with self.assertRaises(exception):
-                    material.attach_many(indices, parameters)
-                self.assertEqual(material.idx_size(), 1)
-                self.assertEqual(material.get_eps_inf((0, 0, 0)), 2.0)
-
-    def test_upper_bounds_are_checked_against_the_update_field(self):
-        material = ConstExReal()
-        parameter = ConstElectricParamReal()
-        parameter.eps_inf = 1
-        parameter.value = 2
-        material.attach_many(
-            np.array(((3, 0, 0),), dtype=np.intc),
-            [parameter],
-        )
-
-        fields = [np.zeros((3, 1, 1)) for _ in range(3)]
-        with self.assertRaisesRegex(IndexError, "out of bounds"):
-            material.update_all(*fields, 1, 1, 1, 0)
-        self.assertFalse(fields[0].any())
-
-
-class UpdatePlanTest(unittest.TestCase):
-    @staticmethod
-    def dielectric_parameter(eps_inf):
-        parameter = DielectricElectricParamReal()
-        parameter.eps_inf = eps_inf
-        return parameter
-
-    def test_unordered_indices_use_sparse_runs_without_reordering_metadata(self):
-        indices = np.array(
-            ((2, 0, 0), (1, 0, 0), (0, 0, 1)),
-            dtype=np.intc,
-        )
-        material = DielectricExReal()
-        material.attach_many(
-            indices,
-            [self.dielectric_parameter(value) for value in (4.0, 3.0, 2.0)],
-        )
-
-        material.finalize(0, 4, 2, 3, 4, 2, 3, 4, 2, 3)
-
-        self.assertTrue(material.is_finalized())
-        self.assertTrue(material.plan_is_parallel_safe())
-        self.assertEqual(material.plan_size(), 3)
-        self.assertEqual(material.plan_run_count(), 3)
-        self.assertGreater(material.plan_bytes(), 0)
-        self.assertEqual(material.get_eps_inf((2, 0, 0)), 4.0)
-        self.assertEqual(material.get_eps_inf((0, 0, 1)), 2.0)
-        self.assertEqual(material.get_eps_inf((1, 0, 0)), 3.0)
-
-        ex = np.zeros((4, 2, 3))
-        hz = np.zeros((4, 2, 3))
-        hy = np.zeros((4, 2, 3))
-        for i, _, k in indices:
-            hz[i + 1, 1, k] = 1
-        material.update_all(ex, hz, hy, 1, 1, 1, 0)
-
-        expected = np.zeros_like(ex)
-        expected[2, 0, 0] = 0.25
-        expected[0, 0, 1] = 0.5
-        expected[1, 0, 0] = 1 / 3
-        np.testing.assert_array_equal(ex, expected)
-
-    def test_duplicate_public_attachments_preserve_serial_update_order(self):
-        material = DielectricExReal()
-        index = np.array((0, 0, 0), dtype=np.intc)
-        material.attach(index, self.dielectric_parameter(1.0))
-        material.attach(index, self.dielectric_parameter(2.0))
-
-        ex = np.zeros((2, 2, 2))
-        hz = np.zeros((2, 2, 2))
-        hy = np.zeros((2, 2, 2))
-        hz[1, 1, 0] = 1
-        material.update_all(ex, hz, hy, 1, 1, 1, 0)
-
-        self.assertTrue(material.is_finalized())
-        self.assertFalse(material.plan_is_parallel_safe())
-        self.assertEqual(ex[0, 0, 0], 1.5)
-
-    def test_contiguous_cells_are_compressed_into_one_run(self):
-        material = DielectricExReal()
-        material.attach_many(
-            np.array(((0, 0, 0), (0, 0, 1), (0, 0, 2)), dtype=np.intc),
-            [self.dielectric_parameter(2.0) for _ in range(3)],
-        )
-
-        material.finalize(0, 2, 2, 4, 2, 2, 4, 2, 2, 4)
-
-        self.assertEqual(material.plan_size(), 3)
-        self.assertEqual(material.plan_run_count(), 1)
-        self.assertLess(material.plan_bytes(), material.plan_size() * 40)
-
-    def test_collapsed_targets_disable_parallel_alias_assumptions(self):
-        material = ConstExReal()
-        parameter = ConstElectricParamReal()
-        parameter.eps_inf = 1
-        parameter.value = 2
-        material.attach(np.array((0, 0, 0), dtype=np.intc), parameter)
-        material.attach(np.array((1, 0, 0), dtype=np.intc), parameter)
-
-        material.finalize(0, 2, 1, 2, 1, 2, 2, 2, 2, 1)
-
-        self.assertFalse(material.plan_is_parallel_safe())
-
-    def test_finalization_validates_complete_stencil_atomically(self):
-        material = DielectricExReal()
-        material.attach(
-            np.array((1, 0, 0), dtype=np.intc),
-            self.dielectric_parameter(1.0),
-        )
-
-        with self.assertRaisesRegex(IndexError, "stencil index is out of bounds"):
-            material.finalize(0, 2, 2, 2, 2, 2, 2, 2, 2, 2)
-
-        self.assertFalse(material.is_finalized())
-        self.assertEqual(material.plan_size(), 0)
-
-    def test_fdtd_finalizes_every_material_family(self):
-        materials = (
-            Dielectric(),
-            Drude(dps=(DrudePole(omega=1.0, gamma=0.1),)),
-            Lorentz(lps=(LorentzPole(amp=0.2, omega=1.0, gamma=0.1),)),
-            DcpAde(),
-            DcpPlrc(),
-            Dm2(),
-        )
-        for medium in materials:
-            with self.subTest(material=type(medium).__name__):
-                simulation = TMzFDTD(
-                    Cartesian(size=(1, 1, 0), resolution=2),
-                    [DefaultMedium(material=medium), Shell(material=Cpml())],
-                    verbose=False,
-                )
-                simulation.init()
-                for updaters in simulation.pw_material.values():
-                    for updater in updaters.values():
-                        self.assertTrue(updater.is_finalized())
-                        self.assertEqual(updater.plan_size(), updater.idx_size())
-
-        simulation = TMzFDTD(
-            Cartesian(size=(1, 1, 0), resolution=2),
-            [DefaultMedium(material=Dielectric()), Shell(material=Upml())],
-            verbose=False,
-        )
-        simulation.init()
-        self.assertTrue(
-            any(
-                type(updater).__name__.startswith("Upml") and updater.is_finalized()
-                for updaters in simulation.pw_material.values()
-                for updater in updaters.values()
-            )
-        )
+    return gmes.TorchSimulation(
+        space=gmes.Cartesian(size=size, resolution=3),
+        geometry=_geometry(sphere_type),
+        sources=sources,
+        runtime=_runtime(),
+    )
 
 
 class MaterialMappingFastPathTest(unittest.TestCase):
-    def build_simulation(self, bloch=None):
-        geometry = [
-            DefaultMedium(
-                material=Drude(
-                    eps_inf=2.0,
-                    dps=(DrudePole(omega=1.0, gamma=0.1),),
+    """Keep vectorized lowering equivalent to pointwise geometry semantics."""
+
+    def assert_planner_maps_match_pointwise_geometry(self, simulation):
+        tree = GeomBoxTree(simulation.geometry)
+        geometries = tree.root.geom_list
+        geometry_ids = {
+            id(geometry): index for index, geometry in enumerate(geometries)
+        }
+        for name, component in _COMPONENT_TYPES.items():
+            with self.subTest(component=name):
+                shape = simulation.plan.shapes[name]
+                axes = simulation.space.component_coordinate_axes(component, shape)
+                expected_material = []
+                expected_underlying = []
+                for x in axes[0]:
+                    for y in axes[1]:
+                        for z in axes[2]:
+                            top, underneath = tree.object_of_point((x, y, z))
+                            expected_material.append(geometry_ids[id(top)])
+                            expected_underlying.append(
+                                -1
+                                if underneath is None
+                                else geometry_ids[id(underneath)]
+                            )
+                plan = simulation.plan.components[name]
+                np.testing.assert_array_equal(
+                    plan.material_ids,
+                    np.asarray(expected_material, dtype=np.int32).reshape(shape),
                 )
-            ),
-            Shell(material=Cpml()),
-        ]
-        sources = [
-            PointSource(
-                src_time=Continuous(freq=0.8, width=0.5),
-                center=(0, 0, 0),
-                component=Ez,
-            )
-        ]
-        kwargs = {} if bloch is None else {"bloch": bloch}
-        return TMzFDTD(
-            Cartesian(size=(2, 2, 0), resolution=4),
-            geometry,
-            sources,
-            verbose=False,
-            **kwargs,
-        )
+                np.testing.assert_array_equal(
+                    plan.underlying_ids,
+                    np.asarray(expected_underlying, dtype=np.int32).reshape(shape),
+                )
 
-    def assert_material_maps_equal(self, fast, legacy):
-        self.assertEqual(fast.pw_material.keys(), legacy.pw_material.keys())
-        for component in fast.pw_material:
-            fast_updaters = fast.pw_material[component]
-            legacy_updaters = legacy.pw_material[component]
-            self.assertEqual(fast_updaters.keys(), legacy_updaters.keys())
-            getter_name = (
-                "get_eps_inf" if component.__name__.startswith("E") else "get_mu_inf"
-            )
-            for updater_type, fast_updater in fast_updaters.items():
-                legacy_updater = legacy_updaters[updater_type]
-                self.assertEqual(fast_updater.idx_size(), legacy_updater.idx_size())
-                fast_getter = getattr(fast_updater, getter_name)
-                legacy_getter = getattr(legacy_updater, getter_name)
-                for index in np.ndindex(fast.field[component].shape):
-                    self.assertEqual(fast_getter(index), legacy_getter(index))
-
-    def test_fast_mapping_matches_legacy_maps_and_multistep_fields(self):
-        for bloch in (None, (0.1, 0.2, 0)):
-            with self.subTest(bloch=bloch):
-                fast = self.build_simulation(bloch)
-                fast.init()
-                with patch.object(fdtd_module, "_BUILTIN_MATERIAL_TYPES", ()):
-                    legacy = self.build_simulation(bloch)
-                    legacy.init()
-
-                self.assert_material_maps_equal(fast, legacy)
-                for _ in range(5):
-                    fast.step()
-                    legacy.step()
-                for component in fast.field:
-                    np.testing.assert_array_equal(
-                        fast.field[component], legacy.field[component]
-                    )
-
-    def test_builtin_mapping_constructs_one_updater_per_material_type(self):
-        constructor = material_module.CpmlEzReal
-        calls = 0
-
-        def counted_constructor():
-            nonlocal calls
-            calls += 1
-            return constructor()
-
-        with patch.object(material_module, "CpmlEzReal", counted_constructor):
-            simulation = self.build_simulation()
-            simulation.init()
-
-        self.assertEqual(calls, 1)
-
-    def test_custom_material_subclass_uses_legacy_signature(self):
-        class CustomDielectric(Dielectric):
-            calls = 0
-
-            def get_pw_material_ez(self, idx, coords, underneath=None, cmplx=False):
-                type(self).calls += 1
-                return super().get_pw_material_ez(idx, coords, underneath, cmplx)
-
-        simulation = TMzFDTD(
-            Cartesian(size=(2, 2, 0), resolution=3),
-            [DefaultMedium(material=CustomDielectric())],
-            verbose=False,
-        )
-        simulation.init()
-
-        self.assertGreater(CustomDielectric.calls, 1)
-        self.assertTrue(simulation.pw_material[Ez])
-
-    def test_inherited_builtin_material_descriptor_uses_fast_path(self):
-        class InheritedDielectric(Dielectric):
-            pass
-
-        constructor = material_module.DielectricEzReal
-        calls = 0
-
-        def counted_constructor():
-            nonlocal calls
-            calls += 1
-            return constructor()
-
-        with patch.object(material_module, "DielectricEzReal", counted_constructor):
-            simulation = TMzFDTD(
-                Cartesian(size=(2, 2, 0), resolution=3),
-                [DefaultMedium(material=InheritedDielectric())],
-                verbose=False,
-            )
-            simulation.init()
-
-        self.assertEqual(calls, 1)
-
-    def test_batched_geometry_mapping_matches_fallback_for_all_components(self):
-        def build(size, bloch):
-            geometry = [
-                DefaultMedium(material=Dielectric(1)),
-                Sphere(material=Dielectric(2), radius=0.45),
-                Sphere(material=Dielectric(3), radius=0.2),
-                Shell(material=Cpml()),
-            ]
-            kwargs = {} if bloch is None else {"bloch": bloch}
-            return FDTD(
-                Cartesian(size=size, resolution=3),
-                geometry,
-                verbose=False,
-                **kwargs,
-            )
-
+    def test_batched_mapping_matches_pointwise_for_all_components_and_clipping(self):
         for size in ((1, 1, 1), (2, 0, 0)):
-            for bloch in (None, (0.1, 0.2, 0)):
-                with self.subTest(size=size, bloch=bloch):
-                    fast = build(size, bloch)
-                    fast._MATERIAL_TILE_SIZE = 7
-                    fast.init()
-                    with patch.object(
-                        fdtd_module.GeomBoxTree,
-                        "_uses_vectorized_predicate",
-                        return_value=False,
-                    ):
-                        fallback = build(size, bloch)
-                        fallback.init()
+            with self.subTest(size=size):
+                simulation = _simulation(size)
+                tree = GeomBoxTree(simulation.geometry)
+                self.assertTrue(tree.supports_bulk_lowering())
+                top, underneath = tree.object_of_point((0, 0, 0))
+                self.assertIs(top, simulation.geometry[3])
+                self.assertIs(underneath, simulation.geometry[2])
+                self.assert_planner_maps_match_pointwise_geometry(simulation)
+                self.assertTrue(
+                    np.any(simulation.plan.components["Ex"].underlying_ids == 2)
+                )
 
-                    self.assert_material_maps_equal(fast, fallback)
-                    for _ in range(3):
-                        fast.step()
-                        fallback.step()
-                    for component in fast.field:
-                        np.testing.assert_array_equal(
-                            fast.field[component], fallback.field[component]
-                        )
-
-    def test_custom_geometry_subclass_uses_pointwise_fallback(self):
-        class CustomSphere(Sphere):
+    def test_pointwise_and_vectorized_geometry_have_equal_multistep_fields(self):
+        class PointwiseSphere(gmes.Sphere):
             calls = 0
 
             def in_object(self, point):
                 type(self).calls += 1
                 return super().in_object(point)
 
-        simulation = FDTD(
-            Cartesian(size=(1, 1, 1), resolution=2),
-            [
-                DefaultMedium(material=Dielectric()),
-                CustomSphere(material=Dielectric(2), radius=0.25),
-            ],
-            verbose=False,
-        )
+        vectorized = _simulation((1, 1, 1), source=True)
+        pointwise = _simulation((1, 1, 1), PointwiseSphere, source=True)
+        self.assertFalse(GeomBoxTree(pointwise.geometry).supports_bulk_lowering())
+        self.assertGreater(PointwiseSphere.calls, 0)
+        for _ in range(3):
+            vectorized.step()
+            pointwise.step()
+        for name, expected in vectorized.host_snapshot().items():
+            np.testing.assert_array_equal(pointwise.host_snapshot()[name], expected)
 
-        simulation.init()
-
-        self.assertGreater(CustomSphere.calls, 0)
-        self.assertTrue(simulation.pw_material)
-
-    def test_opted_in_custom_geometry_subclass_uses_bulk_mapping(self):
-        class VectorizedSphere(Sphere):
+    def test_opted_in_custom_geometry_uses_vectorized_lowering(self):
+        class VectorizedSphere(gmes.Sphere):
             _gmes_vectorized_geometry = True
 
             def in_object(self, point):
                 raise AssertionError("pointwise fallback must not be used")
 
-        simulation = FDTD(
-            Cartesian(size=(1, 1, 1), resolution=2),
-            [
-                DefaultMedium(material=Dielectric()),
-                VectorizedSphere(material=Dielectric(2), radius=0.25),
-            ],
-            verbose=False,
-        )
+        baseline = _simulation((1, 1, 1))
+        opted_in = _simulation((1, 1, 1), VectorizedSphere)
+        self.assertTrue(GeomBoxTree(opted_in.geometry).supports_bulk_lowering())
+        for name, expected in baseline.plan.components.items():
+            np.testing.assert_array_equal(
+                opted_in.plan.components[name].material_ids, expected.material_ids
+            )
 
-        simulation.init()
+    def test_custom_material_subclasses_fail_closed_before_runtime_execution(self):
+        class CustomDielectric(gmes.Dielectric):
+            pass
 
-        self.assertTrue(simulation.pw_material)
+        with self.assertRaisesRegex(NotImplementedError, "does not support material"):
+            gmes.TorchSimulation(
+                space=gmes.Cartesian((1, 1, 1), 2),
+                geometry=[
+                    gmes.DefaultMedium(gmes.Dielectric()),
+                    gmes.Block(CustomDielectric(), size=(1, 1, 1)),
+                ],
+                runtime=_runtime(),
+            )
 
 
 if __name__ == "__main__":

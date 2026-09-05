@@ -10,24 +10,43 @@ https://doi.org/10.1103/PhysRevA.52.3082.
 from argparse import ArgumentParser
 from pathlib import Path
 
-import matplotlib
+try:  # Package import for tests and installed examples.
+    from .ziolkowski1995_common import (
+        UNITS,
+        configure_axes,
+        figure_title,
+        make_simulation,
+        plot_spatial_pair,
+        population_mask,
+        print_population_summary,
+        print_scenario,
+        run_snapshots,
+        save_plot,
+        sit_scenario,
+    )
+except ImportError:  # Direct script execution.
+    from ziolkowski1995_common import (
+        UNITS,
+        configure_axes,
+        figure_title,
+        make_simulation,
+        plot_spatial_pair,
+        population_mask,
+        print_population_summary,
+        print_scenario,
+        run_snapshots,
+        save_plot,
+        sit_scenario,
+    )
 
-matplotlib.use("Agg")
 
-import matplotlib.pyplot as plt
-from ziolkowski1995_common import (
-    UNITS,
-    configure_axes,
-    figure_title,
-    make_simulation,
-    plot_spatial_pair,
-    population_mask,
-    print_population_summary,
-    print_scenario,
-    run_snapshots,
-    save_plot,
-    sit_scenario,
-)
+def _pyplot():
+    import matplotlib
+
+    matplotlib.use("Agg")
+    from matplotlib import pyplot
+
+    return pyplot
 
 
 def generate(
@@ -38,6 +57,7 @@ def generate(
     show=False,
     verbose=False,
 ):
+    plt = _pyplot()
     requested = set(figures)
     invalid = requested.difference(range(1, 5))
     if invalid:

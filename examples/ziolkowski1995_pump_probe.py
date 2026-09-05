@@ -10,20 +10,35 @@ https://doi.org/10.1103/PhysRevA.52.3082.
 from argparse import ArgumentParser
 from pathlib import Path
 
-import matplotlib
+try:  # Package import for tests and installed examples.
+    from .ziolkowski1995_common import (
+        figure_title,
+        print_intensity_summary,
+        print_population_summary,
+        print_scenario,
+        pump_probe_scenario,
+        run_gain,
+        save_plot,
+    )
+except ImportError:  # Direct script execution.
+    from ziolkowski1995_common import (
+        figure_title,
+        print_intensity_summary,
+        print_population_summary,
+        print_scenario,
+        pump_probe_scenario,
+        run_gain,
+        save_plot,
+    )
 
-matplotlib.use("Agg")
 
-import matplotlib.pyplot as plt
-from ziolkowski1995_common import (
-    figure_title,
-    print_intensity_summary,
-    print_population_summary,
-    print_scenario,
-    pump_probe_scenario,
-    run_gain,
-    save_plot,
-)
+def _pyplot():
+    import matplotlib
+
+    matplotlib.use("Agg")
+    from matplotlib import pyplot
+
+    return pyplot
 
 
 def generate(
@@ -34,6 +49,7 @@ def generate(
     show=False,
     verbose=False,
 ):
+    plt = _pyplot()
     requested = set(figures)
     if requested.difference((12,)):
         raise ValueError("the pump-probe script only generates Fig. 12")

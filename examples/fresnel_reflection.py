@@ -1,69 +1,55 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
+"""Oblique TE reflection/transmission through the documented thin layer."""
 
-"""Transmittance and reflectance through a thin gold layer.
+import math
 
-This script is to obtain the transmittance and reflectance of
-TE polarized light through a thin gold layer.
+import gmes
 
-"""
 
-import os
-import sys
-from datetime import datetime
-
-print(os.uname())
-print("python version:", sys.version)
-start_time = datetime.now()
-print("starting initialization:", start_time)
-
-from math import cos, pi, sin
-
-from numpy import inf
-
-from gmes import *
-
-x_size, y_size = 4, 0.5
-SIZE = (x_size, y_size, 0)
-angle = 0
-wl = 10
-k0 = 2 * pi / wl
-
-a = 20e-9
-# DCP parameters in rad PHz (10^15 rad/s), from
-# https://doi.org/10.2528/PIER12112207
-dp = DrudePole(omega=13.1839e15 * a / c0, gamma=0.109173e15 * a / c0)
-cp1 = CriticalPoint(
-    amp=0.273222, phi=-1.18299, omega=3.88123e15 * a / c0, gamma=0.452006e15 * a / c0
-)
-cp2 = CriticalPoint(
-    amp=3.04155,
-    phi=-1.09115,
-    omega=4.20737e15 * a / c0,
-    gamma=2.35409e15 * a / c0,
-)
-gold = DcpPlrc(eps_inf=1.11683, mu_inf=1, dps=(dp,), cps=(cp1, cp2))
-
-space = Cartesian(size=SIZE, resolution=100, parallel=True)
-geom_list = [
-    DefaultMedium(Dielectric()),
-    Cylinder(center=(0, 0, 0), axis=(1, 0, 0), radius=1000, height=1, material=gold),
-    Shell(material=Cpml(), minus_y=False, plus_y=False),
-]
-source_list = [
-    GaussianBeam(
-        src_time=Continuous(freq=1 / wl, width=50),
-        directivity=MinusX,
-        center=(0.6, 0, 0),
-        size=(0, y_size + 1, 1),
-        direction=(-1 * cos(angle), sin(angle), 0),
-        polarization=(0, 0, 1),
+def make_simulation(resolution=100):
+    wavelength, angle, a = 10, 0, 20e-9
+    dp = gmes.DrudePole(omega=13.1839e15 * a / gmes.c0, gamma=0.109173e15 * a / gmes.c0)
+    cps = (
+        gmes.CriticalPoint(
+            0.273222, -1.18299, 3.88123e15 * a / gmes.c0, 0.452006e15 * a / gmes.c0
+        ),
+        gmes.CriticalPoint(
+            3.04155, -1.09115, 4.20737e15 * a / gmes.c0, 2.35409e15 * a / gmes.c0
+        ),
     )
-]
+    gold = gmes.DcpPlrc(eps_inf=1.11683, mu_inf=1, dps=(dp,), cps=cps)
+    return gmes.TorchSimulation(
+        space=gmes.Cartesian((4, 0.5, 0), resolution),
+        geometry=[
+            gmes.DefaultMedium(gmes.Dielectric()),
+            gmes.Cylinder(
+                gold, center=(0, 0, 0), axis=(1, 0, 0), radius=1000, height=1
+            ),
+            gmes.Shell(gmes.Cpml(), minus_y=False, plus_y=False),
+        ],
+        sources=[
+            gmes.GaussianBeam(
+                gmes.Continuous(1 / wavelength, width=50),
+                gmes.MinusX,
+                (0.6, 0, 0),
+                (0, 1.5, 1),
+                (-math.cos(angle), math.sin(angle), 0),
+                (0, 0, 1),
+            )
+        ],
+        bloch=(0, 2 * math.pi / wavelength * math.sin(angle), 0),
+        probes=[
+            gmes.TorchProbeSpec("Ez", (0.7, 0, 0), coordinates="space"),
+            gmes.TorchProbeSpec("Ez", (-0.7, 0, 0), coordinates="space"),
+        ],
+        runtime=gmes.TorchRuntimeConfig(device="cpu", cpu_threads=1),
+    )
 
-my_fdtd = TMzFDTD(space, geom_list, source_list, bloch=(0, k0 * sin(angle), 0))
 
-my_fdtd.init()
-my_fdtd.set_probe((0.7, 0, 0), "r_wl=%f" % wl)
-my_fdtd.set_probe((-0.7, 0, 0), "t_wl=%f" % wl)
-my_fdtd.step_until_t(200)
+def run(until=200):
+    simulation = make_simulation()
+    simulation.advance(math.ceil(until / simulation.plan.dt))
+    return simulation.flush_probes()
+
+
+if __name__ == "__main__":
+    run()

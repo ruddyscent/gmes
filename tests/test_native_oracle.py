@@ -558,8 +558,14 @@ class NativeOracleTest(unittest.TestCase):
                     Path(directory) / "reference.npz",
                 )
             self.assertEqual(result["historical_observer_commit"], expected)
-            self.assertEqual(result["command"][2], str(runner))
+            self.assertEqual(result["command"][2], str(runner.resolve()))
             self.assertEqual(run.call_count, 2)
+            commit_call, capture_call = run.call_args_list
+            self.assertEqual(
+                commit_call.args[0],
+                ["git", "-C", str(checkout.resolve()), "rev-parse", "HEAD"],
+            )
+            self.assertEqual(capture_call.args[0], result["command"])
 
     def test_isolated_environment_excludes_controller_import_paths(self):
         with patch.dict(

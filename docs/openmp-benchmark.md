@@ -1,4 +1,10 @@
-# OpenMP field-update benchmark
+# OpenMP field-update benchmark (historical pre-cutover evidence)
+
+This is a preserved record of the former native implementation, not an active
+GMES installation, tuning, or benchmark procedure. Reproduce it only from the
+recorded historical native reference/archive associated with the measurement,
+not from the current Torch-only checkout. The timings and checksums below are
+retained for historical differential context.
 
 The reference benchmark ran on an Apple M1 Pro with 10 CPU cores using Python
 3.14.2, Apple Clang 21, and Homebrew libomp 22.1.8. Each main result is the
@@ -42,7 +48,6 @@ workload. This confirms numerical equivalence for the benchmark cases; the
 unit suite provides broader material-model regression coverage in default,
 forced-parallel, and OpenMP-disabled configurations.
 
-Run the measurements from the repository root with the commands in
-[`../benchmarks/README.md`](../benchmarks/README.md). Set
-`GMES_OPENMP_THRESHOLD=0` to force eligible loops through OpenMP or use a very
-large value for an OpenMP-linked serial reference.
+The former command recipe and `GMES_OPENMP_THRESHOLD` controls apply only to
+that recorded native reference environment; they are not supported by the
+current package.

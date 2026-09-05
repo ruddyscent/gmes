@@ -1,31 +1,32 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
+"""Photonic-crystal waveguide with explicit Torch execution."""
 
-"""Shows a Ez field in a photonic crystal waveguide.
+import math
 
-A simple example showing the Ez field in a two-dimensional
-photonic crystal waveguide.
+import gmes
 
-"""
 
-from gmes import *
-
-space = Cartesian(size=(16, 8, 0), resolution=20)
-geom_list = [DefaultMedium(material=Dielectric())]
-geom_list.extend(
-    [
-        Cylinder(material=Dielectric(8.9), radius=0.38, center=(x, y, 0))
+def make_simulation():
+    geometry = [gmes.DefaultMedium(gmes.Dielectric())]
+    geometry += [
+        gmes.Cylinder(gmes.Dielectric(8.9), radius=0.38, center=(x, y, 0))
         for x in range(-8, 9)
         for y in range(-4, 5)
         if y != 0
     ]
-)
-geom_list.append(Shell(material=Cpml()))
-src_list = [
-    PointSource(src_time=Continuous(freq=0.43), component=Ez, center=(-7, 0, 0))
-]
-my_fdtd = TMzFDTD(space, geom_list, src_list)
-my_fdtd.init()
-my_fdtd.show_permittivity(Ez, Z, 0)
-my_fdtd.show_field(Ez, Z, 0)
-my_fdtd.step_until_t(200)
+    geometry.append(gmes.Shell(gmes.Cpml()))
+    return gmes.TorchSimulation(
+        space=gmes.Cartesian((16, 8, 0), 20),
+        geometry=geometry,
+        sources=[gmes.PointSource(gmes.Continuous(0.43), (-7, 0, 0), gmes.Ez)],
+        runtime=gmes.TorchRuntimeConfig(device="cpu", cpu_threads=1),
+    )
+
+
+def run(until=200):
+    simulation = make_simulation()
+    simulation.advance(math.ceil(until / simulation.plan.dt))
+    return simulation.host_snapshot()
+
+
+if __name__ == "__main__":
+    run()

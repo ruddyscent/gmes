@@ -1,40 +1,28 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
+"""Ez propagation in a dielectric slab waveguide."""
 
-"""Shows an Ez field in a dielectric slab waveguide.
+import math
 
-A simple example showing the Ez field in a dielectric slab
-waveguide. This is a GMES version of the script in Fig.12 of
-
-A. F. Oskooi, D. Roundy, M. Ibanescu, P. Bermel, J. D.
-Joannopoulos, and S. G. Johnson, "Meep: A flexible free-software
-package for electromagnetic simulations by the FDTD method,"
-Comput. Phys. Commun. 181, 687-702 (2010).
-
-"""
-
-from gmes import *
+import gmes
 
 
-def make_simulation(verbose=True):
-    space = Cartesian(size=(16, 8, 0), resolution=10)
-    geom_list = [
-        DefaultMedium(material=Dielectric()),
-        Block(material=Dielectric(12), size=(16, 1, 1)),
-        Shell(material=Cpml()),
-    ]
-    src_list = [
-        PointSource(src_time=Continuous(freq=0.15), component=Ez, center=(-7, 0, 0))
-    ]
-    return TMzFDTD(space, geom_list, src_list, verbose=verbose)
+def make_simulation(verbose=False):
+    return gmes.TorchSimulation(
+        space=gmes.Cartesian(size=(16, 8, 0), resolution=10),
+        geometry=[
+            gmes.DefaultMedium(gmes.Dielectric()),
+            gmes.Block(gmes.Dielectric(12), size=(16, 1, 1)),
+            gmes.Shell(gmes.Cpml()),
+        ],
+        sources=[gmes.PointSource(gmes.Continuous(0.15), (-7, 0, 0), gmes.Ez)],
+        runtime=gmes.TorchRuntimeConfig(device="cpu", cpu_threads=1),
+    )
 
 
-def main():
+def run(until=200):
     simulation = make_simulation()
-    simulation.init()
-    simulation.show_field(Ez, Z, 0)
-    simulation.step_until_t(200)
+    simulation.advance(math.ceil(until / simulation.plan.dt))
+    return simulation.host_snapshot()
 
 
 if __name__ == "__main__":
-    main()
+    run()

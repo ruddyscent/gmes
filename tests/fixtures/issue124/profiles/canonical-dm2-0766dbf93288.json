@@ -1,0 +1,167 @@
+{
+  "schema_version": 2,
+  "reference": {
+    "commit": "d87d25afd160d96b1fa0890cacecd90802448d57",
+    "tag": "native-oracle-d87d25a",
+    "observer_tag": "native-oracle-observer-v6",
+    "observer_commit": "2d5810cebf610fa6384235d9771f4ac699c23fc5",
+    "performance_observer_tag": "native-oracle-observer-v5",
+    "performance_observer_commit": "1ab94e579dc52861db7ecdcd55f24f8af1977de7",
+    "performance_summary_sha256": "1c9bdce2717ba858fd03b2e40302a5b2d19a29920496f969e33aee36e34e1baa",
+    "field_initializer": "native-affine-ramp-v1",
+    "field_scale": 0.001,
+    "seed": 115,
+    "performance_warmup_steps": 5,
+    "performance_steps_per_repeat": 100,
+    "performance_repetitions": 15,
+    "performance_profile_steps": 5,
+    "capture_steps": [1, 2, 5, 20, 100],
+    "precondition_steps": 2
+  },
+  "correctness": [
+    {"name": "dielectric-1d", "recipe": "homogeneous", "size": [8, 0, 0], "resolution": 4, "material": "dielectric", "complex": false},
+    {"name": "dielectric-2d", "recipe": "homogeneous", "size": [8, 6, 0], "resolution": 4, "material": "dielectric", "complex": false},
+    {"name": "dielectric-3d", "recipe": "homogeneous", "size": [6, 5, 4], "resolution": 3, "material": "dielectric", "complex": false},
+    {"name": "singleton-3d", "recipe": "homogeneous", "size": [0, 0, 0], "resolution": 3, "material": "dielectric", "complex": false},
+    {"name": "bloch-2d", "recipe": "homogeneous", "size": [8, 6, 0], "resolution": 4, "material": "dielectric", "complex": true},
+    {"name": "bloch-3d", "recipe": "homogeneous", "size": [6, 5, 4], "resolution": 3, "material": "drude-4", "complex": true},
+    {"name": "dummy", "recipe": "homogeneous", "size": [5, 5, 4], "resolution": 3, "material": "dummy", "complex": false},
+    {"name": "const", "recipe": "homogeneous", "size": [5, 5, 4], "resolution": 3, "material": "const", "complex": false},
+    {"name": "upml", "recipe": "homogeneous", "size": [5, 5, 4], "resolution": 3, "material": "upml", "complex": false},
+    {"name": "cpml", "recipe": "homogeneous", "size": [5, 5, 4], "resolution": 3, "material": "cpml", "complex": false},
+    {"name": "upml-bloch", "recipe": "homogeneous", "size": [5, 5, 4], "resolution": 3, "material": "upml", "complex": true},
+    {"name": "cpml-bloch", "recipe": "homogeneous", "size": [5, 5, 4], "resolution": 3, "material": "cpml", "complex": true},
+    {"name": "drude-1", "recipe": "homogeneous", "size": [5, 5, 4], "resolution": 3, "material": "drude-1", "complex": false},
+    {"name": "drude-4", "recipe": "homogeneous", "size": [5, 5, 4], "resolution": 3, "material": "drude-4", "complex": false},
+    {"name": "lorentz-1", "recipe": "homogeneous", "size": [5, 5, 4], "resolution": 3, "material": "lorentz-1", "complex": false},
+    {"name": "lorentz-4", "recipe": "homogeneous", "size": [5, 5, 4], "resolution": 3, "material": "lorentz-4", "complex": false},
+    {"name": "lorentz-bloch", "recipe": "homogeneous", "size": [5, 5, 4], "resolution": 3, "material": "lorentz-1", "complex": true},
+    {"name": "dcp-ade", "recipe": "homogeneous", "size": [5, 5, 4], "resolution": 3, "material": "dcp-ade", "complex": false},
+    {"name": "dcp-plrc", "recipe": "homogeneous", "size": [5, 5, 4], "resolution": 3, "material": "dcp-plrc", "complex": false},
+    {"name": "dcp-rc", "recipe": "homogeneous", "size": [5, 5, 4], "resolution": 3, "material": "dcp-rc", "complex": false},
+    {"name": "dcp-ade-bloch", "recipe": "homogeneous", "size": [5, 5, 4], "resolution": 3, "material": "dcp-ade", "complex": true},
+    {"name": "dcp-plrc-bloch", "recipe": "homogeneous", "size": [5, 5, 4], "resolution": 3, "material": "dcp-plrc", "complex": true},
+    {"name": "dcp-rc-bloch", "recipe": "homogeneous", "size": [5, 5, 4], "resolution": 3, "material": "dcp-rc", "complex": true},
+    {"name": "dm2-1", "recipe": "homogeneous", "size": [5, 5, 0], "resolution": 3, "material": "dm2-1", "complex": false},
+    {"name": "dm2-4", "recipe": "homogeneous", "size": [5, 5, 0], "resolution": 3, "material": "dm2-4", "complex": false},
+    {"name": "mixed-2d", "recipe": "mixed", "size": [12, 6, 0], "resolution": 4, "source": "none", "complex": false},
+    {"name": "mixed-3d", "recipe": "mixed", "size": [96, 6, 4], "resolution": 3, "source": "none", "complex": false},
+    {"name": "periodic-3d", "recipe": "homogeneous", "size": [6, 5, 4], "resolution": 3, "material": "dielectric", "complex": false},
+    {"name": "overlapping-sources", "recipe": "homogeneous", "size": [6, 5, 4], "resolution": 3, "material": "dielectric", "source": "overlap-point", "complex": false},
+    {"name": "tfsf-transparent", "recipe": "homogeneous", "size": [4, 4, 4], "resolution": 2, "material": "dielectric", "source": "tfsf", "complex": false},
+    {"name": "gaussian-auxiliary", "recipe": "homogeneous", "size": [4, 4, 4], "resolution": 2, "material": "dielectric", "source": "gaussian", "complex": false}
+  ],
+  "benchmarks": [
+    {"name": "heterogeneous-16-cylinder", "recipe": "heterogeneous", "size": [10, 10, 0], "resolution": 20, "region_count": 16, "complex": false},
+    {"name": "many-small-regions", "recipe": "heterogeneous", "size": [16, 16, 0], "resolution": 10, "region_count": 128, "complex": false},
+    {"name": "heavy-overlap", "recipe": "heterogeneous", "size": [16, 16, 0], "resolution": 10, "region_count": 16, "overlap": true, "complex": false},
+    {"name": "pml-thin", "recipe": "homogeneous", "size": [16, 16, 0], "resolution": 10, "material": "cpml", "pml_thickness": 0.5, "complex": false},
+    {"name": "pml-thick", "recipe": "homogeneous", "size": [16, 16, 0], "resolution": 10, "material": "cpml", "pml_thickness": 3.0, "complex": false},
+    {"name": "coverage-1-contiguous", "recipe": "coverage", "size": [32, 24, 0], "resolution": 4, "coverage_percent": 1, "layout": "contiguous", "complex": false},
+    {"name": "coverage-1-fragmented", "recipe": "coverage", "size": [32, 24, 0], "resolution": 4, "coverage_percent": 1, "layout": "fragmented", "complex": false},
+    {"name": "coverage-10-contiguous", "recipe": "coverage", "size": [32, 24, 0], "resolution": 4, "coverage_percent": 10, "layout": "contiguous", "complex": false},
+    {"name": "coverage-10-fragmented", "recipe": "coverage", "size": [32, 24, 0], "resolution": 4, "coverage_percent": 10, "layout": "fragmented", "complex": false},
+    {"name": "coverage-50-contiguous", "recipe": "coverage", "size": [32, 24, 0], "resolution": 4, "coverage_percent": 50, "layout": "contiguous", "complex": false},
+    {"name": "coverage-50-fragmented", "recipe": "coverage", "size": [32, 24, 0], "resolution": 4, "coverage_percent": 50, "layout": "fragmented", "complex": false},
+    {"name": "coverage-90-contiguous", "recipe": "coverage", "size": [32, 24, 0], "resolution": 4, "coverage_percent": 90, "layout": "contiguous", "complex": false},
+    {"name": "coverage-90-fragmented", "recipe": "coverage", "size": [32, 24, 0], "resolution": 4, "coverage_percent": 90, "layout": "fragmented", "complex": false},
+    {"name": "cpu-crossover-2d", "recipe": "coverage", "size": [16, 16, 0], "resolution": 10, "coverage_percent": 10, "layout": "fragmented", "complex": false},
+    {"name": "cpu-crossover-3d", "recipe": "coverage", "size": [16, 16, 16], "resolution": 4, "coverage_percent": 10, "layout": "fragmented", "complex": false},
+    {"name": "cpu-large-2d", "recipe": "coverage", "size": [64, 64, 0], "resolution": 10, "coverage_percent": 50, "layout": "fragmented", "complex": false},
+    {"name": "cpu-large-3d", "recipe": "coverage", "size": [32, 32, 32], "resolution": 4, "coverage_percent": 50, "layout": "fragmented", "complex": false},
+    {"name": "single-gpu-2d", "recipe": "coverage", "size": [256, 256, 0], "resolution": 4, "coverage_percent": 50, "layout": "fragmented", "complex": false},
+    {"name": "single-gpu-3d", "recipe": "coverage", "size": [96, 96, 96], "resolution": 1, "coverage_percent": 50, "layout": "fragmented", "complex": false},
+    {"name": "two-gpu-2d", "recipe": "coverage", "size": [384, 256, 0], "resolution": 4, "coverage_percent": 50, "layout": "fragmented", "complex": false},
+    {"name": "two-gpu-3d", "recipe": "coverage", "size": [128, 96, 96], "resolution": 1, "coverage_percent": 50, "layout": "fragmented", "complex": false}
+  ],
+  "physical_checks": [
+    {"name": "reflection-transmission-dcp", "recipe": "homogeneous", "size": [40, 0, 0], "resolution": 10, "material": "dcp-plrc", "source_component": "Ey", "capture_steps": [100, 500], "complex": false},
+    {"name": "stability-energy-dielectric", "recipe": "homogeneous", "size": [24, 12, 0], "resolution": 6, "material": "dielectric", "capture_steps": [100, 500, 1000], "complex": false},
+    {"name": "ziolkowski-dm2", "recipe": "homogeneous", "size": [0, 0, 40], "resolution": 10, "material": "dm2-4", "source_component": "Ex", "capture_steps": [100, 500], "complex": false}
+  ],
+  "performance_gates": {
+    "cpu_crossover": {"cases": ["cpu-crossover-2d", "cpu-crossover-3d"], "sizes": [[16, 16, 0], [16, 16, 16]], "resolutions": [10, 4], "repeats": 15, "threads": [1, "physical"]},
+    "cpu_large": {"cases": ["cpu-large-2d", "cpu-large-3d"], "sizes": [[64, 64, 0], [32, 32, 32]], "resolutions": [10, 4], "repeats": 15, "threads": [1, "physical"]},
+    "cpu_acceptance": {
+      "contract_id": "cpu-acceptance-v2",
+      "timing_reference": {
+        "backend": "torch",
+        "root_commit": "821c075b9328e02c3f3e5d16488a44b64ff08c04",
+        "timing_runtime_identity": {
+          "schema_version": 1,
+          "torch": "2.13.0+cpu",
+          "cuda_runtime": null
+        },
+        "slice_artifacts": [
+          {
+            "thread_mode": "one",
+            "threads": 1,
+            "publication_url": "https://github.com/ruddyscent/gmes/releases/download/issue-123-torch-cpu-baseline-v3/torch-cpu-baseline-one.json",
+            "size_bytes": 18281,
+            "sha256": "c8eba3c17ccae5ba744a8fbc90b89d72a77dcf0624339cda1deb4d7f594395ed"
+          },
+          {
+            "thread_mode": "physical",
+            "threads": 4,
+            "publication_url": "https://github.com/ruddyscent/gmes/releases/download/issue-123-torch-cpu-baseline-v3/torch-cpu-baseline-physical.json",
+            "size_bytes": 18292,
+            "sha256": "b1a3c82a069c2475560468a7b8d0a237db89e857bdce96f8fc812449b5c35602"
+          }
+        ],
+        "legacy_evidence": {
+          "evidence_contract_id": "torch-cpu-acceptance-v7",
+          "cpu_contract_id": "cpu-acceptance-v1",
+          "manifest_sha256": "6d7fe084c558cf69771f0c3928bc9be96fc6bb5b55ba777d674151fbbe6cbe19",
+          "runner_sha256": "fee6d418bb50729ddb26ff14e931a4f51bb8d2a92cb0ad537c2757846247a770",
+          "solver_sha256": "9cd8decc801a6f9d93551c6e6f427afeff1c65e3092e54b03e5abe0a3e9192d5",
+          "solver_abi": "torch-fdtd-regions-v8"
+        }
+      },
+      "cases": ["cpu-crossover-2d", "cpu-crossover-3d", "cpu-large-2d", "cpu-large-3d", "bloch-2d", "bloch-3d"],
+      "thread_modes": ["one", "physical"],
+      "precision": "float64",
+      "max_individual_ratio": 1.05,
+      "native_comparison": "informational",
+      "allocation_contract": {
+        "method": "reviewed-fixed-temporary-provenance-v1",
+        "fixed_temporaries": {
+          "allowed": true,
+          "reviewed_provenance_required": true
+        },
+        "max_net_live_growth_bytes": 0,
+        "max_final_live_growth_bytes": 0,
+        "rss_growth": "bounded",
+        "max_full_field_or_domain_clones": 0,
+        "public_upstream_issue_required": true
+      },
+      "statistics": {
+        "method": "independent-stratified-bootstrap-log-geomean-v1",
+        "resamples": 20000,
+        "seed": 123,
+        "one_sided_confidence": 0.95,
+        "regression_ratio": 1.0,
+        "max_relative_mad": 0.05
+      }
+    },
+    "single_gpu": {"cases": ["single-gpu-2d", "single-gpu-3d"], "sizes": [[256, 256, 0], [96, 96, 96]], "resolutions": [4, 1], "repeats": 15, "devices": [0], "large_mixed_minimum_native_cpu_speedup": 2.0},
+    "two_gpu": {"cases": ["two-gpu-2d", "two-gpu-3d"], "sizes": [[384, 256, 0], [128, 96, 96]], "resolutions": [4, 1], "repeats": 15, "devices": [0, 1], "strong_scaling_minimum": 1.6, "weak_scaling_efficiency_minimum": 0.8},
+    "coverage_percent": [1, 10, 50, 90],
+    "layouts": ["contiguous", "fragmented"],
+    "workloads": ["homogeneous-dielectric", "bloch", "heterogeneous-16-cylinder", "many-small", "heavy-overlap", "pml-thin", "pml-thick", "drude-1", "drude-4", "lorentz-1", "lorentz-4", "dcp-ade", "dcp-plrc", "dcp-rc", "dm2-1", "dm2-4", "mixed", "point-source", "tfsf-transparent", "gaussian-beam", "periodic", "bloch"]
+  },
+  "tolerances": {
+    "native": {"float64": {"rtol": 0.0, "atol": 0.0}, "complex128": {"rtol": 0.0, "atol": 0.0}},
+    "torch": {
+      "dielectric": {"float32": {"rtol": 3e-5, "atol": 3e-6}, "float64": {"rtol": 1e-13, "atol": 1e-14}, "complex64": {"rtol": 3e-5, "atol": 3e-6}, "complex128": {"rtol": 2e-13, "atol": 2e-14}},
+      "pml": {"float32": {"rtol": 5e-5, "atol": 5e-6}, "float64": {"rtol": 2e-12, "atol": 2e-13}, "complex64": {"rtol": 8e-5, "atol": 8e-6}, "complex128": {"rtol": 4e-12, "atol": 4e-13}},
+      "drude": {"float32": {"rtol": 6e-4, "atol": 1e-4}, "float64": {"rtol": 5e-12, "atol": 5e-13}, "complex128": {"rtol": 6e-12, "atol": 6e-13}},
+      "lorentz": {"float32": {"rtol": 6e-4, "atol": 1e-4}, "float64": {"rtol": 5e-12, "atol": 5e-13}, "complex128": {"rtol": 6e-12, "atol": 6e-13}},
+      "dcp-ade": {"float32": {"rtol": 6e-4, "atol": 1e-4}, "float64": {"rtol": 5e-12, "atol": 5e-13}, "complex128": {"rtol": 1e-11, "atol": 1e-12}},
+      "dcp-plrc": {"float32": {"rtol": 6e-4, "atol": 1e-4}, "float64": {"rtol": 5e-12, "atol": 5e-13}, "complex128": {"rtol": 1e-11, "atol": 1e-12}},
+      "dcp-rc": {"float32": {"rtol": 6e-4, "atol": 1e-4}, "float64": {"rtol": 5e-12, "atol": 5e-13}, "complex128": {"rtol": 1e-11, "atol": 1e-12}},
+      "dm2": {"float32": {"rtol": 6e-4, "atol": 3e-6}, "float64": {"rtol": 2e-10, "atol": 2e-12}}
+      ,"source_auxiliary": {"gaussian-auxiliary": {"float64": {"rtol": 2e-12, "atol": 1e-12}}}
+      ,"mixed": {"float64": {"rtol": 2e-10, "atol": 2e-12}, "complex128": {"rtol": 4e-10, "atol": 4e-12}}
+    }
+  }
+}

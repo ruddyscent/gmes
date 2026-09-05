@@ -199,6 +199,56 @@ class TwoGpuBenchmarkContractTest(unittest.TestCase):
 
 
 class RankLocalOwnershipTest(unittest.TestCase):
+    def test_point_sources_filter_nonlocal_targets_before_local_validation(self):
+        global_space = gmes.Cartesian((5, 4, 4), 1)
+        geometry = [gmes.DefaultMedium(gmes.Dielectric())]
+        waveform = gmes.Continuous(0.2)
+        sources = [
+            gmes.PointSource(waveform, center=(-1, 0, 0), component=gmes.Ex),
+            gmes.PointSource(waveform, center=(1, 0, 0), component=gmes.Ex, amp=2),
+            gmes.PointSource(waveform, center=(-1, 0, 0), component=gmes.Ey, amp=3),
+            gmes.PointSource(waveform, center=(1, 0, 0), component=gmes.Ex, amp=4),
+        ]
+        decomposition = choose_two_gpu_decomposition(
+            global_space,
+            geometry,
+            sources=sources,
+            split_axis=0,
+            cut=2,
+        )
+        batches = []
+        for rank in (0, 1):
+            local = rank_local_space(global_space, decomposition, rank)
+            runtime = gmes.TorchRuntimeConfig(
+                device="cpu",
+                cpu_threads=1,
+                launch=gmes.DistributedLaunch(
+                    rank=rank,
+                    world_size=2,
+                    local_rank=rank,
+                    local_world_size=2,
+                ),
+            )
+            simulation = gmes.TorchSimulation(
+                space=local,
+                geometry=geometry,
+                sources=sources,
+                runtime=runtime,
+                _distributed_partition=decomposition,
+            )
+            batches.append(
+                {batch.component: batch for batch in simulation.sources.batches}
+            )
+
+        self.assertEqual(decomposition.local_shape(0)[0], 2)
+        self.assertEqual(decomposition.local_shape(1)[0], 3)
+        self.assertEqual(set(batches[0]), {"Ex"})
+        self.assertEqual(set(batches[1]), {"Ex", "Ey"})
+        self.assertEqual(batches[0]["Ex"].overwrite_targets.numel(), 1)
+        self.assertEqual(batches[1]["Ex"].overwrite_targets.numel(), 1)
+        self.assertEqual(batches[1]["Ey"].overwrite_targets.numel(), 1)
+        self.assertEqual(batches[1]["Ex"].overwrite_amplitudes.tolist(), [4.0])
+
     def test_point_source_is_owned_by_exactly_one_rank(self):
         global_space = gmes.Cartesian((4, 3, 2), 2)
         geometry = [gmes.DefaultMedium(gmes.Dielectric())]

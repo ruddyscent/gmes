@@ -448,47 +448,6 @@ def _profile(simulation, steps):
     }
 
 
-def run_native_case(
-    case,
-    *,
-    threads,
-    warmup,
-    steps,
-    repeats,
-    gmes,
-):
-    """Measure the unchanged native simple-material execution on the same case."""
-    if case not in EXECUTABLE_CASES:
-        return None
-    space, geometry, bloch = build_case(case, gmes)
-    simulation = gmes.FDTD(space, geometry, bloch=bloch, verbose=False)
-    simulation.init()
-    rng = np.random.default_rng(117)
-    for field in simulation.field.values():
-        values = rng.normal(size=field.shape) * 1e-3
-        if bloch is not None:
-            values = values + 1j * rng.normal(size=field.shape) * 1e-3
-        field[...] = values
-    for _ in range(warmup):
-        simulation.step()
-    samples = []
-    for _ in range(repeats):
-        start = perf_counter()
-        for _ in range(steps):
-            simulation.step()
-        samples.append((perf_counter() - start) / steps)
-    cells = int(np.prod(space.my_field_size))
-    return {
-        "threads": threads,
-        "seconds_per_step": samples,
-        "median_seconds_per_step": median(samples),
-        "cells_per_second": cells / median(samples),
-        "field_checksum": float(
-            sum(np.abs(field).sum() for field in simulation.field.values())
-        ),
-    }
-
-
 def run_case(
     case,
     *,
@@ -685,7 +644,6 @@ def main():
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--tile-size", type=int, default=4096)
     parser.add_argument("--profile", action="store_true")
-    parser.add_argument("--native-reference", action="store_true")
     args = parser.parse_args()
     if (
         args.threads < 1
@@ -695,9 +653,6 @@ def main():
         or args.tile_size < 1
     ):
         parser.error("thread, step, repeat, and tile counts must be positive")
-
-    if args.native_reference and torch.device(args.device).type != "cpu":
-        parser.error("--native-reference requires a CPU Torch run")
 
     os.environ["OMP_NUM_THREADS"] = str(args.threads)
     import gmes
@@ -719,41 +674,7 @@ def main():
         torch_output = [run_policy_matrix(case, **kwargs) for case in cases]
     else:
         torch_output = [run_case(case, policy=args.policy, **kwargs) for case in cases]
-    if args.native_reference:
-        native_output = {
-            case: run_native_case(
-                case,
-                threads=args.threads,
-                warmup=args.warmup,
-                steps=args.steps,
-                repeats=args.repeats,
-                gmes=gmes,
-            )
-            for case in cases
-            if case in EXECUTABLE_CASES
-        }
-        gates = {}
-        for item in torch_output:
-            torch_result = item["results"]["auto"] if args.policy == "matrix" else item
-            native_result = native_output.get(item["case"])
-            if native_result is None:
-                continue
-            ratio = (
-                torch_result["median_seconds_per_step"]
-                / native_result["median_seconds_per_step"]
-            )
-            gates[item["case"]] = {
-                "torch_to_native_step_ratio": ratio,
-                "within_five_percent": ratio <= 1.05,
-            }
-        output = {
-            "torch": torch_output,
-            "native": native_output,
-            "native_non_regression": gates,
-        }
-    else:
-        output = torch_output
-    print(json.dumps(output, indent=2, sort_keys=True))
+    print(json.dumps(torch_output, indent=2, sort_keys=True))
 
 
 if __name__ == "__main__":

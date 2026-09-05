@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run an oracle capture in a checkout-isolated process."""
+"""Run a historical oracle capture from its pinned observer checkout."""
 
 import argparse
 import json
@@ -45,15 +45,30 @@ def load_capture_stdout(stdout):
 
 
 def run_capture(checkout, python, manifest, case, output):
+    """Invoke the immutable observer, never this checkout's oracle runtime."""
     checkout = Path(checkout).resolve(strict=True)
     python = Path(python).absolute()
     if not python.is_file():
         raise FileNotFoundError(f"Python executable is absent: {python}")
     manifest = Path(manifest).resolve(strict=True)
+    contract = json.loads(manifest.read_text(encoding="utf-8"))
+    reference = contract["reference"]
+    expected_commit = reference["observer_commit"]
+    actual_commit = subprocess.run(
+        ["git", "-C", str(checkout), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    if actual_commit != expected_commit:
+        raise ValueError(
+            "historical oracle checkout does not match the pinned observer commit: "
+            f"expected {expected_commit}, got {actual_commit}"
+        )
     output = Path(output).resolve()
-    runner = Path(__file__).resolve().with_name("native_oracle.py")
+    runner = checkout / "benchmarks" / "native_oracle.py"
     if not runner.is_file():
-        raise FileNotFoundError(f"oracle controller is absent: {runner}")
+        raise FileNotFoundError(f"historical oracle runner is absent: {runner}")
     output.parent.mkdir(parents=True, exist_ok=True)
     command = [
         str(python),
@@ -84,6 +99,8 @@ def run_capture(checkout, python, manifest, case, output):
         "manifest": str(manifest),
         "case": case,
         "output": str(output),
+        "historical_observer_tag": reference["observer_tag"],
+        "historical_observer_commit": expected_commit,
         "command": command,
         "capture": load_capture_stdout(result.stdout),
     }

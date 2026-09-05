@@ -1,4 +1,4 @@
-"""Tests for the deliberately breaking Torch-native execution path."""
+"""Tests for the deliberately breaking Torch-only execution path."""
 
 import hashlib
 import json
@@ -58,48 +58,42 @@ def _simulation(
     device="cpu",
     precision="float64",
     compile_policy="eager",
+    execution_policy="auto",
     bloch=None,
+    geometry=None,
 ):
     return TorchSimulation(
         space=gmes.Cartesian(size, resolution),
-        geometry=_geometry(),
+        geometry=_geometry() if geometry is None else geometry,
         runtime=TorchRuntimeConfig(
             device=device,
             precision=precision,
             compile_policy=compile_policy,
+            execution_policy=execution_policy,
             cpu_threads=2,
         ),
         bloch=bloch,
     )
 
 
-def _native_and_fields(*, size=(2, 2, 2), resolution=2, bloch=None):
-    native = gmes.FDTD(
-        gmes.Cartesian(size, resolution),
-        _geometry(),
-        bloch=bloch,
-        verbose=False,
-    )
-    native.init()
+def _seeded_fields(simulation, *, complex_fields):
     rng = np.random.default_rng(1729)
-    for field in native.field.values():
+    fields = {}
+    for name, field in simulation.state.host_snapshot().items():
         values = rng.normal(size=field.shape) * 1e-3
-        if bloch is not None:
+        if complex_fields:
             values = values + 1j * rng.normal(size=field.shape) * 1e-3
-        field[...] = values
-        assert np.all(field != 0)
-    fields = {
-        component.__name__: field.copy() for component, field in native.field.items()
-    }
-    return native, fields
+        assert np.all(values != 0)
+        fields[name] = values
+    return fields
 
 
-def _assert_matches_native(test, simulation, native, *, steps, precision):
+def _assert_matches_reference(test, simulation, reference, *, steps, precision):
     simulation.advance(steps)
-    for _ in range(steps):
-        native.step()
+    reference.advance(steps)
     actual = simulation.state.host_snapshot()
-    if native.cmplx:
+    expected = reference.state.host_snapshot()
+    if np.iscomplexobj(expected["Ex"]):
         tolerance_name = "complex128" if precision == "float64" else "complex64"
     else:
         tolerance_name = precision
@@ -107,11 +101,85 @@ def _assert_matches_native(test, simulation, native, *, steps, precision):
     for name in _COMPONENTS:
         np.testing.assert_allclose(
             actual[name],
-            native.field[getattr(gmes, name)],
+            expected[name],
             rtol=tolerance["rtol"],
             atol=tolerance["atol"],
             err_msg=name,
         )
+
+
+def _sync_numpy_boundaries(fields, names, *, high_from_low, dr, bloch):
+    """Apply the periodic/Bloch plane relation without Torch planner helpers."""
+    for name in names:
+        component_axis = "xyz".index(name[1].lower())
+        field = fields[name]
+        for axis in range(3):
+            if axis == component_axis or field.shape[axis] <= 1:
+                continue
+            destination = -1 if high_from_low else 0
+            source = 0 if high_from_low else -1
+            direction = 1 if high_from_low else -1
+            destination_slice = [slice(None)] * field.ndim
+            source_slice = [slice(None)] * field.ndim
+            destination_slice[axis] = destination
+            source_slice[axis] = source
+            phase = 1.0
+            if bloch is not None:
+                length = (field.shape[axis] - 1) * dr[axis]
+                phase = np.exp(1j * direction * bloch[axis] * length)
+            field[tuple(destination_slice)] = field[tuple(source_slice)].copy() * phase
+
+
+def _numpy_dielectric_step(fields, *, resolution, bloch):
+    """Advance one homogeneous Yee step from the published scalar equations."""
+    eps_inf = 1.7
+    mu_inf = 1.05
+    courant_ratio = 0.99
+    dr = (1.0 / resolution,) * 3
+    dt_limit = np.sqrt(eps_inf * mu_inf) / np.sqrt(sum(spacing**-2 for spacing in dr))
+    dt = courant_ratio * dt_limit
+    dx, dy, dz = dr
+    expected = {name: value.copy() for name, value in fields.items()}
+    ex, ey, ez = (expected[name] for name in ("Ex", "Ey", "Ez"))
+    hx, hy, hz = (expected[name] for name in ("Hx", "Hy", "Hz"))
+
+    _sync_numpy_boundaries(
+        expected,
+        ("Hx", "Hy", "Hz"),
+        high_from_low=False,
+        dr=dr,
+        bloch=bloch,
+    )
+    ex[:, :-1, :-1] += (dt / eps_inf) * (
+        (hz[1:, 1:, :] - hz[1:, :-1, :]) / dy - (hy[1:, :, 1:] - hy[1:, :, :-1]) / dz
+    )
+    ey[:-1, :, :-1] += (dt / eps_inf) * (
+        (hx[:, 1:, 1:] - hx[:, 1:, :-1]) / dz - (hz[1:, 1:, :] - hz[:-1, 1:, :]) / dx
+    )
+    ez[:-1, :-1, :] += (dt / eps_inf) * (
+        (hy[1:, :, 1:] - hy[:-1, :, 1:]) / dx - (hx[:, 1:, 1:] - hx[:, :-1, 1:]) / dy
+    )
+
+    _sync_numpy_boundaries(
+        expected,
+        ("Ex", "Ey", "Ez"),
+        high_from_low=True,
+        dr=dr,
+        bloch=bloch,
+    )
+    hx[:, 1:, 1:] += (dt / mu_inf) * (
+        (ey[:-1, :, 1:] - ey[:-1, :, :-1]) / dz
+        - (ez[:-1, 1:, :] - ez[:-1, :-1, :]) / dy
+    )
+    hy[1:, :, 1:] += (dt / mu_inf) * (
+        (ez[1:, :-1, :] - ez[:-1, :-1, :]) / dx
+        - (ex[:, :-1, 1:] - ex[:, :-1, :-1]) / dz
+    )
+    hz[1:, 1:, :] += (dt / mu_inf) * (
+        (ex[:, 1:, :-1] - ex[:, :-1, :-1]) / dy
+        - (ey[1:, :, :-1] - ey[:-1, :, :-1]) / dx
+    )
+    return expected, dt
 
 
 class TorchRuntimeConfigTest(unittest.TestCase):
@@ -867,6 +935,49 @@ class TorchStateTest(unittest.TestCase):
 
 
 class TorchOracleTest(unittest.TestCase):
+    def test_heterogeneous_dielectric_cells_match_scalar_inverse_equations(self):
+        resolution = 4
+        geometry = [
+            gmes.DefaultMedium(gmes.Dielectric(eps_inf=1.7, mu_inf=1.05)),
+            gmes.Block(
+                gmes.Dielectric(eps_inf=3.4, mu_inf=1.05),
+                center=(0, 0, 0),
+                size=(1, 1, 1),
+            ),
+        ]
+        simulation = _simulation(
+            size=(2, 2, 2),
+            resolution=resolution,
+            geometry=geometry,
+        )
+        fields = _seeded_fields(simulation, complex_fields=False)
+        simulation.load_host_fields(fields)
+        spacing = 1.0 / resolution
+        dt = 0.99 * np.sqrt(1.7 * 1.05) / np.sqrt(3 * resolution**2)
+        targets = (
+            ((3, 4, 4), 3.4),  # Ex at (-0.125, 0, 0), inside the block.
+            ((0, 4, 4), 1.7),  # Ex at (-0.875, 0, 0), in the default medium.
+        )
+        expected = {}
+        for target, eps_inf in targets:
+            i, j, k = target
+            curl = (
+                fields["Hz"][i + 1, j + 1, k] - fields["Hz"][i + 1, j, k]
+            ) / spacing - (
+                fields["Hy"][i + 1, j, k + 1] - fields["Hy"][i + 1, j, k]
+            ) / spacing
+            expected[target] = fields["Ex"][target] + dt * curl / eps_inf
+
+        simulation.advance(1)
+        actual = simulation.state.host_snapshot()["Ex"]
+        for target, eps_inf in targets:
+            with self.subTest(target=target, eps_inf=eps_inf):
+                self.assertAlmostEqual(actual[target], expected[target], places=14)
+                wrong = fields["Ex"][target] + (
+                    expected[target] - fields["Ex"][target]
+                ) * eps_inf / (1.7 if eps_inf == 3.4 else 3.4)
+                self.assertGreater(abs(expected[target] - wrong), 1e-10)
+
     def _compare(
         self,
         *,
@@ -877,34 +988,65 @@ class TorchOracleTest(unittest.TestCase):
         size=(2, 2, 2),
         resolution=2,
     ):
-        native, fields = _native_and_fields(
-            size=size, resolution=resolution, bloch=bloch
+        reference = _simulation(
+            size=size,
+            resolution=resolution,
+            device="cpu",
+            precision="float64",
+            compile_policy="eager",
+            execution_policy="dense",
+            bloch=bloch,
         )
+        fields = _seeded_fields(reference, complex_fields=bloch is not None)
         simulation = _simulation(
             size=size,
             resolution=resolution,
             device=device,
             precision=precision,
             compile_policy=compile_policy,
+            execution_policy="compact",
             bloch=bloch,
         )
+        reference.load_host_fields(fields)
         simulation.load_host_fields(fields)
-        _assert_matches_native(
+        expected, expected_dt = _numpy_dielectric_step(
+            fields,
+            resolution=resolution,
+            bloch=bloch,
+        )
+        self.assertAlmostEqual(simulation.plan.dt, expected_dt, places=15)
+        simulation.advance(1)
+        actual = simulation.state.host_snapshot()
+        if np.iscomplexobj(expected["Ex"]):
+            tolerance_name = "complex128" if precision == "float64" else "complex64"
+        else:
+            tolerance_name = precision
+        tolerance = _TOLERANCES[tolerance_name]
+        for name in _COMPONENTS:
+            np.testing.assert_allclose(
+                actual[name],
+                expected[name],
+                rtol=tolerance["rtol"],
+                atol=tolerance["atol"],
+                err_msg=f"{name} independent NumPy Yee step",
+            )
+        reference.advance(1)
+        _assert_matches_reference(
             self,
             simulation,
-            native,
-            steps=3,
+            reference,
+            steps=2,
             precision=precision,
         )
         return simulation
 
-    def test_cpu_eager_float64_matches_frozen_native_contract(self):
+    def test_cpu_eager_float64_matches_numpy_step_and_dense_reference(self):
         self._compare(device="cpu", precision="float64", compile_policy="eager")
 
-    def test_cpu_eager_float32_uses_separate_tolerance(self):
+    def test_cpu_eager_float32_matches_numpy_step_with_separate_tolerance(self):
         self._compare(device="cpu", precision="float32", compile_policy="eager")
 
-    def test_cpu_fullgraph_collapsed_z_matches_native(self):
+    def test_cpu_fullgraph_collapsed_z_matches_numpy_step_and_dense_reference(self):
         self._compare(
             device="cpu",
             precision="float64",
@@ -913,7 +1055,7 @@ class TorchOracleTest(unittest.TestCase):
             resolution=4,
         )
 
-    def test_cpu_fullgraph_paired_real_matches_complex_native(self):
+    def test_cpu_fullgraph_bloch_matches_numpy_step_and_dense_reference(self):
         torch._dynamo.reset()
         simulation = self._compare(
             device="cpu",
@@ -931,7 +1073,7 @@ class TorchOracleTest(unittest.TestCase):
         self.assertEqual(addresses, simulation.buffer_addresses())
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA is unavailable")
-    def test_cuda_fullgraph_collapsed_z_matches_native(self):
+    def test_cuda_fullgraph_collapsed_z_matches_cpu_reference(self):
         self._compare(
             device="cuda:0",
             precision="float32",
@@ -941,7 +1083,7 @@ class TorchOracleTest(unittest.TestCase):
         )
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA is unavailable")
-    def test_cuda_eager_paired_real_matches_complex_native(self):
+    def test_cuda_eager_paired_real_matches_cpu_reference(self):
         self._compare(
             device="cuda:0",
             precision="float64",

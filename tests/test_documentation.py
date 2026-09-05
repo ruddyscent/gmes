@@ -25,27 +25,29 @@ uv build"""
             with self.subTest(document=name):
                 self.assertIn(canonical_workflow, contents)
 
-    def test_examples_and_mpi_use_the_uv_environment(self):
+    def test_examples_use_the_uv_environment_without_mpi_requirements(self):
         readme = self.primary_documents["README.md"]
-        self.assertIn("uv run --no-sync python examples/air2d.py", readme)
-        self.assertIn("uv run --no-sync mpiexec", readme)
+        self.assertIn("Torch runtime", readme)
+        self.assertIn("torchrun", readme)
+        self.assertNotIn("mpiexec", readme)
+        self.assertIn(
+            "uv run --no-sync python examples/air2d.py --no-plot --steps 2", readme
+        )
         self.assertIn(
             "uv run --no-sync python examples/<example file name>", self.examples_readme
         )
-        self.assertIn("uv run --no-sync mpiexec", self.examples_readme)
         self.assertNotIn("$ python examples/", self.examples_readme)
 
-    def test_lock_migration_and_native_prerequisites_are_documented(self):
+    def test_lock_migration_and_pure_torch_prerequisites_are_documented(self):
         readme = self.primary_documents["README.md"]
         contributing = self.primary_documents["CONTRIBUTING.md"]
         agents = self.primary_documents["AGENTS.md"]
         self.assertIn("uv lock --upgrade", readme)
         self.assertIn("PEP 735", readme)
-        self.assertIn("build-essential", readme)
-        self.assertIn("xcode-select --install", readme)
-        self.assertIn("libopenmpi-dev openmpi-bin", readme)
-        self.assertIn("brew install open-mpi", readme)
-        self.assertIn("contiguous-indexing fallback", readme)
+        self.assertIn("PyTorch `>=2.13,<2.14`", readme)
+        self.assertIn("py3-none-any", readme)
+        self.assertIn("No compiler, SWIG, Cython, OpenMP runtime, or MPI", contributing)
+        self.assertIn("pure-Python PyTorch package", agents)
         self.assertIn("tests/test_packaging.py", contributing)
         self.assertIn("uv lock --upgrade", agents)
 

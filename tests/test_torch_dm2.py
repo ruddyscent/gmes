@@ -26,43 +26,204 @@ def _geometry(material):
     ]
 
 
-def _simulations(material, *, precision="float64", compile_policy="eager"):
-    geometry = _geometry(material)
-    native = gmes.FDTD(
-        gmes.Cartesian((2, 2, 2), 2),
-        geometry,
-        dt=0.025,
-        verbose=False,
+def _copy_material(material):
+    return gmes.Dm2(
+        eps_inf=material.eps_inf,
+        mu_inf=material.mu_inf,
+        omega=material.omega,
+        n_atom=material.n_atom,
+        rho30=material.rho30,
+        gamma=material.gamma,
+        t1=material.t1,
+        t2=material.t2,
+        hbar=material.hbar,
+        rtol=material.rtol,
     )
-    native.init()
-    torch_simulation = gmes.TorchSimulation(
+
+
+def _simulations(
+    material,
+    *,
+    precision="float64",
+    compile_policy="eager",
+    execution_policy="auto",
+):
+    reference = gmes.TorchSimulation(
         space=gmes.Cartesian((2, 2, 2), 2),
-        geometry=_geometry(
-            gmes.Dm2(
-                eps_inf=material.eps_inf,
-                mu_inf=material.mu_inf,
-                omega=material.omega,
-                n_atom=material.n_atom,
-                rho30=material.rho30,
-                gamma=material.gamma,
-                t1=material.t1,
-                t2=material.t2,
-                hbar=material.hbar,
-                rtol=material.rtol,
-            )
-        ),
+        geometry=_geometry(_copy_material(material)),
         runtime=gmes.TorchRuntimeConfig(
             device="cpu",
-            precision=precision,
-            compile_policy=compile_policy,
+            precision="float64",
+            execution_policy="dense",
             cpu_threads=2,
         ),
         dt=0.025,
     )
-    return native, torch_simulation
+    torch_simulation = gmes.TorchSimulation(
+        space=gmes.Cartesian((2, 2, 2), 2),
+        geometry=_geometry(_copy_material(material)),
+        runtime=gmes.TorchRuntimeConfig(
+            device="cpu",
+            precision=precision,
+            compile_policy=compile_policy,
+            execution_policy=execution_policy,
+            cpu_threads=2,
+        ),
+        dt=0.025,
+    )
+    return reference, torch_simulation
 
 
 class TorchDm2Test(unittest.TestCase):
+    def test_zero_field_is_an_exact_equilibrium_with_one_corrector_iteration(self):
+        material = gmes.Dm2(
+            eps_inf=1.4,
+            omega=(0.7, 1.1),
+            n_atom=(0.2, 0.4),
+            rho30=-0.75,
+            gamma=0.15,
+            t1=2.5,
+            t2=1.7,
+            rtol=1e-8,
+        )
+        _, simulation = _simulations(material)
+        initial_targets = {
+            snapshot["component"]: snapshot["targets"].copy()
+            for snapshot in simulation.dm2_state_snapshot()
+        }
+
+        # With E = curl(E) = u = 0, every term in the implicit Bloch
+        # recurrence is zero. The fixed point is therefore exact on the first
+        # corrector iteration, independent of execution policy.
+        simulation.step()
+
+        for name, field in simulation.state.host_snapshot().items():
+            np.testing.assert_array_equal(field, np.zeros_like(field), err_msg=name)
+        snapshots = simulation.dm2_state_snapshot()
+        self.assertEqual({item["component"] for item in snapshots}, {"Ex", "Ey", "Ez"})
+        for snapshot in snapshots:
+            targets = snapshot["targets"]
+            np.testing.assert_array_equal(
+                targets,
+                initial_targets[snapshot["component"]],
+            )
+            self.assertTrue(np.all(targets[1:] > targets[:-1]))
+            np.testing.assert_array_equal(snapshot["u"], np.zeros_like(snapshot["u"]))
+        self.assertTrue(
+            torch.equal(
+                simulation.state._dm2_status,
+                torch.zeros_like(simulation.state._dm2_status),
+            )
+        )
+        self.assertTrue(
+            torch.equal(
+                simulation.state._dm2_iterations,
+                torch.ones_like(simulation.state._dm2_iterations),
+            )
+        )
+
+    def test_nonzero_state_matches_explicit_scalar_corrector_recurrence(self):
+        metadata = torch_dm2.Dm2BucketMetadata(
+            component="Ex",
+            bucket_index=0,
+            transition_count=1,
+            target_count=1,
+            prefix="dm2_scalar",
+            source_component="Hz",
+            status_offset=0,
+        )
+        status = torch.zeros(1, dtype=torch.int8)
+        iterations = torch.zeros(1, dtype=torch.int32)
+        state = torch_dm2.TorchDm2BucketState(
+            metadata,
+            status=status,
+            iterations=iterations,
+            device="cpu",
+            dtype=torch.float64,
+        )
+        initial_u = np.asarray((0.05, -0.02, 0.01), dtype=np.float64).reshape(3, 1, 1)
+        state.u.copy_(torch.from_numpy(initial_u))
+        field = torch.tensor([0.2], dtype=torch.float64)
+        source = torch.tensor([0.4, -0.1], dtype=torch.float64)
+        target = torch.tensor([0], dtype=torch.int64)
+        positive = torch.tensor([0], dtype=torch.int64)
+        negative = torch.tensor([1], dtype=torch.int64)
+        dt = 0.025
+        rho30, gamma, t1, t2, hbar = -0.7, 0.15, 2.5, 1.7, 1.0
+        omega, density, curl_scale, tolerance = 0.9, 0.3, 0.4, 1e-10
+
+        time = dt
+        decay = np.exp(-time / t2)
+        coefficient_a = density * gamma / t2 * decay
+        coefficient_b = density * gamma * omega * decay
+        coefficient_plus = 2.0 * gamma / hbar * np.exp(-(1.0 / t1 - 1.0 / t2) * time)
+        coefficient_minus = 2.0 * gamma / hbar * np.exp(-(1.0 / t2 - 1.0 / t1) * time)
+        coefficient_d = 2.0 * gamma * rho30 / hbar * np.exp(time / t2)
+        old_field = 0.2
+        base_field = old_field + (0.4 - -0.1) * curl_scale
+        old_u = initial_u[:, 0, 0].copy()
+        expected_field = old_field
+        expected_u = old_u.copy()
+        expected_iterations = 0
+        for _ in range(DM2_MAX_ITERATIONS):
+            previous_field = expected_field
+            previous_u = expected_u.copy()
+            expected_field = (
+                base_field
+                - 0.5 * dt * (expected_u[0] + old_u[0]) * coefficient_a
+                + 0.5 * dt * (expected_u[1] + old_u[1]) * coefficient_b
+            )
+            field_sum = expected_field + old_field
+            u0 = old_u[0] + (expected_u[1] + old_u[1]) * omega * 0.5 * dt
+            u1 = old_u[1] - (u0 + old_u[0]) * omega * 0.5 * dt
+            u1 += (expected_u[2] + old_u[2]) * coefficient_plus * field_sum * 0.25 * dt
+            u1 += coefficient_d * field_sum * 0.5 * dt
+            u2 = old_u[2] - (u1 + old_u[1]) * coefficient_minus * field_sum * 0.25 * dt
+            expected_u = np.asarray((u0, u1, u2))
+            numerator = np.sqrt(
+                (expected_field - previous_field) ** 2
+                + np.sum((expected_u - previous_u) ** 2)
+            )
+            denominator = np.sqrt(previous_field**2 + np.sum(previous_u**2))
+            error = 0.0 if numerator == denominator == 0.0 else numerator / denominator
+            expected_iterations += 1
+            if error <= tolerance:
+                break
+
+        scalar = lambda value: torch.tensor([value], dtype=torch.float64)
+        state.prepare(
+            field,
+            source,
+            torch.tensor(0, dtype=torch.int64),
+            torch.tensor(dt, dtype=torch.float64),
+            target,
+            positive,
+            negative,
+            scalar(rho30),
+            scalar(gamma),
+            scalar(t1),
+            scalar(t2),
+            scalar(hbar),
+            torch.tensor([[omega]], dtype=torch.float64),
+            torch.tensor([[density]], dtype=torch.float64),
+            scalar(curl_scale),
+        )
+        for _ in range(DM2_MAX_ITERATIONS // DM2_ITERATIONS_PER_CHUNK):
+            state.iterate(
+                0.5 * dt,
+                0.25 * dt,
+                scalar(tolerance),
+                torch.tensor([[omega]], dtype=torch.float64),
+            )
+        state.finalize(field, target)
+
+        self.assertEqual(int(status[0]), 0)
+        self.assertEqual(int(iterations[0]), expected_iterations)
+        self.assertAlmostEqual(float(field[0]), expected_field, places=14)
+        np.testing.assert_allclose(
+            state.u.numpy()[:, 0, 0], expected_u, rtol=0, atol=1e-14
+        )
+
     def _build_failure_simulation(self, material, compile_policy):
         return gmes.TorchSimulation(
             space=gmes.Cartesian((3, 3, 3), 2),
@@ -186,7 +347,7 @@ class TorchDm2Test(unittest.TestCase):
         self.assertTrue(torch.all(simulation.state._dm2_status == 0))
         self.assertTrue(torch.all(simulation.state._dm2_iterations == 1))
 
-    def test_complete_fields_match_native_from_nonzero_input(self):
+    def test_complete_fields_and_state_match_dense_reference(self):
         material = gmes.Dm2(
             eps_inf=1.4,
             mu_inf=1.1,
@@ -199,50 +360,42 @@ class TorchDm2Test(unittest.TestCase):
             hbar=1.2,
             rtol=1e-10,
         )
-        native, simulation = _simulations(material)
+        reference, simulation = _simulations(material)
         rng = np.random.default_rng(120)
-        fields = {}
-        for component, native_field in native.field.items():
-            values = rng.normal(size=native_field.shape) * 1e-3
-            native_field[...] = values
-            fields[component.__name__] = values.copy()
+        fields = {
+            name: rng.normal(size=field.shape) * 1e-3
+            for name, field in reference.state.host_snapshot().items()
+        }
+        reference.load_host_fields(fields)
         simulation.load_host_fields(fields)
 
         for _ in range(2):
-            native.step()
+            reference.step()
             simulation.step()
 
         actual = simulation.state.host_snapshot()
-        for component, native_field in native.field.items():
+        for name, expected in reference.state.host_snapshot().items():
             np.testing.assert_allclose(
-                actual[component.__name__],
-                native_field,
+                actual[name],
+                expected,
                 rtol=2e-10,
                 atol=2e-12,
-                err_msg=component.__name__,
+                err_msg=name,
             )
         snapshots = {
             snapshot["component"]: snapshot
             for snapshot in simulation.dm2_state_snapshot()
         }
+        reference_snapshots = {
+            snapshot["component"]: snapshot
+            for snapshot in reference.dm2_state_snapshot()
+        }
         for component_name in ("Ex", "Ey", "Ez"):
-            component = getattr(gmes, component_name)
-            updater = next(
-                updater
-                for updater in native.pw_material[component].values()
-                if type(updater).__name__.startswith("Dm2")
-            )
-            indices = np.asarray(updater.oracle_indices(), dtype=np.int64).reshape(
-                -1, 3
-            )
-            targets = np.ravel_multi_index(indices.T, native.field[component].shape)
             snapshot = snapshots[component_name]
-            np.testing.assert_array_equal(snapshot["targets"], targets)
-            expected_state = np.asarray(
-                updater.oracle_state(), dtype=np.complex128
-            ).real.reshape(-1, len(material.omega), 3)
+            expected = reference_snapshots[component_name]
+            np.testing.assert_array_equal(snapshot["targets"], expected["targets"])
             np.testing.assert_allclose(
-                snapshot["u"], expected_state, rtol=2e-10, atol=2e-12
+                snapshot["u"], expected["u"], rtol=2e-10, atol=2e-12
             )
 
     def test_multiple_transition_widths_form_exact_buckets(self):
@@ -330,31 +483,31 @@ class TorchDm2Test(unittest.TestCase):
                 states["dense"][index]["u"], states["tiled"][index]["u"]
             )
 
-    def test_float32_matches_native_tolerance(self):
+    def test_float32_matches_dense_float64_tolerance(self):
         material = gmes.Dm2(
             omega=(0.7, 1.1),
             n_atom=(0.2, 0.4),
             gamma=0.15,
             rtol=1e-6,
         )
-        native, simulation = _simulations(material, precision="float32")
+        reference, simulation = _simulations(material, precision="float32")
         rng = np.random.default_rng(123)
-        fields = {}
-        for component, native_field in native.field.items():
-            values = rng.normal(size=native_field.shape) * 1e-3
-            native_field[...] = values
-            fields[component.__name__] = values.copy()
+        fields = {
+            name: rng.normal(size=field.shape) * 1e-3
+            for name, field in reference.state.host_snapshot().items()
+        }
+        reference.load_host_fields(fields)
         simulation.load_host_fields(fields)
-        native.step()
+        reference.step()
         simulation.step()
         actual = simulation.state.host_snapshot()
-        for component, native_field in native.field.items():
+        for name, expected in reference.state.host_snapshot().items():
             np.testing.assert_allclose(
-                actual[component.__name__],
-                native_field,
+                actual[name],
+                expected,
                 rtol=_DM2_FLOAT32_TOLERANCE["rtol"],
                 atol=_DM2_FLOAT32_TOLERANCE["atol"],
-                err_msg=component.__name__,
+                err_msg=name,
             )
 
     def test_compiled_preconditioned_state_matches_at_fixed_capture_steps(self):
@@ -366,30 +519,20 @@ class TorchDm2Test(unittest.TestCase):
             t2=1.7,
             rtol=1e-8,
         )
-        native, simulation = _simulations(material, compile_policy="compile")
+        reference, simulation = _simulations(material, compile_policy="compile")
         rng = np.random.default_rng(125)
-        for native_field in native.field.values():
-            native_field[...] = rng.normal(size=native_field.shape) * 1e-3
-        native.step()
-        native.step()
-
         fields = {
-            component.__name__: field.copy()
-            for component, field in native.field.items()
+            name: rng.normal(size=field.shape) * 1e-3
+            for name, field in reference.state.host_snapshot().items()
         }
-        native_state = {}
-        for component_name in ("Ex", "Ey", "Ez"):
-            component = getattr(gmes, component_name)
-            updater = next(
-                updater
-                for updater in native.pw_material[component].values()
-                if type(updater).__name__.startswith("Dm2")
-            )
-            native_state[component_name] = np.asarray(
-                updater.oracle_state(), dtype=np.complex128
-            ).real.reshape(-1, 1, 3)
+        reference.load_host_fields(fields).advance(2)
+        fields = reference.state.host_snapshot()
+        reference_state = {
+            snapshot["component"]: snapshot["u"]
+            for snapshot in reference.dm2_state_snapshot()
+        }
         states = [
-            native_state[bucket.metadata.component]
+            reference_state[bucket.metadata.component]
             for bucket in simulation.state.dm2_buckets
         ]
         simulation.load_host_fields(fields)
@@ -399,33 +542,28 @@ class TorchDm2Test(unittest.TestCase):
         completed = 0
         for capture in (1, 2, 5, 20, 100):
             delta = capture - completed
-            for _ in range(delta):
-                native.step()
+            reference.advance(delta)
             simulation.advance(delta)
             completed = capture
             actual = simulation.state.host_snapshot()
-            for component, native_field in native.field.items():
+            for name, expected in reference.state.host_snapshot().items():
                 np.testing.assert_allclose(
-                    actual[component.__name__],
-                    native_field,
+                    actual[name],
+                    expected,
                     rtol=2e-10,
                     atol=2e-12,
-                    err_msg=f"{component.__name__} at {capture}",
+                    err_msg=f"{name} at {capture}",
                 )
             snapshots = {
                 snapshot["component"]: snapshot
                 for snapshot in simulation.dm2_state_snapshot()
             }
+            reference_snapshots = {
+                snapshot["component"]: snapshot
+                for snapshot in reference.dm2_state_snapshot()
+            }
             for component_name in ("Ex", "Ey", "Ez"):
-                component = getattr(gmes, component_name)
-                updater = next(
-                    updater
-                    for updater in native.pw_material[component].values()
-                    if type(updater).__name__.startswith("Dm2")
-                )
-                expected = np.asarray(
-                    updater.oracle_state(), dtype=np.complex128
-                ).real.reshape(-1, 1, 3)
+                expected = reference_snapshots[component_name]["u"]
                 np.testing.assert_allclose(
                     snapshots[component_name]["u"],
                     expected,
@@ -434,24 +572,26 @@ class TorchDm2Test(unittest.TestCase):
                     err_msg=f"{component_name} state at {capture}",
                 )
 
-    def test_collapsed_axes_match_native(self):
+    def test_collapsed_axes_match_dense_reference(self):
         for size in ((2, 0, 0), (2, 2, 0)):
             with self.subTest(size=size):
-                geometry = _geometry(
-                    gmes.Dm2(
-                        omega=(0.7,),
-                        n_atom=(0.2,),
-                        gamma=0.15,
-                        rtol=1e-9,
-                    )
-                )
-                native = gmes.FDTD(
-                    gmes.Cartesian(size, 2),
-                    geometry,
+                reference = gmes.TorchSimulation(
+                    space=gmes.Cartesian(size, 2),
+                    geometry=_geometry(
+                        gmes.Dm2(
+                            omega=(0.7,),
+                            n_atom=(0.2,),
+                            gamma=0.15,
+                            rtol=1e-9,
+                        )
+                    ),
+                    runtime=gmes.TorchRuntimeConfig(
+                        device="cpu",
+                        execution_policy="dense",
+                        cpu_threads=2,
+                    ),
                     dt=0.025,
-                    verbose=False,
                 )
-                native.init()
                 simulation = gmes.TorchSimulation(
                     space=gmes.Cartesian(size, 2),
                     geometry=_geometry(
@@ -462,26 +602,30 @@ class TorchDm2Test(unittest.TestCase):
                             rtol=1e-9,
                         )
                     ),
-                    runtime=gmes.TorchRuntimeConfig(device="cpu", cpu_threads=2),
+                    runtime=gmes.TorchRuntimeConfig(
+                        device="cpu",
+                        execution_policy="compact",
+                        cpu_threads=2,
+                    ),
                     dt=0.025,
                 )
                 rng = np.random.default_rng(124)
-                fields = {}
-                for component, native_field in native.field.items():
-                    values = rng.normal(size=native_field.shape) * 1e-3
-                    native_field[...] = values
-                    fields[component.__name__] = values.copy()
+                fields = {
+                    name: rng.normal(size=field.shape) * 1e-3
+                    for name, field in reference.state.host_snapshot().items()
+                }
+                reference.load_host_fields(fields)
                 simulation.load_host_fields(fields)
-                native.step()
+                reference.step()
                 simulation.step()
                 actual = simulation.state.host_snapshot()
-                for component, native_field in native.field.items():
+                for name, expected in reference.state.host_snapshot().items():
                     np.testing.assert_allclose(
-                        actual[component.__name__],
-                        native_field,
+                        actual[name],
+                        expected,
                         rtol=2e-10,
                         atol=2e-12,
-                        err_msg=component.__name__,
+                        err_msg=name,
                     )
 
     def test_zero_reference_converges_and_nan_retains_failed_state(self):
@@ -551,7 +695,7 @@ class TorchDm2Test(unittest.TestCase):
         self.assertTrue(torch.all(compiled.state._dm2_status == 2))
         self.assertTrue(torch.all(compiled.state._dm2_iterations == DM2_MAX_ITERATIONS))
 
-    def test_compiled_fullgraph_matches_native(self):
+    def test_compiled_fullgraph_matches_dense_reference(self):
         material = gmes.Dm2(
             omega=(0.7,),
             n_atom=(0.2,),
@@ -560,30 +704,30 @@ class TorchDm2Test(unittest.TestCase):
             t2=1.7,
             rtol=1e-8,
         )
-        native, simulation = _simulations(material, compile_policy="compile")
+        reference, simulation = _simulations(material, compile_policy="compile")
         rng = np.random.default_rng(121)
-        fields = {}
-        for component, native_field in native.field.items():
-            values = rng.normal(size=native_field.shape) * 1e-3
-            native_field[...] = values
-            fields[component.__name__] = values.copy()
+        fields = {
+            name: rng.normal(size=field.shape) * 1e-3
+            for name, field in reference.state.host_snapshot().items()
+        }
+        reference.load_host_fields(fields)
         simulation.load_host_fields(fields)
 
-        native.step()
+        reference.step()
         simulation.step()
         graphs = torch._dynamo.utils.counters["stats"]["unique_graphs"]
         addresses = simulation.buffer_addresses()
 
         actual = simulation.state.host_snapshot()
-        for component, native_field in native.field.items():
+        for name, expected in reference.state.host_snapshot().items():
             np.testing.assert_allclose(
-                actual[component.__name__],
-                native_field,
+                actual[name],
+                expected,
                 rtol=2e-10,
                 atol=2e-12,
-                err_msg=component.__name__,
+                err_msg=name,
             )
-        native.step()
+        reference.step()
         simulation.step()
         self.assertEqual(graphs, torch._dynamo.utils.counters["stats"]["unique_graphs"])
         self.assertEqual(addresses, simulation.buffer_addresses())

@@ -1,3 +1,4 @@
+import os
 import unittest
 from importlib.util import find_spec
 from math import pi
@@ -32,9 +33,13 @@ from examples.ziolkowski1995_common import (
     make_simulation,
     plot_population,
     pump_probe_scenario,
+    run_gain,
+    run_snapshots,
+    sample_snapshot,
     sit_scenario,
     ultrafast_scenario,
 )
+from gmes import TorchSimulation
 
 MATPLOTLIB_AVAILABLE = find_spec("matplotlib") is not None
 
@@ -54,6 +59,13 @@ class ZiolkowskiOptionalDependencyTest(unittest.TestCase):
 
             sys.meta_path.insert(0, BlockMatplotlib())
 
+            from examples import (
+                ziolkowski1995,
+                ziolkowski1995_gain,
+                ziolkowski1995_pump_probe,
+                ziolkowski1995_sit,
+                ziolkowski1995_ultrafast,
+            )
             from examples.ziolkowski1995_common import gain_scenario
 
             assert gain_scenario().cells == 2_000
@@ -67,6 +79,19 @@ class ZiolkowskiOptionalDependencyTest(unittest.TestCase):
             text=True,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_cli_help_is_headless_and_import_safe(self):
+        root = Path(__file__).parents[1]
+        result = run(
+            [executable, "examples/ziolkowski1995.py", "--help"],
+            cwd=root,
+            env={**os.environ, "PYTHONPATH": str(root)},
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--quick", result.stdout)
 
     @unittest.skipUnless(MATPLOTLIB_AVAILABLE, "plot extra is not installed")
     def test_plot_helpers_render_with_plot_extra(self):
@@ -212,20 +237,66 @@ class ZiolkowskiScenarioTest(unittest.TestCase):
     def test_material_and_probe_geometry(self):
         scenario = gain_scenario(quick=True)
         simulation = make_simulation(scenario)
-        self.assertEqual(int(simulation.space.whole_field_size[2]), scenario.cells)
-        self.assertAlmostEqual(simulation.time_step.dt, 0.5 / scenario.resolution)
+        self.assertIsInstance(simulation, TorchSimulation)
+        self.assertEqual(simulation.plan.shapes["Ex"][2] - 1, scenario.cells)
+        expected_dt = 0.5 / np.sqrt(sum(delta**-2 for delta in simulation.plan.dr))
+        self.assertAlmostEqual(simulation.plan.dt, expected_dt)
 
+        dm2 = next(
+            state
+            for state in simulation.dm2_state_snapshot()
+            if state["component"] == "Ex"
+        )
+        dm2_z_indices = set(
+            np.unravel_index(dm2["targets"], simulation.plan.shapes["Ex"])[2]
+        )
         for distance, expected_rho30 in (
             (2.0, None),
             (5.0, 1.0),
             (13.0, None),
         ):
             coordinate = distance - scenario.domain_um / 2
-            material, _ = simulation.geom_tree.material_of_point((0, 0, coordinate))
+            index = int(simulation.space.space_to_ex_index(0, 0, coordinate)[2])
             if expected_rho30 is None:
-                self.assertNotEqual(material.__class__.__name__, "Dm2")
+                self.assertNotIn(index, dm2_z_indices)
             else:
-                self.assertEqual(material.rho30, expected_rho30)
+                self.assertIn(index, dm2_z_indices)
+                self.assertEqual(
+                    sample_snapshot(simulation).rho3[index], expected_rho30
+                )
+
+    def test_torch_snapshot_checkpoint_and_sampling_clock(self):
+        scenario = gain_scenario(quick=True)
+        simulation = make_simulation(scenario)
+        checkpoint = simulation.checkpoint()
+        first_time = 2 * UNITS.time_si(simulation.plan.dt)
+        snapshots = run_snapshots(simulation, (first_time,))
+        snapshot = snapshots[first_time]
+        self.assertEqual(snapshot.electric.shape, (scenario.cells,))
+        self.assertTrue(np.isfinite(snapshot.electric).all())
+        self.assertEqual(int(simulation.state.step_count.detach().cpu()), 2)
+        self.assertTrue(
+            np.isclose(
+                simulation.dm2_state_snapshot()[0]["time"],
+                2 * simulation.plan.dt,
+            )
+        )
+        simulation.load_checkpoint(checkpoint)
+        self.assertEqual(int(simulation.state.step_count.detach().cpu()), 0)
+
+        result = run_gain(
+            scenario,
+            duration_s=2 * UNITS.time_si(simulation.plan.dt),
+            sample_stride=1,
+        )
+        self.assertTrue(
+            np.allclose(
+                result.time_s,
+                UNITS.time_si(simulation.plan.dt * np.array((0.5, 1.5))),
+            )
+        )
+        self.assertTrue(np.isfinite(result.input_intensity).all())
+        self.assertTrue(np.isfinite(result.output_intensity).all())
 
     def test_relaxation_parameters_are_figure_specific(self):
         self.assertEqual(gain_scenario().t1_s, GAIN_T1_S)

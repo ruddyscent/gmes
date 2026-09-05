@@ -21,43 +21,17 @@ permissions:
 
 jobs:
   analyze:
-    name: CodeQL / ${{ matrix.language }}
+    name: CodeQL / python
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - language: python
-            build-mode: none
-          - language: c-cpp
-            build-mode: manual
-
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: github/codeql-action/init@v4
         with:
-          languages: ${{ matrix.language }}
-          build-mode: ${{ matrix.build-mode }}
-
-      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
-        if: matrix.language == 'c-cpp'
-        with:
-          enable-cache: true
-          version: "0.12.5"
-      - name: Install Python
-        if: matrix.language == 'c-cpp'
-        run: uv python install 3.14
-      - name: Install native build dependencies
-        if: matrix.language == 'c-cpp'
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes libopenmpi-dev openmpi-bin swig
-      - name: Build native extensions
-        if: matrix.language == 'c-cpp'
-        run: |
-          uv sync --locked --extra torch-cpu --extra hdf5 --extra plot --extra mpi
-          uv build
+          languages: python
+          build-mode: none
 
       - uses: github/codeql-action/analyze@v4
         with:
-          category: "/language:${{ matrix.language }}"
+          category: "/language:python"

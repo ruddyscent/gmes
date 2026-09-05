@@ -14,13 +14,11 @@ from gmes.source import Src, SrcTime
 PACKAGE_ROOT = Path(gmes.__file__).resolve().parent
 SOURCE_MODULES = (
     "__init__",
-    "fdtd",
+    "constant",
     "file_io",
     "geometry",
     "material",
-    "pw_source",
     "pygeom",
-    "show",
     "source",
     "torch_dispersive",
     "torch_distributed",
@@ -90,8 +88,9 @@ class DocstringCoverageTest(unittest.TestCase):
 
         for label, value in exports:
             if _source_file(value) not in SOURCE_FILES:
-                # SWIG-generated wrappers, constants, and third-party objects
-                # are outside the Python-owned documentation boundary.
+                # Third-party objects are outside the Python-owned
+                # documentation boundary.  Canonical constants are covered by
+                # the tracked module-docstring check above.
                 continue
             with self.subTest(export=label):
                 self.assert_documented(label, value)
@@ -110,9 +109,8 @@ class DocstringCoverageTest(unittest.TestCase):
         """Render representative modules and primary entry points with pydoc."""
         values = (
             gmes,
-            gmes.fdtd,
+            gmes.constant,
             importlib.import_module("gmes.torch_fdtd"),
-            gmes.FDTD,
             gmes.TorchSimulation,
         )
         for value in values:

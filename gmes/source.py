@@ -5,7 +5,9 @@
 
 from cmath import exp as cexp
 from collections.abc import Callable, Iterator, Sequence
+from contextvars import ContextVar
 from copy import deepcopy
+from dataclasses import dataclass, replace
 from math import cos, exp, pi, sin, sqrt
 from os import PathLike
 from typing import Any, Protocol, cast
@@ -19,30 +21,8 @@ from numpy.typing import NDArray
 from scipy.optimize import bisect  # type: ignore[import-untyped]
 
 from . import constant as const
-from .fdtd import TEMzFDTD
-from .geometry import Cartesian, DefaultMedium, GeomBoxTree, Shell, in_range
+from .geometry import Cartesian, DefaultMedium, GeomBoxTree, Shell
 from .material import Cpml, Dielectric
-
-# Point and total-field/scattered-field source update types.
-from .pw_source import (
-    PointSourceEx,
-    PointSourceEy,
-    PointSourceEz,
-    PointSourceHx,
-    PointSourceHy,
-    PointSourceHz,
-    PointSourceParam,
-    PwSource,
-    PwSourceParam,
-    TransparentElectricParam,
-    TransparentEx,
-    TransparentEy,
-    TransparentEz,
-    TransparentHx,
-    TransparentHy,
-    TransparentHz,
-    TransparentMagneticParam,
-)
 from .pygeom import Material
 
 type Vector3 = Sequence[float] | NDArray[np.float64]
@@ -77,6 +57,92 @@ type RealScalar = float | np.float64
 type FieldScalar = float | complex | np.float64 | np.complex128
 type SourcePoint = tuple[Index3, Coordinate3, Material, Material | None]
 
+
+_COMPONENT_SHAPE_OFFSETS: dict[str, Index3] = {
+    "Ex": (0, 1, 1),
+    "Ey": (1, 0, 1),
+    "Ez": (1, 1, 0),
+    "Hx": (1, 0, 0),
+    "Hy": (0, 1, 0),
+    "Hz": (0, 0, 1),
+}
+
+
+def _is_valid_nonlocal_point_target(
+    space: Cartesian, component: str, target: Index3
+) -> bool:
+    """Return whether a globally valid Yee target belongs to another rank."""
+
+    if int(space.numprocs) == 1:
+        return False
+    shape_offset = _COMPONENT_SHAPE_OFFSETS[component]
+    local_shape = tuple(
+        int(size) + offset
+        for size, offset in zip(space.my_field_size, shape_offset, strict=True)
+    )
+    if all(0 <= index < size for index, size in zip(target, local_shape, strict=True)):
+        return False
+    global_target = tuple(
+        index + int(offset)
+        for index, offset in zip(target, space.global_field_offset, strict=True)
+    )
+    global_shape = tuple(
+        int(size) + offset
+        for size, offset in zip(space.whole_field_size, shape_offset, strict=True)
+    )
+    return all(
+        0 <= index < size
+        for index, size in zip(global_target, global_shape, strict=True)
+    )
+
+
+@dataclass(frozen=True)
+class AuxiliarySourceSpec:
+    """Torch-neutral description of a TFSF auxiliary simulation."""
+
+    space: Cartesian
+    geometry: tuple[object, ...]
+    sources: tuple[object, ...]
+    gaussian_width: float | None = None
+    prewarm_steps: int = 0
+
+
+@dataclass(frozen=True)
+class PointSourceRecord:
+    """Direct point/current lowering independent of a pointwise proxy."""
+
+    component: str
+    target: Index3
+    source_time: object
+    amplitude: float
+    current_scale: float | None
+
+
+@dataclass(frozen=True)
+class TfsfFaceRule:
+    """One direct TFSF interpolation rule with its immutable auxiliary spec."""
+
+    component: str
+    target: Index3
+    sample_component: str
+    sample0: Index3
+    sample1: Index3
+    weight0: float
+    weight1: float
+    coefficient: float
+    auxiliary_spec: AuxiliarySourceSpec
+
+
+@dataclass(frozen=True)
+class _TorchTfsfLowering:
+    geometry_tree: GeomBoxTree
+    auxiliary_spec: AuxiliarySourceSpec
+
+
+_torch_tfsf_lowering: ContextVar[_TorchTfsfLowering | None] = ContextVar(
+    "torch_tfsf_lowering", default=None
+)
+
 #
 # SrcTime: Continuous, Bandpass
 # Src: PointSource, GaussianBeam, TotalFieldScatteredField
@@ -100,6 +166,107 @@ class SrcTime(object):
         """Print a human-readable waveform summary."""
 
         raise NotImplementedError
+
+
+class PaperSourceTime(SrcTime):
+    """Base class for the real-valued Ziolkowski et al. (1995) waveforms."""
+
+    def init(self, cmplx: bool) -> None:
+        if cmplx:
+            raise ValueError("Ziolkowski reproductions require real fields")
+
+    def display_info(self, indent: int = 0) -> None:
+        print(" " * indent + self.__class__.__name__)
+
+
+class SechSinePulse(PaperSourceTime):
+    """Finite 20-cycle SIT pulse from Eqs. (21), (22), and (25)."""
+
+    def __init__(self, omega: float, pulse_width: float) -> None:
+        self.omega = float(omega)
+        self.pulse_width = float(pulse_width)
+
+    def envelope(self, time: float) -> float:
+        """Return the compact sech envelope at ``time``."""
+
+        if not 0 <= time <= self.pulse_width:
+            return 0.0
+        gamma = (time - self.pulse_width / 2) / (self.pulse_width / 2)
+        return float(1 / np.cosh(10 * gamma))
+
+    def oscillator(self, time: float) -> float:
+        return self.envelope(time) * sin(self.omega * time)
+
+
+class UltrafastPulse(PaperSourceTime):
+    """Twice continuously differentiable zero-area pulse from Eq. (28)."""
+
+    SHAPE_FACTOR = -4.201355
+
+    def __init__(self, pulse_width: float) -> None:
+        self.pulse_width = float(pulse_width)
+
+    def oscillator(self, time: float) -> float:
+        if not 0 <= time <= self.pulse_width:
+            return 0.0
+        x_value = 2 * time / self.pulse_width - 1
+        return self.SHAPE_FACTOR * x_value * (1 - x_value**2) ** 3
+
+
+class UltrafastPulseTrain(PaperSourceTime):
+    """Two-pulse excitation used for Fig. 9."""
+
+    def __init__(
+        self, pulse_width: float, alpha: float = 0.96, delay_periods: float = 3
+    ) -> None:
+        self.pulse = UltrafastPulse(pulse_width)
+        self.pulse_width = float(pulse_width)
+        self.alpha = float(alpha)
+        self.delay = float(delay_periods) * self.pulse_width
+
+    def oscillator(self, time: float) -> float:
+        return self.pulse.oscillator(time) + self.alpha * self.pulse.oscillator(
+            time - self.delay
+        )
+
+
+class SmoothSine(PaperSourceTime):
+    """Resonant sinusoid from Eq. (29) with the paper's monotone turn-on."""
+
+    def __init__(self, omega: float, period: float) -> None:
+        self.omega = float(omega)
+        self.period = float(period)
+        self.rise_time = 5 * self.period
+
+    def envelope(self, time: float) -> float:
+        """Return the monotone resonant turn-on envelope at ``time``."""
+
+        if time < 0:
+            return 0.0
+        if time >= self.rise_time:
+            return 1.0
+        x_value = time / self.rise_time - 1
+        return (1 - x_value**2) ** 4
+
+    def oscillator(self, time: float) -> float:
+        return self.envelope(time) * sin(self.omega * time)
+
+
+class PumpProbe(PaperSourceTime):
+    """Ultrafast pump followed by the weak resonant probe used in Fig. 12."""
+
+    def __init__(
+        self, omega: float, pulse_width: float, beta: float, delay: float
+    ) -> None:
+        self.pump = UltrafastPulse(pulse_width)
+        self.probe = SmoothSine(omega, pulse_width)
+        self.beta = float(beta)
+        self.delay = float(delay)
+
+    def oscillator(self, time: float) -> float:
+        return self.pump.oscillator(time) + self.beta * self.probe.oscillator(
+            time - self.delay
+        )
 
 
 class PlaneWaveSrcTime(Protocol):
@@ -133,48 +300,6 @@ class Src(object):
 
     def step(self) -> None:
         """Advance any auxiliary simulation owned by the source."""
-
-        raise NotImplementedError
-
-    def get_pw_source_ex(
-        self, ex_field: FieldArray, space: Cartesian, geom_tree: GeomBoxTree
-    ) -> PwSource | None:
-        """Return an Ex point-wise updater, or None when the source is inactive."""
-
-        raise NotImplementedError
-
-    def get_pw_source_ey(
-        self, ey_field: FieldArray, space: Cartesian, geom_tree: GeomBoxTree
-    ) -> PwSource | None:
-        """Return an Ey point-wise updater, or None when the source is inactive."""
-
-        raise NotImplementedError
-
-    def get_pw_source_ez(
-        self, ez_field: FieldArray, space: Cartesian, geom_tree: GeomBoxTree
-    ) -> PwSource | None:
-        """Return an Ez point-wise updater, or None when the source is inactive."""
-
-        raise NotImplementedError
-
-    def get_pw_source_hx(
-        self, hx_field: FieldArray, space: Cartesian, geom_tree: GeomBoxTree
-    ) -> PwSource | None:
-        """Return an Hx point-wise updater, or None when the source is inactive."""
-
-        raise NotImplementedError
-
-    def get_pw_source_hy(
-        self, hy_field: FieldArray, space: Cartesian, geom_tree: GeomBoxTree
-    ) -> PwSource | None:
-        """Return an Hy point-wise updater, or None when the source is inactive."""
-
-        raise NotImplementedError
-
-    def get_pw_source_hz(
-        self, hz_field: FieldArray, space: Cartesian, geom_tree: GeomBoxTree
-    ) -> PwSource | None:
-        """Return an Hz point-wise updater, or None when the source is inactive."""
 
         raise NotImplementedError
 
@@ -362,150 +487,52 @@ class PointSource(Src):
 
         self.src_time.display_info(4)
 
-    def get_pw_source_ex(
-        self, ex_field: FieldArray, space: Cartesian, geom_tree: GeomBoxTree
-    ) -> PwSource | None:
-        pw_src = None
-
-        if self.comp is const.Ex or self.comp is const.Jx:
-            idx = space.space_to_ex_index(*self.center)
-            if in_range(idx, ex_field.shape, const.Ex):
-                coords = space.ex_index_to_space(*idx)
-                mat_obj, underneath = geom_tree.material_of_point(coords)
-                pw_src_param = PointSourceParam(
-                    self.src_time,
-                    self.amp,
-                    self.comp,
-                    mat_obj.eps_inf,
-                    mat_obj.mu_inf,
-                    self.filename,
-                )
-                pw_src = PointSourceEx()
-                pw_src.attach(idx, pw_src_param)
-
-        return pw_src
-
-    def get_pw_source_ey(
-        self, ey_field: FieldArray, space: Cartesian, geom_tree: GeomBoxTree
-    ) -> PwSource | None:
-        pw_src = None
-
-        if self.comp is const.Ey or self.comp is const.Jy:
-            idx = space.space_to_ey_index(*self.center)
-            if in_range(idx, ey_field.shape, const.Ey):
-                coords = space.ey_index_to_space(*idx)
-                mat_obj, underneath = geom_tree.material_of_point(coords)
-                pw_src_param = PointSourceParam(
-                    self.src_time,
-                    self.amp,
-                    self.comp,
-                    mat_obj.eps_inf,
-                    mat_obj.mu_inf,
-                    self.filename,
-                )
-                pw_src = PointSourceEy()
-                pw_src.attach(idx, pw_src_param)
-
-        return pw_src
-
-    def get_pw_source_ez(
-        self, ez_field: FieldArray, space: Cartesian, geom_tree: GeomBoxTree
-    ) -> PwSource | None:
-        pw_src = None
-
-        if self.comp is const.Ez or self.comp is const.Jz:
-            idx = space.space_to_ez_index(*self.center)
-            if in_range(idx, ez_field.shape, const.Ez):
-                coords = space.ez_index_to_space(*idx)
-                mat_obj, underneath = geom_tree.material_of_point(coords)
-                pw_src_param = PointSourceParam(
-                    self.src_time,
-                    self.amp,
-                    self.comp,
-                    mat_obj.eps_inf,
-                    mat_obj.mu_inf,
-                    self.filename,
-                )
-                pw_src = PointSourceEz()
-                pw_src.attach(idx, pw_src_param)
-
-        return pw_src
-
-    def get_pw_source_hx(
-        self, hx_field: FieldArray, space: Cartesian, geom_tree: GeomBoxTree
-    ) -> PwSource | None:
-        pw_src = None
-
-        if self.comp is const.Hx or self.comp is const.Mx:
-            idx = space.space_to_hx_index(*self.center)
-            if in_range(idx, hx_field.shape, const.Hx):
-                coords = space.hx_index_to_space(*idx)
-                mat_obj, underneath = geom_tree.material_of_point(coords)
-                pw_src_param = PointSourceParam(
-                    self.src_time,
-                    self.amp,
-                    self.comp,
-                    mat_obj.eps_inf,
-                    mat_obj.mu_inf,
-                    self.filename,
-                )
-                pw_src = PointSourceHx()
-                pw_src.attach(idx, pw_src_param)
-
-        return pw_src
-
-    def get_pw_source_hy(
-        self, hy_field: FieldArray, space: Cartesian, geom_tree: GeomBoxTree
-    ) -> PwSource | None:
-        pw_src = None
-
-        if self.comp is const.Hy or self.comp is const.My:
-            idx = space.space_to_hy_index(*self.center)
-            if in_range(idx, hy_field.shape, const.Hy):
-                coords = space.hy_index_to_space(*idx)
-                mat_obj, underneath = geom_tree.material_of_point(coords)
-                pw_src_param = PointSourceParam(
-                    self.src_time,
-                    self.amp,
-                    self.comp,
-                    mat_obj.eps_inf,
-                    mat_obj.mu_inf,
-                    self.filename,
-                )
-                pw_src = PointSourceHy()
-                pw_src.attach(idx, pw_src_param)
-
-        return pw_src
-
-    def get_pw_source_hz(
-        self, hz_field: FieldArray, space: Cartesian, geom_tree: GeomBoxTree
-    ) -> PwSource | None:
-        pw_src = None
-
-        if self.comp is const.Hz or self.comp is const.Mz:
-            idx = space.space_to_hz_index(*self.center)
-            if in_range(idx, hz_field.shape, const.Hz):
-                coords = space.hz_index_to_space(*idx)
-                mat_obj, underneath = geom_tree.material_of_point(coords)
-                pw_src_param = PointSourceParam(
-                    self.src_time,
-                    self.amp,
-                    self.comp,
-                    mat_obj.eps_inf,
-                    mat_obj.mu_inf,
-                    self.filename,
-                )
-                pw_src = PointSourceHz()
-                pw_src.attach(idx, pw_src_param)
-
-        return pw_src
+    def lower_torch_source(self, context: object) -> tuple[PointSourceRecord, ...]:
+        """Lower this built-in directly without a pointwise source proxy."""
+        if self.filename is not None:
+            raise ValueError(
+                "PointSource filename output is unsupported by TorchSimulation; "
+                "use an explicit bounded probe/output adapter"
+            )
+        space = cast(Any, context).space
+        geometry_tree = cast(Any, context).geometry_tree
+        dt = float(cast(Any, context).dt)
+        components = {
+            const.Ex: ("Ex", space.space_to_ex_index, space.ex_index_to_space, False),
+            const.Ey: ("Ey", space.space_to_ey_index, space.ey_index_to_space, False),
+            const.Ez: ("Ez", space.space_to_ez_index, space.ez_index_to_space, False),
+            const.Hx: ("Hx", space.space_to_hx_index, space.hx_index_to_space, False),
+            const.Hy: ("Hy", space.space_to_hy_index, space.hy_index_to_space, False),
+            const.Hz: ("Hz", space.space_to_hz_index, space.hz_index_to_space, False),
+            const.Jx: ("Ex", space.space_to_ex_index, space.ex_index_to_space, True),
+            const.Jy: ("Ey", space.space_to_ey_index, space.ey_index_to_space, True),
+            const.Jz: ("Ez", space.space_to_ez_index, space.ez_index_to_space, True),
+            const.Mx: ("Hx", space.space_to_hx_index, space.hx_index_to_space, True),
+            const.My: ("Hy", space.space_to_hy_index, space.hy_index_to_space, True),
+            const.Mz: ("Hz", space.space_to_hz_index, space.hz_index_to_space, True),
+        }
+        component, to_index, to_space, current = components[self.comp]
+        target = cast(Index3, tuple(int(value) for value in to_index(*self.center)))
+        if _is_valid_nonlocal_point_target(space, component, target):
+            return ()
+        material, _underneath = geometry_tree.material_of_point(to_space(*target))
+        inverse = material.eps_inf if component.startswith("E") else material.mu_inf
+        return (
+            PointSourceRecord(
+                component,
+                target,
+                self.src_time,
+                self.amp,
+                -dt / inverse if current else None,
+            ),
+        )
 
 
 class TotalFieldScatteredField(Src):
     """Set a total and scattered field zone to launch a plane wave."""
 
     _MAPPING_TILE_SIZE = 65536
-    aux_fdtd: TEMzFDTD | _GaussianBeamSrcTime
+    auxiliary_spec: AuxiliarySourceSpec
 
     def __init__(
         self,
@@ -563,11 +590,10 @@ class TotalFieldScatteredField(Src):
         self.geom_tree = geom_tree
         self.src_time.init(cmplx)
 
-        self.aux_fdtd = self._get_aux_fdtd(space, geom_tree, cmplx)
-        self.aux_fdtd.init()
+        self.auxiliary_spec = self._get_auxiliary_spec(space, geom_tree)
 
     def step(self) -> None:
-        self.aux_fdtd.step()
+        pass
 
     def display_info(self, indent: int = 0) -> None:
         print(" " * indent, "plane-wave source:")
@@ -707,20 +733,14 @@ class TotalFieldScatteredField(Src):
             rhs = sin(0.5 * k * zeta * ds) / ds
         return lhs - rhs
 
-    def _get_aux_fdtd(
-        self, space: Cartesian, geom_tree: GeomBoxTree, cmplx: bool
-    ) -> TEMzFDTD:
-        """Returns a TEMz FDTD for a reference of a plane wave.
-
-        The space-cell size of the aux_fdtd is calculated using the matched
-        numerical dispersion technique. This method assumes that dx=dy=dz.
-
-        """
+    def _get_auxiliary_spec(
+        self, space: Cartesian, geom_tree: GeomBoxTree
+    ) -> AuxiliarySourceSpec:
+        """Describe the legacy matched-dispersion auxiliary without creating it."""
         default_medium = geom_tree.object_of_point((inf, inf, inf))[0]
         eps_inf = default_medium.material.eps_inf
         mu_inf = default_medium.material.mu_inf
         v = 1 / sqrt(eps_inf * mu_inf)
-
         ds = tuple(space.dr)
         dt = space.dt
         omega = 2 * pi * self.src_time.freq
@@ -735,132 +755,115 @@ class TotalFieldScatteredField(Src):
             2 * max(ds),
             (zeta, v, omega, dt, wave_number),
         )
-
         pml_thickness = 50 * delta_1d
-
-        # Find the furthest distance, max_dist from the longitudinal
-        # axis of the incomming wave
-        #
-        # FIXME: When self.size contains numpy.inf vertices contains nan
-        #        and the following algorithm does not work.
-        vertices = []
-        for x in (0.5 * self.size[0], -0.5 * self.size[0]):
-            for y in (0.5 * self.size[1], -0.5 * self.size[1]):
-                for z in (0.5 * self.size[2], -0.5 * self.size[2]):
-                    vertices.append(self.center + (x, y, z))
-
-        dist = list(
-            map(abs, list(map(self._metric_from_center_along_beam_axis, vertices)))
+        vertices = [
+            self.center + (x, y, z)
+            for x in (0.5 * self.size[0], -0.5 * self.size[0])
+            for y in (0.5 * self.size[1], -0.5 * self.size[1])
+            for z in (0.5 * self.size[2], -0.5 * self.size[2])
+        ]
+        max_dist = max(
+            map(abs, map(self._metric_from_center_along_beam_axis, vertices))
         )
-        max_dist = max(dist)
-
-        longitudinal_size = 2 * (max_dist + pml_thickness + 2 * delta_1d)
-        aux_size = (0, 0, longitudinal_size)
-
-        mat_objs = self.geom_tree.material_of_point((inf, inf, inf))[0]
-
-        aux_space = Cartesian(size=aux_size, resolution=1 / delta_1d, parallel=False)
-        aux_geom_list = (
-            DefaultMedium(material=mat_objs),
-            Shell(material=Cpml(), thickness=pml_thickness),
+        aux_space = Cartesian(
+            size=(0, 0, 2 * (max_dist + pml_thickness + 2 * delta_1d)),
+            resolution=1 / delta_1d,
+            parallel=False,
         )
-        src_pnt = (0, 0, -max_dist - delta_1d)
-        aux_src_list = (
-            PointSource(
-                src_time=cast(SrcTime, deepcopy(self.src_time)),
-                component=const.Ex,
-                center=src_pnt,
+        # The nested Torch runtime uses the outer Courant step explicitly.
+        # Store it on this inert description so Gaussian prewarm is determined
+        # before that runtime is constructed.
+        aux_space.dt = space.dt
+        material = geom_tree.material_of_point((inf, inf, inf))[0]
+        return AuxiliarySourceSpec(
+            aux_space,
+            (DefaultMedium(material=material), Shell(Cpml(), thickness=pml_thickness)),
+            (
+                PointSource(
+                    src_time=cast(SrcTime, deepcopy(self.src_time)),
+                    component=const.Ex,
+                    center=(0, 0, -max_dist - delta_1d),
+                ),
             ),
         )
 
-        if cmplx:
-            aux_fdtd = TEMzFDTD(
-                aux_space,
-                aux_geom_list,
-                aux_src_list,
-                dt=space.dt,
-                bloch=(0, 0, 0),
-                verbose=False,
-            )
-        else:
-            aux_fdtd = TEMzFDTD(
-                aux_space,
-                aux_geom_list,
-                aux_src_list,
-                dt=space.dt,
-                bloch=None,
-                verbose=False,
-            )
-
-        return aux_fdtd
-
-    def _get_pw_source(
+    def _transparent(
         self,
         space: Cartesian,
         component: ComponentType,
         cosine: RealScalar,
-        field: FieldArray,
+        shape: FieldArray | Index3,
         low_idx: Index3,
         high_idx: Index3,
-        source: type[PwSource],
         samp_i2s: Callable[[int, int, int], Coordinate3],
         face: DirectionType,
-    ) -> PwSource:
-        """Build one transparent point-wise source aggregate.
-
-        Keyword arguments:
-        space - the Coordinate object given as a FDTD argument
-        component - Specify the field component
-        cosine - the cosine of the field vector and the given component
-        field - numpy array of the electromagnetic field
-        low_idx - the low end index of the source boundary
-        high_idx - the high end index of the source boundary
-        source - the pointwise source class
-        samp_i2s - the corresponding index_to_space function
-        face - which side of the interface
-
-        """
-        pw_src = source()
-        for idx, pnt, mat_obj, underneath in self._mapped_source_points(
-            space, component, field, low_idx, high_idx
+    ) -> list[TfsfFaceRule]:
+        """Lower one interface face directly to interpolation rules."""
+        lowering = _torch_tfsf_lowering.get()
+        if lowering is None:
+            raise RuntimeError("direct TFSF lowering context is unavailable")
+        rules: list[TfsfFaceRule] = []
+        electric = issubclass(component, const.Electric)
+        axis = {
+            const.MinusX: 0,
+            const.PlusX: 0,
+            const.MinusY: 1,
+            const.PlusY: 1,
+            const.MinusZ: 2,
+            const.PlusZ: 2,
+        }[face]
+        signs = {
+            "Ex": {"-y": -1, "+y": 1, "-z": 1, "+z": -1},
+            "Ey": {"-z": -1, "+z": 1, "-x": 1, "+x": -1},
+            "Ez": {"-x": -1, "+x": 1, "-y": -1, "+y": 1},
+            "Hx": {"-y": 1, "+y": -1, "-z": -1, "+z": 1},
+            "Hy": {"-z": 1, "+z": -1, "-x": -1, "+x": 1},
+            "Hz": {"-x": 1, "+x": -1, "-y": -1, "+y": 1},
+        }
+        for idx, point, material, underneath in self._mapped_source_points(
+            space, component, shape, low_idx, high_idx
         ):
-            if underneath is None:
-                eps_inf = mat_obj.eps_inf
-                mu_inf = mat_obj.mu_inf
-            else:
-                eps_inf = underneath.eps_inf
-                mu_inf = underneath.mu_inf
-
-            amp = cosine * self.amp * self.mode_function(*pnt)
-
-            samp_pnt = (
-                0,
-                0,
-                self._metric_from_center_along_beam_axis(samp_i2s(*idx)),
+            medium = underneath if underneath is not None else material
+            sample = (
+                lowering.auxiliary_spec.space.spc_to_exact_hy_idx
+                if electric
+                else lowering.auxiliary_spec.space.spc_to_exact_ex_idx
+            )(*((0, 0, self._metric_from_center_along_beam_axis(samp_i2s(*idx)))))
+            low = np.floor(sample).astype(np.intp)
+            weight1 = float(sample[2] - low[2])
+            coefficient = (
+                signs[component.__name__][face.str()]
+                * space.dt
+                * float(cosine)
+                * self.amp
+                * self.mode_function(*point)
+                / ((medium.eps_inf if electric else medium.mu_inf) * space.dr[axis])
             )
-
-            if isinstance(pw_src, (TransparentEx, TransparentEy, TransparentEz)):
-                pw_src_param: PwSourceParam = TransparentElectricParam(
-                    eps_inf, amp, self.aux_fdtd, samp_pnt, face
+            rules.append(
+                TfsfFaceRule(
+                    component.__name__,
+                    idx,
+                    "Hy" if electric else "Ex",
+                    tuple(low),
+                    tuple(low + (0, 0, 1)),
+                    1.0 - weight1,
+                    weight1,
+                    coefficient,
+                    lowering.auxiliary_spec,
                 )
-                pw_src.attach(idx, pw_src_param)
-            if isinstance(pw_src, (TransparentHx, TransparentHy, TransparentHz)):
-                pw_src_param = TransparentMagneticParam(
-                    mu_inf, amp, self.aux_fdtd, samp_pnt, face
-                )
-                pw_src.attach(idx, pw_src_param)
-
-        return pw_src
+            )
+        return rules
 
     def _mapped_source_points(
         self,
         space: Cartesian,
         component: ComponentType,
-        field: FieldArray,
+        shape: FieldArray | Index3,
         low_idx: Index3,
         high_idx: Index3,
     ) -> Iterator[SourcePoint]:
         """Yield source indices, coordinates, and materials in C-order."""
+        shape = cast(Index3, tuple(getattr(shape, "shape", shape)))
         electric_high_trim: dict[ComponentType, Index3] = {
             const.Ex: (0, 1, 1),
             const.Ey: (1, 0, 1),
@@ -873,10 +876,10 @@ class TotalFieldScatteredField(Src):
         }
         if component in electric_high_trim:
             allowed_low = np.zeros(3, dtype=np.intp)
-            allowed_high = np.array(field.shape) - electric_high_trim[component]
+            allowed_high = np.array(shape) - electric_high_trim[component]
         else:
             allowed_low = np.array(magnetic_low[component], dtype=np.intp)
-            allowed_high = np.array(field.shape, dtype=np.intp)
+            allowed_high = np.array(shape, dtype=np.intp)
 
         low = np.maximum(np.array(low_idx, dtype=np.intp), allowed_low)
         high = np.minimum(np.array(high_idx, dtype=np.intp), allowed_high)
@@ -884,7 +887,7 @@ class TotalFieldScatteredField(Src):
         if any(length <= 0 for length in tile_shape):
             return
 
-        field_axes = space.component_coordinate_axes(component, field.shape)
+        field_axes = space.component_coordinate_axes(component, shape)
         axes = cast(
             tuple[RealArray, RealArray, RealArray],
             tuple(
@@ -896,7 +899,10 @@ class TotalFieldScatteredField(Src):
         plane = tile_shape[1] * tile_shape[2]
         for start in range(0, total, self._MAPPING_TILE_SIZE):
             stop = min(start + self._MAPPING_TILE_SIZE, total)
-            geometry_map = self.geom_tree.lower_grid(
+            lowering = _torch_tfsf_lowering.get()
+            if lowering is None:
+                raise RuntimeError("direct TFSF lowering context is unavailable")
+            geometry_map = lowering.geometry_tree.lower_grid(
                 *axes, start, stop, component=component
             )
             geometries = geometry_map.geometries
@@ -923,38 +929,111 @@ class TotalFieldScatteredField(Src):
                 )
                 yield idx, point, material, underneath
 
-    def get_pw_source_ex(
-        self, ex_field: FieldArray, space: Cartesian, geom_tree: GeomBoxTree
-    ) -> PwSource | None:
-        pw_src = TransparentEx()
+    def _component_shapes(self, space: Cartesian) -> dict[str, Index3]:
+        nx, ny, nz = (int(value) for value in space.my_field_size)
+        return {
+            "Ex": (nx, ny + 1, nz + 1),
+            "Ey": (nx + 1, ny, nz + 1),
+            "Ez": (nx + 1, ny + 1, nz),
+            "Hx": (nx, ny + 1, nz + 1),
+            "Hy": (nx + 1, ny, nz + 1),
+            "Hz": (nx + 1, ny + 1, nz),
+        }
 
-        cosine = cast(float, dot(self.h_direction, (0, 0, 1)))
-        if cosine != 0:
-            pw_src_tmp = self._get_pw_source_ex_minus_y(ex_field, space, cosine)
-            if pw_src_tmp != None:
-                pw_src.merge(pw_src_tmp)
+    def _auxiliary_spec_for_context(self, context: object) -> AuxiliarySourceSpec:
+        """Build the nested description without a mutable Torch lifecycle."""
+        value = cast(Any, context)
+        return self._get_auxiliary_spec(value.space, value.geometry_tree)
 
-            pw_src_tmp = self._get_pw_source_ex_plus_y(ex_field, space, cosine)
-            if pw_src_tmp != None:
-                pw_src.merge(pw_src_tmp)
+    def _lower_rules(
+        self,
+        context: object,
+        helpers: Sequence[str],
+        *,
+        include_zero_cosine: bool = False,
+    ) -> tuple[TfsfFaceRule, ...]:
+        space = cast(Any, context).space
+        shapes = self._component_shapes(space)
+        directions = {
+            "_transparent_ex_minus_y": ("Ex", self.h_direction, (0, 0, 1)),
+            "_transparent_ex_plus_y": ("Ex", self.h_direction, (0, 0, 1)),
+            "_transparent_ex_minus_z": ("Ex", self.h_direction, (0, 1, 0)),
+            "_transparent_ex_plus_z": ("Ex", self.h_direction, (0, 1, 0)),
+            "_transparent_ey_minus_z": ("Ey", self.h_direction, (1, 0, 0)),
+            "_transparent_ey_plus_z": ("Ey", self.h_direction, (1, 0, 0)),
+            "_transparent_ey_minus_x": ("Ey", self.h_direction, (0, 0, 1)),
+            "_transparent_ey_plus_x": ("Ey", self.h_direction, (0, 0, 1)),
+            "_transparent_ez_minus_x": ("Ez", self.h_direction, (0, 1, 0)),
+            "_transparent_ez_plus_x": ("Ez", self.h_direction, (0, 1, 0)),
+            "_transparent_ez_minus_y": ("Ez", self.h_direction, (1, 0, 0)),
+            "_transparent_ez_plus_y": ("Ez", self.h_direction, (1, 0, 0)),
+            "_transparent_hx_minus_y": ("Hx", self.e_direction, (0, 0, 1)),
+            "_transparent_hx_plus_y": ("Hx", self.e_direction, (0, 0, 1)),
+            "_transparent_hx_minus_z": ("Hx", self.e_direction, (0, 1, 0)),
+            "_transparent_hx_plus_z": ("Hx", self.e_direction, (0, 1, 0)),
+            "_transparent_hy_minus_z": ("Hy", self.e_direction, (1, 0, 0)),
+            "_transparent_hy_plus_z": ("Hy", self.e_direction, (1, 0, 0)),
+            "_transparent_hy_minus_x": ("Hy", self.e_direction, (0, 0, 1)),
+            "_transparent_hy_plus_x": ("Hy", self.e_direction, (0, 0, 1)),
+            "_transparent_hz_minus_x": ("Hz", self.e_direction, (0, 1, 0)),
+            "_transparent_hz_plus_x": ("Hz", self.e_direction, (0, 1, 0)),
+            "_transparent_hz_minus_y": ("Hz", self.e_direction, (1, 0, 0)),
+            "_transparent_hz_plus_y": ("Hz", self.e_direction, (1, 0, 0)),
+        }
+        lowering = _TorchTfsfLowering(
+            cast(Any, context).geometry_tree,
+            self._auxiliary_spec_for_context(context),
+        )
+        token = _torch_tfsf_lowering.set(lowering)
+        try:
+            records: list[TfsfFaceRule] = []
+            for name in helpers:
+                component, direction, axis = directions[name]
+                cosine = float(dot(direction, axis))
+                if cosine or include_zero_cosine:
+                    records.extend(
+                        getattr(self, name)(shapes[component], space, cosine)
+                    )
+            return tuple(records)
+        finally:
+            _torch_tfsf_lowering.reset(token)
 
-        cosine = cast(float, dot(self.h_direction, (0, 1, 0)))
-        if cosine != 0:
-            pw_src_tmp = self._get_pw_source_ex_minus_z(ex_field, space, cosine)
-            if pw_src_tmp != None:
-                pw_src.merge(pw_src_tmp)
-            pw_src_tmp = self._get_pw_source_ex_plus_z(ex_field, space, cosine)
-            if pw_src_tmp != None:
-                pw_src.merge(pw_src_tmp)
+    def lower_torch_source(self, context: object) -> tuple[TfsfFaceRule, ...]:
+        """Emit direct TFSF face rules for the retained Torch source plan."""
 
-        if len(pw_src._param) == 0:
-            return None
-        else:
-            return pw_src
+        return self._lower_rules(
+            context,
+            (
+                "_transparent_ex_minus_y",
+                "_transparent_ex_plus_y",
+                "_transparent_ex_minus_z",
+                "_transparent_ex_plus_z",
+                "_transparent_ey_minus_z",
+                "_transparent_ey_plus_z",
+                "_transparent_ey_minus_x",
+                "_transparent_ey_plus_x",
+                "_transparent_ez_minus_x",
+                "_transparent_ez_plus_x",
+                "_transparent_ez_minus_y",
+                "_transparent_ez_plus_y",
+                "_transparent_hx_minus_y",
+                "_transparent_hx_plus_y",
+                "_transparent_hx_minus_z",
+                "_transparent_hx_plus_z",
+                "_transparent_hy_minus_z",
+                "_transparent_hy_plus_z",
+                "_transparent_hy_minus_x",
+                "_transparent_hy_plus_x",
+                "_transparent_hz_minus_x",
+                "_transparent_hz_plus_x",
+                "_transparent_hz_minus_y",
+                "_transparent_hz_plus_y",
+            ),
+        )
 
-    def _get_pw_source_ex_minus_y(
-        self, ex_field: FieldArray, space: Cartesian, cosine: RealScalar
-    ) -> PwSource | None:
+    def _transparent_ex_minus_y(
+        self, shape: Index3, space: Cartesian, cosine: RealScalar
+    ) -> list[TfsfFaceRule]:
         if 2 * space.half_size[1] > space.dr[1]:
             low = self.center - self.half_size
             high = self.center + self.half_size * (1, -1, 1)
@@ -966,25 +1045,24 @@ class TotalFieldScatteredField(Src):
 
             hz_i2s = lambda i, j, k: space.hz_index_to_space(i + 1, j, k)
 
-            pw_src = self._get_pw_source(
+            pw_src = self._transparent(
                 space,
                 const.Ex,
                 cosine,
-                ex_field,
+                shape,
                 low_idx,
                 high_idx,
-                TransparentEx,
                 hz_i2s,
                 const.MinusY,
             )
         else:
-            pw_src = None
+            pw_src = []
 
         return pw_src
 
-    def _get_pw_source_ex_plus_y(
-        self, ex_field: FieldArray, space: Cartesian, cosine: RealScalar
-    ) -> PwSource | None:
+    def _transparent_ex_plus_y(
+        self, shape: FieldArray, space: Cartesian, cosine: RealScalar
+    ) -> list[TfsfFaceRule]:
         if 2 * space.half_size[1] > space.dr[1]:
             low = self.center - self.half_size * (1, -1, 1)
             high = self.center + self.half_size
@@ -996,26 +1074,25 @@ class TotalFieldScatteredField(Src):
 
             hz_i2s = lambda i, j, k: space.hz_index_to_space(i + 1, j + 1, k)
 
-            pw_src = self._get_pw_source(
+            pw_src = self._transparent(
                 space,
                 const.Ex,
                 cosine,
-                ex_field,
+                shape,
                 low_idx,
                 high_idx,
-                TransparentEx,
                 hz_i2s,
                 const.PlusY,
             )
 
         else:
-            pw_src = None
+            pw_src = []
 
         return pw_src
 
-    def _get_pw_source_ex_minus_z(
-        self, ex_field: FieldArray, space: Cartesian, cosine: RealScalar
-    ) -> PwSource | None:
+    def _transparent_ex_minus_z(
+        self, shape: FieldArray, space: Cartesian, cosine: RealScalar
+    ) -> list[TfsfFaceRule]:
         if 2 * space.half_size[2] > space.dr[2]:
             low = self.center - self.half_size
             high = self.center + self.half_size * (1, 1, -1)
@@ -1027,25 +1104,24 @@ class TotalFieldScatteredField(Src):
 
             hy_i2s = lambda i, j, k: space.hy_index_to_space(i + 1, j, k)
 
-            pw_src = self._get_pw_source(
+            pw_src = self._transparent(
                 space,
                 const.Ex,
                 cosine,
-                ex_field,
+                shape,
                 low_idx,
                 high_idx,
-                TransparentEx,
                 hy_i2s,
                 const.MinusZ,
             )
         else:
-            pw_src = None
+            pw_src = []
 
         return pw_src
 
-    def _get_pw_source_ex_plus_z(
-        self, ex_field: FieldArray, space: Cartesian, cosine: RealScalar
-    ) -> PwSource | None:
+    def _transparent_ex_plus_z(
+        self, shape: FieldArray, space: Cartesian, cosine: RealScalar
+    ) -> list[TfsfFaceRule]:
         if 2 * space.half_size[2] > space.dr[2]:
             low = self.center - self.half_size * (1, 1, -1)
             high = self.center + self.half_size
@@ -1057,53 +1133,24 @@ class TotalFieldScatteredField(Src):
 
             i2s = lambda i, j, k: space.hy_index_to_space(i + 1, j, k + 1)
 
-            pw_src = self._get_pw_source(
+            pw_src = self._transparent(
                 space,
                 const.Ex,
                 cosine,
-                ex_field,
+                shape,
                 low_idx,
                 high_idx,
-                TransparentEx,
                 i2s,
                 const.PlusZ,
             )
         else:
-            pw_src = None
+            pw_src = []
 
         return pw_src
 
-    def get_pw_source_ey(
-        self, ey_field: FieldArray, space: Cartesian, geom_tree: GeomBoxTree
-    ) -> PwSource | None:
-        pw_src = TransparentEy()
-
-        cosine = cast(float, dot(self.h_direction, (1, 0, 0)))
-        if cosine != 0:
-            pw_src_tmp = self._get_pw_source_ey_minus_z(ey_field, space, cosine)
-            if pw_src_tmp != None:
-                pw_src.merge(pw_src_tmp)
-            pw_src_tmp = self._get_pw_source_ey_plus_z(ey_field, space, cosine)
-            if pw_src_tmp != None:
-                pw_src.merge(pw_src_tmp)
-
-        cosine = cast(float, dot(self.h_direction, (0, 0, 1)))
-        if cosine != 0:
-            pw_src_tmp = self._get_pw_source_ey_minus_x(ey_field, space, cosine)
-            if pw_src_tmp != None:
-                pw_src.merge(pw_src_tmp)
-            pw_src_tmp = self._get_pw_source_ey_plus_x(ey_field, space, cosine)
-            if pw_src_tmp != None:
-                pw_src.merge(pw_src_tmp)
-
-        if len(pw_src._param) == 0:
-            return None
-        else:
-            return pw_src
-
-    def _get_pw_source_ey_minus_z(
-        self, ey_field: FieldArray, space: Cartesian, cosine: RealScalar
-    ) -> PwSource | None:
+    def _transparent_ey_minus_z(
+        self, shape: FieldArray, space: Cartesian, cosine: RealScalar
+    ) -> list[TfsfFaceRule]:
         if 2 * space.half_size[2] > space.dr[2]:
             low = self.center - self.half_size
             high = self.center + self.half_size * (1, 1, -1)
@@ -1115,25 +1162,24 @@ class TotalFieldScatteredField(Src):
 
             hx_i2s = lambda i, j, k: space.hx_index_to_space(i, j + 1, k)
 
-            pw_src = self._get_pw_source(
+            pw_src = self._transparent(
                 space,
                 const.Ey,
                 cosine,
-                ey_field,
+                shape,
                 low_idx,
                 high_idx,
-                TransparentEy,
                 hx_i2s,
                 const.MinusZ,
             )
         else:
-            pw_src = None
+            pw_src = []
 
         return pw_src
 
-    def _get_pw_source_ey_plus_z(
-        self, ey_field: FieldArray, space: Cartesian, cosine: RealScalar
-    ) -> PwSource | None:
+    def _transparent_ey_plus_z(
+        self, shape: FieldArray, space: Cartesian, cosine: RealScalar
+    ) -> list[TfsfFaceRule]:
         if 2 * space.half_size[2] > space.dr[2]:
             low = self.center - self.half_size * (1, 1, -1)
             high = self.center + self.half_size
@@ -1145,25 +1191,24 @@ class TotalFieldScatteredField(Src):
 
             hx_i2s = lambda i, j, k: space.hx_index_to_space(i, j + 1, k + 1)
 
-            pw_src = self._get_pw_source(
+            pw_src = self._transparent(
                 space,
                 const.Ey,
                 cosine,
-                ey_field,
+                shape,
                 low_idx,
                 high_idx,
-                TransparentEy,
                 hx_i2s,
                 const.PlusZ,
             )
         else:
-            pw_src = None
+            pw_src = []
 
         return pw_src
 
-    def _get_pw_source_ey_minus_x(
-        self, ey_field: FieldArray, space: Cartesian, cosine: RealScalar
-    ) -> PwSource | None:
+    def _transparent_ey_minus_x(
+        self, shape: FieldArray, space: Cartesian, cosine: RealScalar
+    ) -> list[TfsfFaceRule]:
         if 2 * space.half_size[0] > space.dr[0]:
             low = self.center - self.half_size
             high = self.center + self.half_size * (-1, 1, 1)
@@ -1175,25 +1220,24 @@ class TotalFieldScatteredField(Src):
 
             hz_i2s = lambda i, j, k: space.hz_index_to_space(i, j + 1, k)
 
-            pw_src = self._get_pw_source(
+            pw_src = self._transparent(
                 space,
                 const.Ey,
                 cosine,
-                ey_field,
+                shape,
                 low_idx,
                 high_idx,
-                TransparentEy,
                 hz_i2s,
                 const.MinusX,
             )
         else:
-            pw_src = None
+            pw_src = []
 
         return pw_src
 
-    def _get_pw_source_ey_plus_x(
-        self, ey_field: FieldArray, space: Cartesian, cosine: RealScalar
-    ) -> PwSource | None:
+    def _transparent_ey_plus_x(
+        self, shape: FieldArray, space: Cartesian, cosine: RealScalar
+    ) -> list[TfsfFaceRule]:
         if 2 * space.half_size[0] > space.dr[0]:
             low = self.center - self.half_size * (-1, 1, 1)
             high = self.center + self.half_size
@@ -1205,53 +1249,24 @@ class TotalFieldScatteredField(Src):
 
             hz_i2s = lambda i, j, k: space.hz_index_to_space(i + 1, j + 1, k)
 
-            pw_src = self._get_pw_source(
+            pw_src = self._transparent(
                 space,
                 const.Ey,
                 cosine,
-                ey_field,
+                shape,
                 low_idx,
                 high_idx,
-                TransparentEy,
                 hz_i2s,
                 const.PlusX,
             )
         else:
-            pw_src = None
+            pw_src = []
 
         return pw_src
 
-    def get_pw_source_ez(
-        self, ez_field: FieldArray, space: Cartesian, geom_tree: GeomBoxTree
-    ) -> PwSource | None:
-        pw_src = TransparentEz()
-
-        cosine = cast(float, dot(self.h_direction, (0, 1, 0)))
-        if cosine != 0:
-            pw_src_tmp = self._get_pw_source_ez_minus_x(ez_field, space, cosine)
-            if pw_src_tmp != None:
-                pw_src.merge(pw_src_tmp)
-            pw_src_tmp = self._get_pw_source_ez_plus_x(ez_field, space, cosine)
-            if pw_src_tmp != None:
-                pw_src.merge(pw_src_tmp)
-
-        cosine = cast(float, dot(self.h_direction, (1, 0, 0)))
-        if cosine != 0:
-            pw_src_tmp = self._get_pw_source_ez_minus_y(ez_field, space, cosine)
-            if pw_src_tmp != None:
-                pw_src.merge(pw_src_tmp)
-            pw_src_tmp = self._get_pw_source_ez_plus_y(ez_field, space, cosine)
-            if pw_src_tmp != None:
-                pw_src.merge(pw_src_tmp)
-
-        if len(pw_src._param) == 0:
-            return None
-        else:
-            return pw_src
-
-    def _get_pw_source_ez_minus_x(
-        self, ez_field: FieldArray, space: Cartesian, cosine: RealScalar
-    ) -> PwSource | None:
+    def _transparent_ez_minus_x(
+        self, shape: FieldArray, space: Cartesian, cosine: RealScalar
+    ) -> list[TfsfFaceRule]:
         if 2 * space.half_size[0] > space.dr[0]:
             low = self.center - self.half_size
             high = self.center + self.half_size * (-1, 1, 1)
@@ -1263,25 +1278,24 @@ class TotalFieldScatteredField(Src):
 
             hy_i2s = lambda i, j, k: space.hy_index_to_space(i, j, k + 1)
 
-            pw_src = self._get_pw_source(
+            pw_src = self._transparent(
                 space,
                 const.Ez,
                 cosine,
-                ez_field,
+                shape,
                 low_idx,
                 high_idx,
-                TransparentEz,
                 hy_i2s,
                 const.MinusX,
             )
         else:
-            pw_src = None
+            pw_src = []
 
         return pw_src
 
-    def _get_pw_source_ez_plus_x(
-        self, ez_field: FieldArray, space: Cartesian, cosine: RealScalar
-    ) -> PwSource | None:
+    def _transparent_ez_plus_x(
+        self, shape: FieldArray, space: Cartesian, cosine: RealScalar
+    ) -> list[TfsfFaceRule]:
         if 2 * space.half_size[0] > space.dr[0]:
             low = self.center - self.half_size * (-1, 1, 1)
             high = self.center + self.half_size
@@ -1293,25 +1307,24 @@ class TotalFieldScatteredField(Src):
 
             hy_i2s = lambda i, j, k: space.hy_index_to_space(i + 1, j, k + 1)
 
-            pw_src = self._get_pw_source(
+            pw_src = self._transparent(
                 space,
                 const.Ez,
                 cosine,
-                ez_field,
+                shape,
                 low_idx,
                 high_idx,
-                TransparentEz,
                 hy_i2s,
                 const.PlusX,
             )
         else:
-            pw_src = None
+            pw_src = []
 
         return pw_src
 
-    def _get_pw_source_ez_minus_y(
-        self, ez_field: FieldArray, space: Cartesian, cosine: RealScalar
-    ) -> PwSource | None:
+    def _transparent_ez_minus_y(
+        self, shape: FieldArray, space: Cartesian, cosine: RealScalar
+    ) -> list[TfsfFaceRule]:
         if 2 * space.half_size[1] > space.dr[1]:
             low = self.center - self.half_size
             high = self.center + self.half_size * (1, -1, 1)
@@ -1323,25 +1336,24 @@ class TotalFieldScatteredField(Src):
 
             hx_i2s = lambda i, j, k: space.hx_index_to_space(i, j, k + 1)
 
-            pw_src = self._get_pw_source(
+            pw_src = self._transparent(
                 space,
                 const.Ez,
                 cosine,
-                ez_field,
+                shape,
                 low_idx,
                 high_idx,
-                TransparentEz,
                 hx_i2s,
                 const.MinusY,
             )
         else:
-            pw_src = None
+            pw_src = []
 
         return pw_src
 
-    def _get_pw_source_ez_plus_y(
-        self, ez_field: FieldArray, space: Cartesian, cosine: RealScalar
-    ) -> PwSource | None:
+    def _transparent_ez_plus_y(
+        self, shape: FieldArray, space: Cartesian, cosine: RealScalar
+    ) -> list[TfsfFaceRule]:
         if 2 * space.half_size[1] > space.dr[1]:
             low = self.center - self.half_size * (1, -1, 1)
             high = self.center + self.half_size
@@ -1353,53 +1365,24 @@ class TotalFieldScatteredField(Src):
 
             hx_i2s = lambda i, j, k: space.hx_index_to_space(i, j + 1, k + 1)
 
-            pw_src = self._get_pw_source(
+            pw_src = self._transparent(
                 space,
                 const.Ez,
                 cosine,
-                ez_field,
+                shape,
                 low_idx,
                 high_idx,
-                TransparentEz,
                 hx_i2s,
                 const.PlusY,
             )
         else:
-            pw_src = None
+            pw_src = []
 
         return pw_src
 
-    def get_pw_source_hx(
-        self, hx_field: FieldArray, space: Cartesian, geom_tree: GeomBoxTree
-    ) -> PwSource | None:
-        pw_src = TransparentHx()
-
-        cosine = cast(float, dot(self.e_direction, (0, 0, 1)))
-        if cosine != 0:
-            pw_src_tmp = self._get_pw_source_hx_minus_y(hx_field, space, cosine)
-            if pw_src_tmp != None:
-                pw_src.merge(pw_src_tmp)
-            pw_src_tmp = self._get_pw_source_hx_plus_y(hx_field, space, cosine)
-            if pw_src_tmp != None:
-                pw_src.merge(pw_src_tmp)
-
-        cosine = cast(float, dot(self.e_direction, (0, 1, 0)))
-        if cosine != 0:
-            pw_src_tmp = self._get_pw_source_hx_minus_z(hx_field, space, cosine)
-            if pw_src_tmp != None:
-                pw_src.merge(pw_src_tmp)
-            pw_src_tmp = self._get_pw_source_hx_plus_z(hx_field, space, cosine)
-            if pw_src_tmp != None:
-                pw_src.merge(pw_src_tmp)
-
-        if len(pw_src._param) == 0:
-            return None
-        else:
-            return pw_src
-
-    def _get_pw_source_hx_minus_y(
-        self, hx_field: FieldArray, space: Cartesian, cosine: RealScalar
-    ) -> PwSource | None:
+    def _transparent_hx_minus_y(
+        self, shape: FieldArray, space: Cartesian, cosine: RealScalar
+    ) -> list[TfsfFaceRule]:
         if 2 * space.half_size[1] > space.dr[1]:
             low = self.center - self.half_size
             high = self.center + self.half_size * (1, -1, 1)
@@ -1414,25 +1397,24 @@ class TotalFieldScatteredField(Src):
 
             ez_i2s = lambda i, j, k: space.ez_index_to_space(i, j, k - 1)
 
-            pw_src = self._get_pw_source(
+            pw_src = self._transparent(
                 space,
                 const.Hx,
                 cosine,
-                hx_field,
+                shape,
                 low_idx,
                 high_idx,
-                TransparentHx,
                 ez_i2s,
                 const.MinusY,
             )
         else:
-            pw_src = None
+            pw_src = []
 
         return pw_src
 
-    def _get_pw_source_hx_plus_y(
-        self, hx_field: FieldArray, space: Cartesian, cosine: RealScalar
-    ) -> PwSource | None:
+    def _transparent_hx_plus_y(
+        self, shape: FieldArray, space: Cartesian, cosine: RealScalar
+    ) -> list[TfsfFaceRule]:
         if 2 * space.half_size[1] > space.dr[1]:
             low = self.center - self.half_size * (1, -1, 1)
             high = self.center + self.half_size
@@ -1447,26 +1429,25 @@ class TotalFieldScatteredField(Src):
 
             ez_i2s = lambda i, j, k: space.ez_index_to_space(i, j - 1, k - 1)
 
-            pw_src = self._get_pw_source(
+            pw_src = self._transparent(
                 space,
                 const.Hx,
                 cosine,
-                hx_field,
+                shape,
                 low_idx,
                 high_idx,
-                TransparentHx,
                 ez_i2s,
                 const.PlusY,
             )
 
         else:
-            pw_src = None
+            pw_src = []
 
         return pw_src
 
-    def _get_pw_source_hx_minus_z(
-        self, hx_field: FieldArray, space: Cartesian, cosine: RealScalar
-    ) -> PwSource | None:
+    def _transparent_hx_minus_z(
+        self, shape: FieldArray, space: Cartesian, cosine: RealScalar
+    ) -> list[TfsfFaceRule]:
         if 2 * space.half_size[2] > space.dr[2]:
             low = self.center - self.half_size
             high = self.center + self.half_size * (1, 1, -1)
@@ -1481,25 +1462,24 @@ class TotalFieldScatteredField(Src):
 
             ey_i2s = lambda i, j, k: space.ey_index_to_space(i, j - 1, k - 1)
 
-            pw_src = self._get_pw_source(
+            pw_src = self._transparent(
                 space,
                 const.Hx,
                 cosine,
-                hx_field,
+                shape,
                 low_idx,
                 high_idx,
-                TransparentHx,
                 ey_i2s,
                 const.MinusZ,
             )
         else:
-            pw_src = None
+            pw_src = []
 
         return pw_src
 
-    def _get_pw_source_hx_plus_z(
-        self, hx_field: FieldArray, space: Cartesian, cosine: RealScalar
-    ) -> PwSource | None:
+    def _transparent_hx_plus_z(
+        self, shape: FieldArray, space: Cartesian, cosine: RealScalar
+    ) -> list[TfsfFaceRule]:
         if 2 * space.half_size[2] > space.dr[2]:
             low = self.center - self.half_size * (1, 1, -1)
             high = self.center + self.half_size
@@ -1514,53 +1494,24 @@ class TotalFieldScatteredField(Src):
 
             ey_i2s = lambda i, j, k: space.ey_index_to_space(i, j - 1, k)
 
-            pw_src = self._get_pw_source(
+            pw_src = self._transparent(
                 space,
                 const.Hx,
                 cosine,
-                hx_field,
+                shape,
                 low_idx,
                 high_idx,
-                TransparentHx,
                 ey_i2s,
                 const.PlusZ,
             )
         else:
-            pw_src = None
+            pw_src = []
 
         return pw_src
 
-    def get_pw_source_hy(
-        self, hy_field: FieldArray, space: Cartesian, geom_tree: GeomBoxTree
-    ) -> PwSource | None:
-        pw_src = TransparentHy()
-
-        cosine = cast(float, dot(self.e_direction, (1, 0, 0)))
-        if cosine != 0:
-            pw_src_tmp = self._get_pw_source_hy_minus_z(hy_field, space, cosine)
-            if pw_src_tmp != None:
-                pw_src.merge(pw_src_tmp)
-            pw_src_tmp = self._get_pw_source_hy_plus_z(hy_field, space, cosine)
-            if pw_src_tmp != None:
-                pw_src.merge(pw_src_tmp)
-
-        cosine = cast(float, dot(self.e_direction, (0, 0, 1)))
-        if cosine != 0:
-            pw_src_tmp = self._get_pw_source_hy_minus_x(hy_field, space, cosine)
-            if pw_src_tmp != None:
-                pw_src.merge(pw_src_tmp)
-            pw_src_tmp = self._get_pw_source_hy_plus_x(hy_field, space, cosine)
-            if pw_src_tmp != None:
-                pw_src.merge(pw_src_tmp)
-
-        if len(pw_src._param) == 0:
-            return None
-        else:
-            return pw_src
-
-    def _get_pw_source_hy_minus_z(
-        self, hy_field: FieldArray, space: Cartesian, cosine: RealScalar
-    ) -> PwSource | None:
+    def _transparent_hy_minus_z(
+        self, shape: FieldArray, space: Cartesian, cosine: RealScalar
+    ) -> list[TfsfFaceRule]:
         if 2 * space.half_size[2] > space.dr[2]:
             low = self.center - self.half_size
             high = self.center + self.half_size * (1, 1, -1)
@@ -1575,25 +1526,24 @@ class TotalFieldScatteredField(Src):
 
             ex_i2s = lambda i, j, k: space.ex_index_to_space(i - 1, j, k)
 
-            pw_src = self._get_pw_source(
+            pw_src = self._transparent(
                 space,
                 const.Hy,
                 cosine,
-                hy_field,
+                shape,
                 low_idx,
                 high_idx,
-                TransparentHy,
                 ex_i2s,
                 const.MinusZ,
             )
         else:
-            pw_src = None
+            pw_src = []
 
         return pw_src
 
-    def _get_pw_source_hy_plus_z(
-        self, hy_field: FieldArray, space: Cartesian, cosine: RealScalar
-    ) -> PwSource | None:
+    def _transparent_hy_plus_z(
+        self, shape: FieldArray, space: Cartesian, cosine: RealScalar
+    ) -> list[TfsfFaceRule]:
         if 2 * space.half_size[2] > space.dr[2]:
             low = self.center - self.half_size * (1, 1, -1)
             high = self.center + self.half_size
@@ -1608,25 +1558,24 @@ class TotalFieldScatteredField(Src):
 
             ex_i2s = lambda i, j, k: space.ex_index_to_space(i - 1, j, k - 1)
 
-            pw_src = self._get_pw_source(
+            pw_src = self._transparent(
                 space,
                 const.Hy,
                 cosine,
-                hy_field,
+                shape,
                 low_idx,
                 high_idx,
-                TransparentHy,
                 ex_i2s,
                 const.PlusZ,
             )
         else:
-            pw_src = None
+            pw_src = []
 
         return pw_src
 
-    def _get_pw_source_hy_minus_x(
-        self, hy_field: FieldArray, space: Cartesian, cosine: RealScalar
-    ) -> PwSource | None:
+    def _transparent_hy_minus_x(
+        self, shape: FieldArray, space: Cartesian, cosine: RealScalar
+    ) -> list[TfsfFaceRule]:
         if 2 * space.half_size[0] > space.dr[0]:
             low = self.center - self.half_size
             high = self.center + self.half_size * (-1, 1, 1)
@@ -1641,25 +1590,24 @@ class TotalFieldScatteredField(Src):
 
             ez_i2s = lambda i, j, k: space.ez_index_to_space(i, j, k - 1)
 
-            pw_src = self._get_pw_source(
+            pw_src = self._transparent(
                 space,
                 const.Hy,
                 cosine,
-                hy_field,
+                shape,
                 low_idx,
                 high_idx,
-                TransparentHy,
                 ez_i2s,
                 const.MinusX,
             )
         else:
-            pw_src = None
+            pw_src = []
 
         return pw_src
 
-    def _get_pw_source_hy_plus_x(
-        self, hy_field: FieldArray, space: Cartesian, cosine: RealScalar
-    ) -> PwSource | None:
+    def _transparent_hy_plus_x(
+        self, shape: FieldArray, space: Cartesian, cosine: RealScalar
+    ) -> list[TfsfFaceRule]:
         if 2 * space.half_size[0] > space.dr[0]:
             low = self.center - self.half_size * (-1, 1, 1)
             high = self.center + self.half_size
@@ -1674,53 +1622,24 @@ class TotalFieldScatteredField(Src):
 
             ez_i2s = lambda i, j, k: space.ez_index_to_space(i - 1, j, k - 1)
 
-            pw_src = self._get_pw_source(
+            pw_src = self._transparent(
                 space,
                 const.Hy,
                 cosine,
-                hy_field,
+                shape,
                 low_idx,
                 high_idx,
-                TransparentHy,
                 ez_i2s,
                 const.PlusX,
             )
         else:
-            pw_src = None
+            pw_src = []
 
         return pw_src
 
-    def get_pw_source_hz(
-        self, hz_field: FieldArray, space: Cartesian, geom_tree: GeomBoxTree
-    ) -> PwSource | None:
-        pw_src = TransparentHz()
-
-        cosine = cast(float, dot(self.e_direction, (0, 1, 0)))
-        if cosine != 0:
-            pw_src_tmp = self._get_pw_source_hz_minus_x(hz_field, space, cosine)
-            if pw_src_tmp != None:
-                pw_src.merge(pw_src_tmp)
-            pw_src_tmp = self._get_pw_source_hz_plus_x(hz_field, space, cosine)
-            if pw_src_tmp != None:
-                pw_src.merge(pw_src_tmp)
-
-        cosine = cast(float, dot(self.e_direction, (1, 0, 0)))
-        if cosine != 0:
-            pw_src_tmp = self._get_pw_source_hz_minus_y(hz_field, space, cosine)
-            if pw_src_tmp != None:
-                pw_src.merge(pw_src_tmp)
-            pw_src_tmp = self._get_pw_source_hz_plus_y(hz_field, space, cosine)
-            if pw_src_tmp != None:
-                pw_src.merge(pw_src_tmp)
-
-        if len(pw_src._param) == 0:
-            return None
-        else:
-            return pw_src
-
-    def _get_pw_source_hz_minus_x(
-        self, hz_field: FieldArray, space: Cartesian, cosine: RealScalar
-    ) -> PwSource | None:
+    def _transparent_hz_minus_x(
+        self, shape: FieldArray, space: Cartesian, cosine: RealScalar
+    ) -> list[TfsfFaceRule]:
         if 2 * space.half_size[0] > space.dr[0]:
             low = self.center - self.half_size
             high = self.center + self.half_size * (-1, 1, 1)
@@ -1735,25 +1654,24 @@ class TotalFieldScatteredField(Src):
 
             ey_i2s = lambda i, j, k: space.ey_index_to_space(i, j - 1, k)
 
-            pw_src = self._get_pw_source(
+            pw_src = self._transparent(
                 space,
                 const.Hz,
                 cosine,
-                hz_field,
+                shape,
                 low_idx,
                 high_idx,
-                TransparentHz,
                 ey_i2s,
                 const.MinusX,
             )
         else:
-            pw_src = None
+            pw_src = []
 
         return pw_src
 
-    def _get_pw_source_hz_plus_x(
-        self, hz_field: FieldArray, space: Cartesian, cosine: RealScalar
-    ) -> PwSource | None:
+    def _transparent_hz_plus_x(
+        self, shape: FieldArray, space: Cartesian, cosine: RealScalar
+    ) -> list[TfsfFaceRule]:
         if 2 * space.half_size[0] > space.dr[0]:
             low = self.center - self.half_size * (-1, 1, 1)
             high = self.center + self.half_size
@@ -1768,25 +1686,24 @@ class TotalFieldScatteredField(Src):
 
             ey_i2s = lambda i, j, k: space.ey_index_to_space(i - 1, j - 1, k)
 
-            pw_src = self._get_pw_source(
+            pw_src = self._transparent(
                 space,
                 const.Hz,
                 cosine,
-                hz_field,
+                shape,
                 low_idx,
                 high_idx,
-                TransparentHz,
                 ey_i2s,
                 const.PlusX,
             )
         else:
-            pw_src = None
+            pw_src = []
 
         return pw_src
 
-    def _get_pw_source_hz_minus_y(
-        self, hz_field: FieldArray, space: Cartesian, cosine: RealScalar
-    ) -> PwSource | None:
+    def _transparent_hz_minus_y(
+        self, shape: FieldArray, space: Cartesian, cosine: RealScalar
+    ) -> list[TfsfFaceRule]:
         if 2 * space.half_size[1] > space.dr[1]:
             low = self.center - self.half_size
             high = self.center + self.half_size * (1, -1, 1)
@@ -1801,25 +1718,24 @@ class TotalFieldScatteredField(Src):
 
             ex_i2s = lambda i, j, k: space.ex_index_to_space(i, j - 1, k)
 
-            pw_src = self._get_pw_source(
+            pw_src = self._transparent(
                 space,
                 const.Hz,
                 cosine,
-                hz_field,
+                shape,
                 low_idx,
                 high_idx,
-                TransparentHz,
                 ex_i2s,
                 const.MinusY,
             )
         else:
-            pw_src = None
+            pw_src = []
 
         return pw_src
 
-    def _get_pw_source_hz_plus_y(
-        self, hz_field: FieldArray, space: Cartesian, cosine: RealScalar
-    ) -> PwSource | None:
+    def _transparent_hz_plus_y(
+        self, shape: FieldArray, space: Cartesian, cosine: RealScalar
+    ) -> list[TfsfFaceRule]:
         if 2 * space.half_size[1] > space.dr[1]:
             low = self.center - self.half_size * (1, -1, 1)
             high = self.center + self.half_size
@@ -1834,19 +1750,18 @@ class TotalFieldScatteredField(Src):
 
             ex_i2s = lambda i, j, k: space.ex_index_to_space(i - 1, j - 1, k)
 
-            pw_src = self._get_pw_source(
+            pw_src = self._transparent(
                 space,
                 const.Hz,
                 cosine,
-                hz_field,
+                shape,
                 low_idx,
                 high_idx,
-                TransparentHz,
                 ex_i2s,
                 const.PlusY,
             )
         else:
-            pw_src = None
+            pw_src = []
 
         return pw_src
 
@@ -1899,23 +1814,24 @@ class GaussianBeam(TotalFieldScatteredField):
         self.geom_tree = geom_tree
         self.src_time.init(cmplx)
 
-        aux_fdtd = self._get_aux_fdtd(space, geom_tree, cmplx)
-        aux_fdtd.init()
+        spec = self._get_auxiliary_spec(space, geom_tree)
         raising = cast(
-            PlaneWaveSrcTime, cast(PointSource, aux_fdtd.src_list[0]).src_time
+            PlaneWaveSrcTime, cast(PointSource, spec.sources[0]).src_time
         ).width
-        dist = 2 * aux_fdtd.space.half_size[2]
+        dist = 2 * spec.space.half_size[2]
         default_medium = next(
-            (i for i in aux_fdtd.geom_list if isinstance(i, DefaultMedium))
+            (i for i in spec.geometry if isinstance(i, DefaultMedium))
         )
         eps_inf = default_medium.material.eps_inf
         mu_inf = default_medium.material.mu_inf
         v_p = 1 / sqrt(eps_inf * mu_inf)
         passby = raising + dist / v_p
 
-        aux_fdtd.step_until_t(2 * passby)
-
-        self.aux_fdtd = _GaussianBeamSrcTime(aux_fdtd)
+        self.auxiliary_spec = replace(
+            spec,
+            gaussian_width=float(raising),
+            prewarm_steps=int(np.ceil(2 * passby / spec.space.dt)),
+        )
 
     def display_info(self, indent: int = 0) -> None:
         print(" " * indent, "Gaussian beam source:")
@@ -1929,191 +1845,67 @@ class GaussianBeam(TotalFieldScatteredField):
 
         self.src_time.display_info(indent + 4)
 
+    def _auxiliary_spec_for_context(self, context: object) -> AuxiliarySourceSpec:
+        spec = super()._auxiliary_spec_for_context(context)
+        raising = cast(
+            PlaneWaveSrcTime, cast(PointSource, spec.sources[0]).src_time
+        ).width
+        dist = 2 * spec.space.half_size[2]
+        default_medium = next(
+            item for item in spec.geometry if isinstance(item, DefaultMedium)
+        )
+        eps_inf = default_medium.material.eps_inf
+        mu_inf = default_medium.material.mu_inf
+        passby = raising + dist * sqrt(eps_inf * mu_inf)
+        return replace(
+            spec,
+            gaussian_width=float(raising),
+            prewarm_steps=int(np.ceil(2 * passby / spec.space.dt)),
+        )
+
+    def lower_torch_source(self, context: object) -> tuple[TfsfFaceRule, ...]:
+        """Emit Gaussian-weighted direct TFSF face rules for Torch execution."""
+
+        selected = {
+            const.PlusY: (
+                "_transparent_ex_minus_y",
+                "_transparent_ez_minus_y",
+                "_transparent_hx_minus_y",
+                "_transparent_hz_minus_y",
+            ),
+            const.MinusY: (
+                "_transparent_ex_plus_y",
+                "_transparent_ez_plus_y",
+                "_transparent_hx_plus_y",
+                "_transparent_hz_plus_y",
+            ),
+            const.PlusZ: (
+                "_transparent_ex_minus_z",
+                "_transparent_ey_minus_z",
+                "_transparent_hx_minus_z",
+                "_transparent_hy_minus_z",
+            ),
+            const.MinusZ: (
+                "_transparent_ex_plus_z",
+                "_transparent_ey_plus_z",
+                "_transparent_hx_plus_z",
+                "_transparent_hy_plus_z",
+            ),
+            const.PlusX: (
+                "_transparent_ey_minus_x",
+                "_transparent_ez_minus_x",
+                "_transparent_hy_minus_x",
+                "_transparent_hz_minus_x",
+            ),
+            const.MinusX: (
+                "_transparent_ey_plus_x",
+                "_transparent_ez_plus_x",
+                "_transparent_hy_plus_x",
+                "_transparent_hz_plus_x",
+            ),
+        }[self.directivity]
+        return self._lower_rules(context, selected, include_zero_cosine=True)
+
     def mode_function(self, x: float, y: float, z: float) -> float:
         r = self._dist_from_beam_axis(x, y, z)
         return exp(-((r / self.waist) ** 2))
-
-    def get_pw_source_ex(
-        self, ex_field: FieldArray, space: Cartesian, geom_tree: GeomBoxTree
-    ) -> PwSource | None:
-        if self.directivity is const.PlusY:
-            cosine = cast(float, dot(self.h_direction, (0, 0, 1)))
-            return self._get_pw_source_ex_minus_y(ex_field, space, cosine)
-
-        elif self.directivity is const.MinusY:
-            cosine = cast(float, dot(self.h_direction, (0, 0, 1)))
-            return self._get_pw_source_ex_plus_y(ex_field, space, cosine)
-
-        elif self.directivity is const.PlusZ:
-            cosine = cast(float, dot(self.h_direction, (0, 1, 0)))
-            return self._get_pw_source_ex_minus_z(ex_field, space, cosine)
-
-        elif self.directivity is const.MinusZ:
-            cosine = cast(float, dot(self.h_direction, (0, 1, 0)))
-            return self._get_pw_source_ex_plus_z(ex_field, space, cosine)
-
-        else:
-            return None
-
-    def get_pw_source_ey(
-        self, ey_field: FieldArray, space: Cartesian, geom_tree: GeomBoxTree
-    ) -> PwSource | None:
-        if self.directivity is const.PlusZ:
-            cosine = cast(float, dot(self.h_direction, (1, 0, 0)))
-            return self._get_pw_source_ey_minus_z(ey_field, space, cosine)
-
-        elif self.directivity is const.MinusZ:
-            cosine = cast(float, dot(self.h_direction, (1, 0, 0)))
-            return self._get_pw_source_ey_plus_z(ey_field, space, cosine)
-
-        elif self.directivity is const.PlusX:
-            cosine = cast(float, dot(self.h_direction, (0, 0, 1)))
-            return self._get_pw_source_ey_minus_x(ey_field, space, cosine)
-
-        elif self.directivity is const.MinusX:
-            cosine = cast(float, dot(self.h_direction, (0, 0, 1)))
-            return self._get_pw_source_ey_plus_x(ey_field, space, cosine)
-
-        else:
-            return None
-
-    def get_pw_source_ez(
-        self, ez_field: FieldArray, space: Cartesian, geom_tree: GeomBoxTree
-    ) -> PwSource | None:
-        if self.directivity is const.PlusX:
-            cosine = cast(float, dot(self.h_direction, (0, 1, 0)))
-            return self._get_pw_source_ez_minus_x(ez_field, space, cosine)
-
-        elif self.directivity is const.MinusX:
-            cosine = cast(float, dot(self.h_direction, (0, 1, 0)))
-            return self._get_pw_source_ez_plus_x(ez_field, space, cosine)
-
-        elif self.directivity is const.PlusY:
-            cosine = cast(float, dot(self.h_direction, (1, 0, 0)))
-            return self._get_pw_source_ez_minus_y(ez_field, space, cosine)
-
-        elif self.directivity is const.MinusY:
-            cosine = cast(float, dot(self.h_direction, (1, 0, 0)))
-            return self._get_pw_source_ez_plus_y(ez_field, space, cosine)
-
-        else:
-            return None
-
-    def get_pw_source_hx(
-        self, hx_field: FieldArray, space: Cartesian, geom_tree: GeomBoxTree
-    ) -> PwSource | None:
-        if self.directivity is const.PlusY:
-            cosine = cast(float, dot(self.e_direction, (0, 0, 1)))
-            return self._get_pw_source_hx_minus_y(hx_field, space, cosine)
-
-        elif self.directivity is const.MinusY:
-            cosine = cast(float, dot(self.e_direction, (0, 0, 1)))
-            return self._get_pw_source_hx_plus_y(hx_field, space, cosine)
-
-        elif self.directivity is const.PlusZ:
-            cosine = cast(float, dot(self.e_direction, (0, 1, 0)))
-            return self._get_pw_source_hx_minus_z(hx_field, space, cosine)
-
-        elif self.directivity is const.MinusZ:
-            cosine = cast(float, dot(self.e_direction, (0, 1, 0)))
-            return self._get_pw_source_hx_plus_z(hx_field, space, cosine)
-
-        else:
-            return None
-
-    def get_pw_source_hy(
-        self, hy_field: FieldArray, space: Cartesian, geom_tree: GeomBoxTree
-    ) -> PwSource | None:
-        if self.directivity is const.PlusZ:
-            cosine = cast(float, dot(self.e_direction, (1, 0, 0)))
-            return self._get_pw_source_hy_minus_z(hy_field, space, cosine)
-
-        elif self.directivity is const.MinusZ:
-            cosine = cast(float, dot(self.e_direction, (1, 0, 0)))
-            return self._get_pw_source_hy_plus_z(hy_field, space, cosine)
-
-        elif self.directivity is const.PlusX:
-            cosine = cast(float, dot(self.e_direction, (0, 0, 1)))
-            return self._get_pw_source_hy_minus_x(hy_field, space, cosine)
-
-        elif self.directivity is const.MinusX:
-            cosine = cast(float, dot(self.e_direction, (0, 0, 1)))
-            return self._get_pw_source_hy_plus_x(hy_field, space, cosine)
-
-        else:
-            return None
-
-    def get_pw_source_hz(
-        self, hz_field: FieldArray, space: Cartesian, geom_tree: GeomBoxTree
-    ) -> PwSource | None:
-        if self.directivity is const.PlusX:
-            cosine = cast(float, dot(self.e_direction, (0, 1, 0)))
-            return self._get_pw_source_hz_minus_x(hz_field, space, cosine)
-
-        elif self.directivity is const.MinusX:
-            cosine = cast(float, dot(self.e_direction, (0, 1, 0)))
-            return self._get_pw_source_hz_plus_x(hz_field, space, cosine)
-
-        elif self.directivity is const.PlusY:
-            cosine = cast(float, dot(self.e_direction, (1, 0, 0)))
-            return self._get_pw_source_hz_minus_y(hz_field, space, cosine)
-
-        elif self.directivity is const.MinusY:
-            cosine = cast(float, dot(self.e_direction, (1, 0, 0)))
-            return self._get_pw_source_hz_plus_y(hz_field, space, cosine)
-
-        else:
-            return None
-
-
-class _GaussianBeamSrcTime(object):
-    class EX(object):
-        """Expose the auxiliary Ex field multiplied by the beam envelope."""
-
-        def __init__(self, outer: _GaussianBeamSrcTime) -> None:
-            self.outer = outer
-
-        def __getitem__(self, idx: Index3) -> FieldScalar:
-            return cast(
-                FieldScalar, self.outer.envelope() * self.outer.aux_fdtd.ex[idx]
-            )
-
-    class HY(object):
-        """Expose the auxiliary Hy field multiplied by the beam envelope."""
-
-        def __init__(self, outer: _GaussianBeamSrcTime) -> None:
-            self.outer = outer
-
-        def __getitem__(self, idx: Index3) -> FieldScalar:
-            return cast(
-                FieldScalar, self.outer.envelope() * self.outer.aux_fdtd.hy[idx]
-            )
-
-    def __init__(self, aux_fdtd: TEMzFDTD) -> None:
-        self.aux_fdtd = aux_fdtd
-        self.space = self.aux_fdtd.space
-        self.ex = self.EX(self)
-        self.hy = self.HY(self)
-
-        self.n = 0
-        self.t: float = 0.0
-
-    def step(self) -> None:
-        """Advance the auxiliary FDTD and update envelope time."""
-
-        self.aux_fdtd.step()
-        self.n += 1
-        self.t = self.n * self.aux_fdtd.time_step.dt
-
-    def envelope(self) -> float:
-        """Return the smooth Gaussian-beam startup envelope."""
-
-        width = cast(
-            PlaneWaveSrcTime,
-            cast(PointSource, self.aux_fdtd.src_list[0]).src_time,
-        ).width
-        if self.t < width:
-            env = sin(0.5 * pi * self.t / width) ** 2
-        else:
-            env = 1
-        return env

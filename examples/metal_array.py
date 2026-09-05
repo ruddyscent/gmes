@@ -24,7 +24,7 @@ QUICK_RESOLUTION = 8
 QUICK_UNTIL = 1
 
 
-class Silver(DcpPlrc):
+def silver(a):
     """This silver permittivity value in the range of 200-1,000 nm.
 
     This parameters has a fitness value of 0.0266134 to the real
@@ -35,41 +35,32 @@ class Silver(DcpPlrc):
 
     """
 
-    def __init__(self, a):
-        """
-        a: lattice constant in meters.
-
-        """
-        dp1 = DrudePole(omega=1.38737e16 * a / c0, gamma=2.07331e13 * a / c0)
-        cp1 = CriticalPoint(
-            amp=1.3735,
-            phi=-0.504658,
-            omega=7.59914e15 * a / c0,
-            gamma=4.28431e15 * a / c0,
-        )
-        cp2 = CriticalPoint(
-            amp=0.304478,
-            phi=-1.48944,
-            omega=6.15009e15 * a / c0,
-            gamma=6.59262e14 * a / c0,
-        )
-        DcpPlrc.__init__(
-            self, eps_inf=0.89583, mu_inf=1, sigma=0, dps=(dp1,), cps=(cp1, cp2)
-        )
+    dp1 = DrudePole(omega=1.38737e16 * a / c0, gamma=2.07331e13 * a / c0)
+    cp1 = CriticalPoint(
+        amp=1.3735, phi=-0.504658, omega=7.59914e15 * a / c0, gamma=4.28431e15 * a / c0
+    )
+    cp2 = CriticalPoint(
+        amp=0.304478, phi=-1.48944, omega=6.15009e15 * a / c0, gamma=6.59262e14 * a / c0
+    )
+    return DcpPlrc(eps_inf=0.89583, mu_inf=1, sigma=0, dps=(dp1,), cps=(cp1, cp2))
 
 
 def run(resolution=FULL_RESOLUTION, until=FULL_UNTIL):
     """Run the six-particle plasmon-waveguide simulation."""
-    space = Cartesian(size=(2, 8, 2), resolution=resolution, parallel=True)
+    space = Cartesian(size=(2, 8, 2), resolution=resolution)
     geom_list = [DefaultMedium(Dielectric())]
     for y in range(-2, 4):
-        geom_list.append(Sphere(Silver(75 * NANO), radius=1.0 / 3, center=(0, y, 0)))
+        geom_list.append(Sphere(silver(75 * NANO), radius=1.0 / 3, center=(0, y, 0)))
     geom_list.append(Shell(Cpml(), thickness=0.5))
     src_list = [PointSource(Continuous(freq=0.207), center=(0, -3, 0), component=Jy)]
-    simulation = FDTD(space, geom_list, src_list, courant_ratio=0.5)
-    simulation.init()
-    simulation.show_field(Ey, Z, 0, (-1e-5, 1e-5))
-    simulation.step_until_t(until)
+    simulation = TorchSimulation(
+        space=space,
+        geometry=geom_list,
+        sources=src_list,
+        courant_ratio=0.5,
+        runtime=TorchRuntimeConfig(device="cpu", cpu_threads=1),
+    )
+    simulation.advance(max(1, round(until / simulation.plan.dt)))
     return simulation
 
 

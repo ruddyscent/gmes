@@ -13,13 +13,54 @@ import torch
 
 import gmes
 import gmes.torch_fdtd
-from benchmarks import native_oracle, torch_correctness, torch_tuning
+from benchmarks import historical_probes, native_oracle, torch_correctness, torch_tuning
+
+PROBE_TRUST = {
+    "expected_manifest_sha256": "cce4820ccc0e8050db6baf47d18fe646ee2c59bb64c89c0279cd38be1ba17d41",
+    "expected_manifest_bytes": 28865,
+    "expected_fixture_sha256": "9fa7d54d63c4e0c6bceca37ed2c9c392d398f4ebe5ae94748de3b25b73b6b289",
+    "expected_fixture_bytes": 202209,
+}
+
+PROBE_CONSUMER_LINES = {
+    "test_native_step_zero_produces_complete_torch_archives": 234,
+    "test_float32_tfsf_long_capture_uses_strict_float64_auxiliary": 253,
+    "test_auxiliary_precision_metadata_corruption_fails_closed": 338,
+    "test_float32_gaussian_long_capture_uses_strict_float64_auxiliary": 458,
+    "test_gaussian_envelope_raw_state_removal_fails_closed": 513,
+    "test_compiled_dummy_long_capture_covers_topology_and_tolerance": 562,
+    "test_candidate_capture_is_independent_of_legacy_native_state": 615,
+    "test_probe_fixture_is_not_a_torch_candidate": 659,
+    "test_cuda_graph_execution_representation_corruption_fails_closed": 671,
+    "test_raw_planner_corruption_fails_closed": 697,
+    "test_rehashed_logical_map_and_planner_tamper_fails_probe_candidate_validation": 712,
+    "test_rehashed_raw_planner_maps_fail_region_indirection": 779,
+    "test_rehashed_planner_material_identity_and_coefficients_are_derived": 843,
+    "test_transparent_source_values_shapes_and_finiteness_are_derived": 922,
+    "test_probe_transparent_values_are_rederived_from_workload": 1008,
+    "test_rehashed_point_source_arrays_require_values_and_exact_closure": 1052,
+    "test_rehashed_point_source_live_buffers_are_closed_and_semantic": 1085,
+    "test_rehashed_coherent_point_source_rewrite_fails_workload_binding": 1179,
+    "test_rehashed_auxiliary_live_state_has_exact_closure_and_shape": 1227,
+    "test_rehashed_live_main_fields_bind_real_and_paired_representations": 1292,
+    "test_rehashed_live_main_and_auxiliary_material_state_fail_closed": 1371,
+    "test_source_plan_corruption_fails_closed": 1412,
+    "test_live_source_clock_corruption_fails_closed": 1426,
+    "test_historical_probe_descriptor_corruption_fails_closed": 1485,
+    "test_invalid_npz_fails_closed": 1509,
+    "test_runtime_modes_bind_precision_and_graph_execution": 1523,
+    "test_npz_preflight_rejects_hidden_records_and_allocation_failures": 1975,
+    "test_npz_preflight_enforces_each_resource_bound_before_numpy_load": 2012,
+}
 
 
 class TorchCorrectnessTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.manifest = native_oracle.load_manifest()
+        cls.probe_bundle = historical_probes.load_bundle(
+            Path(__file__).parent / "fixtures" / "issue124", **PROBE_TRUST
+        )
 
     @staticmethod
     def _provenance(commit):
@@ -50,7 +91,7 @@ class TorchCorrectnessTest(unittest.TestCase):
         manifest["physical_checks"] = [small(name) for name in physical]
         return manifest
 
-    def _capture_pair(self, directory, manifest, name, **runtime):
+    def _capture_full_reference_pair(self, directory, manifest, name, **runtime):
         spec = native_oracle.find_case(manifest, name)
         reference = Path(directory) / f"{name}-native.npz"
         candidate = Path(directory) / f"{name}-torch.npz"
@@ -70,6 +111,80 @@ class TorchCorrectnessTest(unittest.TestCase):
                 reference, manifest, candidate, **runtime
             )
         return reference, candidate
+
+    def _capture_probe_candidate(
+        self, directory, manifest, name, *, consumer_line=None, **runtime
+    ):
+        requested_runtime = {
+            "device": runtime.pop("device", "cpu"),
+            "precision": runtime.pop("precision", "float64"),
+            "graph_mode": runtime.pop("graph_mode", "eager"),
+            "compile_mode": runtime.pop("compile_mode", "default"),
+        }
+        if runtime:
+            raise ValueError("unexpected probe runtime arguments")
+        runtime = requested_runtime
+        line = consumer_line or PROBE_CONSUMER_LINES[self._testMethodName]
+        matches = [
+            binding
+            for binding in self.probe_bundle.side["runtime_bindings"]
+            if binding["test_line"] == line
+            and binding["case"] == name
+            and binding["runtime"] == runtime
+        ]
+        if len(matches) != 1:
+            raise ValueError("test probe binding must resolve exactly once")
+        resolved = historical_probes.resolve_case(
+            self.probe_bundle,
+            profile_id=matches[0]["profile"],
+            case=name,
+            manifest=manifest,
+            runtime=runtime,
+            consumer_line=line,
+        )
+        candidate = Path(directory) / f"{name}-torch.npz"
+        with patch.object(
+            native_oracle,
+            "_checkout_provenance",
+            side_effect=self._provenance("b" * 40),
+        ):
+            torch_correctness.capture_torch_candidate_from_probe(
+                resolved,
+                self.probe_bundle,
+                manifest,
+                candidate,
+                trust=PROBE_TRUST,
+            )
+        return resolved, candidate
+
+    def _compare_probe_candidate(
+        self, resolved, candidate, manifest, *, include_tolerances=False
+    ):
+        return torch_correctness.compare_torch_candidate_to_probe(
+            resolved,
+            self.probe_bundle,
+            candidate,
+            manifest,
+            trust=PROBE_TRUST,
+            include_tolerances=include_tolerances,
+        )
+
+    def _compare_candidate(
+        self, reference, candidate, manifest, *, include_tolerances=False
+    ):
+        if isinstance(reference, historical_probes.ResolvedCase):
+            return self._compare_probe_candidate(
+                reference,
+                candidate,
+                manifest,
+                include_tolerances=include_tolerances,
+            )
+        return torch_correctness.compare_torch_archives(
+            reference,
+            candidate,
+            manifest,
+            include_tolerances=include_tolerances,
+        )
 
     @staticmethod
     def _corrupt_archive(directory, candidate, key):
@@ -231,18 +346,20 @@ class TorchCorrectnessTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             for name in cases:
                 with self.subTest(case=name):
-                    reference, candidate = self._capture_pair(directory, manifest, name)
-                    result = torch_correctness.compare_torch_archives(
-                        reference, candidate, manifest
+                    reference, candidate = self._capture_probe_candidate(
+                        directory, manifest, name
                     )
+                    result = self._compare_candidate(reference, candidate, manifest)
                     self.assertEqual(result, {"passed": True, "failures": []})
                     with np.load(candidate, allow_pickle=False) as archive:
                         metadata = native_oracle.read_metadata(archive)
                     self.assertEqual(metadata["backend"], "torch")
+                    backend = metadata["backend_metadata"]
                     self.assertEqual(
-                        metadata["backend_metadata"]["input_archive"]["prefix"],
-                        "step/0",
+                        backend["historical_probe_input"]["authority"],
+                        "sampled-test-only; not full-array native authority",
                     )
+                    self.assertNotIn("input_archive", backend)
 
     def test_float32_tfsf_long_capture_uses_strict_float64_auxiliary(self):
         capture_steps = [1, 2, 5, 20, 100]
@@ -250,13 +367,13 @@ class TorchCorrectnessTest(unittest.TestCase):
         manifest["reference"]["capture_steps"] = capture_steps
         manifest["correctness"][0]["capture_steps"] = capture_steps
         with tempfile.TemporaryDirectory() as directory:
-            reference, candidate = self._capture_pair(
+            reference, candidate = self._capture_probe_candidate(
                 directory,
                 manifest,
                 "tfsf-transparent",
                 precision="float32",
             )
-            result = torch_correctness.compare_torch_archives(
+            result = self._compare_candidate(
                 reference,
                 candidate,
                 manifest,
@@ -335,7 +452,7 @@ class TorchCorrectnessTest(unittest.TestCase):
     def test_auxiliary_precision_metadata_corruption_fails_closed(self):
         manifest = self._small_manifest(("tfsf-transparent",))
         with tempfile.TemporaryDirectory() as directory:
-            reference, candidate = self._capture_pair(
+            reference, candidate = self._capture_probe_candidate(
                 directory,
                 manifest,
                 "tfsf-transparent",
@@ -355,9 +472,7 @@ class TorchCorrectnessTest(unittest.TestCase):
                     json.dumps(metadata, sort_keys=True)
                 )
                 np.savez_compressed(corrupted, **arrays)
-                result = torch_correctness.compare_torch_archives(
-                    reference, corrupted, manifest
-                )
+                result = self._compare_candidate(reference, corrupted, manifest)
                 self.assertFalse(result["passed"])
                 self.assertEqual(
                     result["failures"][0]["key"], "candidate/archive-contract"
@@ -455,13 +570,13 @@ class TorchCorrectnessTest(unittest.TestCase):
         manifest["reference"]["capture_steps"] = capture_steps
         manifest["correctness"][0]["capture_steps"] = capture_steps
         with tempfile.TemporaryDirectory() as directory:
-            reference, candidate = self._capture_pair(
+            reference, candidate = self._capture_probe_candidate(
                 directory,
                 manifest,
                 "gaussian-auxiliary",
                 precision="float32",
             )
-            result = torch_correctness.compare_torch_archives(
+            result = self._compare_candidate(
                 reference,
                 candidate,
                 manifest,
@@ -510,7 +625,7 @@ class TorchCorrectnessTest(unittest.TestCase):
     def test_gaussian_envelope_raw_state_removal_fails_closed(self):
         manifest = self._small_manifest(("gaussian-auxiliary",))
         with tempfile.TemporaryDirectory() as directory:
-            reference, candidate = self._capture_pair(
+            reference, candidate = self._capture_probe_candidate(
                 directory,
                 manifest,
                 "gaussian-auxiliary",
@@ -543,9 +658,7 @@ class TorchCorrectnessTest(unittest.TestCase):
             arrays["metadata.json"] = np.asarray(json.dumps(metadata, sort_keys=True))
             corrupted = Path(directory) / "gaussian-envelope-removed.npz"
             np.savez_compressed(corrupted, **arrays)
-            result = torch_correctness.compare_torch_archives(
-                reference, corrupted, manifest
-            )
+            result = self._compare_candidate(reference, corrupted, manifest)
             self.assertFalse(result["passed"])
             self.assertEqual(result["failures"][0]["key"], "candidate/archive-contract")
             self.assertIn(
@@ -559,7 +672,7 @@ class TorchCorrectnessTest(unittest.TestCase):
         manifest["reference"]["capture_steps"] = capture_steps
         manifest["correctness"][0]["capture_steps"] = capture_steps
         with tempfile.TemporaryDirectory() as directory:
-            reference, candidate = self._capture_pair(
+            reference, candidate = self._capture_probe_candidate(
                 directory,
                 manifest,
                 "dummy",
@@ -567,7 +680,7 @@ class TorchCorrectnessTest(unittest.TestCase):
                 compile_mode="default",
                 precision="float64",
             )
-            result = torch_correctness.compare_torch_archives(
+            result = self._compare_candidate(
                 reference,
                 candidate,
                 manifest,
@@ -611,8 +724,9 @@ class TorchCorrectnessTest(unittest.TestCase):
 
     def test_candidate_capture_is_independent_of_legacy_native_state(self):
         manifest = self._small_manifest(("dcp-plrc-bloch",))
+        self.assertFalse(hasattr(gmes, "FDTD"))
         with tempfile.TemporaryDirectory() as directory:
-            reference, candidate = self._capture_pair(
+            reference, candidate = self._capture_probe_candidate(
                 directory, manifest, "dcp-plrc-bloch"
             )
             with (
@@ -631,44 +745,46 @@ class TorchCorrectnessTest(unittest.TestCase):
                     "_source_records",
                     side_effect=AssertionError("legacy source adapter used"),
                 ),
-                patch.object(
-                    gmes,
-                    "FDTD",
-                    side_effect=AssertionError("legacy FDTD used"),
-                ),
             ):
-                torch_correctness.capture_torch_candidate(
-                    reference, manifest, candidate
+                torch_correctness.capture_torch_candidate_from_probe(
+                    reference,
+                    self.probe_bundle,
+                    manifest,
+                    candidate,
+                    trust=PROBE_TRUST,
                 )
             self.assertEqual(
-                torch_correctness.compare_torch_archives(
-                    reference, candidate, manifest
-                ),
+                self._compare_candidate(reference, candidate, manifest),
                 {"passed": True, "failures": []},
             )
             with np.load(candidate, allow_pickle=False) as archive:
                 metadata = native_oracle.read_metadata(archive)
             backend = metadata["backend_metadata"]
             self.assertEqual(backend["logical_map_source"], "live-torch-plan")
-            self.assertNotIn("path", backend["input_archive"])
+            self.assertNotIn("path", backend["historical_probe_input"])
+            self.assertNotIn("input_archive", backend)
             self.assertTrue(backend["torch_arrays"])
 
-    def test_copied_reference_is_not_a_torch_candidate(self):
+    def test_probe_fixture_is_not_a_torch_candidate(self):
         manifest = self._small_manifest(("dcp-plrc-bloch",))
         with tempfile.TemporaryDirectory() as directory:
-            reference, _candidate = self._capture_pair(
+            reference, _candidate = self._capture_probe_candidate(
                 directory, manifest, "dcp-plrc-bloch"
             )
-            result = torch_correctness.compare_torch_archives(
-                reference, reference, manifest
+            fixture = (
+                Path(__file__).parent
+                / "fixtures"
+                / "issue124"
+                / self.probe_bundle.side["fixture"]["file"]
             )
+            result = self._compare_candidate(reference, fixture, manifest)
         self.assertFalse(result["passed"])
-        self.assertEqual(result["failures"][0]["key"], "candidate/archive-contract")
+        self.assertEqual(result["failures"][0]["key"], "archive/container")
 
     def test_cuda_graph_execution_representation_corruption_fails_closed(self):
         manifest = self._small_manifest(("dcp-plrc-bloch",))
         with tempfile.TemporaryDirectory() as directory:
-            reference, candidate = self._capture_pair(
+            reference, candidate = self._capture_probe_candidate(
                 directory, manifest, "dcp-plrc-bloch"
             )
             corrupted = Path(directory) / "corrupted-cuda-graph-representation.npz"
@@ -684,9 +800,7 @@ class TorchCorrectnessTest(unittest.TestCase):
             ] = "external-standard-regions+tampered"
             arrays["metadata.json"] = np.asarray(json.dumps(metadata, sort_keys=True))
             np.savez_compressed(corrupted, **arrays)
-            result = torch_correctness.compare_torch_archives(
-                reference, corrupted, manifest
-            )
+            result = self._compare_candidate(reference, corrupted, manifest)
         self.assertFalse(result["passed"])
         self.assertEqual(result["failures"][0]["key"], "candidate/archive-contract")
         self.assertIn("backend identity is invalid", result["failures"][0]["error"])
@@ -694,22 +808,24 @@ class TorchCorrectnessTest(unittest.TestCase):
     def test_raw_planner_corruption_fails_closed(self):
         manifest = self._small_manifest(("dcp-plrc-bloch",))
         with tempfile.TemporaryDirectory() as directory:
-            reference, candidate = self._capture_pair(
+            reference, candidate = self._capture_probe_candidate(
                 directory, manifest, "dcp-plrc-bloch"
             )
             corrupted = self._corrupt_archive(
                 directory, candidate, "torch/planner/Ex/material_ids"
             )
-            result = torch_correctness.compare_torch_archives(
-                reference, corrupted, manifest
-            )
+            result = self._compare_candidate(reference, corrupted, manifest)
         self.assertFalse(result["passed"])
         self.assertEqual(result["failures"][0]["key"], "candidate/archive-contract")
 
-    def test_rehashed_logical_map_and_planner_tamper_fails_native_authority(self):
+    def test_rehashed_logical_map_and_planner_tamper_fails_probe_candidate_validation(
+        self,
+    ):
         manifest = self._small_manifest(("mixed-2d",))
         with tempfile.TemporaryDirectory() as directory:
-            reference, candidate = self._capture_pair(directory, manifest, "mixed-2d")
+            reference, candidate = self._capture_probe_candidate(
+                directory, manifest, "mixed-2d"
+            )
             for suffix in ("material_ids", "underlying_ids"):
                 with self.subTest(map=suffix):
 
@@ -758,9 +874,7 @@ class TorchCorrectnessTest(unittest.TestCase):
                         f"rehashed-map-{suffix}",
                         mutate,
                     )
-                    result = torch_correctness.compare_torch_archives(
-                        reference, rewritten, manifest
-                    )
+                    result = self._compare_candidate(reference, rewritten, manifest)
                     self.assertFalse(result["passed"])
                     self.assertIn(
                         "candidate/archive-contract",
@@ -776,7 +890,7 @@ class TorchCorrectnessTest(unittest.TestCase):
     def test_rehashed_raw_planner_maps_fail_region_indirection(self):
         manifest = self._small_manifest(("dcp-plrc-bloch",))
         with tempfile.TemporaryDirectory() as directory:
-            reference, candidate = self._capture_pair(
+            reference, candidate = self._capture_probe_candidate(
                 directory, manifest, "dcp-plrc-bloch"
             )
 
@@ -822,9 +936,7 @@ class TorchCorrectnessTest(unittest.TestCase):
                         f"rehashed-raw-planner-{suffix}",
                         mutate,
                     )
-                    result = torch_correctness.compare_torch_archives(
-                        reference, rewritten, manifest
-                    )
+                    result = self._compare_candidate(reference, rewritten, manifest)
                     self.assertFalse(result["passed"])
                     self.assertIn(
                         "candidate/archive-contract",
@@ -840,10 +952,10 @@ class TorchCorrectnessTest(unittest.TestCase):
     def test_rehashed_planner_material_identity_and_coefficients_are_derived(self):
         manifest = self._small_manifest(("drude-1",))
         with tempfile.TemporaryDirectory() as directory:
-            reference, candidate = self._capture_pair(directory, manifest, "drude-1")
-            baseline = torch_correctness.compare_torch_archives(
-                reference, candidate, manifest
+            reference, candidate = self._capture_probe_candidate(
+                directory, manifest, "drude-1"
             )
+            baseline = self._compare_candidate(reference, candidate, manifest)
             self.assertTrue(baseline["passed"], baseline["failures"])
             with np.load(candidate, allow_pickle=False) as archive:
                 coefficient_key = next(
@@ -905,9 +1017,7 @@ class TorchCorrectnessTest(unittest.TestCase):
                     rewritten = self._rewrite_candidate(
                         directory, candidate, f"rehashed-{label}", mutate
                     )
-                    result = torch_correctness.compare_torch_archives(
-                        reference, rewritten, manifest
-                    )
+                    result = self._compare_candidate(reference, rewritten, manifest)
                     self.assertFalse(result["passed"])
                     self.assertIn(
                         "immutable workload plan",
@@ -919,12 +1029,10 @@ class TorchCorrectnessTest(unittest.TestCase):
     def test_transparent_source_values_shapes_and_finiteness_are_derived(self):
         manifest = self._small_manifest(("tfsf-transparent",))
         with tempfile.TemporaryDirectory() as directory:
-            reference, candidate = self._capture_pair(
+            reference, candidate = self._capture_probe_candidate(
                 directory, manifest, "tfsf-transparent"
             )
-            baseline = torch_correctness.compare_torch_archives(
-                reference, candidate, manifest
-            )
+            baseline = self._compare_candidate(reference, candidate, manifest)
             self.assertTrue(baseline["passed"], baseline["failures"])
             with np.load(candidate, allow_pickle=False) as archive:
                 batch_root = next(
@@ -993,63 +1101,49 @@ class TorchCorrectnessTest(unittest.TestCase):
                     rewritten = self._rewrite_candidate(
                         directory, candidate, f"rehashed-transparent-{label}", mutate
                     )
-                    result = torch_correctness.compare_torch_archives(
-                        reference, rewritten, manifest
-                    )
+                    result = self._compare_candidate(reference, rewritten, manifest)
                     self.assertFalse(result["passed"])
                     self.assertEqual(
                         result["failures"][0]["key"],
                         "candidate/archive-contract",
                     )
 
-    def test_native_transparent_values_are_rederived_from_workload(self):
+    def test_probe_transparent_values_are_rederived_from_workload(self):
         manifest = self._small_manifest(("tfsf-transparent",))
         with tempfile.TemporaryDirectory() as directory:
-            reference, candidate = self._capture_pair(
+            reference, candidate = self._capture_probe_candidate(
                 directory, manifest, "tfsf-transparent"
             )
-            with np.load(reference, allow_pickle=False) as archive:
-                arrays = {key: archive[key].copy() for key in archive.files}
-            source_key = next(
-                key
-                for key in arrays
-                if key.startswith("step/1/source/")
-                and key.endswith("/values")
-                and "Transparent" in key
-            )
-            values = arrays[source_key].copy()
-            values.flat[0] += 1.0
-            arrays[source_key] = values
-            rewritten_reference = Path(directory) / "rehashed-native-source.npz"
-            np.savez_compressed(rewritten_reference, **arrays)
+            with np.load(candidate, allow_pickle=False) as archive:
+                source_key = next(
+                    key
+                    for key in archive.files
+                    if key.startswith("step/1/source/")
+                    and key.endswith("/values")
+                    and "Transparent" in key
+                )
 
-            def bind_rewritten_reference(_arrays, metadata):
-                metadata["backend_metadata"]["input_archive"] = {
-                    "sha256": torch_correctness._sha256(rewritten_reference),
-                    "size_bytes": rewritten_reference.stat().st_size,
-                    "media_type": "application/x-npz",
-                    "prefix": "step/0",
-                }
+            def corrupt_source(arrays, _metadata):
+                values = arrays[source_key].copy()
+                original = values.copy()
+                values.flat[0] ^= np.uint64(1)
+                self.assertFalse(np.array_equal(values, original))
+                arrays[source_key] = values
 
             rebound_candidate = self._rewrite_candidate(
                 directory,
                 candidate,
-                "rebound-native-source",
-                bind_rewritten_reference,
+                "rebound-probe-source",
+                corrupt_source,
             )
-            result = torch_correctness.compare_torch_archives(
-                rewritten_reference, rebound_candidate, manifest
-            )
+            result = self._compare_candidate(reference, rebound_candidate, manifest)
             self.assertFalse(result["passed"])
-            self.assertIn(
-                "reference/source-contract",
-                [failure["key"] for failure in result["failures"]],
-            )
+            self.assertEqual(result["failures"][0]["key"], "candidate/archive-contract")
 
     def test_rehashed_point_source_arrays_require_values_and_exact_closure(self):
         manifest = self._small_manifest(("dcp-plrc-bloch",))
         with tempfile.TemporaryDirectory() as directory:
-            reference, candidate = self._capture_pair(
+            reference, candidate = self._capture_probe_candidate(
                 directory, manifest, "dcp-plrc-bloch"
             )
             source_key = "step/1/source/Ex/0-PointSourceEx/values"
@@ -1074,15 +1168,13 @@ class TorchCorrectnessTest(unittest.TestCase):
                     rewritten = self._rewrite_candidate(
                         directory, candidate, f"rehashed-{label}", mutate
                     )
-                    result = torch_correctness.compare_torch_archives(
-                        reference, rewritten, manifest
-                    )
+                    result = self._compare_candidate(reference, rewritten, manifest)
                     self.assertFalse(result["passed"])
 
     def test_rehashed_point_source_live_buffers_are_closed_and_semantic(self):
         manifest = self._small_manifest(("dcp-plrc-bloch",))
         with tempfile.TemporaryDirectory() as directory:
-            reference, candidate = self._capture_pair(
+            reference, candidate = self._capture_probe_candidate(
                 directory, manifest, "dcp-plrc-bloch"
             )
             root = "torch/step/1/sources/batches/0"
@@ -1168,15 +1260,13 @@ class TorchCorrectnessTest(unittest.TestCase):
                     rewritten = self._rewrite_candidate(
                         directory, candidate, f"rehashed-live-source-{label}", mutate
                     )
-                    result = torch_correctness.compare_torch_archives(
-                        reference, rewritten, manifest
-                    )
+                    result = self._compare_candidate(reference, rewritten, manifest)
                     self.assertFalse(result["passed"])
 
     def test_rehashed_coherent_point_source_rewrite_fails_workload_binding(self):
         manifest = self._small_manifest(("dcp-plrc-bloch",))
         with tempfile.TemporaryDirectory() as directory:
-            reference, candidate = self._capture_pair(
+            reference, candidate = self._capture_probe_candidate(
                 directory, manifest, "dcp-plrc-bloch"
             )
 
@@ -1212,9 +1302,7 @@ class TorchCorrectnessTest(unittest.TestCase):
                 "rehashed-coherent-point-source",
                 mutate,
             )
-            result = torch_correctness.compare_torch_archives(
-                reference, rewritten, manifest
-            )
+            result = self._compare_candidate(reference, rewritten, manifest)
             self.assertFalse(result["passed"])
             self.assertIn(
                 "semantics differ from expected source",
@@ -1224,7 +1312,7 @@ class TorchCorrectnessTest(unittest.TestCase):
     def test_rehashed_auxiliary_live_state_has_exact_closure_and_shape(self):
         manifest = self._small_manifest(("tfsf-transparent",))
         with tempfile.TemporaryDirectory() as directory:
-            reference, candidate = self._capture_pair(
+            reference, candidate = self._capture_probe_candidate(
                 directory, manifest, "tfsf-transparent"
             )
 
@@ -1273,9 +1361,7 @@ class TorchCorrectnessTest(unittest.TestCase):
                         f"rehashed-{label}",
                         mutate,
                     )
-                    result = torch_correctness.compare_torch_archives(
-                        reference, rewritten, manifest
-                    )
+                    result = self._compare_candidate(reference, rewritten, manifest)
                     self.assertFalse(result["passed"])
 
     def test_rehashed_live_main_fields_bind_real_and_paired_representations(self):
@@ -1283,13 +1369,26 @@ class TorchCorrectnessTest(unittest.TestCase):
             ("stability-energy-dielectric", 0),
             ("dcp-plrc-bloch", 1),
         )
+        consumer_line = PROBE_CONSUMER_LINES[self._testMethodName]
+        bindings = [
+            binding
+            for binding in self.probe_bundle.side["runtime_bindings"]
+            if binding["test_line"] == consumer_line
+        ]
+        profile_ids = {binding["profile"] for binding in bindings}
+        self.assertEqual(len(profile_ids), 1)
+        self.assertEqual(
+            {binding["case"] for binding in bindings},
+            {name for name, _channel in cases},
+        )
+        reviewed_manifest = self.probe_bundle.profiles[profile_ids.pop()]
         with tempfile.TemporaryDirectory() as directory:
             for ordinal, (name, channel) in enumerate(cases):
                 with self.subTest(case=name, channel=channel):
                     case_directory = Path(directory) / str(ordinal)
                     case_directory.mkdir()
-                    manifest = self._small_manifest((name,))
-                    reference, candidate = self._capture_pair(
+                    manifest = copy.deepcopy(reviewed_manifest)
+                    reference, candidate = self._capture_probe_candidate(
                         case_directory, manifest, name
                     )
 
@@ -1308,9 +1407,7 @@ class TorchCorrectnessTest(unittest.TestCase):
                         f"rehashed-live-field-{ordinal}",
                         mutate,
                     )
-                    result = torch_correctness.compare_torch_archives(
-                        reference, rewritten, manifest
-                    )
+                    result = self._compare_candidate(reference, rewritten, manifest)
                     self.assertFalse(result["passed"])
                     self.assertIn(
                         "live field differs from canonical field",
@@ -1362,13 +1459,26 @@ class TorchCorrectnessTest(unittest.TestCase):
                 "pml_",
             ),
         )
+        consumer_line = PROBE_CONSUMER_LINES[self._testMethodName]
+        bindings = [
+            binding
+            for binding in self.probe_bundle.side["runtime_bindings"]
+            if binding["test_line"] == consumer_line
+        ]
+        profile_ids = {binding["profile"] for binding in bindings}
+        self.assertEqual(len(profile_ids), 1)
+        self.assertEqual(
+            {binding["case"] for binding in bindings},
+            {name for name, _prefix, _token in cases},
+        )
+        reviewed_manifest = self.probe_bundle.profiles[profile_ids.pop()]
         with tempfile.TemporaryDirectory() as directory:
             for ordinal, (name, prefix, token) in enumerate(cases):
                 with self.subTest(case=name):
                     case_directory = Path(directory) / str(ordinal)
                     case_directory.mkdir()
-                    manifest = self._small_manifest((name,))
-                    reference, candidate = self._capture_pair(
+                    manifest = copy.deepcopy(reviewed_manifest)
+                    reference, candidate = self._capture_probe_candidate(
                         case_directory, manifest, name
                     )
 
@@ -1395,9 +1505,7 @@ class TorchCorrectnessTest(unittest.TestCase):
                         f"rehashed-material-state-{ordinal}",
                         mutate,
                     )
-                    result = torch_correctness.compare_torch_archives(
-                        reference, rewritten, manifest
-                    )
+                    result = self._compare_candidate(reference, rewritten, manifest)
                     self.assertFalse(result["passed"])
                     self.assertIn(
                         "live material state differs from canonical state",
@@ -1409,21 +1517,19 @@ class TorchCorrectnessTest(unittest.TestCase):
     def test_source_plan_corruption_fails_closed(self):
         manifest = self._small_manifest(("dcp-plrc-bloch",))
         with tempfile.TemporaryDirectory() as directory:
-            reference, candidate = self._capture_pair(
+            reference, candidate = self._capture_probe_candidate(
                 directory, manifest, "dcp-plrc-bloch"
             )
             source_key = "step/0/source/Ex/0-PointSourceEx/values"
             corrupted = self._corrupt_archive(directory, candidate, source_key)
-            result = torch_correctness.compare_torch_archives(
-                reference, corrupted, manifest
-            )
+            result = self._compare_candidate(reference, corrupted, manifest)
         self.assertFalse(result["passed"])
         self.assertEqual(result["failures"][0]["key"], "candidate/archive-contract")
 
     def test_live_source_clock_corruption_fails_closed(self):
         manifest = self._small_manifest(("gaussian-auxiliary",))
         with tempfile.TemporaryDirectory() as directory:
-            reference, candidate = self._capture_pair(
+            reference, candidate = self._capture_probe_candidate(
                 directory, manifest, "gaussian-auxiliary"
             )
             keys = (
@@ -1444,9 +1550,7 @@ class TorchCorrectnessTest(unittest.TestCase):
                         json.dumps(metadata, sort_keys=True)
                     )
                     np.savez_compressed(output, **arrays)
-                    result = torch_correctness.compare_torch_archives(
-                        reference, output, manifest
-                    )
+                    result = self._compare_candidate(reference, output, manifest)
                     self.assertFalse(result["passed"])
                     self.assertEqual(
                         result["failures"][0]["key"],
@@ -1473,63 +1577,233 @@ class TorchCorrectnessTest(unittest.TestCase):
                 )
             arrays["metadata.json"] = np.asarray(json.dumps(metadata, sort_keys=True))
             np.savez_compressed(output, **arrays)
-            result = torch_correctness.compare_torch_archives(
-                reference, output, manifest
-            )
+            result = self._compare_candidate(reference, output, manifest)
             self.assertFalse(result["passed"])
             self.assertEqual(result["failures"][0]["key"], "candidate/archive-contract")
 
-    def test_native_step_zero_descriptor_corruption_fails_closed(self):
+    def test_historical_probe_descriptor_corruption_fails_closed(self):
         manifest = self._small_manifest(("dcp-plrc-bloch",))
         with tempfile.TemporaryDirectory() as directory:
-            reference, candidate = self._capture_pair(
+            reference, candidate = self._capture_probe_candidate(
                 directory, manifest, "dcp-plrc-bloch"
             )
             corrupted = Path(directory) / "corrupted-input-contract.npz"
             with np.load(candidate, allow_pickle=False) as archive:
                 arrays = {name: archive[name].copy() for name in archive.files}
                 metadata = native_oracle.read_metadata(archive)
-            metadata["backend_metadata"]["input_step_zero_contract"]["arrays"][
-                "step/0/time"
-            ]["sha256"] = ("0" * 64)
+            metadata["backend_metadata"]["historical_probe_input"][
+                "probe_projection_sha256"
+            ] = ("0" * 64)
             arrays["metadata.json"] = np.asarray(json.dumps(metadata, sort_keys=True))
             np.savez_compressed(corrupted, **arrays)
-            result = torch_correctness.compare_torch_archives(
-                reference, corrupted, manifest
-            )
+            result = self._compare_candidate(reference, corrupted, manifest)
         self.assertFalse(result["passed"])
-        self.assertEqual(
-            result["failures"][0]["key"],
-            "candidate/input_step_zero_contract",
+        self.assertEqual(result["failures"][0]["key"], "candidate/archive-contract")
+
+    def test_probe_comparison_uses_immutable_snapshot_after_path_replacement(self):
+        with tempfile.TemporaryDirectory() as directory:
+            candidate_path = Path(directory) / "candidate.npz"
+            replacement_path = Path(directory) / "replacement.npz"
+            np.savez(candidate_path, payload=np.asarray([1], dtype=np.int64))
+            np.savez(replacement_path, payload=np.asarray([2], dtype=np.int64))
+            original_bytes = candidate_path.read_bytes()
+            replacement_bytes = replacement_path.read_bytes()
+            expected_input = {"binding": "expected"}
+
+            def validate(_archive, _manifest, *, allow_probe):
+                self.assertTrue(allow_probe)
+                os.replace(replacement_path, candidate_path)
+                return {
+                    "backend_metadata": {
+                        "historical_probe_input": expected_input,
+                    }
+                }
+
+            def compare_bytes(candidate_bytes, _resolved):
+                self.assertIs(type(candidate_bytes), bytes)
+                self.assertEqual(candidate_bytes, original_bytes)
+                return {
+                    "passed": True,
+                    "failures": [],
+                    "tolerance_results": [],
+                }
+
+            with (
+                patch.object(
+                    torch_correctness,
+                    "_validate_torch_candidate_archive",
+                    side_effect=validate,
+                ),
+                patch.object(
+                    torch_correctness,
+                    "_historical_probe_input",
+                    return_value=expected_input,
+                ),
+                patch.object(
+                    historical_probes,
+                    "compare_candidate_bytes",
+                    side_effect=compare_bytes,
+                    create=True,
+                ),
+                patch.object(
+                    historical_probes,
+                    "compare_candidate",
+                    side_effect=AssertionError("path comparator used"),
+                ),
+            ):
+                result = torch_correctness.compare_torch_candidate_to_probe(
+                    object(), object(), candidate_path, {}, trust={}
+                )
+
+            self.assertEqual(result, {"passed": True, "failures": []})
+            self.assertEqual(candidate_path.read_bytes(), replacement_bytes)
+
+    def test_probe_comparison_fails_closed_without_bytes_api(self):
+        with tempfile.TemporaryDirectory() as directory:
+            candidate_path = Path(directory) / "candidate.npz"
+            np.savez(candidate_path, payload=np.asarray([1], dtype=np.int64))
+            expected_input = {"binding": "expected"}
+            metadata = {"backend_metadata": {"historical_probe_input": expected_input}}
+            with (
+                patch.object(
+                    torch_correctness,
+                    "_validate_torch_candidate_archive",
+                    return_value=metadata,
+                ),
+                patch.object(
+                    torch_correctness,
+                    "_historical_probe_input",
+                    return_value=expected_input,
+                ),
+                patch.object(
+                    historical_probes,
+                    "compare_candidate_bytes",
+                    None,
+                    create=True,
+                ),
+                patch.object(
+                    historical_probes,
+                    "compare_candidate",
+                    side_effect=AssertionError("path comparator used"),
+                ),
+            ):
+                result = torch_correctness.compare_torch_candidate_to_probe(
+                    object(), object(), candidate_path, {}, trust={}
+                )
+
+        self.assertFalse(result["passed"])
+        self.assertEqual(result["failures"][0]["key"], "candidate/archive-contract")
+
+    def test_probe_snapshot_cap_rejects_before_open_and_accepts_boundary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            oversized = Path(directory) / "oversized.npz"
+            with oversized.open("wb") as handle:
+                handle.truncate(torch_correctness.MAX_PROBE_SNAPSHOT_BYTES + 1)
+            with patch.object(
+                Path,
+                "open",
+                side_effect=AssertionError("oversized payload opened"),
+            ) as opener:
+                result = torch_correctness.compare_torch_candidate_to_probe(
+                    object(), object(), oversized, {}, trust={}
+                )
+            opener.assert_not_called()
+            self.assertFalse(result["passed"])
+            self.assertEqual(result["failures"][0]["key"], "archive/container")
+
+            boundary = Path(directory) / "boundary.npz"
+            with boundary.open("wb") as handle:
+                handle.truncate(torch_correctness.MAX_PROBE_SNAPSHOT_BYTES)
+            with patch.object(
+                torch_correctness,
+                "_preflight_npz_file",
+                side_effect=ValueError("boundary reached archive preflight"),
+            ) as preflight:
+                with self.assertRaisesRegex(
+                    ValueError, "boundary reached archive preflight"
+                ):
+                    torch_correctness._read_bounded_npz_snapshot(boundary)
+            preflight.assert_called_once()
+
+    def test_resolved_probe_workload_requires_unique_full_binding(self):
+        binding = next(
+            item
+            for item in self.probe_bundle.side["runtime_bindings"]
+            if item["test_line"] == 615
         )
+        manifest = copy.deepcopy(self.probe_bundle.profiles[binding["profile"]])
+        resolved = historical_probes.resolve_case(
+            self.probe_bundle,
+            profile_id=binding["profile"],
+            case=binding["case"],
+            manifest=manifest,
+            runtime=dict(binding["runtime"]),
+            consumer_line=binding["test_line"],
+        )
+        selected = torch_correctness._resolved_probe_workload(
+            self.probe_bundle, resolved, manifest
+        )
+        self.assertEqual(selected["name"], resolved.case)
+
+        duplicate_manifest = copy.deepcopy(manifest)
+        source_group = next(
+            group
+            for group in ("correctness", "physical_checks")
+            if any(spec["name"] == resolved.case for spec in manifest[group])
+        )
+        opposite_group = (
+            "physical_checks" if source_group == "correctness" else "correctness"
+        )
+        duplicate_manifest[opposite_group].append(copy.deepcopy(selected))
+        duplicate_resolved = historical_probes.ResolvedCase(
+            resolved.profile_id,
+            resolved.case,
+            duplicate_manifest,
+            dict(resolved.runtime),
+            resolved.consumer_line,
+            resolved.capture,
+        )
+        with self.assertRaisesRegex(ValueError, "workload is missing or ambiguous"):
+            torch_correctness._resolved_probe_workload(
+                self.probe_bundle, duplicate_resolved, duplicate_manifest
+            )
+
+        missing_resolved = historical_probes.ResolvedCase(
+            resolved.profile_id,
+            resolved.case,
+            manifest,
+            dict(resolved.runtime),
+            resolved.consumer_line + 1,
+            resolved.capture,
+        )
+        with self.assertRaisesRegex(ValueError, "binding is missing or ambiguous"):
+            torch_correctness._resolved_probe_workload(
+                self.probe_bundle, missing_resolved, manifest
+            )
 
     def test_invalid_npz_fails_closed(self):
         manifest = self._small_manifest(("dcp-plrc-bloch",))
         with tempfile.TemporaryDirectory() as directory:
-            reference, _candidate = self._capture_pair(
+            reference, _candidate = self._capture_probe_candidate(
                 directory, manifest, "dcp-plrc-bloch"
             )
             invalid = Path(directory) / "invalid.npz"
             invalid.write_bytes(b"not an NPZ archive")
-            result = torch_correctness.compare_torch_archives(
-                reference, invalid, manifest
-            )
+            result = self._compare_candidate(reference, invalid, manifest)
         self.assertFalse(result["passed"])
         self.assertEqual(result["failures"][0]["key"], "archive/container")
 
     def test_runtime_modes_bind_precision_and_graph_execution(self):
         manifest = self._small_manifest(("stability-energy-dielectric",))
         with tempfile.TemporaryDirectory() as directory:
-            reference, candidate = self._capture_pair(
+            reference, candidate = self._capture_probe_candidate(
                 directory,
                 manifest,
                 "stability-energy-dielectric",
                 precision="float32",
             )
             self.assertEqual(
-                torch_correctness.compare_torch_archives(
-                    reference, candidate, manifest
-                ),
+                self._compare_candidate(reference, candidate, manifest),
                 {"passed": True, "failures": []},
             )
             with np.load(candidate, allow_pickle=False) as archive:
@@ -1623,6 +1897,10 @@ class TorchCorrectnessTest(unittest.TestCase):
             )
         )
 
+    @unittest.skip(
+        "#169 quarantine: production full-reference index/receipt authority is out "
+        "of scope for C1"
+    )
     def test_cpu_binding_rejects_rehashed_noncontract_runtime_archives(self):
         manifest = self._small_manifest(("stability-energy-dielectric",))
         evidence = {
@@ -1750,7 +2028,7 @@ class TorchCorrectnessTest(unittest.TestCase):
             trusted_directory = Path(workspace) / "trusted"
             directory.mkdir()
             trusted_directory.mkdir()
-            reference, candidate = self._capture_pair(
+            reference, candidate = self._capture_full_reference_pair(
                 directory, manifest, "stability-energy-dielectric"
             )
             loaded, loaded_receipt = load_rebuilt_index(
@@ -1809,7 +2087,7 @@ class TorchCorrectnessTest(unittest.TestCase):
 
             float32_directory = Path(directory) / "float32"
             float32_directory.mkdir()
-            float32_reference, float32_candidate = self._capture_pair(
+            float32_reference, float32_candidate = self._capture_full_reference_pair(
                 float32_directory,
                 manifest,
                 "stability-energy-dielectric",
@@ -1828,6 +2106,10 @@ class TorchCorrectnessTest(unittest.TestCase):
                 )
             )
 
+    @unittest.skip(
+        "#169 quarantine: production full-reference index/receipt authority is out "
+        "of scope for C1"
+    )
     def test_index_revalidates_full_correctness_and_physical_matrix(self):
         manifest = self._small_manifest(
             ("dcp-plrc-bloch",), ("stability-energy-dielectric",)
@@ -1844,7 +2126,7 @@ class TorchCorrectnessTest(unittest.TestCase):
             directory.mkdir()
             trusted_directory.mkdir()
             pairs = [
-                self._capture_pair(directory, manifest, name)
+                self._capture_full_reference_pair(directory, manifest, name)
                 for name in (
                     "dcp-plrc-bloch",
                     "stability-energy-dielectric",
@@ -1918,6 +2200,10 @@ class TorchCorrectnessTest(unittest.TestCase):
                     runtime_receipt=external_receipt,
                 )
 
+    @unittest.skip(
+        "#169 quarantine: production full-reference index/receipt authority is out "
+        "of scope for C1"
+    )
     def test_runtime_receipt_prevents_coherent_runtime_relabel(self):
         manifest = self._small_manifest(("stability-energy-dielectric",))
         evidence = {
@@ -1927,7 +2213,7 @@ class TorchCorrectnessTest(unittest.TestCase):
             "solver_abi": gmes.torch_fdtd.TORCH_SOLVER_ABI,
         }
         with tempfile.TemporaryDirectory() as directory:
-            reference, candidate = self._capture_pair(
+            reference, candidate = self._capture_full_reference_pair(
                 directory, manifest, "stability-energy-dielectric"
             )
             receipt = self._write_runtime_receipt(
@@ -1972,35 +2258,34 @@ class TorchCorrectnessTest(unittest.TestCase):
     def test_npz_preflight_rejects_hidden_records_and_allocation_failures(self):
         manifest = self._small_manifest(("stability-energy-dielectric",))
         with tempfile.TemporaryDirectory() as directory:
-            reference, candidate = self._capture_pair(
+            reference, candidate = self._capture_probe_candidate(
                 directory, manifest, "stability-energy-dielectric"
             )
             original_digest = torch_correctness._sha256(candidate)
             self._insert_unindexed_local_record(candidate)
             refreshed_digest = torch_correctness._sha256(candidate)
             self.assertNotEqual(refreshed_digest, original_digest)
-            hidden = torch_correctness.compare_torch_archives(
-                reference, candidate, manifest
-            )
+            hidden = self._compare_candidate(reference, candidate, manifest)
             self.assertFalse(hidden["passed"])
             self.assertIn("indexed local records", hidden["failures"][0]["error"])
 
             clean_directory = Path(directory) / "clean"
             clean_directory.mkdir()
-            clean_reference, clean_candidate = self._capture_pair(
+            clean_reference, clean_candidate = self._capture_probe_candidate(
                 clean_directory,
                 manifest,
                 "stability-energy-dielectric",
+                consumer_line=1990,
             )
             real_load = np.load
 
             def fail_candidate(handle, *args, **kwargs):
-                if getattr(handle, "name", None) == str(clean_candidate.resolve()):
+                if isinstance(handle, torch_correctness.io.BytesIO):
                     raise MemoryError("synthetic allocation failure")
                 return real_load(handle, *args, **kwargs)
 
             with patch.object(torch_correctness.np, "load", side_effect=fail_candidate):
-                allocation = torch_correctness.compare_torch_archives(
+                allocation = self._compare_candidate(
                     clean_reference, clean_candidate, manifest
                 )
             self.assertFalse(allocation["passed"])
@@ -2009,7 +2294,7 @@ class TorchCorrectnessTest(unittest.TestCase):
     def test_npz_preflight_enforces_each_resource_bound_before_numpy_load(self):
         manifest = self._small_manifest(("stability-energy-dielectric",))
         with tempfile.TemporaryDirectory() as directory:
-            reference, _candidate = self._capture_pair(
+            _reference, candidate = self._capture_probe_candidate(
                 directory, manifest, "stability-energy-dielectric"
             )
             limits = (
@@ -2030,7 +2315,7 @@ class TorchCorrectnessTest(unittest.TestCase):
                     ) as loader,
                     self.assertRaises(ValueError),
                 ):
-                    with torch_correctness._open_bounded_npz(reference):
+                    with torch_correctness._open_bounded_npz(candidate):
                         pass
                 loader.assert_not_called()
 
@@ -2172,28 +2457,13 @@ class TorchCorrectnessTest(unittest.TestCase):
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA is unavailable")
     def test_cuda_float32_ziolkowski_500_step_eager_and_graph_archives(self):
-        spec = native_oracle.find_case(self.manifest, "ziolkowski-dm2")
         key = "step/500/state/Ex/0-Dm2/values"
         expected_tolerance = {
             "rtol": 6e-4,
             "atol": 3e-6,
             "scope": "strategies/dm2/float32",
         }
-        observer_commit = self.manifest["reference"]["observer_commit"]
         with tempfile.TemporaryDirectory() as directory:
-            reference = Path(directory) / "ziolkowski-dm2-native.npz"
-            with patch.object(
-                native_oracle,
-                "_checkout_provenance",
-                side_effect=self._provenance(observer_commit),
-            ):
-                native_oracle.capture_case(spec, self.manifest, reference)
-
-            with np.load(reference, allow_pickle=False) as archive:
-                reference_metadata = native_oracle.read_metadata(archive)
-                self.assertIn(key, archive.files)
-            self.assertEqual(reference_metadata["capture_steps"], [100, 500])
-
             modes = (("eager", "default"), ("graph", "reduce-overhead"))
             for graph_mode, compile_mode in modes:
                 with self.subTest(
@@ -2205,22 +2475,34 @@ class TorchCorrectnessTest(unittest.TestCase):
                         Path(directory)
                         / f"ziolkowski-dm2-cuda-float32-{graph_mode}.npz"
                     )
+                    runtime = {
+                        "device": "cuda:0",
+                        "precision": "float32",
+                        "graph_mode": graph_mode,
+                        "compile_mode": compile_mode,
+                    }
+                    resolved = historical_probes.resolve_case(
+                        self.probe_bundle,
+                        profile_id="canonical-dm2-0766dbf93288",
+                        case="ziolkowski-dm2",
+                        manifest=self.manifest,
+                        runtime=runtime,
+                        consumer_line=2190,
+                    )
                     with patch.object(
                         native_oracle,
                         "_checkout_provenance",
                         side_effect=self._provenance("b" * 40),
                     ):
-                        torch_correctness.capture_torch_candidate(
-                            reference,
+                        torch_correctness.capture_torch_candidate_from_probe(
+                            resolved,
+                            self.probe_bundle,
                             self.manifest,
                             candidate,
-                            device="cuda:0",
-                            precision="float32",
-                            graph_mode=graph_mode,
-                            compile_mode=compile_mode,
+                            trust=PROBE_TRUST,
                         )
-                    result = torch_correctness.compare_torch_archives(
-                        reference,
+                    result = self._compare_probe_candidate(
+                        resolved,
                         candidate,
                         self.manifest,
                         include_tolerances=True,

@@ -2,7 +2,6 @@
 requires = [
     "setuptools>=77",
     "wheel",
-    "numpy>=2.3",
 ]
 build-backend = "setuptools.build_meta"
 
@@ -24,7 +23,6 @@ classifiers = [
     "Intended Audience :: Science/Research",
     "Operating System :: MacOS",
     "Operating System :: POSIX :: Linux",
-    "Programming Language :: C++",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.14",
     "Topic :: Scientific/Engineering :: Physics",
@@ -37,14 +35,12 @@ dependencies = [
 
 [project.optional-dependencies]
 plot = ["matplotlib>=3.10"]
-mpi = ["mpi4py>=4"]
 hdf5 = ["tables>=3.10"]
 torch-cpu = ["torch>=2.13,<2.14"]
 torch-cu126 = ["torch>=2.13,<2.14"]
 torch-cu130 = ["torch>=2.13,<2.14"]
 all = [
     "matplotlib>=3.10",
-    "mpi4py>=4",
     "tables>=3.10",
 ]
 
@@ -75,7 +71,6 @@ conflicts = [
 build-constraint-dependencies = [
     "setuptools==84.0.0",
     "wheel==0.48.0",
-    "numpy==2.5.2",
 ]
 cache-keys = [
     {file = "pyproject.toml"},
@@ -84,14 +79,6 @@ cache-keys = [
     {file = "MANIFEST.in"},
     {file = "build-constraints.txt"},
     {file = "README.md"},
-    {file = "utils/macos_build.py"},
-    {file = "utils/openmp_build.py"},
-    {file = "src/*.cc"},
-    {file = "src/*.hh"},
-    {file = "src/*.i"},
-    {env = "GMES_ENABLE_OPENMP"},
-    {env = "GMES_OPENMP_PREFIX"},
-    {env = "MACOSX_DEPLOYMENT_TARGET"},
 ]
 
 [tool.uv.sources]
@@ -120,20 +107,27 @@ explicit = true
 packages = ["gmes"]
 
 [tool.setuptools.package-data]
-gmes = ["py.typed", "*.pyi"]
+gmes = ["py.typed", "constant.pyi"]
 
 [tool.setuptools.dynamic]
 version = {file = "VERSION"}
 
 [tool.black]
 target-version = ["py314"]
+# Byte-pinned #124 historical-test snapshots preserve recorded SHA identities; only these paths are exempt.
+force-exclude = '''
+/(tests/fixtures/issue124/(generator|historical_probe_loader|package_integration_assertions|self_test)\.py|benchmarks/historical_probes\.py)$
+'''
 
 [tool.isort]
 profile = "black"
 py_version = 314
 extend_skip = [
-    "gmes/constant.py",
-    "gmes/pw_material.py",
+    "tests/fixtures/issue124/generator.py",
+    "tests/fixtures/issue124/historical_probe_loader.py",
+    "tests/fixtures/issue124/package_integration_assertions.py",
+    "tests/fixtures/issue124/self_test.py",
+    "benchmarks/historical_probes.py",
 ]
 
 [tool.mypy]
@@ -143,25 +137,12 @@ files = [
     "tests/typing/public_api.py",
     "tests/typing/star_import.py",
 ]
-exclude = [
-    "^gmes/constant\\.py$",
-    "^gmes/pw_material\\.py$",
-]
 strict = true
 extra_checks = true
 warn_unreachable = true
 warn_unused_configs = true
 show_error_codes = true
 pretty = true
-
-[[tool.mypy.overrides]]
-module = ["gmes.constant", "gmes.pw_material"]
-disallow_untyped_defs = false
-disallow_incomplete_defs = false
-
-[[tool.mypy.overrides]]
-module = ["mpi4py"]
-ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = ["matplotlib", "matplotlib.*"]
@@ -172,14 +153,6 @@ py-version = "3.14"
 load-plugins = [
     "pylint.extensions.docparams",
     "pylint.extensions.docstyle",
-]
-extension-pkg-allow-list = [
-    "gmes._constant",
-    "gmes._pw_material",
-]
-ignore-patterns = [
-    "^constant\\.py$",
-    "^pw_material\\.py$",
 ]
 
 [tool.pylint.messages_control]
@@ -203,19 +176,3 @@ enable = [
     "useless-param-doc",
     "used-before-assignment",
 ]
-
-[tool.cibuildwheel]
-build = "cp314-manylinux_x86_64 cp314-macosx_arm64"
-environment = {PIP_CONSTRAINT = "$(pwd)/build-constraints.txt"}
-test-command = "python -c 'import gmes, gmes._constant, gmes._pw_material, gmes.material, gmes.pygeom'"
-
-[tool.cibuildwheel.linux]
-archs = ["x86_64"]
-before-all = "dnf install --assumeyes swig"
-manylinux-x86_64-image = "manylinux_2_34"
-repair-wheel-command = "auditwheel repair -w {dest_dir} {wheel}"
-
-[tool.cibuildwheel.macos]
-archs = ["arm64"]
-environment = {MACOSX_DEPLOYMENT_TARGET = "11.0"}
-repair-wheel-command = "delocate-wheel --require-archs {delocate_archs} -w {dest_dir} -v {wheel}"

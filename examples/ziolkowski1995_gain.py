@@ -11,23 +11,41 @@ is not fully reproduced; see VERIFICATION.md for the equation audit.
 from argparse import ArgumentParser
 from pathlib import Path
 
-import matplotlib
+try:  # Package import for tests and installed examples.
+    from .ziolkowski1995_common import (
+        UNITS,
+        configure_axes,
+        figure_title,
+        gain_scenario,
+        plot_gain,
+        population_mask,
+        print_intensity_summary,
+        print_scenario,
+        run_gain,
+        save_plot,
+    )
+except ImportError:  # Direct script execution.
+    from ziolkowski1995_common import (
+        UNITS,
+        configure_axes,
+        figure_title,
+        gain_scenario,
+        plot_gain,
+        population_mask,
+        print_intensity_summary,
+        print_scenario,
+        run_gain,
+        save_plot,
+    )
 
-matplotlib.use("Agg")
 
-import matplotlib.pyplot as plt
-from ziolkowski1995_common import (
-    UNITS,
-    configure_axes,
-    figure_title,
-    gain_scenario,
-    plot_gain,
-    population_mask,
-    print_intensity_summary,
-    print_scenario,
-    run_gain,
-    save_plot,
-)
+def _pyplot():
+    import matplotlib
+
+    matplotlib.use("Agg")
+    from matplotlib import pyplot
+
+    return pyplot
 
 
 def generate(
@@ -38,6 +56,7 @@ def generate(
     show=False,
     verbose=False,
 ):
+    plt = _pyplot()
     requested = set(figures)
     invalid = requested.difference((10, 11))
     if invalid:

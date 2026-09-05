@@ -1,18 +1,15 @@
 import unittest
 from math import pi, sin
 from types import SimpleNamespace
-from unittest.mock import patch
 
 import numpy as np
+import torch
 
+import gmes
 from gmes import DefaultMedium, Dielectric, Sphere
-from gmes.constant import Ex, PlusX, PlusY
+from gmes import source as source_module
+from gmes.constant import Ex
 from gmes.geometry import Cartesian, in_range
-from gmes.pw_source import (
-    TransparentElectricParam,
-    TransparentEx,
-    TransparentMagneticParam,
-)
 from gmes.pygeom import GeomBoxTree
 from gmes.source import (
     Bandpass,
@@ -20,6 +17,7 @@ from gmes.source import (
     DifferentiatedGaussian,
     TotalFieldScatteredField,
 )
+from gmes.torch_source import TorchTransparentBatch
 
 
 class SourceTimeTest(unittest.TestCase):
@@ -100,42 +98,35 @@ class SourceTimeTest(unittest.TestCase):
         self.assertAlmostEqual(source.oscillator(4), -source.oscillator(6))
         self.assertEqual(source.oscillator(5), 0.0)
 
-    def test_transparent_source_sampling_indices_are_integral(self):
-        aux_fdtd = SimpleNamespace(space=Cartesian(size=(0, 0, 2), resolution=10))
-        parameters = (
-            TransparentElectricParam(1, 1, aux_fdtd, (0, 0, 0.13), PlusX),
-            TransparentMagneticParam(1, 1, aux_fdtd, (0, 0, 0.13), PlusX),
+    def test_torch_transparent_plan_uses_integral_consolidated_sampling(self):
+        simulation = gmes.TorchSimulation(
+            space=Cartesian(size=(4, 4, 4), resolution=2),
+            geometry=[DefaultMedium(Dielectric())],
+            sources=[self.make_tfsf(src_time=Continuous(freq=0.2))],
+            runtime=gmes.TorchRuntimeConfig(device="cpu", cpu_threads=1),
         )
-
-        for parameter in parameters:
-            for index in parameter.samp_idx0[PlusX] + parameter.samp_idx1[PlusX]:
-                self.assertIsInstance(index, np.integer)
-
-    def test_transparent_source_merge_preserves_shared_edge_faces(self):
-        aux_fdtd = SimpleNamespace(space=Cartesian(size=(0, 0, 2), resolution=10))
-        first = TransparentEx()
-        second = TransparentEx()
-        first.attach(
-            (1, 2, 3),
-            TransparentElectricParam(2, 3, aux_fdtd, (0, 0, 0.13), PlusX),
+        batches = tuple(
+            batch
+            for batch in simulation.sources.batches
+            if isinstance(batch, TorchTransparentBatch)
         )
-        second.attach(
-            (1, 2, 3),
-            TransparentElectricParam(2, 5, aux_fdtd, (0, 0, 0.27), PlusY),
-        )
-
-        first.merge(second)
-
-        parameter = first._param[(1, 2, 3)]
-        self.assertEqual(parameter.face_list, [PlusX, PlusY])
-        self.assertEqual(parameter.amp, {PlusX: 3, PlusY: 5})
-        for values in (
-            parameter.samp_idx0,
-            parameter.samp_idx1,
-            parameter.r0,
-            parameter.r1,
-        ):
-            self.assertEqual(set(values), {PlusX, PlusY})
+        self.assertTrue(batches)
+        for batch in batches:
+            self.assertEqual(batch.targets.dtype, torch.int64)
+            self.assertEqual(batch.samples.dtype, torch.int64)
+            self.assertTrue(torch.isfinite(batch.weights).all())
+            self.assertEqual(torch.unique(batch.targets).numel(), batch.targets.numel())
+            target_size = simulation.state.field(batch.component).numel()
+            sample_size = batch.auxiliary.state.field(batch.auxiliary_component).numel()
+            self.assertTrue(
+                torch.all((0 <= batch.targets) & (batch.targets < target_size))
+            )
+            self.assertTrue(
+                torch.all((0 <= batch.samples) & (batch.samples < sample_size))
+            )
+            for samples, weights in zip(batch.samples, batch.weights):
+                active = samples[weights != 0]
+                self.assertEqual(torch.unique(active).numel(), active.numel())
 
     def test_tfsf_batches_builtin_geometry_mapping_with_field_clipping(self):
         source = self.make_tfsf()
@@ -145,18 +136,24 @@ class SourceTimeTest(unittest.TestCase):
         sphere = Sphere(Dielectric(3), radius=0.6)
         for obj in (default, sphere):
             obj.init(space)
-        source.geom_tree = GeomBoxTree((default, sphere))
+        geometry_tree = GeomBoxTree((default, sphere))
         field = space.get_ex_storage((Ex,))
 
-        mapped = list(
-            source._mapped_source_points(
-                space,
-                Ex,
-                field,
-                (-2, -2, -2),
-                tuple(value + 2 for value in field.shape),
-            )
+        lowering_token = source_module._torch_tfsf_lowering.set(
+            SimpleNamespace(geometry_tree=geometry_tree)
         )
+        try:
+            mapped = list(
+                source._mapped_source_points(
+                    space,
+                    Ex,
+                    field,
+                    (-2, -2, -2),
+                    tuple(value + 2 for value in field.shape),
+                )
+            )
+        finally:
+            source_module._torch_tfsf_lowering.reset(lowering_token)
         expected_indices = [
             index
             for index in np.ndindex(field.shape)
@@ -167,7 +164,7 @@ class SourceTimeTest(unittest.TestCase):
         for index, point, material, underneath in mapped:
             self.assertEqual(point, space.ex_index_to_space(*index))
             self.assertEqual(
-                (material, underneath), source.geom_tree.material_of_point(point)
+                (material, underneath), geometry_tree.material_of_point(point)
             )
 
     def test_tfsf_custom_geometry_uses_pointwise_fallback(self):
@@ -184,12 +181,18 @@ class SourceTimeTest(unittest.TestCase):
         sphere = CustomSphere(Dielectric(3), radius=0.6)
         for obj in (default, sphere):
             obj.init(space)
-        source.geom_tree = GeomBoxTree((default, sphere))
+        geometry_tree = GeomBoxTree((default, sphere))
         field = space.get_ex_storage((Ex,))
 
-        mapped = list(
-            source._mapped_source_points(space, Ex, field, (0, 0, 0), field.shape)
+        lowering_token = source_module._torch_tfsf_lowering.set(
+            SimpleNamespace(geometry_tree=geometry_tree)
         )
+        try:
+            mapped = list(
+                source._mapped_source_points(space, Ex, field, (0, 0, 0), field.shape)
+            )
+        finally:
+            source_module._torch_tfsf_lowering.reset(lowering_token)
 
         self.assertGreater(CustomSphere.calls, 0)
         self.assertTrue(mapped)

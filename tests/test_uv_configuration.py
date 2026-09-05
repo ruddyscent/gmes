@@ -16,7 +16,7 @@ class UvCacheKeyTest(unittest.TestCase):
         with (project_root / "uv.lock").open("rb") as stream:
             cls.lockfile = tomllib.load(stream)
 
-    def test_preserves_default_and_dynamic_build_inputs(self):
+    def test_preserves_pure_package_build_inputs(self):
         file_keys = {entry["file"] for entry in self.cache_keys if "file" in entry}
         self.assertGreaterEqual(
             file_keys,
@@ -25,33 +25,18 @@ class UvCacheKeyTest(unittest.TestCase):
                 "setup.py",
                 "VERSION",
                 "MANIFEST.in",
+                "build-constraints.txt",
                 "README.md",
-                "utils/macos_build.py",
-                "utils/openmp_build.py",
             },
         )
 
-    def test_tracks_all_native_source_types(self):
+    def test_excludes_native_build_inputs_and_environment(self):
         file_keys = {entry["file"] for entry in self.cache_keys if "file" in entry}
-        self.assertGreaterEqual(
-            file_keys,
-            {"src/*.cc", "src/*.hh", "src/*.i"},
-        )
-        self.assertNotIn("src/*.pyx", file_keys)
-        self.assertFalse(any(key.startswith("gmes/") for key in file_keys))
-
-    def test_tracks_macos_deployment_target(self):
         environment_keys = {entry["env"] for entry in self.cache_keys if "env" in entry}
-        self.assertGreaterEqual(
-            environment_keys,
-            {
-                "GMES_ENABLE_OPENMP",
-                "GMES_OPENMP_PREFIX",
-                "MACOSX_DEPLOYMENT_TARGET",
-            },
-        )
+        self.assertFalse(any(key.startswith("src/") for key in file_keys))
+        self.assertEqual(environment_keys, set())
 
-    def test_pins_uv_and_native_build_dependencies(self):
+    def test_pins_uv_and_pure_build_dependencies(self):
         self.assertEqual(self.uv_configuration["required-version"], "==0.12.5")
         constraints = set(self.uv_configuration["build-constraint-dependencies"])
         self.assertEqual(
@@ -59,7 +44,6 @@ class UvCacheKeyTest(unittest.TestCase):
             {
                 "setuptools==84.0.0",
                 "wheel==0.48.0",
-                "numpy==2.5.2",
             },
         )
         pip_constraints = {
@@ -71,14 +55,16 @@ class UvCacheKeyTest(unittest.TestCase):
         }
         self.assertEqual(pip_constraints, constraints)
 
-    def test_build_and_runtime_numpy_versions_match(self):
+    def test_numpy_remains_a_runtime_dependency_only(self):
         numpy_package = next(
             package
             for package in self.lockfile["package"]
             if package["name"] == "numpy"
         )
-        constraints = self.uv_configuration["build-constraint-dependencies"]
-        self.assertIn(f"numpy=={numpy_package['version']}", constraints)
+        self.assertGreaterEqual(numpy_package["version"], "2.3")
+        self.assertIn(
+            "numpy>=2.3", self.project_configuration["project"]["dependencies"]
+        )
 
     def test_locks_explicit_pytorch_213_accelerator_variants(self):
         project = self.project_configuration["project"]
@@ -133,10 +119,14 @@ class UvCacheKeyTest(unittest.TestCase):
         self.assertTrue(mypy["warn_unused_configs"])
         self.assertEqual(
             self.project_configuration["tool"]["setuptools"]["package-data"]["gmes"],
-            ["py.typed", "*.pyi"],
+            ["py.typed", "constant.pyi"],
         )
         locked_names = {package["name"] for package in self.lockfile["package"]}
         self.assertIn("mypy", locked_names)
+        self.assertNotIn("mpi4py", locked_names)
+        self.assertNotIn(
+            "mpi", self.project_configuration["project"]["optional-dependencies"]
+        )
 
 
 if __name__ == "__main__":

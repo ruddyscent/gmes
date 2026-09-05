@@ -28,83 +28,49 @@ jobs:
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
+          cache-suffix: ${{ github.job }}
           enable-cache: true
           version: "0.12.5"
       - name: Install Python
         run: uv python install 3.14
-      - name: Install SWIG on Linux
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes libopenmpi-dev openmpi-bin swig
-      - name: Install SWIG on macOS
-        if: runner.os == 'macOS'
-        run: brew install swig libomp
-      - name: Install Linux test dependencies
-        if: runner.os == 'Linux'
-        run: uv sync --locked --extra torch-cpu --extra hdf5 --extra plot --extra mpi
-      - name: Install macOS test dependencies without plot extra
-        if: runner.os == 'macOS'
+      - name: Install locked CPU test environment
         run: uv sync --locked --extra torch-cpu --extra hdf5
-      - name: Verify default build OpenMP support on Linux
-        if: runner.os == 'Linux'
-        run: uv run --no-sync python -c "from gmes import pw_material; assert pw_material.openmp_enabled()"
-      - name: Verify default build serial fallback on macOS
-        if: runner.os == 'macOS'
-        run: uv run --no-sync python -c "from gmes import pw_material; assert not pw_material.openmp_enabled()"
       - name: Run quality checks
         run: |
           uv run --no-sync python -m isort --check-only gmes examples tests benchmarks utils setup.py
           uv run --no-sync python -m black --check gmes examples tests benchmarks utils setup.py
           uv run --no-sync python -m mypy
-          uv run --no-sync python -m mypy.stubtest --mypy-config-file pyproject.toml gmes.constant gmes.pw_material
+          uv run --no-sync python -m mypy.stubtest --mypy-config-file pyproject.toml gmes.constant
           uv run --no-sync python -m pylint $(git ls-files 'gmes/*.py') setup.py
-      - name: Run tests with the default threshold
+      - name: Run complete supported CPU suite
         run: uv run --no-sync python -m unittest discover -v
-      - name: Run tests with forced parallel updates
-        if: runner.os == 'Linux'
-        run: OMP_NUM_THREADS=4 GMES_OPENMP_THRESHOLD=0 uv run --no-sync python -m unittest discover -v
-      - name: Rebuild without OpenMP on Linux
-        if: runner.os == 'Linux'
-        run: GMES_ENABLE_OPENMP=0 uv sync --locked --extra torch-cpu --extra hdf5 --extra plot --extra mpi --reinstall-package gmes
-      - name: Rebuild without OpenMP on macOS
-        if: runner.os == 'macOS'
-        run: GMES_ENABLE_OPENMP=0 uv sync --locked --extra torch-cpu --extra hdf5 --extra plot --reinstall-package gmes
-      - name: Run tests with the serial build
-        run: GMES_ENABLE_OPENMP=0 uv run --no-sync python -m unittest discover -v
-      - name: Run MPI deployment smoke test
-        if: runner.os == 'Linux'
-        run: uv run --no-sync mpiexec --oversubscribe -n 10 python tests/mpi_deployment_smoke.py
-      - name: Build distributions with required OpenMP
-        if: runner.os == 'Linux'
-        run: GMES_ENABLE_OPENMP=1 uv build
-      - name: Build distributions with macOS auto fallback
-        if: runner.os == 'macOS'
-        run: GMES_ENABLE_OPENMP=auto uv build
-      - name: Check out candidate head for canonical macOS evidence
+      - name: Build pure distributions
+        run: uv build
+      - name: Check out candidate head for #124 package evidence
         if: runner.os == 'macOS' && github.event_name == 'pull_request'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
-          path: issue123-evidence-candidate
+          path: issue124-package-evidence-candidate
           persist-credentials: false
-      - name: Build and exercise candidate macOS packages
+      - name: Build and verify candidate #124 packages
         if: runner.os == 'macOS' && github.event_name == 'pull_request'
         env:
           CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-          CANDIDATE_DIR: ${{ github.workspace }}/issue123-evidence-candidate
-          EVIDENCE_DIR: ${{ runner.temp }}/issue-123-macos-evidence
-          RECORDS_DIR: ${{ runner.temp }}/issue-123-macos-command-records
-          WORK_DIR: ${{ runner.temp }}/issue-123-macos-work
+          CANDIDATE_DIR: ${{ github.workspace }}/issue124-package-evidence-candidate
+          EVIDENCE_DIR: ${{ runner.temp }}/issue-124-package-evidence
+          UV_CACHE_DIR: ${{ runner.temp }}/issue-124-package-cache
         run: |
           set -euo pipefail
           test "$(uname -m)" = arm64
           test "$(git -C "$CANDIDATE_DIR" rev-parse HEAD)" = "$CANDIDATE_SHA"
           test -z "$(git -C "$CANDIDATE_DIR" status --porcelain=v1 --untracked-files=all)"
-          mkdir -p "$EVIDENCE_DIR/packages" "$EVIDENCE_DIR/logs" "$RECORDS_DIR" "$WORK_DIR"
-          GMES_ENABLE_OPENMP=auto uv build --clear --no-create-gitignore --directory "$CANDIDATE_DIR" --out-dir "$EVIDENCE_DIR/packages"
+          mkdir -p "$EVIDENCE_DIR/packages"
+          uv build --clear --no-create-gitignore --directory "$CANDIDATE_DIR" --out-dir "$EVIDENCE_DIR/packages"
           wheels=("$EVIDENCE_DIR"/packages/*.whl)
           sdists=("$EVIDENCE_DIR"/packages/*.tar.gz)
           test "${#wheels[@]}" -eq 1
@@ -112,65 +78,52 @@ jobs:
           test -f "${wheels[0]}"
           test -f "${sdists[0]}"
           case "${wheels[0]}" in
-            *-cp314*-macosx_*_arm64.whl) ;;
+            *-py3-none-any.whl) ;;
             *) exit 1 ;;
           esac
-          python="$GITHUB_WORKSPACE/.venv/bin/python"
-          helper="$CANDIDATE_DIR/benchmarks/macos_ci_evidence.py"
-          record_probe() {
-            local probe_status stderr_path
-            probe_args=(record --role "$1")
-            if [[ -n "$2" ]]; then
-              probe_args+=(--mode "$2")
-            fi
-            probe_args+=(
-              --repository "$CANDIDATE_DIR"
-              --forbidden-root "$CANDIDATE_DIR"
-              --expected-package "$3"
-              --evidence-dir "$EVIDENCE_DIR"
-              --records-dir "$RECORDS_DIR"
-              --working-directory "$WORK_DIR"
+          helper="$CANDIDATE_DIR/benchmarks/package_cutover.py"
+          for archive in "${wheels[0]}" "${sdists[0]}"; do
+            environment="$RUNNER_TEMP/gmes-issue-124-$(basename "$archive")"
+            uv venv --clear --python 3.14 "$environment"
+            (
+              cd "$CANDIDATE_DIR"
+              UV_PROJECT_ENVIRONMENT="$environment" uv sync --locked --no-install-project \
+                --extra torch-cpu --extra hdf5
             )
-            if "$python" -I "$helper" "${probe_args[@]}"; then
-              return 0
-            else
-              probe_status=$?
+            "$environment/bin/python" -m ensurepip
+            "$environment/bin/python" -m pip --version
+            "$environment/bin/python" -m pip install --no-deps \
+              --constraint "$CANDIDATE_DIR/build-constraints.txt" \
+              setuptools==84.0.0 wheel==0.48.0
+            digest="$(shasum -a 256 "$archive" | awk '{print $1}')"
+            installer=(--no-deps --no-index --force-reinstall)
+            if [[ "$archive" == *.tar.gz ]]; then
+              installer+=(--no-build-isolation)
             fi
-            stderr_path="$EVIDENCE_DIR/logs/$1.stderr.txt"
-            printf 'macOS package probe %s failed with exit code %s; captured stderr (%s):\n' "$1" "$probe_status" "$stderr_path" >&2
-            if [[ -s "$stderr_path" ]]; then
-              tail -c 65536 "$stderr_path" >&2
-              printf '\n' >&2
-            else
-              printf '%s\n' '(no captured stderr was written)' >&2
-            fi
-            return "$probe_status"
-          }
-          GMES_ENABLE_OPENMP=auto UV_NO_CACHE=1 uv pip install \
-            --python "$python" --reinstall --no-deps "${wheels[0]}"
-          record_probe wheel-import "" "${wheels[0]}"
-          record_probe wheel-default-suite default "${wheels[0]}"
-          record_probe wheel-serial-suite serial "${wheels[0]}"
-          GMES_ENABLE_OPENMP=auto UV_NO_CACHE=1 uv pip install \
-            --python "$python" --reinstall --no-deps "${sdists[0]}"
-          record_probe sdist-import "" "${sdists[0]}"
-          record_probe sdist-default-suite default "${sdists[0]}"
-          GMES_ENABLE_OPENMP=0 UV_NO_CACHE=1 uv pip install \
-            --python "$python" --reinstall --no-deps "${sdists[0]}"
-          record_probe sdist-serial-suite serial "${sdists[0]}"
-          "$python" -I "$helper" capture \
-            --evidence-dir "$EVIDENCE_DIR" \
-            --records-dir "$RECORDS_DIR" \
-            --repository "$CANDIDATE_DIR" \
-            --manifest "$CANDIDATE_DIR/benchmarks/native_oracle_workloads.json" \
-            --candidate-commit "$CANDIDATE_SHA"
+            "$environment/bin/python" -m pip install "${installer[@]}" \
+              "gmes @ file://${archive}#sha256=${digest}"
+            (
+              cd "$RUNNER_TEMP"
+              "$environment/bin/python" -I "$helper" \
+                --candidate-label "issue-124-macos-${CANDIDATE_SHA}-$(basename "$archive")" \
+                --archive "$archive" \
+                --forbidden-root "$GITHUB_WORKSPACE" \
+                --forbidden-root "$CANDIDATE_DIR" \
+                --device cpu \
+                --required-device-count 0 \
+                --evidence-dir "$EVIDENCE_DIR/$(basename "$archive")"
+            )
+          done
+          # Hosted PR CI runs CPU package evidence only. package_cutover also
+          # supports trusted installed-origin one-/two-GPU evidence elsewhere;
+          # an unavailable accelerator must not be represented as success.
           test -z "$(git -C "$CANDIDATE_DIR" status --porcelain=v1 --untracked-files=all)"
-      - name: Upload canonical macOS candidate evidence
+      - name: Upload candidate #124 package evidence
         if: runner.os == 'macOS' && github.event_name == 'pull_request'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: issue-123-macos-${{ github.event.pull_request.head.sha || github.sha }}
-          path: ${{ runner.temp }}/issue-123-macos-evidence
+          name: issue-124-package-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/issue-124-package-evidence
           if-no-files-found: error
           retention-days: 90
           overwrite: true

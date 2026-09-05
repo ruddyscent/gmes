@@ -1,29 +1,67 @@
 # Releasing GMES
 
-GMES releases are built from a version tag in clean GitHub-hosted runners.
-The workflow transfers the resulting source distribution and wheels through
-GitHub Actions artifacts, publishes those exact files to PyPI with OpenID
-Connect (OIDC), and attaches them to the matching GitHub Release. Never upload
-local `dist/` contents or a rebuilt copy of an artifact.
+GMES releases are built on clean GitHub-hosted runners from a version tag. The
+release workflow validates and transfers the exact archives through GitHub
+Actions artifacts, publishes those same files with OpenID Connect (OIDC), and
+attaches them to the matching GitHub Release. Never upload local `dist/`
+contents or rebuild an artifact after validation.
 
-## Supported artifacts for 0.10.0
+## Artifact contract
 
-The release contains exactly three files:
+The pure-package release contains exactly two files:
 
-- `gmes-0.10.0.tar.gz`
-- a CPython 3.14 Linux x86_64 `manylinux_2_34` wheel
-- a CPython 3.14 macOS arm64 wheel targeting macOS 11
+- `gmes-<version>-py3-none-any.whl`
+- `gmes-<version>.tar.gz`
 
-Windows and macOS x86_64 are intentionally unsupported for 0.10.0. Add either
-platform only in a separate change that builds and tests its wheel on a native
-runner.
+The wheel is `Root-Is-Purelib: true` and must contain the canonical
+`gmes/constant.py`, `gmes/constant.pyi`, `gmes/py.typed`, and supported Torch
+modules. Archive validation rejects retired GMES native binaries, generated
+proxies, `src/` members, traversal paths, links, duplicate members, and
+unexpected artifact names. A universal wheel does not by itself prove CPU,
+CUDA, or two-GPU support; those require their respective installed-artifact
+gates.
+
+## Trusted installed-artifact cutover evidence
+
+CPU, single-CUDA, and two-CUDA/NCCL evidence is a #124 pre-merge acceptance
+concern. Run it on a trusted dedicated machine after binding a clean candidate
+checkout to the candidate commit; a descriptive label alone does not bind a
+commit. The machine need not be a GitHub self-hosted runner. Run from a
+directory outside both checkouts, and retain the evidence outside either one:
+
+```sh
+test "$(git -C "$CANDIDATE" rev-parse HEAD)" = "$CANDIDATE_SHA"
+test -z "$(git -C "$CANDIDATE" status --porcelain=v1 --untracked-files=all)"
+uv venv --clear --python 3.14 "$ENV"
+(
+  cd "$CANDIDATE"
+  UV_PROJECT_ENVIRONMENT="$ENV" uv sync --locked --no-install-project \
+    --extra torch-cu130 --extra hdf5
+)
+"$ENV/bin/python" -m ensurepip
+"$ENV/bin/python" -m pip install --no-deps \
+  --constraint "$CANDIDATE/build-constraints.txt" setuptools==84.0.0 wheel==0.48.0
+ARCHIVE_SHA256="$(shasum -a 256 "$ARCHIVE" | awk '{print $1}')"
+INSTALLER=(--no-deps --no-index --force-reinstall)
+case "$ARCHIVE" in *.tar.gz) INSTALLER+=(--no-build-isolation) ;; esac
+"$ENV/bin/python" -m pip install "${INSTALLER[@]}" \
+  "gmes @ file://${ARCHIVE}#sha256=${ARCHIVE_SHA256}"
+cd "$RUN_DIRECTORY"
+"$ENV/bin/python" -I "$CANDIDATE/benchmarks/package_cutover.py" \
+  --candidate-label "${CANDIDATE_SHA}-cuda2" --archive "$ARCHIVE" \
+  --forbidden-root "$CANDIDATE" --forbidden-root "$CONTROLLER_CHECKOUT" \
+  --device cuda:0 --required-device-count 2 --evidence-dir "$EVIDENCE_DIRECTORY"
+```
+
+Use `torch-cpu`, `--device cpu`, and `--required-device-count 0` for CPU;
+use a selected CUDA extra and `--required-device-count 1` for single-device
+CUDA. The two-device helper launches `torchrun --nproc_per_node=2`, requires
+NCCL and two visible devices, validates installed module origins before and
+after the smoke, and records command, archive digest, stdout, and stderr. A
+resource failure remains a failure; do not replace it with a skipped result or
+claim this local evidence as publication authority.
 
 ## One-time publishing setup
-
-The `gmes` JSON endpoint on PyPI returned 404 when the release pipeline was
-prepared on 2026-08-22, so no public project existed at that time. Recheck the
-name before release and make sure it is either still available or controlled
-by the GMES maintainer account.
 
 Configure a pending Trusted Publisher on PyPI when the project does not yet
 exist, or add a publisher to the existing project with these exact values:
@@ -36,72 +74,58 @@ exist, or add a publisher to the existing project with these exact values:
 | Workflow | `release.yml` |
 | Environment | `pypi` |
 
-The GitHub repository must also have an environment named `pypi`. Restrict it
-to version tags matching `v*` and require a maintainer approval. The workflow
-grants `id-token: write` only to the PyPI publishing job; no PyPI password or
-API token is stored in GitHub.
+The GitHub repository must have a protected `pypi` environment restricted to
+version tags matching `v*` and requiring maintainer approval. Only the PyPI
+publishing job receives `id-token: write`; no PyPI password or API token is
+stored in GitHub.
 
 ## Prepare and validate a release
 
-1. Update `VERSION`, the release heading and date in `CHANGELOG.md`, and the
-   supported-platform table in `README.md` in a release-preparation pull
-   request.
-2. Confirm that the release workflow's expected wheel platforms match the
-   documentation. All third-party Actions must remain pinned to immutable
-   commit SHAs. Keep `build-constraints.txt` synchronized with
-   `[tool.uv].build-constraint-dependencies` so uv and cibuildwheel use the
-   same native build dependencies.
+1. Update `VERSION`, the release heading/date in `CHANGELOG.md`, and any
+   supported-runtime statement in `README.md` in a preparation pull request.
+2. Keep third-party Actions pinned to immutable commit SHAs. Keep
+   `build-constraints.txt` synchronized with the pure build constraints in
+   `pyproject.toml`; do not reintroduce native build requirements.
 3. Run the local checks:
 
    ```sh
    uv python install 3.14
-   uv sync --locked --extra hdf5
+   uv sync --locked --extra torch-cpu --extra hdf5
    uv run --no-sync python -m isort --check-only gmes examples tests utils setup.py
    uv run --no-sync python -m black --check gmes examples tests utils setup.py
    uv run --no-sync python -m mypy
-   uv run --no-sync python -m mypy.stubtest --mypy-config-file pyproject.toml gmes.constant gmes.pw_material
    uv run --no-sync python -m pylint $(git ls-files 'gmes/*.py') setup.py
    uv run --no-sync python -m unittest discover -v
+   uv lock --check
    uv build
    ```
 
-4. Confirm that the preparation pull request's `Release` workflow succeeds.
-   It builds and validates artifacts but cannot publish them. Once the workflow
-   exists on the default branch, maintainers may also run it manually against
-   a preparation branch for the same artifact-only validation.
-5. Squash-merge the preparation pull request after the required CI and CodeQL
-   checks pass. Confirm that local `master` is at the merged commit.
+4. Confirm the release workflow validates one universal wheel and one sdist,
+   including archive contents, digest binding, and clean installed CPU checks
+   outside the checkout. It must reuse those validated archives for publishing
+   and release attachment.
+5. Do not infer missing Linux/macOS CPU or trusted single-/two-GPU evidence
+   from metadata, an artifact shape, or a skipped job. Those remain fail-closed
+   gates for final acceptance.
+6. Squash-merge only after the required CPU status checks and CodeQL pass.
 
 ## Publish the release
 
-1. Create the signed tag from the verified `master` commit and push only that
-   tag:
+1. Create the signed tag from verified `master` and push only that tag:
 
    ```sh
    git tag -s v0.10.0 -m "GMES 0.10.0"
    git push origin v0.10.0
    ```
 
-2. The tag starts the `Release` workflow. It checks that the tag, `VERSION`,
-   package metadata, changelog heading, and GitHub Release title use the same
-   version.
-3. Wait for both full test jobs, the isolated sdist build, both cibuildwheel
-   jobs, `twine check`, archive-content checks, clean-install smoke tests,
-   auditwheel, and delocate to succeed.
-4. Approve the protected `pypi` environment deployment. The publishing job
-   contains no checkout or build step and fails on duplicate files.
-5. Wait for the clean PyPI wheel installation check. The workflow then creates
-   `GMES 0.10.0` as the GitHub Release and attaches the same three verified
-   files.
-6. Verify the PyPI project page, GitHub Release, and a clean user installation:
+2. The tag workflow verifies the tag, package metadata, changelog heading,
+   and GitHub Release title describe the same version.
+3. Approve the protected `pypi` environment only after the verified archive
+   set and installed-artifact checks succeed. The publishing job has no build
+   step and rejects duplicate files; never enable `skip-existing`.
+4. The GitHub Release attaches the exact verified wheel and sdist. If an
+   uploaded distribution is wrong, publish a new version rather than replacing
+   files or bypassing duplicate rejection.
 
-   ```sh
-   python3.14 -m venv /tmp/gmes-release-check
-   /tmp/gmes-release-check/bin/python -m pip install --only-binary=:all: "gmes==0.10.0"
-   /tmp/gmes-release-check/bin/python -c "import gmes, gmes.material, gmes.pygeom"
-   ```
-
-If publication partially succeeds, do not enable `skip-existing` and do not
-replace published files. Diagnose the failed downstream job and rerun only the
-failed GitHub Actions jobs. If an uploaded distribution itself is wrong, make
-a new version rather than overwriting it.
+No publication is authorized by this document; follow the protected workflow
+and repository review policy.

@@ -6,10 +6,8 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import hashlib
-import importlib
 import json
 import math
-import os
 import platform
 import re
 import subprocess
@@ -1517,64 +1515,6 @@ def _array_record(name: str, initial: Any, final: Any) -> dict[str, Any]:
     return record
 
 
-def _native_fields(simulation: Any, gmes_module: Any) -> dict[str, Any]:
-    return {
-        name: simulation.field[getattr(gmes_module, name)].copy()
-        for name in FIELD_NAMES
-    }
-
-
-def _native_result(
-    gmes_module: Any, initial_fields: dict[str, Any]
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    import numpy as np  # pylint: disable=import-outside-toplevel
-
-    geometry = [
-        gmes_module.DefaultMedium(gmes_module.Dielectric(eps_inf=1.7, mu_inf=1.05))
-    ]
-    simulation = gmes_module.FDTD(
-        gmes_module.Cartesian(size=(2, 2, 2), resolution=2),
-        geometry,
-        verbose=False,
-    )
-    simulation.init()
-    for name, values in initial_fields.items():
-        simulation.field[getattr(gmes_module, name)][...] = values
-    initial = _native_fields(simulation, gmes_module)
-    initial_addresses = {
-        name: int(simulation.field[getattr(gmes_module, name)].ctypes.data)
-        for name in FIELD_NAMES
-    }
-    initial_step = int(simulation.time_step.n)
-    simulation.step()
-    simulation.step()
-    final = _native_fields(simulation, gmes_module)
-    final_addresses = {
-        name: int(simulation.field[getattr(gmes_module, name)].ctypes.data)
-        for name in FIELD_NAMES
-    }
-    fields = [_array_record(name, initial[name], final[name]) for name in FIELD_NAMES]
-    finite = all(
-        np.isfinite(values).all() for values in (*initial.values(), *final.values())
-    )
-    progressed = _records_sha256(fields, "initial") != _records_sha256(fields, "final")
-    stable = initial_addresses == final_addresses
-    result = {
-        "openmp_enabled": False,
-        "steps": {"initial": initial_step, "final": int(simulation.time_step.n)},
-        "fields": fields,
-        "initial_field_sha256": _records_sha256(fields, "initial"),
-        "final_field_sha256": _records_sha256(fields, "final"),
-        "storage_addresses": {"initial": initial_addresses, "final": final_addresses},
-        "storage_stable": stable,
-        "finite": bool(finite),
-        "progressed": progressed,
-        "passed": bool(finite and progressed and stable),
-    }
-    _validate_native_result(result, "captured native result")
-    return result, final
-
-
 def _torch_state(simulation: Any) -> dict[str, Any]:
     return {
         name: tensor.detach().cpu().numpy().copy()
@@ -1755,111 +1695,13 @@ def probe_installed_package(
     forbidden_root: Path,
     expected_package: Path,
 ) -> dict[str, Any]:
-    """Run one installed-package import or complete native/Torch CPU contract."""
+    """Retired current-tree capture entry point for the issue #123 schema."""
 
-    _require(role in RUNTIME_ROLES, "package probe role differs")
-    _require(SUITE_MODES.get(role) == mode, "package probe role and mode differ")
-    platform_record = _platform_record()
-    _validate_platform(platform_record, "package probe platform")
-    repository = repository.resolve(strict=True)
-    forbidden_root = forbidden_root.resolve(strict=True)
-    expected_package = expected_package.resolve(strict=True)
-
-    import numpy as np  # pylint: disable=import-outside-toplevel
-    import torch  # pylint: disable=import-outside-toplevel
-
-    import gmes  # pylint: disable=import-outside-toplevel
-
-    package_sha256 = _installed_archive_sha256(expected_package)
-    host_contract = _capture_host_contract(repository, torch)
-    module_path = Path(gmes.__file__).resolve(strict=True)
-    native_modules = [
-        Path(importlib.import_module(name).__file__).resolve(strict=True)
-        for name in ("gmes._constant", "gmes._pw_material")
-    ]
-    outside_source = all(
-        not path.is_relative_to(forbidden_root)
-        for path in (module_path, *native_modules)
+    del role, mode, repository, forbidden_root, expected_package
+    raise EvidenceError(
+        "current-tree macOS native probing is retired; validate the recorded "
+        "historical observer evidence instead"
     )
-    _require(outside_source, "package probe imported from the source checkout")
-    if role.endswith("-import"):
-        result = {
-            "kind": IMPORT_RESULT_KIND,
-            "role": role,
-            "package_sha256": package_sha256,
-            "platform": platform_record,
-            "host_contract": host_contract,
-            "distribution": {
-                "name": "gmes",
-                "version": metadata.version("gmes"),
-                "module_path": str(module_path),
-                "native_module_paths": [str(path) for path in native_modules],
-                "outside_source": outside_source,
-            },
-            "passed": True,
-        }
-        _validate_probe_result(result, role, package_sha256, platform_record)
-        return result
-
-    _require(
-        gmes.pw_material.openmp_enabled() is False,
-        "macOS native package enabled OpenMP",
-    )
-    expected_openmp = "auto" if mode == "default" else "0"
-    _require(
-        os.environ.get("GMES_ENABLE_OPENMP") == expected_openmp,
-        "package probe OpenMP environment differs",
-    )
-    native_template = gmes.FDTD(
-        gmes.Cartesian(size=(2, 2, 2), resolution=2),
-        [gmes.DefaultMedium(gmes.Dielectric(eps_inf=1.7, mu_inf=1.05))],
-        verbose=False,
-    )
-    native_template.init()
-    rng = np.random.default_rng(1729)
-    initial_fields = {
-        name: rng.normal(size=native_template.field[getattr(gmes, name)].shape) * 1e-3
-        for name in FIELD_NAMES
-    }
-    _require(
-        all(
-            np.all(values != 0) and np.isfinite(values).all()
-            for values in initial_fields.values()
-        ),
-        "deterministic initial field contract differs",
-    )
-    native, native_final = _native_result(gmes, initial_fields)
-    eager, eager_final = _torch_result(gmes, torch, initial_fields, "eager")
-    compiled, compiled_final = _torch_result(gmes, torch, initial_fields, "compile")
-    manifest = _strict_json(
-        repository / "benchmarks" / "native_oracle_workloads.json", "candidate manifest"
-    )
-    tolerance = manifest["tolerances"]["torch"]["dielectric"]["float64"]
-    rtol = float(tolerance["rtol"])
-    atol = float(tolerance["atol"])
-    comparisons = [
-        _comparison("eager", "compile", eager_final, compiled_final, rtol, atol),
-        _comparison("eager", "native", eager_final, native_final, rtol, atol),
-        _comparison("compile", "native", compiled_final, native_final, rtol, atol),
-    ]
-    result = {
-        "kind": SUITE_RESULT_KIND,
-        "role": role,
-        "mode": mode,
-        "package_sha256": package_sha256,
-        "platform": platform_record,
-        "host_contract": host_contract,
-        "native": native,
-        "torch_cpu": {"modes": [eager, compiled], "comparisons": comparisons},
-        "passed": bool(
-            native["passed"]
-            and eager["passed"]
-            and compiled["passed"]
-            and all(item["passed"] for item in comparisons)
-        ),
-    }
-    _validate_probe_result(result, role, package_sha256, platform_record)
-    return result
 
 
 def record_runtime_command(
@@ -1872,101 +1714,22 @@ def record_runtime_command(
     records_directory: Path,
     working_directory: Path,
 ) -> int:
-    """Run a real isolated probe and persist its exact argv, exit, stdout, stderr."""
+    """Retired current-tree recorder for the issue #123 native evidence schema."""
 
-    _require(role in RUNTIME_ROLES, "runtime command role differs")
-    _require(SUITE_MODES.get(role) == mode, "runtime command role and mode differ")
-    repository = repository.resolve(strict=True)
-    forbidden_root = forbidden_root.resolve(strict=True)
-    expected_package = expected_package.resolve(strict=True)
-    evidence_directory = evidence_directory.resolve(strict=True)
-    records_directory = records_directory.resolve(strict=True)
-    working_directory = working_directory.resolve(strict=True)
-    _require(
-        forbidden_root == repository,
-        "forbidden source root must be the candidate checkout",
-    )
-    _require(
-        expected_package.parent == evidence_directory / "packages",
-        "expected package must belong to the evidence package directory",
-    )
-    _require(
-        not working_directory.is_relative_to(forbidden_root)
-        and not working_directory.is_relative_to(evidence_directory),
-        "probe working directory must be outside source and evidence",
-    )
-    _require(
-        not records_directory.is_relative_to(evidence_directory),
-        "command records must remain outside the uploaded evidence closure",
-    )
-    log_directory = evidence_directory / "logs"
-    log_directory.mkdir(parents=True, exist_ok=True)
-    records_directory.mkdir(parents=True, exist_ok=True)
-    cache_directory = records_directory / "torchinductor" / role
-    cache_directory.mkdir(parents=True, exist_ok=True)
-    argv = _probe_argv(
-        sys.executable,
+    del (
+        role,
+        mode,
         repository,
         forbidden_root,
         expected_package,
-        role,
-        mode,
+        evidence_directory,
+        records_directory,
+        working_directory,
     )
-    environment_record = {
-        "GMES_ENABLE_OPENMP": "0" if mode == "serial" else "auto",
-        "MKL_NUM_THREADS": "1",
-        "OMP_NUM_THREADS": "1",
-        "OPENBLAS_NUM_THREADS": "1",
-        "TORCHINDUCTOR_CACHE_DIR": str(cache_directory),
-    }
-    environment = dict(os.environ)
-    environment.update(environment_record)
-    completed = subprocess.run(
-        argv,
-        cwd=working_directory,
-        env=environment,
-        check=False,
-        capture_output=True,
+    raise EvidenceError(
+        "current-tree macOS native recording is retired; capture remains limited "
+        "to the manifest-pinned historical observer checkout"
     )
-    stdout_raw = (
-        completed.stdout
-        if isinstance(completed.stdout, bytes)
-        else completed.stdout.encode("utf-8")
-    )
-    stderr_raw = (
-        completed.stderr
-        if isinstance(completed.stderr, bytes)
-        else completed.stderr.encode("utf-8")
-    )
-    stdout = log_directory / f"{role}.stdout.json"
-    stderr = log_directory / f"{role}.stderr.txt"
-    stdout.write_bytes(stdout_raw)
-    stderr.write_bytes(stderr_raw)
-    try:
-        result = _strict_json_bytes(stdout_raw, f"{role} stdout")
-    except EvidenceError:
-        result = None
-    record = {
-        "schema_version": 2,
-        "kind": COMMAND_RECORD_KIND,
-        "role": role,
-        "command": {
-            "argv": argv,
-            "cwd": str(working_directory),
-            "environment": environment_record,
-        },
-        "exit_code": int(completed.returncode),
-        "stdout_sha256": _sha256(stdout_raw),
-        "stdout_size_bytes": len(stdout_raw),
-        "stderr_sha256": _sha256(stderr_raw),
-        "stderr_size_bytes": len(stderr_raw),
-        "result": result,
-    }
-    (records_directory / f"{role}.json").write_text(
-        json.dumps(record, allow_nan=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    return int(completed.returncode)
 
 
 def _arguments() -> argparse.Namespace:
@@ -2034,15 +1797,10 @@ def main() -> int:
         )
         return 0
     if args.command == "capture":
-        output = capture_runtime_index(
-            args.evidence_dir,
-            args.records_dir,
-            args.repository,
-            args.manifest,
-            args.candidate_commit,
+        raise EvidenceError(
+            "current-tree macOS native capture is retired; validate recorded "
+            "historical observer evidence with assemble"
         )
-        print(output)
-        return 0
     index, scope = assemble_macos_index(
         runtime_index=args.runtime_index,
         manifest=args.manifest,

@@ -644,18 +644,16 @@ class MacOSCiEvidenceTest(unittest.TestCase):
                 output=self.directory / "index.json",
             )
 
-    def test_record_preserves_real_argv_exit_stdout_and_stderr(self):
+    def test_retired_current_tree_record_and_probe_fail_closed(self):
         role = "wheel-import"
-        expected = self._result(role)
-        stdout = json.dumps(expected, separators=(",", ":"), sort_keys=True).encode()
-        stderr = b"native diagnostic\n"
-        completed = subprocess.CompletedProcess([], 0, stdout=stdout, stderr=stderr)
         package = self._package(role)
-
-        with mock.patch.object(
-            evidence.subprocess, "run", return_value=completed
-        ) as run:
-            exit_code = evidence.record_runtime_command(
+        record_path = self.records / f"{role}.json"
+        before = record_path.read_bytes()
+        with (
+            mock.patch.object(evidence.subprocess, "run") as run,
+            self.assertRaisesRegex(evidence.EvidenceError, "historical observer"),
+        ):
+            evidence.record_runtime_command(
                 role=role,
                 mode=None,
                 repository=evidence.ROOT,
@@ -665,18 +663,32 @@ class MacOSCiEvidenceTest(unittest.TestCase):
                 records_directory=self.records,
                 working_directory=self.work,
             )
-        self.assertEqual(exit_code, 0)
-        self.assertEqual((self.logs / f"{role}.stdout.json").read_bytes(), stdout)
-        self.assertEqual((self.logs / f"{role}.stderr.txt").read_bytes(), stderr)
-        record = json.loads((self.records / f"{role}.json").read_text())
-        self.assertEqual(record["exit_code"], 0)
-        self.assertEqual(record["command"]["argv"], run.call_args.args[0])
-        self.assertEqual(
-            record["command"]["argv"][:4], [sys.executable, "-I", "-W", "error"]
-        )
-        self.assertEqual(
-            set(record["command"]["environment"]), evidence.COMMAND_ENVIRONMENT_KEYS
-        )
+        run.assert_not_called()
+        self.assertEqual(record_path.read_bytes(), before)
+        with self.assertRaisesRegex(evidence.EvidenceError, "historical observer"):
+            evidence.probe_installed_package(
+                role, None, evidence.ROOT, evidence.ROOT, package
+            )
+
+    def test_retired_capture_cli_fails_closed(self):
+        with (
+            mock.patch.object(
+                sys,
+                "argv",
+                [
+                    "macos_ci_evidence.py",
+                    "capture",
+                    "--evidence-dir",
+                    str(self.directory),
+                    "--records-dir",
+                    str(self.records),
+                    "--candidate-commit",
+                    self.candidate["candidate_git_commit"],
+                ],
+            ),
+            self.assertRaisesRegex(evidence.EvidenceError, "historical observer"),
+        ):
+            evidence.main()
 
     def test_runtime_index_rejects_noncanonical_cache_directory(self):
         role = "wheel-import"

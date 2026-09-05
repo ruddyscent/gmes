@@ -10,17 +10,30 @@ https://doi.org/10.1103/PhysRevA.52.3082.
 from argparse import ArgumentParser
 from pathlib import Path
 
-from ziolkowski1995_common import (
-    ULTRAFAST_PREROLL_S,
-    figure_title,
-    make_simulation,
-    plot_population,
-    plot_spatial_pair,
-    print_population_summary,
-    print_scenario,
-    run_snapshots,
-    ultrafast_scenario,
-)
+try:  # Package import for tests and installed examples.
+    from .ziolkowski1995_common import (
+        ULTRAFAST_PREROLL_S,
+        figure_title,
+        make_simulation,
+        plot_population,
+        plot_spatial_pair,
+        print_population_summary,
+        print_scenario,
+        run_snapshots,
+        ultrafast_scenario,
+    )
+except ImportError:  # Direct script execution.
+    from ziolkowski1995_common import (
+        ULTRAFAST_PREROLL_S,
+        figure_title,
+        make_simulation,
+        plot_population,
+        plot_spatial_pair,
+        print_population_summary,
+        print_scenario,
+        run_snapshots,
+        ultrafast_scenario,
+    )
 
 
 def generate(

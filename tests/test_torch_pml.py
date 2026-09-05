@@ -1,5 +1,6 @@
-"""Oracle and storage tests for Torch UPML/CPML tensor buckets."""
+"""Reference and storage tests for Torch UPML/CPML tensor buckets."""
 
+import copy
 import json
 import unittest
 from pathlib import Path
@@ -8,12 +9,6 @@ import numpy as np
 import torch
 
 import gmes
-from benchmarks.native_oracle import (
-    _build_sources,
-    _coverage_geometry,
-    find_case,
-    initial_field_values,
-)
 from gmes.torch_fdtd import (
     DEFAULT_CPML_REPRESENTATION,
     SPARSE_CPML_REPRESENTATION,
@@ -28,6 +23,105 @@ _MANIFEST = json.loads(
 _TOLERANCES = _MANIFEST["tolerances"]["torch"]["pml"]
 
 
+def _crossover_material(name):
+    """Build only the public material models used by cpu-crossover-2d."""
+    pole = gmes.DrudePole(omega=0.6, gamma=0.03)
+    critical_points = (
+        gmes.CriticalPoint(amp=0.04, phi=0.2, omega=0.9, gamma=0.03),
+        gmes.CriticalPoint(amp=0.02, phi=-0.1, omega=1.1, gamma=0.04),
+    )
+    factories = {
+        "dielectric": lambda: gmes.Dielectric(eps_inf=1.7, mu_inf=1.05),
+        "drude-1": lambda: gmes.Drude(eps_inf=1.2, dps=(pole,)),
+        "lorentz-1": lambda: gmes.Lorentz(
+            eps_inf=1.2,
+            lps=(gmes.LorentzPole(amp=0.05, omega=0.8, gamma=0.03),),
+        ),
+        "dcp-ade": lambda: gmes.DcpAde(eps_inf=1.2, dps=(pole,), cps=critical_points),
+        "dcp-plrc": lambda: gmes.DcpPlrc(eps_inf=1.2, dps=(pole,), cps=critical_points),
+        "dcp-rc": lambda: gmes.DcpRc(eps_inf=1.2, dps=(pole,), cps=critical_points),
+        "dm2-1": lambda: gmes.Dm2(
+            eps_inf=1.2,
+            omega=(0.8,),
+            n_atom=(0.01,),
+            gamma=0.02,
+            rtol=1e-4,
+        ),
+    }
+    return factories[name]()
+
+
+def _crossover_geometry(spec):
+    """Construct the fixed fragmented coverage workload through public models."""
+    size = np.maximum(np.asarray(spec["size"], dtype=float), 1.0)
+    families = (
+        "drude-1",
+        "lorentz-1",
+        "dcp-ade",
+        "dcp-plrc",
+        "dcp-rc",
+        "dm2-1",
+    )
+    geometry = [
+        gmes.DefaultMedium(_crossover_material("dielectric")),
+        gmes.Shell(gmes.Cpml(), thickness=max(0.25, min(size) * 0.04)),
+    ]
+    total_width = max(
+        size[0] * float(spec["coverage_percent"]) / 100,
+        len(families) / spec["resolution"],
+    )
+    family_width = total_width / len(families)
+    origin = -0.5 * total_width
+    fragments = 4
+    for family_index, family in enumerate(families):
+        for fragment in range(fragments):
+            width = family_width / fragments
+            center_x = (
+                origin + (family_index + (fragment + 0.5) / fragments) * family_width
+            )
+            height = size[1] / fragments
+            center_y = -0.5 * size[1] + (fragment + 0.5) * height
+            geometry.append(
+                gmes.Block(
+                    _crossover_material(family),
+                    center=(center_x, center_y, 0),
+                    size=(width * 0.92, height * 0.82, size[2]),
+                )
+            )
+    return geometry
+
+
+def _crossover_sources(spec):
+    return [
+        gmes.PointSource(
+            src_time=gmes.Continuous(freq=0.35),
+            center=(0, 0, 0),
+            component=gmes.Ex,
+            amp=float(spec.get("source_amp", 1e-3)),
+        )
+    ]
+
+
+def _crossover_initial_fields(shapes, *, seed, scale):
+    """Return deterministic nonzero fields without an executable oracle import."""
+    rng = np.random.default_rng(seed)
+    fields = {}
+    for name in _COMPONENTS:
+        shape = tuple(int(length) for length in shapes[name])
+        values = scale * (1 + 0.1 * rng.random())
+        for axis, length in enumerate(shape):
+            ramp_shape = [1] * len(shape)
+            ramp_shape[axis] = length
+            values = values + (
+                scale
+                * 1e-6
+                * (axis + 1)
+                * np.linspace(0, 1, length).reshape(ramp_shape)
+            )
+        fields[name] = np.broadcast_to(values, shape).copy()
+    return fields
+
+
 def _geometry(material_type):
     return [
         gmes.DefaultMedium(gmes.Dielectric(eps_inf=2.5, mu_inf=1.2)),
@@ -35,7 +129,7 @@ def _geometry(material_type):
     ]
 
 
-def _native_and_torch(
+def _reference_and_torch(
     material_type,
     *,
     size=(2, 2, 2),
@@ -48,16 +142,21 @@ def _native_and_torch(
     geometry=None,
 ):
     geometry = _geometry(material_type) if geometry is None else geometry
-    native = gmes.FDTD(
-        gmes.Cartesian(size, resolution),
-        geometry,
+    reference = gmes.TorchSimulation(
+        space=gmes.Cartesian(size, resolution),
+        geometry=copy.deepcopy(geometry),
+        runtime=gmes.TorchRuntimeConfig(
+            device="cpu",
+            precision="float64",
+            execution_policy="dense",
+            planner_tile_size=16,
+            cpu_threads=2,
+        ),
         bloch=bloch,
-        verbose=False,
     )
-    native.init()
     simulation = gmes.TorchSimulation(
         space=gmes.Cartesian(size, resolution),
-        geometry=geometry,
+        geometry=copy.deepcopy(geometry),
         runtime=gmes.TorchRuntimeConfig(
             device=device,
             precision=precision,
@@ -70,26 +169,19 @@ def _native_and_torch(
     )
     rng = np.random.default_rng(118)
     fields = {}
-    for component, values in native.field.items():
+    for name, values in reference.state.host_snapshot().items():
         seeded = rng.normal(size=values.shape) * 1e-3
         if bloch is not None:
             seeded = seeded + 1j * rng.normal(size=values.shape) * 1e-3
-        values[...] = seeded
-        fields[component.__name__] = seeded.copy()
+        fields[name] = seeded
+    reference.load_host_fields(fields)
     simulation.load_host_fields(fields)
-    return native, simulation
+    return reference, simulation
 
 
-def _native_pml_updater(native, component, model):
-    return next(
-        updater
-        for updater in native.pw_material[getattr(gmes, component)].values()
-        if model.__name__ in type(updater).__name__
-    )
-
-
-def _assert_oracle(test, native, simulation, model, precision):
-    complex_values = native.cmplx
+def _assert_reference(test, reference, simulation, model, precision):
+    expected_fields = reference.state.host_snapshot()
+    complex_values = np.iscomplexobj(expected_fields["Ex"])
     tolerance_name = (
         ("complex128" if precision == "float64" else "complex64")
         if complex_values
@@ -98,12 +190,12 @@ def _assert_oracle(test, native, simulation, model, precision):
     tolerance = _TOLERANCES[tolerance_name]
     snapshot = simulation.state.host_snapshot()
     states = simulation.state.pml_state_snapshot()
-    width = 1 if model is gmes.Upml else 2
+    reference_states = reference.state.pml_state_snapshot()
     model_name = model.__name__.lower()
     for component in _COMPONENTS:
         np.testing.assert_allclose(
             snapshot[component],
-            native.field[getattr(gmes, component)],
+            expected_fields[component],
             rtol=tolerance["rtol"],
             atol=tolerance["atol"],
             err_msg=component,
@@ -114,44 +206,66 @@ def _assert_oracle(test, native, simulation, model, precision):
             for index, bucket in enumerate(component_plan.buckets)
             if bucket.signature.model == model_name
         )
-        updater = _native_pml_updater(native, component, model)
-        indices = np.asarray(updater.oracle_indices(), dtype=np.int64).reshape(-1, 3)
-        np.testing.assert_array_equal(
-            bucket.targets,
-            np.ravel_multi_index(indices.T, component_plan.shape),
+        reference_plan = reference.plan.components[component]
+        reference_index, reference_bucket = next(
+            (index, bucket)
+            for index, bucket in enumerate(reference_plan.buckets)
+            if bucket.signature.model == model_name
         )
-        expected_state = np.asarray(updater.oracle_state()).reshape(-1, width)
+        np.testing.assert_array_equal(bucket.targets, reference_bucket.targets)
         np.testing.assert_allclose(
             states[f"pml_{component.lower()}_{bucket_index}_state"],
-            expected_state,
+            reference_states[f"pml_{component.lower()}_{reference_index}_state"],
             rtol=tolerance["rtol"],
             atol=tolerance["atol"],
             err_msg=f"{component} state",
         )
 
 
-def _native_state_rows(native, component_name, updater_prefix, width):
-    component = getattr(gmes, component_name)
-    updater = next(
-        updater
-        for updater in native.pw_material[component].values()
-        if type(updater).__name__.startswith(updater_prefix)
-    )
-    indices = np.asarray(updater.oracle_indices(), dtype=np.int64).reshape(-1, 3)
-    targets = np.ravel_multi_index(indices.T, native.field[component].shape)
-    state = np.asarray(updater.oracle_state(), dtype=np.complex128).reshape(
-        len(targets), width
-    )
-    return targets, state
-
-
-def _select_native_rows(native_targets, native_state, torch_targets):
-    positions = {int(target): index for index, target in enumerate(native_targets)}
-    return native_state[[positions[int(target)] for target in torch_targets]]
-
-
 def _host_array(value):
     return value.detach().cpu().numpy()
+
+
+def _pml_profile_formula(material, coordinate, axis):
+    """Return sigma, kappa, and alpha from the published grading equations."""
+    offset = coordinate - material.center[axis]
+    half_size = material.half_size[axis]
+    if offset <= material.d - half_size:
+        depth = np.clip((half_size + offset) / material.d, 0.0, 1.0)
+        boundary = True
+    elif half_size - material.d <= offset:
+        depth = np.clip((half_size - offset) / material.d, 0.0, 1.0)
+        boundary = True
+    else:
+        depth = 1.0
+        boundary = False
+    graded = (1.0 - depth) ** material.m
+    sigma = material.sigma_max[axis] * graded
+    kappa = 1.0 + (material.kappa_max - 1.0) * graded
+    alpha = (
+        material.a_max * depth**material.m_a
+        if boundary and isinstance(material, gmes.Cpml)
+        else 0.0
+    )
+    return sigma, kappa, alpha
+
+
+def _upml_coefficients_formula(material, coordinate, axis):
+    sigma, kappa, _ = _pml_profile_formula(material, coordinate, axis)
+    denominator = 2.0 * kappa + sigma * material.dt
+    return (
+        (2.0 * kappa - sigma * material.dt) / denominator,
+        2.0 * material.dt / denominator,
+        1.0 / denominator,
+    )
+
+
+def _cpml_coefficients_formula(material, coordinate, axis):
+    sigma, kappa, alpha = _pml_profile_formula(material, coordinate, axis)
+    decay = np.exp(-(sigma / kappa + alpha) * material.dt)
+    denominator = (sigma + kappa * alpha) * kappa
+    memory = 0.0 if denominator == 0.0 else sigma * (decay - 1.0) / denominator
+    return decay, memory, kappa
 
 
 def _torch_dispersive_rows(simulation, descriptor):
@@ -190,8 +304,8 @@ def _torch_dispersive_rows(simulation, descriptor):
         pole_state = persistent("pole_state")[..., 0].T
         point_values = persistent("point_state")
         point_state = (point_values[..., 0] + 1j * point_values[..., 1])[..., 0].T
-        # Native real-field PLRC/RC updaters retain structurally zero state for
-        # the absent imaginary field channel; Torch deliberately omits it.
+        # The full complex PLRC/RC row layout reserves a structurally zero
+        # imaginary channel; the real-only Torch state stores only live values.
         state = np.concatenate(
             (
                 pole_state,
@@ -206,6 +320,72 @@ def _torch_dispersive_rows(simulation, descriptor):
 
 
 class TorchPmlOracleTest(unittest.TestCase):
+    def test_one_cell_state_recurrences_match_explicit_scalar_equations(self):
+        field = torch.tensor([0.25], dtype=torch.float64)
+        source1 = torch.tensor([0.8, -0.2], dtype=torch.float64)
+        source2 = torch.tensor([0.4, -0.6], dtype=torch.float64)
+        targets = torch.tensor([0], dtype=torch.int64)
+        stencil = torch.tensor([[0, 1, 0, 1]], dtype=torch.int64)
+        scratch = tuple(torch.zeros(1, dtype=torch.float64) for _ in range(3))
+        scale1, scale2, direction = 2.0, 0.5, -1.0
+        difference1 = (0.8 - -0.2) * scale1
+        difference2 = (0.4 - -0.6) * scale2
+
+        upml_coefficients = np.asarray(
+            [[0.7, 0.8, 0.3, 0.9, 0.4, 1.2, 0.6]], dtype=np.float64
+        )
+        upml_state = torch.tensor([[0.15]], dtype=torch.float64)
+        old_memory = float(upml_state[0, 0])
+        curl = (difference1 - difference2) * direction
+        new_memory = 0.8 * old_memory + 0.3 * curl
+        expected_field = 0.9 * 0.25 + 0.4 * 0.7 * (1.2 * new_memory - 0.6 * old_memory)
+        gmes.torch_fdtd._upml_bucket_update(
+            field,
+            source1,
+            source2,
+            targets,
+            stencil,
+            torch.from_numpy(upml_coefficients),
+            upml_state,
+            *scratch,
+            scale1,
+            scale2,
+            direction,
+            False,
+        )
+        self.assertAlmostEqual(float(field[0]), expected_field)
+        self.assertAlmostEqual(float(upml_state[0, 0]), new_memory)
+
+        field.fill_(0.25)
+        cpml_coefficients = np.asarray(
+            [[0.7, 0.8, -0.3, 1.4, 0.6, -0.2, 1.5]], dtype=np.float64
+        )
+        cpml_state = torch.tensor([[0.15, -0.05]], dtype=torch.float64)
+        psi1 = 0.8 * 0.15 - 0.3 * difference1
+        psi2 = 0.6 * -0.05 - 0.2 * difference2
+        expected_field = 0.25 + 0.7 * 0.1 * direction * (
+            difference1 / 1.4 + psi1 - difference2 / 1.5 - psi2
+        )
+        gmes.torch_fdtd._cpml_bucket_update(
+            field,
+            source1,
+            source2,
+            targets,
+            stencil,
+            torch.from_numpy(cpml_coefficients),
+            cpml_state,
+            *scratch,
+            scale1,
+            scale2,
+            direction,
+            0.1,
+            False,
+        )
+        self.assertAlmostEqual(float(field[0]), expected_field)
+        np.testing.assert_allclose(
+            cpml_state.numpy(), [[psi1, psi2]], rtol=0, atol=1e-15
+        )
+
     def test_nonzero_fields_and_state_match_at_reference_steps(self):
         cases = (
             (gmes.Upml, "eager"),
@@ -216,7 +396,7 @@ class TorchPmlOracleTest(unittest.TestCase):
             with self.subTest(model=model.__name__, compile_policy=compile_policy):
                 if compile_policy == "compile":
                     torch._dynamo.reset()
-                native, simulation = _native_and_torch(
+                reference, simulation = _reference_and_torch(
                     model,
                     compile_policy=compile_policy,
                 )
@@ -225,8 +405,8 @@ class TorchPmlOracleTest(unittest.TestCase):
                     delta = target - completed
                     simulation.advance(delta)
                     for _ in range(delta):
-                        native.step()
-                    _assert_oracle(self, native, simulation, model, "float64")
+                        reference.step()
+                    _assert_reference(self, reference, simulation, model, "float64")
                     completed = target
 
     def test_float32_and_paired_real_bloch_use_model_tolerances(self):
@@ -240,7 +420,7 @@ class TorchPmlOracleTest(unittest.TestCase):
                 with self.subTest(
                     model=model.__name__, precision=precision, bloch=bool(bloch)
                 ):
-                    native, simulation = _native_and_torch(
+                    reference, simulation = _reference_and_torch(
                         model,
                         precision=precision,
                         bloch=bloch,
@@ -253,22 +433,22 @@ class TorchPmlOracleTest(unittest.TestCase):
                     )
                     simulation.advance(5)
                     for _ in range(5):
-                        native.step()
-                    _assert_oracle(self, native, simulation, model, precision)
+                        reference.step()
+                    _assert_reference(self, reference, simulation, model, precision)
 
-    def test_collapsed_1d_2d_and_3d_modes_match_native(self):
+    def test_collapsed_1d_2d_and_3d_modes_match_dense_reference(self):
         for size in ((4, 0, 0), (4, 3, 0), (3, 3, 2)):
             for model in (gmes.Upml, gmes.Cpml):
                 with self.subTest(size=size, model=model.__name__):
-                    native, simulation = _native_and_torch(
+                    reference, simulation = _reference_and_torch(
                         model,
                         size=size,
                         compile_policy="compile" if model is gmes.Cpml else "eager",
                     )
                     simulation.advance(5)
                     for _ in range(5):
-                        native.step()
-                    _assert_oracle(self, native, simulation, model, "float64")
+                        reference.step()
+                    _assert_reference(self, reference, simulation, model, "float64")
 
     def test_shell_corners_use_mixed_underlying_media(self):
         geometry = [
@@ -280,7 +460,7 @@ class TorchPmlOracleTest(unittest.TestCase):
             ),
             gmes.Shell(gmes.Cpml(), thickness=0.75),
         ]
-        native, simulation = _native_and_torch(
+        reference, simulation = _reference_and_torch(
             gmes.Cpml,
             size=(2, 2, 2),
             resolution=4,
@@ -288,8 +468,8 @@ class TorchPmlOracleTest(unittest.TestCase):
         )
         simulation.advance(5)
         for _ in range(5):
-            native.step()
-        _assert_oracle(self, native, simulation, gmes.Cpml, "float64")
+            reference.step()
+        _assert_reference(self, reference, simulation, gmes.Cpml, "float64")
         for component in simulation.plan.components.values():
             bucket = next(
                 bucket
@@ -302,11 +482,11 @@ class TorchPmlOracleTest(unittest.TestCase):
     def test_forced_execution_policies_are_oracle_equivalent(self):
         for policy in ("dense", "compact", "tiled"):
             with self.subTest(policy=policy):
-                native, simulation = _native_and_torch(gmes.Cpml, policy=policy)
+                reference, simulation = _reference_and_torch(gmes.Cpml, policy=policy)
                 simulation.advance(5)
                 for _ in range(5):
-                    native.step()
-                _assert_oracle(self, native, simulation, gmes.Cpml, "float64")
+                    reference.step()
+                _assert_reference(self, reference, simulation, gmes.Cpml, "float64")
                 self.assertEqual(
                     {
                         bucket.selected_policy
@@ -316,11 +496,11 @@ class TorchPmlOracleTest(unittest.TestCase):
                     {policy},
                 )
 
-    def test_compiled_z_collapsed_specialization_matches_native(self):
+    def test_compiled_z_collapsed_specialization_matches_dense_reference(self):
         for model in (gmes.Upml, gmes.Cpml):
             with self.subTest(model=model.__name__):
                 torch._dynamo.reset()
-                native, simulation = _native_and_torch(
+                reference, simulation = _reference_and_torch(
                     model,
                     size=(4, 4, 0),
                     resolution=3,
@@ -332,10 +512,10 @@ class TorchPmlOracleTest(unittest.TestCase):
                 )
                 simulation.advance(5)
                 for _ in range(5):
-                    native.step()
-                _assert_oracle(self, native, simulation, model, "float64")
+                    reference.step()
+                _assert_reference(self, reference, simulation, model, "float64")
 
-    def test_compiled_custom_kappa_sparse_residual_matches_native(self):
+    def test_compiled_custom_kappa_sparse_residual_matches_dense_reference(self):
         for precision in ("float64", "float32"):
             with self.subTest(precision=precision):
                 geometry = [
@@ -347,7 +527,7 @@ class TorchPmlOracleTest(unittest.TestCase):
                     ),
                     gmes.Shell(gmes.Cpml(kappa_max=3.0), thickness=0.75),
                 ]
-                native, simulation = _native_and_torch(
+                reference, simulation = _reference_and_torch(
                     gmes.Cpml,
                     size=(2, 2, 2),
                     resolution=4,
@@ -360,10 +540,10 @@ class TorchPmlOracleTest(unittest.TestCase):
                     delta = target - completed
                     simulation.advance(delta)
                     for _ in range(delta):
-                        native.step()
-                    _assert_oracle(
+                        reference.step()
+                    _assert_reference(
                         self,
-                        native,
+                        reference,
                         simulation,
                         gmes.Cpml,
                         precision,
@@ -379,7 +559,7 @@ class TorchPmlOracleTest(unittest.TestCase):
             gmes.DefaultMedium(gmes.Dielectric(eps_inf=2.5, mu_inf=1.2)),
             gmes.Shell(gmes.Cpml(kappa_max=1e8), thickness=0.5),
         ]
-        native, simulation = _native_and_torch(
+        reference, simulation = _reference_and_torch(
             gmes.Cpml,
             precision="float32",
             compile_policy="compile",
@@ -387,36 +567,43 @@ class TorchPmlOracleTest(unittest.TestCase):
         )
         simulation.advance(5)
         for _ in range(5):
-            native.step()
-        _assert_oracle(self, native, simulation, gmes.Cpml, "float32")
+            reference.step()
+        _assert_reference(self, reference, simulation, gmes.Cpml, "float32")
         self.assertEqual(
             simulation.diagnostics()["pml"]["execution_representation"],
             DEFAULT_CPML_REPRESENTATION,
         )
 
-    def test_compiled_cpu_crossover_manifest_matches_complete_native_state(self):
+    def test_compiled_cpu_crossover_manifest_matches_dense_reference_state(self):
         torch._dynamo.reset()
-        spec = find_case(_MANIFEST, "cpu-crossover-2d")
+        spec = next(
+            item
+            for item in _MANIFEST["benchmarks"]
+            if item["name"] == "cpu-crossover-2d"
+        )
         reference = _MANIFEST["reference"]
 
         def geometry():
-            return _coverage_geometry(spec, gmes)
+            return _crossover_geometry(spec)
 
         def sources():
-            return _build_sources(spec, gmes)
+            return _crossover_sources(spec)
 
-        native = gmes.FDTD(
-            gmes.Cartesian(tuple(spec["size"]), spec["resolution"]),
-            geometry(),
-            sources(),
-            verbose=False,
+        reference_simulation = gmes.TorchSimulation(
+            space=gmes.Cartesian(tuple(spec["size"]), spec["resolution"]),
+            geometry=geometry(),
+            sources=sources(),
+            runtime=gmes.TorchRuntimeConfig(
+                device="cpu",
+                precision="float64",
+                execution_policy="dense",
+                cpu_threads=2,
+            ),
         )
-        native.init()
         simulation = gmes.TorchSimulation(
             space=gmes.Cartesian(tuple(spec["size"]), spec["resolution"]),
             geometry=geometry(),
             sources=sources(),
-            dt=native.time_step.dt,
             runtime=gmes.TorchRuntimeConfig(
                 device="cpu",
                 precision="float64",
@@ -424,18 +611,16 @@ class TorchPmlOracleTest(unittest.TestCase):
                 cpu_threads=2,
             ),
         )
-        fields = initial_field_values(
+        fields = _crossover_initial_fields(
             simulation.plan.shapes,
-            reference["seed"],
-            reference["field_scale"],
+            seed=reference["seed"],
+            scale=reference["field_scale"],
         )
-        for component, native_field in native.field.items():
-            native_field[...] = fields[component.__name__]
+        reference_simulation.load_host_fields(fields)
         simulation.load_host_fields(fields)
 
         simulation.advance(5)
-        for _ in range(5):
-            native.step()
+        reference_simulation.advance(5)
 
         for bucket_state in simulation.state.dm2_buckets:
             self.assertGreater(
@@ -456,101 +641,82 @@ class TorchPmlOracleTest(unittest.TestCase):
         tolerance = _MANIFEST["tolerances"]["torch"]["mixed"]["float64"]
         persistent = simulation.state.checkpoint()
         compared_dm2 = set()
-        for index, bucket_state in enumerate(simulation.state.dm2_buckets):
-            metadata = bucket_state.metadata
-            native_targets, native_values = _native_state_rows(
-                native,
-                metadata.component,
-                "Dm2",
-                metadata.transition_count * 3,
-            )
-            native_values = native_values.real.reshape(
-                len(native_targets), metadata.transition_count, 3
-            )
-            torch_targets = _host_array(
-                getattr(simulation.plan, f"{metadata.prefix}_targets")
-            )
-            self.assertEqual(set(torch_targets), set(native_targets))
+        actual_dm2 = simulation.dm2_state_snapshot()
+        reference_dm2 = reference_simulation.dm2_state_snapshot()
+        self.assertEqual(len(actual_dm2), len(reference_dm2))
+        for index, (actual, expected) in enumerate(zip(actual_dm2, reference_dm2)):
+            self.assertEqual(actual["component"], expected["component"])
+            np.testing.assert_array_equal(actual["targets"], expected["targets"])
             np.testing.assert_allclose(
-                _host_array(bucket_state.u).transpose(1, 2, 0),
-                _select_native_rows(native_targets, native_values, torch_targets),
+                actual["u"],
+                expected["u"],
                 rtol=tolerance["rtol"],
                 atol=tolerance["atol"],
-                err_msg=f"{metadata.component} DM2 state",
+                err_msg=f"{actual['component']} DM2 state",
             )
             compared_dm2.add(f"dm2_buckets.{index}.u")
         expected_dm2 = {name for name in persistent if name.startswith("dm2_buckets.")}
         self.assertEqual(compared_dm2, expected_dm2)
         pml_state = simulation.state.pml_state_snapshot()
-        compared_pml = set()
-        for component_name in _COMPONENTS:
-            component_plan = simulation.plan.components[component_name]
-            bucket_index, bucket = next(
-                (index, bucket)
-                for index, bucket in enumerate(component_plan.buckets)
-                if bucket.signature.model == "cpml"
-            )
-            native_targets, native_values = _native_state_rows(
-                native, component_name, "Cpml", 2
-            )
-            torch_targets = np.asarray(bucket.targets, dtype=np.int64)
-            self.assertEqual(set(torch_targets), set(native_targets))
-            state_name = f"pml_{component_name.lower()}_{bucket_index}_state"
+        reference_pml = reference_simulation.state.pml_state_snapshot()
+        self.assertEqual(set(pml_state), set(reference_pml))
+        for state_name, actual in pml_state.items():
             np.testing.assert_allclose(
-                pml_state[state_name],
-                _select_native_rows(native_targets, native_values, torch_targets),
+                actual,
+                reference_pml[state_name],
                 rtol=tolerance["rtol"],
                 atol=tolerance["atol"],
-                err_msg=f"{component_name} CPML state",
+                err_msg=state_name,
             )
-            compared_pml.add(state_name)
+        compared_pml = set(pml_state)
         expected_pml = {name for name in persistent if name.startswith("pml_")}
         self.assertEqual(compared_pml, expected_pml)
 
-        updater_prefixes = {
-            "drude": "Drude",
-            "lorentz": "Lorentz",
-            "dcp-ade": "DcpAde",
-            "dcp-plrc": "DcpPlrc",
-            "dcp-rc": "DcpPlrc",
-        }
         compared_dispersive = set()
-        covered_targets = {}
-        native_target_sets = {}
-        for descriptor in simulation.plan.dispersive_buckets:
+        reference_descriptors = reference_simulation.plan.dispersive_buckets
+        self.assertEqual(
+            len(simulation.plan.dispersive_buckets), len(reference_descriptors)
+        )
+        for descriptor, reference_descriptor in zip(
+            simulation.plan.dispersive_buckets, reference_descriptors
+        ):
             actual, width, names = _torch_dispersive_rows(simulation, descriptor)
-            updater_prefix = updater_prefixes[descriptor.model]
-            native_targets, native_values = _native_state_rows(
-                native,
-                descriptor.component,
-                updater_prefix,
-                width,
+            expected, reference_width, reference_names = _torch_dispersive_rows(
+                reference_simulation, reference_descriptor
             )
             torch_targets = _host_array(
                 getattr(simulation.plan, f"{descriptor.prefix}_targets")
             )
+            reference_targets = _host_array(
+                getattr(
+                    reference_simulation.plan,
+                    f"{reference_descriptor.prefix}_targets",
+                )
+            )
+            self.assertEqual(descriptor.component, reference_descriptor.component)
+            self.assertEqual(descriptor.model, reference_descriptor.model)
+            self.assertEqual(width, reference_width)
+            self.assertEqual(names, reference_names)
+            np.testing.assert_array_equal(torch_targets, reference_targets)
             np.testing.assert_allclose(
                 actual,
-                _select_native_rows(native_targets, native_values, torch_targets),
+                expected,
                 rtol=tolerance["rtol"],
                 atol=tolerance["atol"],
                 err_msg=f"{descriptor.component} {descriptor.model} state",
             )
-            key = (descriptor.component, updater_prefix)
-            covered_targets.setdefault(key, set()).update(map(int, torch_targets))
-            native_target_sets.setdefault(key, set()).update(map(int, native_targets))
             compared_dispersive.update(names)
-        self.assertEqual(covered_targets, native_target_sets)
         expected_dispersive = {
             name for name in persistent if name.startswith("bucket_")
         }
         self.assertEqual(compared_dispersive, expected_dispersive)
 
         actual_fields = simulation.state.host_snapshot()
+        reference_fields = reference_simulation.state.host_snapshot()
         for component_name in _COMPONENTS:
             np.testing.assert_allclose(
                 actual_fields[component_name],
-                native.field[getattr(gmes, component_name)],
+                reference_fields[component_name],
                 rtol=tolerance["rtol"],
                 atol=tolerance["atol"],
                 err_msg=f"{component_name} field",
@@ -563,11 +729,13 @@ class TorchPmlOracleTest(unittest.TestCase):
             )
         self.assertEqual(int(simulation.state.step_count), 5)
         self.assertAlmostEqual(
-            float(simulation.state.source_time), native.time_step.t, places=14
+            float(simulation.state.source_time),
+            float(reference_simulation.state.source_time),
+            places=14,
         )
 
-    def test_long_run_absorbs_seeded_energy_like_native(self):
-        native, simulation = _native_and_torch(
+    def test_long_run_absorbs_seeded_energy_like_dense_reference(self):
+        reference, simulation = _reference_and_torch(
             gmes.Cpml,
             size=(4, 4, 0),
             resolution=3,
@@ -579,8 +747,8 @@ class TorchPmlOracleTest(unittest.TestCase):
         )
         simulation.advance(200)
         for _ in range(200):
-            native.step()
-        _assert_oracle(self, native, simulation, gmes.Cpml, "float64")
+            reference.step()
+        _assert_reference(self, reference, simulation, gmes.Cpml, "float64")
         final_energy = sum(
             float(np.square(np.abs(values)).sum())
             for values in simulation.state.host_snapshot().values()
@@ -655,63 +823,53 @@ class TorchPmlStorageTest(unittest.TestCase):
                 first, second, field = axes_by_component[component_name]
                 base = bucket.cell_coefficients[:, 0]
                 if model is gmes.Upml:
+                    first_coefficients = [
+                        _upml_coefficients_formula(material, value, first)
+                        for value in coordinates[:, first]
+                    ]
+                    second_coefficients = [
+                        _upml_coefficients_formula(material, value, second)
+                        for value in coordinates[:, second]
+                    ]
+                    field_profiles = [
+                        _pml_profile_formula(material, value, field)
+                        for value in coordinates[:, field]
+                    ]
                     expected = np.column_stack(
                         (
                             base,
+                            [value[0] for value in first_coefficients],
+                            [value[1] for value in first_coefficients],
+                            [value[0] for value in second_coefficients],
+                            [value[2] for value in second_coefficients],
                             [
-                                material.c1(value, first)
-                                for value in coordinates[:, first]
+                                2.0 * kappa + sigma * material.dt
+                                for sigma, kappa, _ in field_profiles
                             ],
                             [
-                                material.c2(value, first)
-                                for value in coordinates[:, first]
-                            ],
-                            [
-                                material.c3(value, second)
-                                for value in coordinates[:, second]
-                            ],
-                            [
-                                material.c4(value, second)
-                                for value in coordinates[:, second]
-                            ],
-                            [
-                                material.c5(value, field)
-                                for value in coordinates[:, field]
-                            ],
-                            [
-                                material.c6(value, field)
-                                for value in coordinates[:, field]
+                                2.0 * kappa - sigma * material.dt
+                                for sigma, kappa, _ in field_profiles
                             ],
                         )
                     )
                 else:
+                    first_coefficients = [
+                        _cpml_coefficients_formula(material, value, first)
+                        for value in coordinates[:, first]
+                    ]
+                    second_coefficients = [
+                        _cpml_coefficients_formula(material, value, second)
+                        for value in coordinates[:, second]
+                    ]
                     expected = np.column_stack(
                         (
                             base,
-                            [
-                                material.b(value, first)
-                                for value in coordinates[:, first]
-                            ],
-                            [
-                                material.c(value, first)
-                                for value in coordinates[:, first]
-                            ],
-                            [
-                                material.kappa(value, first)
-                                for value in coordinates[:, first]
-                            ],
-                            [
-                                material.b(value, second)
-                                for value in coordinates[:, second]
-                            ],
-                            [
-                                material.c(value, second)
-                                for value in coordinates[:, second]
-                            ],
-                            [
-                                material.kappa(value, second)
-                                for value in coordinates[:, second]
-                            ],
+                            [value[0] for value in first_coefficients],
+                            [value[1] for value in first_coefficients],
+                            [value[2] for value in first_coefficients],
+                            [value[0] for value in second_coefficients],
+                            [value[1] for value in second_coefficients],
+                            [value[2] for value in second_coefficients],
                         )
                     )
                 np.testing.assert_allclose(
@@ -814,7 +972,7 @@ class TorchPmlStorageTest(unittest.TestCase):
             simulation.load_checkpoint(invalid)
 
     def test_warm_execution_and_checkpoint_keep_fixed_device_storage(self):
-        _native, simulation = _native_and_torch(gmes.Upml)
+        _reference, simulation = _reference_and_torch(gmes.Upml)
         simulation.advance(2)
         addresses = simulation.buffer_addresses()
         checkpoint = simulation.state.checkpoint()
@@ -829,11 +987,13 @@ class TorchPmlStorageTest(unittest.TestCase):
 
     def test_cpu_fullgraph_has_no_graph_break_or_storage_change(self):
         torch._dynamo.reset()
-        native, simulation = _native_and_torch(gmes.Cpml, compile_policy="compile")
+        reference, simulation = _reference_and_torch(
+            gmes.Cpml, compile_policy="compile"
+        )
         simulation.advance(2)
         for _ in range(2):
-            native.step()
-        _assert_oracle(self, native, simulation, gmes.Cpml, "float64")
+            reference.step()
+        _assert_reference(self, reference, simulation, gmes.Cpml, "float64")
         self.assertEqual(torch._dynamo.utils.counters["graph_break"], {})
         addresses = simulation.buffer_addresses()
         simulation.advance(3)
@@ -844,7 +1004,7 @@ class TorchPmlStorageTest(unittest.TestCase):
         for compile_policy in ("eager", "compile"):
             for model in (gmes.Upml, gmes.Cpml):
                 with self.subTest(compile_policy=compile_policy, model=model.__name__):
-                    native, simulation = _native_and_torch(
+                    reference, simulation = _reference_and_torch(
                         model,
                         precision="float32",
                         compile_policy=compile_policy,
@@ -856,9 +1016,9 @@ class TorchPmlStorageTest(unittest.TestCase):
                     addresses = simulation.buffer_addresses()
                     simulation.advance(5)
                     for _ in range(7):
-                        native.step()
+                        reference.step()
                     torch.cuda.synchronize(simulation.device)
-                    _assert_oracle(self, native, simulation, model, "float32")
+                    _assert_reference(self, reference, simulation, model, "float32")
                     self.assertEqual(addresses, simulation.buffer_addresses())
                     self.assertEqual(
                         allocated,

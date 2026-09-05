@@ -1,41 +1,36 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
+"""Two-dimensional TMz cylindrical-wave propagation in air."""
 
-"""Models two-dimensional TMz cylindrical-wave propagation in air.
+import argparse
+import math
 
-This script models two-dimensional TMz cylindrical-wave
-propagation in air. A single Ez component located at the center of
-the space oscillates sinusoidally. A simple on-time visualization
-display will show the Ez, Hx, and Hy fields of the outgoing wave
-distributed within the grid. You can compare the spatial-symmetry
-properties of these fields with respect to the center of the space
-where the excitation is applied.
-
-"""
-
-from gmes import *
+import gmes
 
 SIZE = (10, 10, 0)
-DISPLAY_COMPONENTS = (Ez, Hx, Hy)
+DISPLAY_COMPONENTS = (gmes.Ez, gmes.Hx, gmes.Hy)
 
 
-def make_simulation(verbose=True):
-    space = Cartesian(size=SIZE, resolution=20)
-    geom_list = [DefaultMedium(material=Dielectric()), Shell(material=Cpml())]
-    src_list = [
-        PointSource(src_time=Continuous(freq=0.8), center=(0, 0, 0), component=Ez)
-    ]
-    return TMzFDTD(space, geom_list, src_list, verbose=verbose)
+def make_simulation(verbose=False):
+    return gmes.TorchSimulation(
+        space=gmes.Cartesian(size=SIZE, resolution=20),
+        geometry=[gmes.DefaultMedium(gmes.Dielectric()), gmes.Shell(gmes.Cpml())],
+        sources=[gmes.PointSource(gmes.Continuous(0.8), (0, 0, 0), gmes.Ez)],
+        runtime=gmes.TorchRuntimeConfig(device="cpu", cpu_threads=1),
+    )
 
 
-def main():
+def run(until=10):
     simulation = make_simulation()
-    simulation.init()
-    for component in DISPLAY_COMPONENTS:
-        simulation.show_field(component, Z, 0)
-    simulation.step_until_t(10)
-    simulation.write_field(Ez, (-5, -5, 0), (5, 5, 0))
+    simulation.advance(math.ceil(until / simulation.plan.dt))
+    return simulation.host_snapshot()
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--steps", type=int)
+    parser.add_argument("--no-plot", action="store_true")
+    arguments = parser.parse_args()
+    if arguments.steps is None:
+        run()
+    else:
+        simulation = make_simulation()
+        simulation.advance(arguments.steps)

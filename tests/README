@@ -4,5 +4,10 @@ migration contracts.
 Install the package in an isolated environment, then run all tests from
 the repository root:
 
-$ uv sync --locked --extra hdf5
+$ uv sync --locked --extra torch-cpu --extra hdf5
 $ uv run --no-sync python -m unittest discover -v
+
+The CPU extra is the normal complete-suite selection. CUDA and two-GPU
+evidence requires a trusted runner with the required resources and is not
+silently replaced by a skipped local test. HDF5 tests remain optional when
+PyTables is unavailable.

@@ -9,14 +9,6 @@ import numpy as np
 from examples.air2d import DISPLAY_COMPONENTS
 from examples.air2d import make_simulation as make_air2d
 from examples.slab_waveguide import make_simulation
-from gmes.constant import Z
-
-try:
-    from gmes.show import Snapshot
-except ModuleNotFoundError as error:
-    if error.name != "matplotlib":
-        raise
-    Snapshot = None
 
 
 class ReadmeQuickStartTest(unittest.TestCase):
@@ -38,9 +30,8 @@ class ReadmeQuickStartTest(unittest.TestCase):
             from examples.air2d import make_simulation
 
             simulation = make_simulation(verbose=False)
-            simulation.init()
             simulation.step()
-            assert simulation.time_step.n == 1
+            assert int(simulation.state.step_count) == 1
             """)
 
         result = run(
@@ -52,29 +43,19 @@ class ReadmeQuickStartTest(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
-    @unittest.skipIf(Snapshot is None, "plot extra is not installed")
-    def test_air2d_plot_components_construct_with_plot_extra(self):
+    def test_air2d_snapshot_has_display_components(self):
         simulation = make_air2d(verbose=False)
-        simulation.init()
-
+        simulation.step()
+        snapshot = simulation.host_snapshot()
         for component in DISPLAY_COMPONENTS:
             with self.subTest(component=component.__name__):
-                snapshot = Snapshot(
-                    simulation,
-                    component,
-                    Z,
-                    cut=0,
-                    vrange=(-1, 1),
-                    title="",
-                    fig_id=0,
-                )
-                self.assertGreater(snapshot.data.size, 0)
+                self.assertGreater(snapshot[component.__name__].size, 0)
 
 
 class SlabWaveguideExampleTest(unittest.TestCase):
     def test_finite_slab_covers_the_intended_waveguide(self):
         simulation = make_simulation(verbose=False)
-        slab = simulation.geom_list[1]
+        slab = simulation.geometry[1]
 
         self.assertTrue(np.isfinite(slab.size).all())
         for point in ((-6, 0, 0), (0, 0, 0), (6, 0, 0)):

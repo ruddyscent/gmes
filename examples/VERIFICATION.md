@@ -29,7 +29,7 @@ https://doi.org/10.1103/PhysRevA.52.3082.
 
 ### Dm2 implementation citation audit
 
-The two references at the start of `src/pw_dm2.hh` are appropriate, but they
+The two references recorded in the [pre-cutover Dm2 header](https://github.com/ruddyscent/gmes/blob/66a0a1aa8d6f163134967e8b8a7e9dc46530717b/src/pw_dm2.hh) are appropriate, but they
 support different parts of the implementation. The Ziolkowski paper is the
 primary source for the homogeneous two-level Maxwell-Bloch equations,
 exponential variables, and predictor-corrector updates in Eqs. (11)-(12) and

@@ -417,18 +417,3 @@ $RECYCLE.BIN/
 *.lnk
 
 # End of https://www.toptal.com/developers/gitignore/api/python,c++,macos,windows,linux,vim,visualstudiocode,video,images,audio
-
-### GMES ###
-# SWIG-generated Python modules and wrapper sources
-/gmes/constant.py
-/gmes/pw_material.py
-/src/constant.py
-/src/pw_material.py
-/src/*_wrap.cpp
-
-# Cython-generated C sources
-/src/material.c
-/src/pygeom.c
-
-# Emacs auto-save files
-*#

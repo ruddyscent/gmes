@@ -4,24 +4,19 @@ Notable changes to GMES are documented in this file.
 
 ## [Unreleased]
 
-### Added
-
-- Optional OpenMP parallelism for large native material-update loops, with
-  build-time fallback, runtime introspection, and a tunable cell threshold.
-- Repeatable field-update benchmarks for dielectric and dispersive workloads.
-
 ### Changed
 
-- Replace the untyped Cython material configuration layer with an
-  import-compatible Python module while keeping native field-update kernels.
-- Replace the remaining Cython geometry extension with an import-compatible
-  Python module and bounded NumPy region-ID lowering.
+- Make the Torch runtime the supported solver API and remove the retired
+  C++/SWIG solver, generated proxies, OpenMP controls, and MPI solver launch.
+- Build one universal pure-Python wheel and one sdist; GMES no longer requires
+  a compiler, SWIG, Cython, OpenMP, or system headers to install.
+- Make device, dtype, thread, compilation, probe, checkpoint, and external
+  observation boundaries explicit. This is a breaking API migration.
 
-### Fixed
+### Historical
 
-- macOS auto-detection now skips `libomp` runtimes whose minimum deployment
-  target is newer than the extension target instead of producing a
-  deceptively tagged wheel with a linker warning.
+- Keep recorded OpenMP measurements as pre-cutover evidence only; they are not
+  current build, tuning, or support promises.
 
 ## [0.10.0] - 2026-08-22
 

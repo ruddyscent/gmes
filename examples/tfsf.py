@@ -1,35 +1,31 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
+"""Launch a vacuum plane wave with a bounded Torch run."""
 
-"""Launch a planewave in vacuum.
+import math
 
-A simple example which showing how to use launch a planewave.
+import gmes
 
-"""
 
-from gmes import *
-
-SIZE = (5, 5, 0)
-
-space = Cartesian(size=SIZE, resolution=20)
-geom_list = [
-    DefaultMedium(material=Dielectric()),
-    Shell(material=Cpml(), thickness=0.5),
-]
-src_list = [
-    TotalFieldScatteredField(
-        src_time=Continuous(freq=0.8),
-        center=(0, 0, 0),
-        size=(3, 3, 1),
-        direction=(1, -1, 0),
-        polarization=(0, 0, 1),
+def make_simulation():
+    return gmes.TorchSimulation(
+        space=gmes.Cartesian((5, 5, 0), 20),
+        geometry=[
+            gmes.DefaultMedium(gmes.Dielectric()),
+            gmes.Shell(gmes.Cpml(), thickness=0.5),
+        ],
+        sources=[
+            gmes.TotalFieldScatteredField(
+                gmes.Continuous(0.8), (0, 0, 0), (3, 3, 1), (1, -1, 0), (0, 0, 1)
+            )
+        ],
+        runtime=gmes.TorchRuntimeConfig(device="cpu", cpu_threads=1),
     )
-]
 
-my_fdtd = TMzFDTD(space, geom_list, src_list)
 
-my_fdtd.init()
+def run(until=200):
+    simulation = make_simulation()
+    simulation.advance(math.ceil(until / simulation.plan.dt))
+    return simulation.host_snapshot()
 
-my_fdtd.show_field(Ez, Z, 0)
-# my_fdtd.write_field(Ez, (-5,-5,0), (5,5,0))
-my_fdtd.step_until_t(200)
+
+if __name__ == "__main__":
+    run()

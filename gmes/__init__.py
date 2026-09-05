@@ -22,67 +22,131 @@
 ##    Kyungwon Chun
 ##    kwchun@gist.ac.kr
 
-"""Simulate electromagnetic fields with legacy native and PyTorch FDTD backends.
+"""Public API for GMES's Torch-only FDTD runtime."""
 
-GMES implements the explicit finite-difference time-domain (FDTD) method
-for one-, two-, and three-dimensional Cartesian photonic simulations. The
-legacy API maps NumPy field arrays to native point-wise update kernels. The
-PyTorch API lowers the same geometry and material models into reusable tensor
-plans for CPU, CUDA, and optional two-rank distributed execution.
+from math import inf
 
-Modules:
-    fdtd: Legacy FDTD simulation classes backed by native update kernels.
-    geometry: Cartesian grids and geometric primitives.
-    constant: Physical constants and field, axis, and direction identifiers.
-    source: Temporal waveforms and spatial source definitions.
-    material: Nondispersive, absorbing, and dispersive materials.
-    torch_fdtd: Planned PyTorch simulations and runtime configuration.
-    torch_distributed: Two-rank CUDA domain decomposition and halo exchange.
-    torch_output: Device probe buffers, spectra, and checkpoint persistence.
+from . import (
+    constant,
+    geometry,
+    material,
+    source,
+    torch_distributed,
+    torch_fdtd,
+    torch_output,
+    torch_plan,
+    torch_source,
+)
+from .constant import (
+    ATTO,
+    FEMTO,
+    GIGA,
+    KILO,
+    MEGA,
+    MICRO,
+    MILLI,
+    NANO,
+    PETA,
+    PICO,
+    TERA,
+    Z0,
+    Ex,
+    Ey,
+    Ez,
+    Hx,
+    Hy,
+    Hz,
+    Jx,
+    Jy,
+    Jz,
+    MinusX,
+    MinusY,
+    MinusZ,
+    Mx,
+    My,
+    Mz,
+    PlusX,
+    PlusY,
+    PlusZ,
+    X,
+    Y,
+    Z,
+    c0,
+    eps0,
+    mu0,
+    pi,
+)
+from .geometry import (
+    Block,
+    Cartesian,
+    Cone,
+    Cylinder,
+    DefaultMedium,
+    Ellipsoid,
+    Shell,
+    Sphere,
+)
+from .material import (
+    Const,
+    Cpml,
+    CriticalPoint,
+    DcpAde,
+    DcpPlrc,
+    DcpRc,
+    Dielectric,
+    Dm2,
+    Drude,
+    DrudePole,
+    Dummy,
+    Lorentz,
+    LorentzPole,
+    Upml,
+)
+from .source import (
+    Bandpass,
+    Continuous,
+    DifferentiatedGaussian,
+    GaussianBeam,
+    PointSource,
+    TotalFieldScatteredField,
+)
+from .torch_distributed import (
+    TorchDistributedError,
+    TorchDistributedSimulation,
+    TorchHaloExchange,
+    TwoGpuDecomposition,
+    choose_two_gpu_decomposition,
+    distributed_launch_from_environment,
+    rank_local_space,
+)
+from .torch_fdtd import (
+    ComponentPlan,
+    DistributedLaunch,
+    ExecutionSignature,
+    FlattenedStencilTerm,
+    MaterialBucketPlan,
+    TorchConfigurationError,
+    TorchExecutionPlanner,
+    TorchProbeSamples,
+    TorchProbeSpec,
+    TorchProbeSpectrum,
+    TorchRuntimeConfig,
+    TorchSimulation,
+    TorchSimulationPlan,
+    TorchSimulationState,
+    probe_spectrum,
+    read_torch_checkpoint,
+    torch_runtime_diagnostics,
+    write_probe_text,
+    write_torch_checkpoint,
+)
+from .torch_source import TorchPointSourceRecord, TorchSourceLoweringContext
 
-Examples:
-    Run one source-free legacy step in a two-dimensional TMz domain:
-
-    >>> space = Cartesian(size=(2, 2, 0), resolution=2)
-    >>> geometry = [DefaultMedium(material=Dielectric())]
-    >>> simulation = TMzFDTD(space, geometry, verbose=False)
-    >>> simulation.init()
-    >>> simulation.step()
-"""
-
-from typing import Any
-
-from . import constant, fdtd, geometry, material, pw_material, pw_source, source
-
-norm: Any
-from .constant import *
-from .fdtd import *
-from .geometry import *
-from .material import *
-from .source import *
-from .torch_distributed import *
-from .torch_fdtd import *
-
-# List here only the objects we want to be publicly available
 __all__ = [
-    "fdtd",
     "geometry",
     "constant",
     "source",
-    "pw_source",
     "material",
-    "pw_material",
-    "TimeStep",
-    "FDTD",
-    "TExFDTD",
-    "TEyFDTD",
-    "TEzFDTD",
-    "TMxFDTD",
-    "TMyFDTD",
-    "TMzFDTD",
-    "TEMxFDTD",
-    "TEMyFDTD",
-    "TEMzFDTD",
     "Cartesian",
     "DefaultMedium",
     "Cone",

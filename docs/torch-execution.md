@@ -1,10 +1,9 @@
 # Torch-native execution
 
-`TorchSimulation` is GMES's intentionally breaking execution path. PyTorch is
-the destination, not one selectable backend, so this API has no
-`backend="cpp"` switch and does not expose NumPy fields or the legacy stepping
-surface. The native classes remain temporarily available only while the frozen
-oracle is needed by the migration.
+`TorchSimulation` is GMES's intentionally breaking and supported execution
+API. PyTorch is not a selectable backend: there is no `backend="cpp"` switch,
+no legacy stepping surface, and no solver-owned display API. Host field views,
+checkpoint I/O, probes, and plotting are explicit observation boundaries.
 
 The executable slice supports periodic 1-D, 2-D, and 3-D Cartesian
 domains, simple nondispersive `Dielectric`, `Const`, and `Dummy` geometry,
@@ -97,9 +96,9 @@ into a timestep. These choices currently affect planner decisions and optional
 storage only. Execution normally uses a dense dielectric base plus compact
 indexed material updates; local compiled CPU CPML additionally selects the
 dense-base, axis-sparse residual representation described below. Forced-policy
-timings are therefore exploratory and the automatic-policy performance gate
-remains fail-closed until the policies select distinct executable
-representations.
+timings are exploratory. For #124, numerical correctness, finite results, and
+fixed-storage/compiler behavior remain required, while speed or scaling
+shortfalls are follow-up performance work rather than acceptance blockers.
 `simulation.diagnostics()["material_plan"]` explains every decision and its
 candidate costs.
 
@@ -251,9 +250,11 @@ Gaussian modes are lowered during construction, and their envelope derives
 from the exact post-prewarm auxiliary integer step and float64 timestep.
 
 A third-party source must implement `lower_torch_source(context)` and return
-`TorchPointSourceRecord` values. The lowering hook runs once during
-construction. Arbitrary legacy callbacks and `PointSource(filename=...)`
-are rejected rather than entering or graph-breaking `advance()`.
+`TorchPointSourceRecord` values. The immutable lowering context has exactly
+the supported source metadata; record validation completes before plan/state
+allocation, and the hook runs once during construction. Arbitrary per-step
+Python callbacks and `PointSource(filename=...)` are rejected rather than
+entering or graph-breaking `advance()`.
 
 `TorchProbeSpec` creates a fixed-capacity device ring. When a producer
 outpaces explicit flushing, the ring overwrites its oldest values and reports
@@ -325,14 +326,15 @@ uv sync --locked --extra torch-cu126 --extra hdf5
 uv sync --locked --extra torch-cu130 --extra hdf5
 ```
 
-Do not enable more than one `torch-*` extra. Plain package installation keeps
-the standard platform selection: PyPI supplies CPU wheels on macOS and the
-CUDA 13.0 wheel on Linux. CI explicitly requests `torch-cpu` so GPU runtime
-packages are not mistaken for GPU test coverage.
+Do not enable more than one `torch-*` extra. CI explicitly requests
+`torch-cpu` so a GPU runtime package is not mistaken for GPU test coverage.
+The package's universal wheel does not select or validate an accelerator.
 
-The 2.13.0 probe used Python 3.14.7. CPU plus CUDA 12.6 and CUDA 13.0 eager/compiled tests ran on Linux with
-NVIDIA compute capabilities 8.6 and 7.5. The required macOS CPU
-job verifies the arm64 wheel and CPU execution. See the
+Historical 2.13 compatibility probes used Python 3.14.7 and Linux NVIDIA
+compute capabilities 8.6 and 7.5. They are not final CPU/macOS/CUDA acceptance
+evidence. Final Linux/macOS CPU and trusted installed single-/two-GPU gates
+must run separately and fail closed when their required resources are absent.
+See the
 [PyTorch release matrix](https://github.com/pytorch/pytorch/blob/main/RELEASE.md)
 and [uv PyTorch guide](https://docs.astral.sh/uv/guides/integration/pytorch/)
 for the upstream compatibility and index contracts.

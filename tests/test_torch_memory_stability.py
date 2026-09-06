@@ -9,12 +9,18 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
+import torch
+
 from benchmarks import torch_memory_stability as stability
 
 
 def _result(**overrides):
     result = {
         "checkout_module_origin_valid": True,
+        "candidate_commit": "a" * 40,
+        "candidate_dirty": False,
+        "collector_harness_sha256": "b" * 64,
+        "runtime_source_sha256": "c" * 64,
         "storage_stable": True,
         "all_batches_finite": True,
         "field_error_samples": [0.0] * 15,
@@ -33,12 +39,238 @@ def _result(**overrides):
         "device_type": "cpu",
         "batches": 15,
         "steps_per_batch": 100,
+        "observer_warmup": {
+            "complete": True,
+            "compiler_counter_collector_primed": True,
+            "field_error_checked": True,
+            "rss_samples_bytes": [100],
+            "candidate_tensors": [4],
+            "reference_tensors": [4],
+            "candidate_finite": [True],
+            "reference_finite": [True],
+            "field_error_samples": [0.0],
+            "storage_stable": [True],
+            "cuda_samples": [],
+        },
     }
     result.update(overrides)
+    if result["device_type"] == "cuda" and "observer_warmup" not in overrides:
+        result["observer_warmup"] = {
+            **result["observer_warmup"],
+            "cuda_samples": [{"allocated": 10, "reserved": 20}],
+        }
     return result
 
 
 class StabilityEvidenceTest(unittest.TestCase):
+    def test_cuda_memory_snapshot_reads_both_totals_once_without_legacy_flatteners(
+        self,
+    ):
+        snapshot = {
+            "allocated_bytes": {"all": {"current": 11}},
+            "reserved_bytes": {"all": {"current": 22}},
+        }
+        device = torch.device("cuda", 0)
+        with (
+            mock.patch.object(
+                stability.torch.cuda,
+                "memory_stats_as_nested_dict",
+                return_value=snapshot,
+            ) as stats,
+            mock.patch.object(stability.torch.cuda, "memory_allocated") as allocated,
+            mock.patch.object(stability.torch.cuda, "memory_reserved") as reserved,
+        ):
+            self.assertEqual(stability._cuda_current_memory(device), (11, 22))
+        stats.assert_called_once_with(device)
+        allocated.assert_not_called()
+        reserved.assert_not_called()
+
+    def test_cuda_memory_snapshot_rejects_missing_malformed_bool_and_negative_values(
+        self,
+    ):
+        valid = {
+            "allocated_bytes": {"all": {"current": 11}},
+            "reserved_bytes": {"all": {"current": 22}},
+        }
+        invalid_snapshots = (
+            {},
+            {"allocated_bytes": {"all": {"current": 11}}},
+            {
+                "allocated_bytes": {"all": {"current": "11"}},
+                "reserved_bytes": {"all": {"current": 22}},
+            },
+            {
+                "allocated_bytes": {"all": {"current": True}},
+                "reserved_bytes": {"all": {"current": 22}},
+            },
+            {
+                "allocated_bytes": {"all": {"current": 11}},
+                "reserved_bytes": {"all": {"current": -1}},
+            },
+        )
+        for snapshot in invalid_snapshots:
+            with (
+                self.subTest(snapshot=snapshot),
+                mock.patch.object(
+                    stability.torch.cuda,
+                    "memory_stats_as_nested_dict",
+                    return_value=snapshot,
+                ),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "non-negative integer"):
+                    stability._cuda_current_memory(torch.device("cuda", 0))
+        self.assertEqual(valid["allocated_bytes"]["all"]["current"], 11)
+
+    def test_cuda_observation_uses_one_snapshot_and_not_legacy_flatteners(self):
+        telemetry = stability._new_telemetry(1, cuda=True)
+        candidate = SimpleNamespace(device=torch.device("cuda", 0))
+        reference = SimpleNamespace(device=torch.device("cuda", 0))
+        observer = SimpleNamespace(
+            slots=(object(),), finite=lambda: True, stable=lambda: True
+        )
+        snapshot = {
+            "allocated_bytes": {"all": {"current": 11}},
+            "reserved_bytes": {"all": {"current": 22}},
+        }
+        with (
+            mock.patch.object(stability, "_synchronize"),
+            mock.patch.object(
+                stability.torch.cuda,
+                "memory_stats_as_nested_dict",
+                return_value=snapshot,
+            ) as stats,
+            mock.patch.object(stability.torch.cuda, "memory_allocated") as allocated,
+            mock.patch.object(stability.torch.cuda, "memory_reserved") as reserved,
+        ):
+            stability._observe_into(
+                telemetry,
+                0,
+                candidate=candidate,
+                reference=reference,
+                read_rss=lambda: 33,
+                candidate_live=observer,
+                reference_live=observer,
+                candidate_storage=observer,
+                reference_storage=observer,
+                compare_fields=False,
+            )
+        stats.assert_called_once_with(candidate.device)
+        allocated.assert_not_called()
+        reserved.assert_not_called()
+        self.assertEqual(telemetry.cuda_allocated.tolist(), [11])
+        self.assertEqual(telemetry.cuda_reserved.tolist(), [22])
+
+    def test_one_batch_is_diagnostic_only_not_an_invalid_request(self):
+        decision = stability._evaluate(
+            _result(
+                batches=1,
+                steps_per_batch=1,
+                rss_assessment={"adequate": False, "sustained_growth": None},
+            )
+        )
+        self.assertTrue(decision["diagnostic_ok"])
+        self.assertFalse(decision["qualified"])
+        self.assertIn(
+            "fewer than 15 post-warmup batches were observed",
+            decision["qualification_errors"],
+        )
+
+    def test_phase_progress_emits_fixed_marker_only_when_enabled(self):
+        with mock.patch.object(stability.os, "write") as write:
+            stability._phase_progress(False, "warmup-start")
+            write.assert_not_called()
+            stability._phase_progress(True, "warmup-start")
+        write.assert_called_once_with(2, b"torch-memory-stability phase=warmup-start\n")
+
+    def test_prebound_storage_observer_detects_replacement_and_nonfinite(self):
+        for name in ("field", "material", "source"):
+            with self.subTest(name=name):
+                owner = torch.nn.Module()
+                owner.register_buffer(name, torch.ones(2))
+                observer = stability._buffer_observer((owner,))
+                self.assertTrue(observer.stable())
+                self.assertTrue(observer.finite())
+                owner.register_buffer(name, torch.full((2,), float("nan")))
+                self.assertFalse(observer.stable())
+                self.assertFalse(observer.finite())
+
+    def test_prebound_storage_observer_rejects_added_or_removed_buffer_keys(self):
+        added = torch.nn.Module()
+        added.register_buffer("field", torch.ones(2))
+        observer = stability._buffer_observer((added,))
+        added.register_buffer("unexpected", torch.ones(2))
+        self.assertFalse(observer.stable())
+
+        removed = torch.nn.Module()
+        removed.register_buffer("field", torch.ones(2))
+        observer = stability._buffer_observer((removed,))
+        del removed._buffers["field"]
+        self.assertFalse(observer.stable())
+        self.assertFalse(observer.finite())
+
+    def test_preallocated_telemetry_keeps_observer_warmup_separate(self):
+        observer = stability._new_telemetry(1, cuda=False)
+        measured = stability._new_telemetry(3, cuda=False)
+        observer.rss[:] = [100]
+        measured.rss[:] = [120, 120, 120]
+        for telemetry in (observer, measured):
+            telemetry.candidate_tensors[:] = 4
+            telemetry.reference_tensors[:] = 4
+            telemetry.candidate_finite[:] = True
+            telemetry.reference_finite[:] = True
+            telemetry.field_error[:] = 0.0
+            telemetry.storage_stable[:] = True
+        self.assertEqual(
+            stability._telemetry_report(observer)["rss_samples_bytes"], [100]
+        )
+        samples = stability._telemetry_report(measured)["rss_samples_bytes"]
+        self.assertEqual(samples, [120, 120, 120])
+        self.assertFalse(stability._growth_assessment(samples)["sustained_growth"])
+
+    def test_missing_or_malformed_warmup_blocks_qualification(self):
+        for warmup in (None, {}, {"complete": True}):
+            decision = stability._evaluate(_result(observer_warmup=warmup))
+            self.assertFalse(decision["qualified"])
+            self.assertIn(
+                "complete healthy primed observer warmup evidence is missing",
+                decision["hard_failures"],
+            )
+
+    def test_unhealthy_warmup_cannot_qualify_a_both_runtime_collection(self):
+        for name in (
+            "candidate_finite",
+            "reference_finite",
+            "storage_stable",
+        ):
+            with self.subTest(name=name):
+                warmup = dict(_result()["observer_warmup"])
+                warmup[name] = [False]
+                decision = stability._evaluate(_result(observer_warmup=warmup))
+                self.assertFalse(decision["qualified"])
+                self.assertIn(
+                    "complete healthy primed observer warmup evidence is missing",
+                    decision["hard_failures"],
+                )
+        warmup = dict(_result()["observer_warmup"])
+        warmup["field_error_checked"] = False
+        decision = stability._evaluate(_result(observer_warmup=warmup))
+        self.assertFalse(decision["qualified"])
+        self.assertIn(
+            "complete healthy primed observer warmup evidence is missing",
+            decision["hard_failures"],
+        )
+
+    def test_legacy_qualified_record_without_warmup_cannot_be_promoted(self):
+        raw = _result(qualified=True, diagnostic_ok=True)
+        del raw["observer_warmup"]
+        record = stability.reevaluate(raw, b"legacy")
+        self.assertFalse(record["current_evaluator_diagnostic"]["qualified"])
+        self.assertFalse(record["effective_decision"]["qualified"])
+        self.assertIn(
+            "complete healthy primed observer warmup evidence is missing",
+            record["current_evaluator_diagnostic"]["hard_failures"],
+        )
+
     def test_growth_detects_monotonic_and_oscillatory_retention(self):
         self.assertTrue(
             stability._growth_assessment([10, 11, 12, 13, 14, 15])["sustained_growth"]
@@ -123,6 +355,29 @@ class StabilityEvidenceTest(unittest.TestCase):
             )["diagnostic_ok"]
         )
 
+    def test_single_runtime_control_remains_diagnostic_without_field_comparison(self):
+        decision = stability._evaluate(
+            _result(advance_role="reference", field_error_checked=False)
+        )
+        self.assertTrue(decision["diagnostic_ok"])
+        self.assertFalse(decision["qualified"])
+        self.assertIn(
+            "single-runtime or observation control cannot qualify advance stability",
+            decision["qualification_errors"],
+        )
+
+    def test_sustained_growth_fails_after_observer_warmup(self):
+        decision = stability._evaluate(
+            _result(
+                advance_role="both",
+                rss_assessment={"adequate": True, "sustained_growth": True},
+            )
+        )
+        self.assertFalse(decision["diagnostic_ok"])
+        self.assertIn(
+            "RSS shows sustained post-warmup retained growth", decision["hard_failures"]
+        )
+
     def test_evaluator_never_qualifies_observation_only_or_unverified_lowering(self):
         self.assertFalse(
             stability._evaluate(_result(observation_only=True))["qualified"]
@@ -146,6 +401,36 @@ class StabilityEvidenceTest(unittest.TestCase):
                 )
             )["diagnostic_ok"]
         )
+
+    def test_postprime_rss_growth_fails_with_flat_cuda_accounting(self):
+        stable_cuda = {"adequate": True, "sustained_growth": False}
+        decision = stability._evaluate(
+            _result(
+                device_type="cuda",
+                cuda_assessment={
+                    "allocated": stable_cuda,
+                    "reserved": stable_cuda,
+                },
+                rss_assessment={"adequate": True, "sustained_growth": True},
+            )
+        )
+        self.assertFalse(decision["diagnostic_ok"])
+        self.assertIn(
+            "RSS shows sustained post-warmup retained growth", decision["hard_failures"]
+        )
+
+    def test_all_nonboth_advance_roles_remain_diagnostic(self):
+        for role in ("candidate", "reference", "none"):
+            with self.subTest(role=role):
+                decision = stability._evaluate(
+                    _result(
+                        advance_role=role,
+                        observation_only=role == "none",
+                        field_error_checked=role == "none",
+                    )
+                )
+                self.assertTrue(decision["diagnostic_ok"])
+                self.assertFalse(decision["qualified"])
 
     def test_copy_record_detects_non_clone_materialization(self):
         event = SimpleNamespace(key="aten::copy_", input_shapes=[(2, 3)])
@@ -176,10 +461,12 @@ class StabilityEvidenceTest(unittest.TestCase):
 
     def test_reevaluation_binds_raw_and_current_evaluator_without_recertifying(self):
         raw = _result(
-            harness_sha256="old-collector", diagnostic_ok=False, qualified=False
+            collector_harness_sha256="d" * 64,
+            diagnostic_ok=False,
+            qualified=False,
         )
         record = stability.reevaluate(raw, json.dumps(raw, sort_keys=True).encode())
-        self.assertEqual(record["raw_collector_harness_sha256"], "old-collector")
+        self.assertEqual(record["raw_collector_harness_sha256"], "d" * 64)
         self.assertFalse(record["new_collection"])
         self.assertIsInstance(record["reevaluator_harness_sha256"], str)
         self.assertFalse(record["effective_decision"]["qualified"])

@@ -286,10 +286,52 @@ records a current-check diagnostic separately from its effective decision. The
 effective decision can qualify only when the raw collection was already
 qualified and the current diagnostic remains qualified; it cannot promote a
 prior failed or partial collection into new evidence.
-Compare an advance series with its observation-only control before attributing
-an initial RSS transition to the solver. The control can identify collector or
-setup allocation, but it does not clear a later advance-series drift: that
-remains reported as unattributed until separately explained.
+The collector records one complete observer warmup separately before measured
+RSS begins. It preallocates the measured RSS, finite-state, field-error,
+storage, and CUDA telemetry, then reads RSS after the complete observation
+path. Storage and finite-state observation bind the existing module buffer
+path. CUDA telemetry takes one public allocator-stat snapshot per observation
+and fails closed unless both current totals are non-negative Python integers;
+it does not call the two separately flattening convenience accessors. Storage
+and finite-state observation bind the existing module buffer
+slots and data pointers once after solver warmup; measured samples do not
+rebuild `buffer_addresses()` or named-buffer dictionaries. This makes a
+first-use observer transition visible without excluding it from historical
+records or allowing per-sample report allocation to masquerade as simulation
+growth. Replacing a bound buffer, adding or removing a buffer key, or making a
+replacement non-finite fails the observation; captured stale tensors cannot
+mask a live-state change. Compare an advance series with its observation-only
+control before attributing an initial RSS transition to the solver. The control
+can identify collector or setup allocation, but it does not clear a later
+advance-series drift: that remains reported as unattributed until separately
+explained.
+`--advance-role candidate` and `--advance-role reference` are diagnostic
+controls for separating the two live simulations; neither can qualify
+stability.
+
+Use `--phase-progress` only to locate a bounded diagnostic timeout. It emits
+fixed stderr markers before and after warmup, observer priming, the complete
+measurement loop, and post-loop profiling; it emits nothing per sample and is
+not a substitute for the JSON evidence. A one-batch diagnostic is permitted
+for this purpose only and remains explicitly unqualified.
+
+`torch_lowered_materialization.py` is a standalone CUDA wrapper-output
+diagnostic. Run it in an isolated process with a fresh private Inductor cache
+and a new private output directory:
+
+~~~sh
+CACHE=/tmp/gmes-lowering-cache
+OUT=/tmp/gmes-lowering-output
+mkdir -m 700 "$CACHE"
+TORCHINDUCTOR_CACHE_DIR="$CACHE" uv run --no-sync python -m benchmarks.torch_lowered_materialization \
+  --case all-material-2d --device cuda:0 --precision float64 \
+  --warmup-steps 1 --cache-directory "$CACHE" --output-directory "$OUT"
+~~~
+
+Exact field-layout output candidates are diagnostic candidates, not clone
+findings. Opaque or unmapped wrapper paths remain unverified, and the raw
+generated-wrapper bundle is private diagnostic output that must not be added
+to Git.
 
 The final completion bundle embeds all three correctness indexes as full
 artifact descriptors: the CPU scope owns the CPU index, and the single-GPU

@@ -11,7 +11,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -38,33 +40,182 @@ COPY_OR_MATERIALIZE_OPERATORS = {
     "aten::_to_copy",
     "aten::contiguous",
 }
+_PHASE_MESSAGES = {
+    "warmup-start": b"torch-memory-stability phase=warmup-start\n",
+    "warmup-end": b"torch-memory-stability phase=warmup-end\n",
+    "observer-prime-start": b"torch-memory-stability phase=observer-prime-start\n",
+    "observer-primed": b"torch-memory-stability phase=observer-primed\n",
+    "measurement-start": b"torch-memory-stability phase=measurement-start\n",
+    "measurement-end": b"torch-memory-stability phase=measurement-end\n",
+    "profiler-start": b"torch-memory-stability phase=profiler-start\n",
+    "profiler-end": b"torch-memory-stability phase=profiler-end\n",
+}
 
 
-def _storage_digest(simulation: gmes.TorchSimulation) -> str:
-    """Hash fixed-storage identity without recording process addresses."""
-    digest = hashlib.sha256()
-    for name, address in sorted(simulation.buffer_addresses().items()):
-        digest.update(name.encode())
-        digest.update(b"\0")
-        digest.update(str(address).encode())
-        digest.update(b"\0")
-    return digest.hexdigest()
+def _phase_progress(enabled: bool, phase: str) -> None:
+    """Emit one optional fixed diagnostic marker outside sample collection."""
+    if enabled:
+        os.write(2, _PHASE_MESSAGES[phase])
 
 
-def _live_finite(simulation: gmes.TorchSimulation) -> tuple[int, bool]:
-    """Check live field, material, PML, and source buffers without a clone."""
-    tensors = tuple(simulation.state.named_buffers()) + tuple(
-        simulation.sources.named_buffers()
+@dataclass
+class _Telemetry:
+    """Fixed storage for one complete observer series."""
+
+    rss: np.ndarray
+    candidate_tensors: np.ndarray
+    reference_tensors: np.ndarray
+    candidate_finite: np.ndarray
+    reference_finite: np.ndarray
+    field_error: np.ndarray
+    storage_stable: np.ndarray
+    cuda_allocated: np.ndarray | None
+    cuda_reserved: np.ndarray | None
+
+
+def _new_telemetry(samples: int, *, cuda: bool) -> _Telemetry:
+    """Allocate every retained record before collecting an RSS sample."""
+    if samples < 1:
+        raise ValueError("telemetry requires at least one sample")
+    return _Telemetry(
+        rss=np.empty(samples, dtype=np.int64),
+        candidate_tensors=np.empty(samples, dtype=np.int64),
+        reference_tensors=np.empty(samples, dtype=np.int64),
+        candidate_finite=np.empty(samples, dtype=np.bool_),
+        reference_finite=np.empty(samples, dtype=np.bool_),
+        field_error=np.empty(samples, dtype=np.float64),
+        storage_stable=np.empty(samples, dtype=np.bool_),
+        cuda_allocated=np.empty(samples, dtype=np.int64) if cuda else None,
+        cuda_reserved=np.empty(samples, dtype=np.int64) if cuda else None,
     )
-    # Eager DM2 never enters the packed CPU solve, so this intentionally
-    # uninitialized non-persistent carry is not physical material state.
-    tensors = tuple(
-        (name, value)
-        for name, value in tensors
-        if not name.endswith("._packed_loop_state")
-    )
-    return len(tensors), all(
-        bool(torch.isfinite(value).all().item()) for _, value in tensors
+
+
+def _telemetry_report(telemetry: _Telemetry) -> dict[str, object]:
+    """Convert fixed records after, never during, collection."""
+    result: dict[str, object] = {
+        "rss_samples_bytes": telemetry.rss.tolist(),
+        "candidate_tensors": telemetry.candidate_tensors.tolist(),
+        "reference_tensors": telemetry.reference_tensors.tolist(),
+        "candidate_finite": telemetry.candidate_finite.tolist(),
+        "reference_finite": telemetry.reference_finite.tolist(),
+        "field_error_samples": telemetry.field_error.tolist(),
+        "storage_stable": telemetry.storage_stable.tolist(),
+    }
+    if telemetry.cuda_allocated is not None and telemetry.cuda_reserved is not None:
+        result["cuda_samples"] = [
+            {"allocated": int(allocated), "reserved": int(reserved)}
+            for allocated, reserved in zip(
+                telemetry.cuda_allocated, telemetry.cuda_reserved, strict=True
+            )
+        ]
+    else:
+        result["cuda_samples"] = []
+    return result
+
+
+@dataclass(frozen=True)
+class _BufferSlot:
+    """A prebound module buffer and the storage it owned after warmup."""
+
+    owner: torch.nn.Module
+    name: str
+    tensor: torch.Tensor
+    data_ptr: int
+
+
+@dataclass(frozen=True)
+class _ModuleBufferKeys:
+    """The complete registered-buffer key set of one observed module."""
+
+    owner: torch.nn.Module
+    names: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class _BufferObserver:
+    """Check prebound buffers without rebuilding named-buffer dictionaries."""
+
+    slots: tuple[_BufferSlot, ...]
+    module_buffers: tuple[_ModuleBufferKeys, ...]
+
+    def stable(self) -> bool:
+        """Return whether every observed module slot still owns its storage."""
+        return all(
+            len(module.owner._buffers) == len(module.names)
+            and all(name in module.owner._buffers for name in module.names)
+            for module in self.module_buffers
+        ) and all(
+            slot.owner._buffers.get(slot.name) is slot.tensor
+            and slot.tensor.data_ptr() == slot.data_ptr
+            for slot in self.slots
+        )
+
+    def finite(self) -> bool:
+        """Return whether every observed live tensor remains finite."""
+        return all(
+            isinstance(current := slot.owner._buffers.get(slot.name), torch.Tensor)
+            and bool(torch.isfinite(current).all().item())
+            for slot in self.slots
+        )
+
+
+def _buffer_observer(
+    roots: tuple[torch.nn.Module | None, ...], *, skip_packed_loop_state: bool = False
+) -> _BufferObserver:
+    """Bind buffer slots once, preserving module-recursive coverage."""
+    slots: list[_BufferSlot] = []
+    modules: list[_ModuleBufferKeys] = []
+    seen_modules: set[int] = set()
+    for root in roots:
+        if root is None:
+            continue
+        for module in root.modules():
+            if id(module) in seen_modules:
+                continue
+            seen_modules.add(id(module))
+            modules.append(_ModuleBufferKeys(module, tuple(module._buffers)))
+            for name, tensor in module._buffers.items():
+                if tensor is None or (
+                    skip_packed_loop_state and name == "_packed_loop_state"
+                ):
+                    continue
+                slots.append(_BufferSlot(module, name, tensor, tensor.data_ptr()))
+    return _BufferObserver(tuple(slots), tuple(modules))
+
+
+def _storage_observer(simulation: gmes.TorchSimulation) -> _BufferObserver:
+    """Bind permanent simulation and transparent-auxiliary storage after warmup."""
+    roots: list[torch.nn.Module | None] = []
+    visited: set[int] = set()
+
+    def visit(current: gmes.TorchSimulation) -> None:
+        if id(current) in visited:
+            return
+        visited.add(id(current))
+        roots.extend(
+            (
+                current.state,
+                current.plan,
+                current.sources,
+                current.probes,
+                current._dispersive_overlay,
+            )
+        )
+        for auxiliary in current.sources.auxiliaries:
+            if not isinstance(auxiliary, gmes.TorchSimulation):
+                raise RuntimeError(
+                    "storage observation requires TorchSimulation transparent auxiliaries"
+                )
+            visit(auxiliary)
+
+    visit(simulation)
+    return _buffer_observer(tuple(roots))
+
+
+def _live_observer(simulation: gmes.TorchSimulation) -> _BufferObserver:
+    """Bind field, material, PML, and source buffers without clones."""
+    return _buffer_observer(
+        (simulation.state, simulation.sources), skip_packed_loop_state=True
     )
 
 
@@ -87,6 +238,71 @@ def _field_error(
         )
         errors.append(float(difference.item()))
     return max(errors)
+
+
+def _cuda_current_memory(device: torch.device) -> tuple[int, int]:
+    """Read both current CUDA allocator totals from one validated snapshot."""
+    snapshot = torch.cuda.memory_stats_as_nested_dict(device)
+    if not isinstance(snapshot, dict):
+        raise RuntimeError("CUDA allocator snapshot is not a mapping")
+
+    def current(kind: str) -> int:
+        section = snapshot.get(kind)
+        all_devices = section.get("all") if isinstance(section, dict) else None
+        value = all_devices.get("current") if isinstance(all_devices, dict) else None
+        if type(value) is not int or value < 0:
+            raise RuntimeError(
+                "CUDA allocator snapshot has no non-negative integer "
+                f"{kind}.all.current value"
+            )
+        return value
+
+    return current("allocated_bytes"), current("reserved_bytes")
+
+
+def _observe_into(
+    telemetry: _Telemetry,
+    index: int,
+    *,
+    candidate: gmes.TorchSimulation,
+    reference: gmes.TorchSimulation,
+    read_rss,
+    candidate_live: _BufferObserver,
+    reference_live: _BufferObserver,
+    candidate_storage: _BufferObserver,
+    reference_storage: _BufferObserver,
+    compare_fields: bool,
+) -> None:
+    """Record one complete live observation into already allocated storage."""
+    _synchronize(candidate.device)
+    candidate_count, candidate_finite = (
+        len(candidate_live.slots),
+        candidate_live.finite(),
+    )
+    reference_count, reference_finite = (
+        len(reference_live.slots),
+        reference_live.finite(),
+    )
+    error = _field_error(candidate, reference) if compare_fields else 0.0
+    storage_stable = candidate_storage.stable() and reference_storage.stable()
+    if candidate.device.type == "cuda":
+        assert telemetry.cuda_allocated is not None
+        assert telemetry.cuda_reserved is not None
+        allocated, reserved = _cuda_current_memory(candidate.device)
+        telemetry.cuda_allocated[index] = allocated
+        telemetry.cuda_reserved[index] = reserved
+    # RSS is deliberately last: every observer operation is part of this
+    # sample, and no retained Python record is allocated after it.
+    rss = read_rss()
+    if rss is None:
+        raise RuntimeError("current RSS is unavailable")
+    telemetry.rss[index] = rss
+    telemetry.candidate_tensors[index] = candidate_count
+    telemetry.reference_tensors[index] = reference_count
+    telemetry.candidate_finite[index] = candidate_finite
+    telemetry.reference_finite[index] = reference_finite
+    telemetry.field_error[index] = error
+    telemetry.storage_stable[index] = storage_stable
 
 
 def _growth_assessment(samples: list[int]) -> dict[str, object]:
@@ -315,28 +531,112 @@ def reevaluate(raw: dict[str, object], raw_bytes: bytes) -> dict[str, object]:
     }
 
 
+def _sha256_text(value: object, length: int = 64) -> bool:
+    """Return whether one portable provenance digest has the expected shape."""
+    return (
+        isinstance(value, str)
+        and len(value) == length
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _complete_observer_warmup(
+    value: object, *, cuda: bool, require_healthy: bool
+) -> bool:
+    """Require the primed full observer record before qualification is possible."""
+    if not isinstance(value, dict):
+        return False
+    if (
+        value.get("complete") is not True
+        or value.get("compiler_counter_collector_primed") is not True
+        or not isinstance(value.get("field_error_checked"), bool)
+    ):
+        return False
+    for name, predicate in (
+        ("rss_samples_bytes", lambda item: type(item) is int),
+        ("candidate_tensors", lambda item: type(item) is int),
+        ("reference_tensors", lambda item: type(item) is int),
+        ("candidate_finite", lambda item: type(item) is bool),
+        ("reference_finite", lambda item: type(item) is bool),
+        (
+            "field_error_samples",
+            lambda item: isinstance(item, float) and np.isfinite(item),
+        ),
+        ("storage_stable", lambda item: type(item) is bool),
+    ):
+        items = value.get(name)
+        if not isinstance(items, list) or len(items) != 1 or not predicate(items[0]):
+            return False
+    cuda_samples = value.get("cuda_samples")
+    cuda_complete = (
+        cuda_samples == []
+        if not cuda
+        else (
+            isinstance(cuda_samples, list)
+            and len(cuda_samples) == 1
+            and isinstance(cuda_samples[0], dict)
+            and type(cuda_samples[0].get("allocated")) is int
+            and type(cuda_samples[0].get("reserved")) is int
+        )
+    )
+    if not cuda_complete:
+        return False
+    if not require_healthy:
+        return True
+    return (
+        value["candidate_finite"] == [True]
+        and value["reference_finite"] == [True]
+        and value["storage_stable"] == [True]
+        and value["field_error_checked"] is True
+    )
+
+
+def _collection_provenance_valid(result: dict[str, object]) -> bool:
+    """Require explicit candidate and runtime binding for a new qualification."""
+    return (
+        _sha256_text(result.get("collector_harness_sha256"))
+        and _sha256_text(result.get("runtime_source_sha256"))
+        and _sha256_text(result.get("candidate_commit"), length=40)
+        and type(result.get("candidate_dirty")) is bool
+    )
+
+
 def _evaluate(result: dict[str, object]) -> dict[str, object]:
     """Return explicit diagnostic and fail-closed qualification decisions."""
     hard_failures = []
     qualification_errors = []
+    advance_role = result.get("advance_role", "both")
     if result.get("checkout_module_origin_valid") is not True:
         hard_failures.append(
             "runtime or harness origin is outside the candidate checkout"
+        )
+    if not _collection_provenance_valid(result):
+        hard_failures.append("new collection provenance is incomplete")
+    if not _complete_observer_warmup(
+        result.get("observer_warmup"),
+        cuda=result.get("device_type") == "cuda",
+        require_healthy=advance_role == "both",
+    ):
+        hard_failures.append(
+            "complete healthy primed observer warmup evidence is missing"
         )
     if result.get("storage_stable") is not True:
         hard_failures.append("live simulation storage was replaced")
     if result.get("all_batches_finite") is not True:
         hard_failures.append("candidate or eager reference state became non-finite")
-    errors = result.get("field_error_samples")
-    if (
-        not isinstance(errors, list)
-        or not errors
-        or not all(isinstance(value, float) and np.isfinite(value) for value in errors)
-    ):
-        hard_failures.append("field-error samples are missing or non-finite")
-    elif max(errors) > float(result["field_error_tolerance"]):
-        hard_failures.append("compiled and eager fields diverged beyond tolerance")
-    if result.get("observation_only") is not True:
+    if result.get("field_error_checked", True) is True:
+        errors = result.get("field_error_samples")
+        if (
+            not isinstance(errors, list)
+            or not errors
+            or not all(
+                isinstance(value, float) and np.isfinite(value) for value in errors
+            )
+        ):
+            hard_failures.append("field-error samples are missing or non-finite")
+        elif max(errors) > float(result["field_error_tolerance"]):
+            hard_failures.append("compiled and eager fields diverged beyond tolerance")
+    if advance_role == "both":
         copy_records = result.get("operator_copy_records")
         if (
             not isinstance(copy_records, list)
@@ -348,7 +648,7 @@ def _evaluate(result: dict[str, object]) -> dict[str, object]:
                 "a warmed advance observed a full-domain copy/materialization"
             )
     compiler = result.get("compiler_counter_delta")
-    if result.get("compile_policy") == "compile":
+    if result.get("compile_policy") == "compile" and advance_role == "both":
         if result.get("compiled_region_executed") is not True:
             hard_failures.append("compiled execution region was not established")
         if not isinstance(compiler, dict) or any(
@@ -382,6 +682,10 @@ def _evaluate(result: dict[str, object]) -> dict[str, object]:
     if result.get("compile_policy") != "compile":
         qualification_errors.append(
             "eager evidence is diagnostic and cannot qualify compiled stability"
+        )
+    if advance_role != "both":
+        qualification_errors.append(
+            "single-runtime or observation control cannot qualify advance stability"
         )
     if int(result.get("batches", 0)) < MIN_QUALIFICATION_BATCHES:
         qualification_errors.append("fewer than 15 post-warmup batches were observed")
@@ -429,10 +733,18 @@ def observe(
     steps: int,
     batches: int,
     observation_only: bool = False,
+    advance_role: str | None = None,
+    phase_progress: bool = False,
 ) -> dict[str, object]:
     """Run one fixed mixed case and collect stability evidence."""
-    if batches < 3 or steps < 1 or warmup < 1:
-        raise ValueError("warmup >= 1, steps >= 1, and batches >= 3 are required")
+    if batches < 1 or steps < 1 or warmup < 1:
+        raise ValueError("warmup, steps, and batches must all be positive")
+    if advance_role is None:
+        advance_role = "none" if observation_only else "both"
+    if advance_role not in {"both", "candidate", "reference", "none"}:
+        raise ValueError("advance role is invalid")
+    if observation_only != (advance_role == "none"):
+        raise ValueError("observation-only mode requires the none advance role")
     manifest = load_manifest(MANIFEST)
     spec, space, geometry, sources, bloch = _build_case(case, manifest)
     if not sources:
@@ -468,71 +780,87 @@ def observe(
     seed, scale = manifest["reference"]["seed"], manifest["reference"]["field_scale"]
     _initialize_fields(candidate, seed, scale)
     _initialize_fields(reference, seed, scale)
-    candidate.advance(warmup)
-    reference.advance(warmup)
+    _phase_progress(phase_progress, "warmup-start")
+    if advance_role in {"both", "candidate"}:
+        candidate.advance(warmup)
+    if advance_role in {"both", "reference"}:
+        reference.advance(warmup)
+    _phase_progress(phase_progress, "warmup-end")
     _synchronize(candidate.device)
-    candidate_storage, reference_storage = _storage_digest(candidate), _storage_digest(
+    candidate_live, reference_live = _live_observer(candidate), _live_observer(
         reference
     )
-    counters_before = _counter_snapshot()
+    candidate_storage, reference_storage = _storage_observer(
+        candidate
+    ), _storage_observer(reference)
     read_rss, provider = _current_rss_provider()
-    rss: list[int | None] = [None] * batches
-    cuda: list[dict[str, int] | None] = [None] * batches
-    health: list[dict[str, object] | None] = [None] * batches
-    errors: list[float | None] = [None] * batches
-    storage_stable = True
+    # Allocate both series before the observer's first allocation-prone pass.
+    observer_warmup = _new_telemetry(1, cuda=candidate.device.type == "cuda")
+    measured = _new_telemetry(batches, cuda=candidate.device.type == "cuda")
+    field_error_checked = advance_role in {"both", "none"}
     try:
+        # Counter access is part of collector setup and can initialize Torch
+        # bookkeeping. Prime it before the recorded complete observer pass.
+        _phase_progress(phase_progress, "observer-prime-start")
+        _counter_snapshot()
+        _observe_into(
+            observer_warmup,
+            0,
+            candidate=candidate,
+            reference=reference,
+            read_rss=read_rss,
+            candidate_live=candidate_live,
+            reference_live=reference_live,
+            candidate_storage=candidate_storage,
+            reference_storage=reference_storage,
+            compare_fields=field_error_checked,
+        )
+        _phase_progress(phase_progress, "observer-primed")
+        # The measured compiler counter window starts after complete observer
+        # warmup, not merely after solver warmup.
+        counters_before = _counter_snapshot()
+        _phase_progress(phase_progress, "measurement-start")
         for index in range(batches):
-            if not observation_only:
+            if advance_role in {"both", "candidate"}:
                 candidate.advance(steps)
+            if advance_role in {"both", "reference"}:
                 reference.advance(steps)
-            _synchronize(candidate.device)
-            rss_value = read_rss()
-            if rss_value is None:
-                raise RuntimeError("current RSS is unavailable")
-            candidate_count, candidate_finite = _live_finite(candidate)
-            reference_count, reference_finite = _live_finite(reference)
-            error = _field_error(candidate, reference)
-            rss[index] = int(rss_value)
-            errors[index] = error
-            health[index] = {
-                "batch": index,
-                "candidate_tensors": candidate_count,
-                "candidate_finite": candidate_finite,
-                "reference_tensors": reference_count,
-                "reference_finite": reference_finite,
-                "field_error_finite": bool(np.isfinite(error)),
-            }
-            if candidate.device.type == "cuda":
-                cuda[index] = {
-                    "allocated": int(torch.cuda.memory_allocated(candidate.device)),
-                    "reserved": int(torch.cuda.memory_reserved(candidate.device)),
-                }
-            if (
-                _storage_digest(candidate) != candidate_storage
-                or _storage_digest(reference) != reference_storage
-            ):
-                storage_stable = False
+            _observe_into(
+                measured,
+                index,
+                candidate=candidate,
+                reference=reference,
+                read_rss=read_rss,
+                candidate_live=candidate_live,
+                reference_live=reference_live,
+                candidate_storage=candidate_storage,
+                reference_storage=reference_storage,
+                compare_fields=field_error_checked,
+            )
+        _phase_progress(phase_progress, "measurement-end")
     finally:
         close = getattr(read_rss, "close", None)
         if callable(close):
             close()
-    copy_records = (
-        _profile_warmed_advances(candidate, reference) if not observation_only else []
-    )
+    if advance_role == "both":
+        _phase_progress(phase_progress, "profiler-start")
+        copy_records = _profile_warmed_advances(candidate, reference)
+        _phase_progress(phase_progress, "profiler-end")
+    else:
+        copy_records = []
     _synchronize(candidate.device)
     counters = _counter_delta(counters_before, _counter_snapshot())
-    all_finite = all(
-        isinstance(item, dict)
-        and item["candidate_finite"]
-        and item["reference_finite"]
-        and item["field_error_finite"]
-        for item in health
+    observer_report = _telemetry_report(observer_warmup)
+    measured_report = _telemetry_report(measured)
+    all_finite = bool(
+        np.all(measured.candidate_finite) and np.all(measured.reference_finite)
     )
-    completed_rss = [value for value in rss if isinstance(value, int)]
-    completed_errors = [value for value in errors if isinstance(value, float)]
-    completed_health = [value for value in health if isinstance(value, dict)]
-    completed_cuda = [value for value in cuda if isinstance(value, dict)]
+    if field_error_checked:
+        all_finite = all_finite and bool(np.all(np.isfinite(measured.field_error)))
+    storage_stable = bool(
+        np.all(observer_warmup.storage_stable) and np.all(measured.storage_stable)
+    )
+    completed_cuda = measured_report["cuda_samples"]
     result = {
         "schema": "torch-memory-stability-v3",
         "case": spec["name"],
@@ -541,12 +869,20 @@ def observe(
         "precision": precision,
         "compile_policy": compile_policy,
         "warmup_steps": warmup,
-        "steps_per_batch": 0 if observation_only else steps,
+        "steps_per_batch": 0 if advance_role == "none" else steps,
         "batches": batches,
         "observation_only": observation_only,
+        "advance_role": advance_role,
+        "field_error_checked": field_error_checked,
         "rss_provider": provider,
-        "rss_samples_bytes": completed_rss,
-        "rss_assessment": _growth_assessment(completed_rss),
+        "observer_warmup": {
+            "complete": True,
+            "compiler_counter_collector_primed": True,
+            "field_error_checked": field_error_checked,
+            **observer_report,
+        },
+        "rss_samples_bytes": measured_report["rss_samples_bytes"],
+        "rss_assessment": _growth_assessment(measured_report["rss_samples_bytes"]),
         "cuda_samples": completed_cuda,
         "cuda_assessment": (
             {
@@ -560,13 +896,27 @@ def observe(
             if completed_cuda
             else None
         ),
-        "batch_health": completed_health,
+        "batch_health": [
+            {
+                "batch": index,
+                "candidate_tensors": int(measured.candidate_tensors[index]),
+                "candidate_finite": bool(measured.candidate_finite[index]),
+                "reference_tensors": int(measured.reference_tensors[index]),
+                "reference_finite": bool(measured.reference_finite[index]),
+                "field_error_finite": (
+                    bool(np.isfinite(measured.field_error[index]))
+                    if field_error_checked
+                    else None
+                ),
+            }
+            for index in range(batches)
+        ],
         "all_batches_finite": all_finite,
-        "field_error_samples": completed_errors,
+        "field_error_samples": measured_report["field_error_samples"],
         "field_error_tolerance": 1e-10 if precision == "float64" else 1e-5,
         "storage_stable": storage_stable
-        and _storage_digest(candidate) == candidate_storage
-        and _storage_digest(reference) == reference_storage,
+        and candidate_storage.stable()
+        and reference_storage.stable(),
         "compiler_counter_delta": counters,
         "compiled_region_topology": getattr(
             candidate, "_compiled_region_topology", None
@@ -611,6 +961,17 @@ def main() -> None:
     parser.add_argument("--warmup", type=int, default=10)
     parser.add_argument("--steps", type=int, default=100)
     parser.add_argument("--batches", type=int, default=15)
+    parser.add_argument(
+        "--advance-role",
+        choices=("both", "candidate", "reference", "none"),
+        default="both",
+        help="diagnostic control role; only both can qualify stability",
+    )
+    parser.add_argument(
+        "--phase-progress",
+        action="store_true",
+        help="emit fixed pre/post-phase markers to stderr outside measured samples",
+    )
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument(
         "--reevaluate",
@@ -622,6 +983,9 @@ def main() -> None:
         raw_bytes = args.reevaluate.read_bytes()
         result = reevaluate(json.loads(raw_bytes), raw_bytes)
     else:
+        advance_role = (
+            "none" if args.mode == "observation-control" else args.advance_role
+        )
         result = observe(
             case=args.case,
             device=args.device,
@@ -631,6 +995,8 @@ def main() -> None:
             steps=args.steps,
             batches=args.batches,
             observation_only=args.mode == "observation-control",
+            advance_role=advance_role,
+            phase_progress=args.phase_progress,
         )
         result["mode"] = args.mode
     args.output.parent.mkdir(parents=True, exist_ok=True)

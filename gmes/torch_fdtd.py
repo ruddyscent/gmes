@@ -87,6 +87,9 @@ CUDA_GRAPH_EXECUTION_REPRESENTATION = (
 )
 DIRECT_VIEW_MUTATION_REPRESENTATION = "direct-nonoverlapping-as-strided-v1"
 DEFAULT_VIEW_MUTATION_REPRESENTATION = "slice-views-v1"
+CPML_CUDA_VIEW_MUTATION_REPRESENTATION = (
+    "slice-views+cpml-direct-nonoverlapping-as-strided-v1"
+)
 PACKED_DM2_REPRESENTATION = "single-carry-packed-loop-v2"
 FUNCTIONAL_DM2_REPRESENTATION = "functional-multi-carry-loop-v1"
 FUSED_SOURCE_REPRESENTATION = "fused-half-step-v1"
@@ -1087,6 +1090,47 @@ def _field_region(field: Any, starts: Any, trims: Any) -> Any:
     return torch.as_strided(field, size=size, stride=strides, storage_offset=offset)
 
 
+def _uses_cpml_cuda_direct_views(
+    *, fused_local_phases: Any, device_type: Any, model: Any
+) -> bool:
+    """Select original-field CPML views only for local compiled CUDA phases."""
+    return bool(fused_local_phases and device_type == "cuda" and model == "cpml")
+
+
+def _uses_cpml_cuda_direct_views_for_plan(
+    *, fused_local_phases: Any, device_type: Any, component_plans: Any
+) -> bool:
+    """Select CPML CUDA views only when the built plan contains CPML buckets."""
+    return _uses_cpml_cuda_direct_views(
+        fused_local_phases=fused_local_phases,
+        device_type=device_type,
+        model="cpml",
+    ) and any(
+        bucket.signature.model == "cpml"
+        for component in component_plans
+        for bucket in component.buckets
+    )
+
+
+def _view_mutation_representation(
+    *,
+    direct_view_mutations: Any,
+    fused_local_phases: Any,
+    device_type: Any,
+    component_plans: Any,
+) -> str:
+    """Describe direct views without relabeling plans that lack CPML buckets."""
+    if direct_view_mutations:
+        return DIRECT_VIEW_MUTATION_REPRESENTATION
+    if _uses_cpml_cuda_direct_views_for_plan(
+        fused_local_phases=fused_local_phases,
+        device_type=device_type,
+        component_plans=component_plans,
+    ):
+        return CPML_CUDA_VIEW_MUTATION_REPRESENTATION
+    return DEFAULT_VIEW_MUTATION_REPRESENTATION
+
+
 def _boundary_plane(field: Any, axis: Any, index: Any) -> Any:
     strides = field.stride()
     size = tuple(field.shape[:axis]) + tuple(field.shape[axis + 1 :])
@@ -1765,10 +1809,11 @@ class TorchSimulation:
             else EXTERNAL_SOURCE_REPRESENTATION
         )
         self._direct_view_mutations = self._fused_local_phases and device.type == "cpu"
-        self._view_mutation_representation = (
-            DIRECT_VIEW_MUTATION_REPRESENTATION
-            if self._direct_view_mutations
-            else DEFAULT_VIEW_MUTATION_REPRESENTATION
+        self._view_mutation_representation = _view_mutation_representation(
+            direct_view_mutations=self._direct_view_mutations,
+            fused_local_phases=self._fused_local_phases,
+            device_type=device.type,
+            component_plans=plan.components.values(),
         )
         self._boundary_sync_stage_cache: dict[tuple[Any, ...], Any] = {}
         z_collapsed = (
@@ -2226,11 +2271,19 @@ class TorchSimulation:
                 model = bucket.signature.model
                 if model not in functions:
                     continue
+                direct_views = (
+                    self._direct_view_mutations
+                    or _uses_cpml_cuda_direct_views(
+                        fused_local_phases=self._fused_local_phases,
+                        device_type=self.device.type,
+                        model=model,
+                    )
+                )
                 prefix = f"bucket_{name.lower()}_{index}"
                 state_prefix = f"pml_{name.lower()}_{index}"
                 flatten: Callable[[torch.Tensor], torch.Tensor] = (
                     (lambda value: value)
-                    if self._direct_view_mutations
+                    if direct_views
                     else (
                         (lambda value: value.reshape(-1, paired_width))
                         if paired_width is not None
@@ -2276,7 +2329,7 @@ class TorchSimulation:
                                     direction,
                                     metadata.axis_sign,
                                     self.plan.dt,
-                                    self._direct_view_mutations,
+                                    direct_views,
                                 ),
                             )
                         )
@@ -2299,7 +2352,7 @@ class TorchSimulation:
                 ]
                 if model == "cpml":
                     arguments.append(self.plan.dt)
-                arguments.append(self._direct_view_mutations)
+                arguments.append(direct_views)
                 executions.append((functions[model], tuple(arguments)))
         return tuple(executions)
 

@@ -4,14 +4,21 @@ import copy
 import json
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 import numpy as np
 import torch
 
 import gmes
 from gmes.torch_fdtd import (
+    CPML_CUDA_VIEW_MUTATION_REPRESENTATION,
     DEFAULT_CPML_REPRESENTATION,
+    DEFAULT_VIEW_MUTATION_REPRESENTATION,
     SPARSE_CPML_REPRESENTATION,
+    _uses_cpml_cuda_direct_views,
+    _uses_cpml_cuda_direct_views_for_plan,
+    _view_mutation_representation,
 )
 
 _COMPONENTS = ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")
@@ -757,6 +764,185 @@ class TorchPmlOracleTest(unittest.TestCase):
 
 
 class TorchPmlStorageTest(unittest.TestCase):
+    @staticmethod
+    def _pml_execution_arguments(
+        *, device_type, fused_local_phases, direct_view_mutations, model
+    ):
+        class RegisteredState(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.paired_real = False
+                for name in ("ex", "hy", "hz"):
+                    self.register_buffer(name, torch.empty((2, 3, 2)))
+                self.register_buffer("pml_ex_0_state", torch.empty((4, 2)))
+                self.register_buffer("_pml_ex_0_scratch0", torch.empty(4))
+                self.register_buffer("_pml_ex_0_scratch1", torch.empty(4))
+                self.register_buffer("_pml_ex_0_scratch2", torch.empty(4))
+
+            def field(self, name):
+                return getattr(self, name.lower())
+
+        state = RegisteredState()
+        fields = {name: state.field(name) for name in ("Ex", "Hy", "Hz")}
+        bucket = SimpleNamespace(
+            signature=SimpleNamespace(model=model), cpml_residual_axes=()
+        )
+        component = SimpleNamespace(
+            stencil=(
+                SimpleNamespace(source="Hz", scale_axis=1),
+                SimpleNamespace(source="Hy", scale_axis=2),
+            ),
+            buckets=(bucket,),
+        )
+        plan = SimpleNamespace(
+            components={"Ex": component},
+            cpml_residual_axes=(),
+            dr=(0.5, 0.25, 0.125),
+            dt=0.1,
+            bucket_ex_0_targets=torch.tensor([0, 3, 7, 11]),
+            bucket_ex_0_stencil_indices=torch.empty((4, 4), dtype=torch.int64),
+            bucket_ex_0_cell_coefficients=torch.empty((4, 7)),
+        )
+        simulation = object.__new__(gmes.TorchSimulation)
+        simulation.state = state
+        simulation.plan = plan
+        simulation.device = torch.device(device_type)
+        simulation._fused_local_phases = fused_local_phases
+        simulation._direct_view_mutations = direct_view_mutations
+        executions = simulation._pml_executions(("Ex",), {model: object()})
+        return state, fields, executions[0][1]
+
+    def test_cpml_cuda_direct_view_metadata_uses_actual_plan_buckets(self):
+        self.assertTrue(
+            _uses_cpml_cuda_direct_views(
+                fused_local_phases=True,
+                device_type="cuda",
+                model="cpml",
+            )
+        )
+        geometries = (
+            ("no-pml", [gmes.DefaultMedium(gmes.Dielectric())]),
+            ("upml-only", _geometry(gmes.Upml)),
+            ("cpml", _geometry(gmes.Cpml)),
+        )
+        for label, geometry in geometries:
+            simulation = gmes.TorchSimulation(
+                space=gmes.Cartesian((2, 2, 2), 2),
+                geometry=geometry,
+                runtime=gmes.TorchRuntimeConfig(device="cpu", cpu_threads=1),
+            )
+            component_plans = simulation.plan.components.values()
+            with self.subTest(label=label):
+                enabled = _uses_cpml_cuda_direct_views_for_plan(
+                    fused_local_phases=True,
+                    device_type="cuda",
+                    component_plans=component_plans,
+                )
+                self.assertIs(enabled, label == "cpml")
+                self.assertEqual(
+                    _view_mutation_representation(
+                        direct_view_mutations=False,
+                        fused_local_phases=True,
+                        device_type="cuda",
+                        component_plans=component_plans,
+                    ),
+                    (
+                        CPML_CUDA_VIEW_MUTATION_REPRESENTATION
+                        if label == "cpml"
+                        else DEFAULT_VIEW_MUTATION_REPRESENTATION
+                    ),
+                )
+        for fused_local_phases, device_type, model in (
+            (False, "cuda", "cpml"),
+            (True, "cpu", "cpml"),
+            (True, "cuda", "upml"),
+        ):
+            with self.subTest(
+                fused_local_phases=fused_local_phases,
+                device_type=device_type,
+                model=model,
+            ):
+                self.assertFalse(
+                    _uses_cpml_cuda_direct_views(
+                        fused_local_phases=fused_local_phases,
+                        device_type=device_type,
+                        model=model,
+                    )
+                )
+
+    def test_cpml_direct_view_arguments_preserve_registered_tensor_identity(self):
+        scenarios = (
+            ("local-compiled-cuda", "cuda", True, False, "cpml", True),
+            ("eager-cuda", "cuda", False, False, "cpml", False),
+            ("local-compiled-cpu", "cpu", True, True, "cpml", True),
+            ("eager-cpu", "cpu", False, False, "cpml", False),
+            ("local-compiled-cuda-upml", "cuda", True, False, "upml", False),
+            ("distributed-cuda", "cuda", False, False, "cpml", False),
+        )
+        for (
+            scenario,
+            device_type,
+            fused_local_phases,
+            direct_view_mutations,
+            model,
+            expected_original_views,
+        ) in scenarios:
+            with self.subTest(scenario=scenario):
+                state, fields, arguments = self._pml_execution_arguments(
+                    device_type=device_type,
+                    fused_local_phases=fused_local_phases,
+                    direct_view_mutations=direct_view_mutations,
+                    model=model,
+                )
+                if expected_original_views:
+                    self.assertIs(arguments[0], state.ex)
+                    self.assertIs(arguments[1], state.hz)
+                    self.assertIs(arguments[2], state.hy)
+                    self.assertIs(arguments[0], fields["Ex"])
+                    self.assertIs(arguments[1], fields["Hz"])
+                    self.assertIs(arguments[2], fields["Hy"])
+                else:
+                    self.assertIsNot(arguments[0], fields["Ex"])
+                    self.assertIsNot(arguments[1], fields["Hz"])
+                    self.assertIsNot(arguments[2], fields["Hy"])
+                self.assertIs(arguments[-1], expected_original_views)
+
+    def test_cuda_constructor_keeps_cpu_sparse_cpml_disabled(self):
+        captured = {}
+
+        class StopAtPlanner(Exception):
+            pass
+
+        class CapturingPlanner:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+                raise StopAtPlanner
+
+        with (
+            mock.patch.object(
+                gmes.torch_fdtd,
+                "_resolved_device",
+                return_value=SimpleNamespace(type="cuda"),
+            ),
+            mock.patch.object(
+                gmes.torch_fdtd,
+                "TorchExecutionPlanner",
+                CapturingPlanner,
+            ),
+            self.assertRaises(StopAtPlanner),
+        ):
+            gmes.TorchSimulation(
+                space=gmes.Cartesian((2, 2, 2), 2),
+                geometry=[
+                    gmes.DefaultMedium(gmes.Dielectric()),
+                    gmes.Shell(gmes.Cpml(), thickness=0.5),
+                ],
+                runtime=gmes.TorchRuntimeConfig(
+                    device="cuda:0", compile_policy="compile", cpu_threads=1
+                ),
+            )
+        self.assertIs(captured["cpml_sparse_residual"], False)
+
     def test_state_is_active_only_contiguous_and_uses_underlying_medium(self):
         simulation = gmes.TorchSimulation(
             space=gmes.Cartesian((4, 4, 4), 3),

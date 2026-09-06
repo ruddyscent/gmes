@@ -244,9 +244,170 @@ def _validate_contract(contract: Mapping[str, object]) -> list[str]:
     return reasons
 
 
+def _pointer_name(node: ast.AST, parameters: set[str]) -> str | None:
+    """Return the one pointer parameter used by a Triton pointer expression."""
+    names = {
+        item.id
+        for item in ast.walk(node)
+        if isinstance(item, ast.Name) and item.id in parameters
+    }
+    return next(iter(names)) if len(names) == 1 else None
+
+
+def _assignment_values(function: ast.FunctionDef) -> dict[str, ast.AST]:
+    """Return simple local assignments in one emitted Triton function."""
+    result = {}
+    repeated = set()
+    for node in ast.walk(function):
+        if (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+        ):
+            name = node.targets[0].id
+            if name in result:
+                repeated.add(name)
+            else:
+                result[name] = node.value
+    for name in repeated:
+        result.pop(name, None)
+    return result
+
+
+def _direct_load_pointer(
+    node: ast.AST,
+    assignments: Mapping[str, ast.AST],
+    parameters: set[str],
+    depth: int = 0,
+) -> str | None:
+    """Resolve only an untransformed ``tl.load`` value through local aliases."""
+    if depth > 32:
+        return None
+    if isinstance(node, ast.Name) and node.id in assignments:
+        return _direct_load_pointer(
+            assignments[node.id], assignments, parameters, depth + 1
+        )
+    if (
+        isinstance(node, ast.Call)
+        and _call_name(node.func) in {"tl.load", "triton.language.load"}
+        and node.args
+    ):
+        return _pointer_name(node.args[0], parameters)
+    return None
+
+
+def _load_count_and_compute(
+    node: ast.AST,
+    assignments: Mapping[str, ast.AST],
+    parameters: set[str],
+    depth: int = 0,
+) -> tuple[int, bool, frozenset[str]] | None:
+    """Conservatively identify real work in one emitted Triton store value."""
+    if depth > 32:
+        return None
+    if isinstance(node, ast.IfExp):
+        # A ternary can select an unchanged input.  It is not arithmetic
+        # provenance without an explicit arithmetic payload on every path.
+        return None
+    if isinstance(node, ast.Name):
+        if node.id in assignments:
+            return _load_count_and_compute(
+                assignments[node.id], assignments, parameters, depth + 1
+            )
+        return (0, False, frozenset())
+    if isinstance(node, ast.Constant):
+        return (0, False, frozenset())
+    if isinstance(node, ast.Call) and _call_name(node.func) in {
+        "tl.load",
+        "triton.language.load",
+    }:
+        if not node.args or _pointer_name(node.args[0], parameters) is None:
+            return None
+        return (1, False, frozenset({_pointer_name(node.args[0], parameters)}))
+    values = [
+        child for child in ast.iter_child_nodes(node) if isinstance(child, ast.expr)
+    ]
+    child_results = [
+        _load_count_and_compute(child, assignments, parameters, depth + 1)
+        for child in values
+    ]
+    if any(item is None for item in child_results):
+        return None
+    loads = sum(item[0] for item in child_results if item is not None)
+    compute = any(item[1] for item in child_results if item is not None)
+    pointers = frozenset().union(
+        *(item[2] for item in child_results if item is not None)
+    )
+    if isinstance(node, (ast.BinOp, ast.UnaryOp, ast.BoolOp, ast.Compare)):
+        compute = True
+    elif isinstance(node, ast.Call):
+        # A selector can inspect both inputs while storing either one unchanged;
+        # an opaque call likewise does not establish arithmetic provenance.  Keep
+        # both fail-closed unless the stored payload's arithmetic is explicit in
+        # the supported AST grammar above.
+        name = _call_name(node.func)
+        if name not in {
+            "tl.load",
+            "triton.language.load",
+            "tl.store",
+            "triton.language.store",
+        }:
+            return None
+    return (loads, compute, pointers)
+
+
+def _kernel_output_provenance(
+    function: ast.FunctionDef, parameters: tuple[str, ...]
+) -> dict[str, dict[str, str]]:
+    """Classify only direct, arithmetic, or unknown emitted Triton stores."""
+    parameter_set = set(parameters)
+    assignments = _assignment_values(function)
+    outputs: dict[str, dict[str, str]] = {}
+
+    def visit(node: ast.AST, conditional: bool = False) -> None:
+        branch = conditional or isinstance(
+            node, (ast.If, ast.For, ast.While, ast.Try, ast.Match)
+        )
+        if (
+            isinstance(node, ast.Call)
+            and _call_name(node.func) in {"tl.store", "triton.language.store"}
+            and len(node.args) >= 2
+        ):
+            pointer = _pointer_name(node.args[0], parameter_set)
+            if pointer is not None:
+                direct = _direct_load_pointer(node.args[1], assignments, parameter_set)
+                summary = _load_count_and_compute(
+                    node.args[1], assignments, parameter_set
+                )
+                if branch:
+                    provenance = {"kind": "unknown"}
+                elif direct is not None:
+                    provenance = {"kind": "identity-input", "input": direct}
+                elif (
+                    summary is not None
+                    and summary[0] >= 2
+                    and summary[1]
+                    and len(summary[2]) >= 2
+                ):
+                    provenance = {"kind": "computed"}
+                else:
+                    provenance = {"kind": "unknown"}
+                previous = outputs.get(pointer)
+                outputs[pointer] = (
+                    provenance
+                    if previous is None or previous == provenance
+                    else {"kind": "unknown"}
+                )
+        for child in ast.iter_child_nodes(node):
+            visit(child, branch)
+
+    visit(function)
+    return outputs
+
+
 def _kernel_definitions(
     tree: ast.AST, reasons: list[str]
-) -> dict[str, tuple[str, ...]]:
+) -> dict[str, dict[str, object]]:
     kernels = {}
     for node in ast.walk(tree):
         if not (
@@ -275,13 +436,17 @@ def _kernel_definitions(
         if len(functions) != 1:
             reasons.append("triton-definition-function-count")
             continue
-        kernels[node.targets[0].id] = tuple(
-            argument.arg for argument in functions[0].args.args
-        )
+        parameters = tuple(argument.arg for argument in functions[0].args.args)
+        kernels[node.targets[0].id] = {
+            "parameters": parameters,
+            "outputs": _kernel_output_provenance(functions[0], parameters),
+        }
     return kernels
 
 
-def _argument_shapes(tree: ast.AST) -> dict[str, tuple[int, ...]]:
+def _argument_layouts(
+    tree: ast.AST,
+) -> dict[str, tuple[tuple[int, ...], tuple[int, ...]]]:
     result = {}
     for node in ast.walk(tree):
         if not (
@@ -292,8 +457,9 @@ def _argument_shapes(tree: ast.AST) -> dict[str, tuple[int, ...]]:
         ):
             continue
         shape = _shape_literal(node.args[1])
-        if shape is not None:
-            result[node.args[0].id] = shape
+        stride = _shape_literal(node.args[2] if len(node.args) >= 3 else None)
+        if shape is not None and stride is not None and len(shape) == len(stride):
+            result[node.args[0].id] = (shape, stride)
     return result
 
 
@@ -346,6 +512,21 @@ def _is_field_output_candidate(
     )
 
 
+def _is_possible_field_layout(
+    shape: object,
+    stride: object,
+    field_layouts: tuple[tuple[tuple[int, ...], tuple[int, ...]], ...],
+) -> bool | None:
+    """Return whether a resolved source can be a contracted field layout."""
+    if not isinstance(shape, tuple) or not isinstance(stride, tuple):
+        return None
+    return (shape, stride) in field_layouts or (
+        len(shape) == 1
+        and stride == (1,)
+        and shape[0] in {_numel(item[0]) for item in field_layouts}
+    )
+
+
 def _pointer_role(name: str) -> str | None:
     if name.startswith("in_out_ptr"):
         return "in-out"
@@ -363,7 +544,7 @@ def _resolved_value(
     *,
     allocations: Mapping[str, Mapping[str, object]],
     aliases: Mapping[str, ast.AST],
-    argument_shapes: Mapping[str, tuple[int, ...]],
+    argument_layouts: Mapping[str, tuple[tuple[int, ...], tuple[int, ...]]],
     depth: int = 0,
 ) -> dict[str, object]:
     if depth > 16:
@@ -376,13 +557,15 @@ def _resolved_value(
                 aliases[node.id],
                 allocations=allocations,
                 aliases=aliases,
-                argument_shapes=argument_shapes,
+                argument_layouts=argument_layouts,
                 depth=depth + 1,
             )
         if DIRECT_ARGUMENT.fullmatch(node.id):
+            layout = argument_layouts.get(node.id)
             return {
                 "kind": "direct-input",
-                "shape": argument_shapes.get(node.id),
+                "shape": None if layout is None else layout[0],
+                "stride": None if layout is None else layout[1],
                 "name": node.id,
             }
     if isinstance(node, ast.Call) and _call_name(node.func) in KNOWN_ALIAS_FACTORIES:
@@ -391,7 +574,7 @@ def _resolved_value(
                 node.args[0],
                 allocations=allocations,
                 aliases=aliases,
-                argument_shapes=argument_shapes,
+                argument_layouts=argument_layouts,
                 depth=depth + 1,
             )
     return {"kind": "unknown"}
@@ -411,11 +594,14 @@ def _audit_wrapper(
         "size_bytes": len(raw),
         "launches": [],
         "full_domain_output_candidates": [],
+        "non_field_output_exclusions": [],
         "reasons": [],
     }
     reasons = result["reasons"]
     candidates = result["full_domain_output_candidates"]
+    exclusions = result["non_field_output_exclusions"]
     assert isinstance(reasons, list) and isinstance(candidates, list)
+    assert isinstance(exclusions, list)
     if not isinstance(region, str) or not region:
         reasons.append("missing-region-label")
     try:
@@ -424,7 +610,7 @@ def _audit_wrapper(
         reasons.append("wrapper-is-unparseable")
         return result
     kernels = _kernel_definitions(tree, reasons)
-    argument_shapes = _argument_shapes(tree)
+    argument_layouts = _argument_layouts(tree)
     allocations: dict[str, Mapping[str, object]] = {}
     aliases: dict[str, ast.AST] = {}
     for node in ast.walk(tree):
@@ -438,7 +624,7 @@ def _audit_wrapper(
         if isinstance(node.value, ast.Call):
             allocation = _allocation_from_call(node.value)
             if allocation is not None:
-                allocations[target] = allocation
+                allocations[target] = {"name": target, **allocation}
                 if allocation["shape"] is None:
                     reasons.append(f"allocation-shape-unknown:{target}")
                 continue
@@ -465,9 +651,16 @@ def _audit_wrapper(
         ):
             continue
         kernel_name = node.func.value.id
-        parameters = kernels.get(kernel_name)
-        if parameters is None:
+        kernel = kernels.get(kernel_name)
+        if kernel is None:
             reasons.append(f"launch-kernel-unknown:{kernel_name}")
+            continue
+        parameters = kernel.get("parameters")
+        provenance_by_pointer = kernel.get("outputs")
+        if not isinstance(parameters, tuple) or not isinstance(
+            provenance_by_pointer, dict
+        ):
+            reasons.append(f"launch-kernel-metadata-invalid:{kernel_name}")
             continue
         launch_count += 1
         launch = {"kernel": kernel_name, "outputs": []}
@@ -484,9 +677,19 @@ def _audit_wrapper(
                 node.args[index],
                 allocations=allocations,
                 aliases=aliases,
-                argument_shapes=argument_shapes,
+                argument_layouts=argument_layouts,
             )
-            outputs.append({"parameter": parameter, "role": role, **resolved})
+            provenance = provenance_by_pointer.get(parameter, {"kind": "unknown"})
+            if not isinstance(provenance, dict):
+                provenance = {"kind": "unknown"}
+            outputs.append(
+                {
+                    "parameter": parameter,
+                    "role": role,
+                    "payload_provenance": provenance,
+                    **resolved,
+                }
+            )
             if resolved["kind"] == "allocation":
                 candidate = _is_field_output_candidate(
                     resolved.get("shape"),
@@ -500,15 +703,80 @@ def _audit_wrapper(
                         f"allocation-shape-unknown:{kernel_name}:{parameter}"
                     )
                 elif candidate:
-                    candidates.append(
+                    event = {
+                        "kernel": kernel_name,
+                        "parameter": parameter,
+                        "factory": resolved["factory"],
+                        "reused_storage": resolved["reused_storage"],
+                        "shape": list(resolved["shape"]),
+                        "stride": list(resolved["stride"]),
+                    }
+                    kind = provenance.get("kind")
+                    if kind == "computed":
+                        candidates.append(
+                            {
+                                "classification": "arithmetic-produced-field-workspace",
+                                **event,
+                            }
+                        )
+                    elif kind == "identity-input":
+                        input_pointer = provenance.get("input")
+                        try:
+                            input_index = parameters.index(input_pointer)
+                        except TypeError, ValueError:
+                            input_index = -1
+                        source_value = (
+                            _resolved_value(
+                                node.args[input_index],
+                                allocations=allocations,
+                                aliases=aliases,
+                                argument_layouts=argument_layouts,
+                            )
+                            if 0 <= input_index < len(node.args)
+                            else {"kind": "unknown"}
+                        )
+                        field_source = _is_possible_field_layout(
+                            source_value.get("shape"),
+                            source_value.get("stride"),
+                            field_layouts,
+                        )
+                        candidates.append(
+                            {
+                                "classification": (
+                                    "field-identity-copy"
+                                    if field_source
+                                    else "field-identity-source-unproven"
+                                ),
+                                "source": source_value,
+                                **event,
+                            }
+                        )
+                        reasons.append(
+                            f"field-identity-copy:{kernel_name}:{parameter}"
+                            if field_source
+                            else f"field-identity-source-unproven:{kernel_name}:{parameter}"
+                        )
+                    else:
+                        candidates.append(
+                            {
+                                "classification": "field-producer-unknown",
+                                **event,
+                            }
+                        )
+                        reasons.append(
+                            f"field-producer-unknown:{kernel_name}:{parameter}"
+                        )
+                else:
+                    exclusions.append(
                         {
-                            "classification": "exact-field-layout-output-candidate",
+                            "classification": "non-field-layout-output",
                             "kernel": kernel_name,
                             "parameter": parameter,
                             "factory": resolved["factory"],
                             "reused_storage": resolved["reused_storage"],
-                            "shape": list(resolved["shape"]),
-                            "stride": list(resolved["stride"]),
+                            "shape": resolved["shape"],
+                            "stride": resolved["stride"],
+                            "dtype": resolved["dtype"],
                         }
                     )
             elif resolved["kind"] != "direct-input":
@@ -527,7 +795,7 @@ def _audit_wrapper(
                 value,
                 allocations=allocations,
                 aliases=aliases,
-                argument_shapes=argument_shapes,
+                argument_layouts=argument_layouts,
             )
             for value in values
         ]
@@ -582,6 +850,11 @@ def audit_compiled_wrapper_sources(
         for wrapper in wrappers
         for event in wrapper["full_domain_output_candidates"]
     ]
+    exclusions = [
+        event
+        for wrapper in wrappers
+        for event in wrapper["non_field_output_exclusions"]
+    ]
     unique_reasons = sorted(set(reasons))
     status = "unverified" if unique_reasons else "verified"
     return {
@@ -595,6 +868,7 @@ def audit_compiled_wrapper_sources(
             "missing": missing,
         },
         "full_domain_output_candidates": candidates,
+        "non_field_output_exclusions": exclusions,
         "reasons": unique_reasons,
         "status": status,
         "verified": status == "verified",

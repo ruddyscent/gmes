@@ -52,14 +52,19 @@ def _contract(*, regions: list[str] | None = None) -> dict[str, object]:
     }
 
 
-def _wrapper(*, allocation: str = "", output: str = "arg0_1") -> str:
+def _wrapper(
+    *,
+    allocation: str = "",
+    output: str = "arg0_1",
+    payload: str = "value = tl.load(in_ptr0)\n    tl.store(out_ptr0, value)",
+) -> str:
     return f"""\
 kernel = async_compile.triton('kernel', r'''\
 import triton
 import triton.language as tl
 @triton.jit
 def kernel(in_ptr0, out_ptr0, xnumel: tl.constexpr):
-    pass
+    {payload}
 ''')
 
 def call(args):
@@ -67,6 +72,27 @@ def call(args):
     assert_size_stride(arg0_1, (8,), (1,))
     {allocation}
     kernel.run(arg0_1, {output}, 8, grid=grid(8), stream=stream0)
+"""
+
+
+def _arithmetic_wrapper(*, allocation: str, output: str = "buf0") -> str:
+    return f"""\
+kernel = async_compile.triton('kernel', r'''\
+import triton
+import triton.language as tl
+@triton.jit
+def kernel(in_ptr0, in_ptr1, out_ptr0, xnumel: tl.constexpr):
+    left = tl.load(in_ptr0)
+    right = tl.load(in_ptr1)
+    tl.store(out_ptr0, left - right)
+''')
+
+def call(args):
+    arg0_1, arg1_1 = args
+    assert_size_stride(arg0_1, (8,), (1,))
+    assert_size_stride(arg1_1, (8,), (1,))
+    {allocation}
+    kernel.run(arg0_1, arg1_1, {output}, 8, grid=grid(8), stream=stream0)
 """
 
 
@@ -84,20 +110,89 @@ class LoweredMaterializationTest(unittest.TestCase):
         output = audit["wrappers"][0]["launches"][0]["outputs"][0]
         self.assertEqual(output["kind"], "direct-input")
 
-    def test_exact_field_layout_outputs_are_diagnostic_candidates(self):
+    def test_arithmetic_field_workspaces_and_pool_reuse_are_diagnostic_only(self):
         for allocation in (
             "buf0 = empty_strided_cuda((8,), (1,), torch.float64)",
             "buf0 = alloc_from_pool((8,), (1,), torch.float64)",
         ):
             with self.subTest(allocation=allocation):
-                audit = self._audit(_wrapper(allocation=allocation, output="buf0"))
+                audit = self._audit(_arithmetic_wrapper(allocation=allocation))
                 self.assertEqual(audit["status"], "verified")
                 self.assertTrue(audit["verified"])
                 candidates = audit["full_domain_output_candidates"]
                 self.assertEqual(len(candidates), 1)
                 self.assertEqual(
                     candidates[0]["classification"],
-                    "exact-field-layout-output-candidate",
+                    "arithmetic-produced-field-workspace",
+                )
+                self.assertEqual(
+                    candidates[0]["reused_storage"], "alloc_from_pool" in allocation
+                )
+
+    def test_identity_field_copy_and_unknown_payload_fail_closed(self):
+        identity = self._audit(
+            _wrapper(
+                allocation="buf0 = empty_strided_cuda((8,), (1,), torch.float64)",
+                output="buf0",
+            )
+        )
+        self.assertFalse(identity["verified"])
+        self.assertIn("field-identity-copy:kernel:out_ptr0", identity["reasons"])
+        self.assertEqual(
+            identity["full_domain_output_candidates"][0]["classification"],
+            "field-identity-copy",
+        )
+
+        for payload in (
+            "value = tl.load(in_ptr0) + 0\n    tl.store(out_ptr0, value)",
+            "value = tl.load(in_ptr0)\n    value = tl.load(in_ptr0)\n    tl.store(out_ptr0, value)",
+            "if xnumel:\n        value = tl.load(in_ptr0) + tl.load(in_ptr0)\n        tl.store(out_ptr0, value)",
+        ):
+            with self.subTest(payload=payload):
+                unknown = self._audit(
+                    _wrapper(
+                        allocation="buf0 = alloc_from_pool((8,), (1,), torch.float64)",
+                        output="buf0",
+                        payload=payload,
+                    )
+                )
+                self.assertFalse(unknown["verified"])
+                self.assertIn(
+                    "field-producer-unknown:kernel:out_ptr0", unknown["reasons"]
+                )
+
+    def test_selector_and_opaque_payloads_are_not_arithmetic_provenance(self):
+        payloads = (
+            "left = tl.load(in_ptr0)\n    right = tl.load(in_ptr1)\n"
+            "    value = tl.where(right > 0, left, left)\n"
+            "    tl.store(out_ptr0, value)",
+            "left = tl.load(in_ptr0)\n    right = tl.load(in_ptr1)\n"
+            "    value = tl.where(xnumel > 0, left, right)\n"
+            "    tl.store(out_ptr0, value)",
+            "left = tl.load(in_ptr0)\n    right = tl.load(in_ptr1)\n"
+            "    value = left if xnumel > 0 else right\n"
+            "    tl.store(out_ptr0, value)",
+            "left = tl.load(in_ptr0)\n    right = tl.load(in_ptr1)\n"
+            "    value = opaque_transform(left, right)\n"
+            "    tl.store(out_ptr0, value)",
+        )
+        for payload in payloads:
+            with self.subTest(payload=payload):
+                source = _arithmetic_wrapper(
+                    allocation="buf0 = empty_strided_cuda((8,), (1,), torch.float64)"
+                ).replace(
+                    "left = tl.load(in_ptr0)\n    right = tl.load(in_ptr1)\n"
+                    "    tl.store(out_ptr0, left - right)",
+                    payload,
+                )
+                audit = self._audit(source)
+                self.assertFalse(audit["verified"])
+                self.assertIn(
+                    "field-producer-unknown:kernel:out_ptr0", audit["reasons"]
+                )
+                self.assertEqual(
+                    audit["full_domain_output_candidates"][0]["classification"],
+                    "field-producer-unknown",
                 )
 
     def test_larger_or_nonfield_outputs_are_not_clone_candidates(self):
@@ -113,6 +208,7 @@ class LoweredMaterializationTest(unittest.TestCase):
                 self.assertEqual(audit["status"], "verified")
                 self.assertTrue(audit["verified"])
                 self.assertEqual(audit["full_domain_output_candidates"], [])
+                self.assertEqual(len(audit["non_field_output_exclusions"]), 1)
 
     def test_unknown_factory_mapping_and_opaque_paths_fail_closed(self):
         for source, reason in (
@@ -134,6 +230,29 @@ class LoweredMaterializationTest(unittest.TestCase):
         )
         self.assertEqual(audit["status"], "unverified")
         self.assertIn("missing-region-coverage:magnetic", audit["reasons"])
+
+    def test_both_required_halves_need_separate_payload_provenance(self):
+        contract = _contract(regions=["electric", "magnetic"])
+        audit = lowering.audit_compiled_wrapper_sources(
+            sources=[
+                {
+                    "region": "electric",
+                    "source": _arithmetic_wrapper(
+                        allocation="buf0 = empty_strided_cuda((8,), (1,), torch.float64)"
+                    ),
+                },
+                {
+                    "region": "magnetic",
+                    "source": _arithmetic_wrapper(
+                        allocation="buf0 = alloc_from_pool((8,), (1,), torch.float64)"
+                    ),
+                },
+            ],
+            contract=contract,
+        )
+        self.assertTrue(audit["verified"])
+        self.assertEqual(audit["region_coverage"]["missing"], [])
+        self.assertEqual(len(audit["full_domain_output_candidates"]), 2)
 
     def test_malformed_field_layout_and_runtime_digest_fail_closed(self):
         contract = _contract()

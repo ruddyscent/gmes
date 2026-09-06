@@ -795,7 +795,7 @@ def _partition_geometry(gmes):
 
 
 def _partition_sources(gmes):
-    """Return ordered sources owned on both sides of the forced cut."""
+    """Return point and TFSF sources owned on both sides of the forced cut."""
     waveform = gmes.DifferentiatedGaussian(0.7, 0.3)
     return (
         gmes.PointSource(waveform, center=(-2, 0, 0), component=gmes.Ex, amp=1),
@@ -803,6 +803,15 @@ def _partition_sources(gmes):
         gmes.PointSource(waveform, center=(-1, 0, 0), component=gmes.Ey, amp=3),
         # Same Ex target: the final record must be the one surviving on rank 0.
         gmes.PointSource(waveform, center=(-1, 0, 0), component=gmes.Ex, amp=4),
+        # This supported direct TFSF face region straddles the forced x cut.
+        gmes.TotalFieldScatteredField(
+            gmes.Continuous(0.2, phase=0.2, width=1),
+            center=(0, 0, 0),
+            size=(3, 3, 3),
+            direction=(1, 0, 0),
+            polarization=(0, 1, 0),
+            amp=0.3,
+        ),
     )
 
 
@@ -879,29 +888,75 @@ def _material_rows(simulation, *, offset=(0, 0, 0), rank=None, split_axis=None):
     return _canonical_rows(parts)
 
 
-def _point_source_rows(simulation, *, offset=(0, 0, 0)):
-    """Canonicalize actual point batch parameters without native archive input."""
-    from gmes.torch_source import TorchPointSourceBatch
-
+def _source_rows(simulation, *, offset=(0, 0, 0)):
+    """Canonicalize owned point and transparent source batch payloads."""
     parts = []
     for batch in simulation.sources.batches:
-        if not isinstance(batch, TorchPointSourceBatch):
-            raise ValueError("two-GPU state case requires point-source batches")
-        shape = simulation.plan.shapes[batch.component]
-        for kind in ("overwrite", "additive"):
-            targets = getattr(batch, f"{kind}_targets").detach().cpu().numpy()
-            models = getattr(batch, f"{kind}_models").detach().cpu().numpy()
-            parameters = getattr(batch, f"{kind}_parameters").detach().cpu().numpy()
-            amplitudes = getattr(batch, f"{kind}_amplitudes").detach().cpu().numpy()
-            if not len(targets):
-                continue
-            indices = np.column_stack(np.unravel_index(targets, shape)).astype(
-                np.int64, copy=False
+        native_type, representation, indices, values = (
+            torch_correctness._source_batch_payload(simulation, batch)
+        )
+        if not len(indices):
+            continue
+        indices = np.asarray(indices, dtype=np.int64).copy()
+        indices += np.asarray(offset, dtype=np.int64)
+        values = np.asarray(values)
+        if values.ndim != 1 or values.size % len(indices):
+            raise ValueError("source batch payload cannot be partitioned by target")
+        parts.append(
+            (
+                f"source/{batch.component}/{native_type}/{representation}",
+                indices,
+                values.reshape(len(indices), -1),
             )
-            indices += np.asarray(offset, dtype=np.int64)
-            values = np.column_stack((models, amplitudes, parameters))
-            parts.append((f"source/{batch.component}/{kind}", indices, values))
+        )
     return _canonical_rows(parts)
+
+
+def _source_auxiliary_arrays(simulation):
+    """Capture live transparent-source auxiliary state without an oracle archive."""
+    arrays = {}
+    records = torch_correctness._independent_source_records(simulation, 0, arrays)
+    if not records["auxiliary"]:
+        raise ValueError("partition-crossing source requires a transparent auxiliary")
+    prefix = "step/0/"
+    result = {
+        key.removeprefix(prefix): value
+        for key, value in arrays.items()
+        if key.startswith(f"{prefix}source_aux/")
+        or key.startswith(f"{prefix}source_aux_material/")
+    }
+    if not result:
+        raise ValueError("transparent auxiliary state capture is empty")
+    for ordinal, (record, auxiliary) in enumerate(
+        zip(records["auxiliary"], simulation.sources.auxiliaries, strict=True)
+    ):
+        clock = _source_clock(auxiliary)
+        prefix = f"source_aux/{ordinal}-{record['source']}/live_clock"
+        result[f"{prefix}/step_count"] = clock["source/step_count"]
+        result[f"{prefix}/time"] = clock["source/time"]
+    return result
+
+
+def _transparent_source_ownership(rows):
+    """Count owned direct TFSF/Gaussian face targets from live source rows."""
+    return sum(
+        len(value)
+        for key, value in rows.items()
+        if key.startswith("source/")
+        and "/Transparent" in key
+        and key.endswith("/indices")
+    )
+
+
+def _point_source_ownership(rows):
+    """Count only direct point-source targets, never transparent face rows."""
+    return sum(
+        len(value)
+        for key, value in rows.items()
+        if key.startswith("source/")
+        and "/PointSource" in key
+        and key.endswith("/indices")
+    )
 
 
 def _source_clock(simulation):
@@ -921,6 +976,89 @@ def _source_clock(simulation):
     }
 
 
+def _canonical_distributed_rows(gathered_rows):
+    """Merge exact owned rows from every rank and reject duplicate ownership."""
+    return _canonical_rows(
+        (
+            (
+                key.removesuffix("/indices"),
+                value,
+                gathered[key.replace("/indices", "/values")],
+            )
+            for gathered in gathered_rows
+            for key, value in gathered.items()
+            if key.endswith("/indices")
+        )
+    )
+
+
+def _distributed_live_state(distributed, launch, dist):
+    """Collect fields plus all rank-local persistent source/material state."""
+    global_fields = distributed.global_field_snapshot()
+    local_material = _material_rows(
+        distributed.local,
+        offset=distributed.decomposition.offset(launch.rank),
+        rank=launch.rank,
+        split_axis=distributed.decomposition.axis,
+    )
+    local_sources = _source_rows(
+        distributed.local, offset=distributed.decomposition.offset(launch.rank)
+    )
+    local_auxiliary = _source_auxiliary_arrays(distributed.local)
+    local_clock = _source_clock(distributed.local)
+    gathered_material = [None, None]
+    gathered_sources = [None, None]
+    gathered_auxiliary = [None, None]
+    gathered_clocks = [None, None]
+    for gathered, local in (
+        (gathered_material, local_material),
+        (gathered_sources, local_sources),
+        (gathered_auxiliary, local_auxiliary),
+        (gathered_clocks, local_clock),
+    ):
+        dist.all_gather_object(gathered, local, group=distributed.group)
+    if launch.rank != 0:
+        return None
+    return {
+        "fields": global_fields,
+        "material": _canonical_distributed_rows(gathered_material),
+        "sources": _canonical_distributed_rows(gathered_sources),
+        "auxiliaries": gathered_auxiliary,
+        "clocks": gathered_clocks,
+        "source_ownership": [
+            sum(len(value) for key, value in rows.items() if key.endswith("/indices"))
+            for rows in gathered_sources
+        ],
+        "point_source_ownership": [
+            _point_source_ownership(rows) for rows in gathered_sources
+        ],
+        "transparent_source_ownership": [
+            _transparent_source_ownership(rows) for rows in gathered_sources
+        ],
+    }
+
+
+def _persistent_replay_arrays(state):
+    """Flatten complete distributed state for exact post-checkpoint replay checks."""
+    arrays = {f"field/{key}": value for key, value in state["fields"].items()}
+    arrays.update(
+        {f"material/{key}": value for key, value in state["material"].items()}
+    )
+    arrays.update({f"source/{key}": value for key, value in state["sources"].items()})
+    for rank, auxiliary in enumerate(state["auxiliaries"]):
+        arrays.update(
+            {
+                f"source_auxiliary/rank-{rank}/{key}": value
+                for key, value in auxiliary.items()
+            }
+        )
+    for rank, clock in enumerate(state["clocks"]):
+        arrays.update(
+            {f"source_clock/rank-{rank}/{key}": value for key, value in clock.items()}
+        )
+    return arrays
+
+
 def _comparison_tolerances(arrays, tolerance):
     """Use exact topology and one frozen tolerance for each numeric state row."""
     return {
@@ -928,6 +1066,16 @@ def _comparison_tolerances(arrays, tolerance):
         for key, value in arrays.items()
         if np.asarray(value).dtype.kind not in "biu"
     }
+
+
+def _live_clock_tolerances(arrays, tolerance):
+    """Keep live scheduling clocks exact while retaining physical tolerances."""
+    result = _comparison_tolerances(arrays, tolerance)
+    for key, value in arrays.items():
+        if "/live_clock/" in key or key.startswith("source_clock/"):
+            if np.asarray(value).dtype.kind not in "biu":
+                result[key] = {"rtol": 0.0, "atol": 0.0}
+    return result
 
 
 def _public_device_metadata(logical, properties):
@@ -938,20 +1086,38 @@ def _public_device_metadata(logical, properties):
 def _two_gpu_report_passed(
     captures,
     source_comparison,
+    source_auxiliary_comparisons,
     source_clock_comparisons,
     checkpoint_comparison,
     source_ownership,
+    point_source_ownership,
+    transparent_source_ownership,
+    source_crossings,
 ):
     """Combine every required two-rank comparison without hiding a failure."""
     return (
         all(
-            item["field_comparison"]["passed"] and item["material_comparison"]["passed"]
+            item["field_comparison"]["passed"]
+            and item["material_comparison"]["passed"]
+            and item["source_comparison"]["passed"]
+            and all(
+                comparison["comparison"]["passed"]
+                for comparison in item["source_auxiliary_comparisons"]
+            )
+            and all(
+                comparison["comparison"]["passed"]
+                for comparison in item["source_clock_comparisons"]
+            )
             for item in captures
         )
         and source_comparison["passed"]
+        and all(item["comparison"]["passed"] for item in source_auxiliary_comparisons)
         and all(item["comparison"]["passed"] for item in source_clock_comparisons)
         and checkpoint_comparison["passed"]
         and all(source_ownership)
+        and all(point_source_ownership)
+        and all(transparent_source_ownership)
+        and source_crossings > 0
     )
 
 
@@ -1032,118 +1198,48 @@ def run_two_gpu_partition_case(output):
     raw = {}
     capture_results = []
     tolerance = native_oracle.load_manifest()["tolerances"]["torch"]["drude"]["float64"]
+    source_ownership = None
+    point_source_ownership = None
+    transparent_source_ownership = None
     for relative_step in captures:
         distributed.advance(relative_step - completed)
         if launch.rank == 0:
             serial.advance(relative_step - completed)
         completed = relative_step
-        global_fields = distributed.global_field_snapshot()
-        local_material = _material_rows(
-            distributed.local,
-            offset=distributed.decomposition.offset(launch.rank),
-            rank=launch.rank,
-            split_axis=distributed.decomposition.axis,
-        )
-        gathered_material = [None, None]
-        dist.all_gather_object(
-            gathered_material, local_material, group=distributed.group
-        )
+        distributed_state = _distributed_live_state(distributed, launch, dist)
         if launch.rank != 0:
             continue
         serial_fields = serial.host_snapshot()
         serial_material = _material_rows(serial)
-        distributed_material = _canonical_rows(
-            (
-                (
-                    key.removesuffix("/indices"),
-                    value,
-                    gathered[key.replace("/indices", "/values")],
-                )
-                for gathered in gathered_material
-                for key, value in gathered.items()
-                if key.endswith("/indices")
-            )
-        )
+        serial_sources = _source_rows(serial)
+        serial_source_clock = _source_clock(serial)
+        serial_source_auxiliary = _source_auxiliary_arrays(serial)
         field_comparison = compare_arrays(
             serial_fields,
-            global_fields,
+            distributed_state["fields"],
             dict.fromkeys(serial_fields, tolerance),
         )
         material_comparison = compare_arrays(
             serial_material,
-            distributed_material,
+            distributed_state["material"],
             _comparison_tolerances(serial_material, tolerance),
-        )
-        for name in COMPONENTS:
-            raw[f"capture/{relative_step}/serial/{name}"] = serial_fields[name]
-            raw[f"capture/{relative_step}/distributed/{name}"] = global_fields[name]
-        for key, value in serial_material.items():
-            raw[f"capture/{relative_step}/serial/{key}"] = value
-        for key, value in distributed_material.items():
-            raw[f"capture/{relative_step}/distributed/{key}"] = value
-        capture_results.append(
-            {
-                "relative_step": relative_step,
-                "field_comparison": field_comparison,
-                "material_comparison": material_comparison,
-            }
-        )
-    local_sources = _point_source_rows(
-        distributed.local, offset=distributed.decomposition.offset(launch.rank)
-    )
-    gathered_sources = [None, None]
-    dist.all_gather_object(gathered_sources, local_sources, group=distributed.group)
-    gathered_source_clocks = [None, None]
-    dist.all_gather_object(
-        gathered_source_clocks,
-        _source_clock(distributed.local),
-        group=distributed.group,
-    )
-    local_source_ownership = sum(
-        len(value) for key, value in local_sources.items() if key.endswith("/indices")
-    )
-    source_ownership = [None, None]
-    dist.all_gather_object(
-        source_ownership, local_source_ownership, group=distributed.group
-    )
-    if launch.rank == 0:
-        serial_sources = _point_source_rows(serial)
-        serial_source_clock = _source_clock(serial)
-    checkpoint = distributed.checkpoint()
-    distributed.advance(5)
-    if launch.rank == 0:
-        serial_checkpoint = serial.checkpoint()
-        serial.advance(5)
-    replay_fields = distributed.global_field_snapshot()
-    distributed.load_checkpoint(checkpoint).advance(5)
-    if launch.rank == 0:
-        serial.load_checkpoint(serial_checkpoint).advance(5)
-    replay_again = distributed.global_field_snapshot()
-    devices = [None, None]
-    local_device = torch.cuda.get_device_properties(launch.local_rank)
-    dist.all_gather_object(
-        devices,
-        _public_device_metadata(launch.local_rank, local_device),
-        group=distributed.group,
-    )
-    if launch.rank == 0:
-        distributed_sources = _canonical_rows(
-            (
-                (
-                    key.removesuffix("/indices"),
-                    value,
-                    gathered[key.replace("/indices", "/values")],
-                )
-                for gathered in gathered_sources
-                for key, value in gathered.items()
-                if key.endswith("/indices")
-            )
         )
         source_comparison = compare_arrays(
             serial_sources,
-            distributed_sources,
+            distributed_state["sources"],
             dict.fromkeys(serial_sources, {"rtol": 0.0, "atol": 0.0}),
         )
+        source_auxiliary_comparisons = [
+            {
+                "rank": rank,
+                "comparison": compare_arrays(
+                    serial_source_auxiliary,
+                    remote_auxiliary,
+                    _live_clock_tolerances(serial_source_auxiliary, tolerance),
+                ),
+            }
+            for rank, remote_auxiliary in enumerate(distributed_state["auxiliaries"])
+        ]
         source_clock_comparisons = [
             {
                 "rank": rank,
@@ -1153,23 +1249,82 @@ def run_two_gpu_partition_case(output):
                     {"source/time": {"rtol": 0.0, "atol": 0.0}},
                 ),
             }
-            for rank, remote_clock in enumerate(gathered_source_clocks)
+            for rank, remote_clock in enumerate(distributed_state["clocks"])
         ]
-        replay_comparison = compare_arrays(
-            replay_fields, replay_again, dict.fromkeys(replay_fields, tolerance)
-        )
+        if relative_step == captures[0]:
+            source_ownership = distributed_state["source_ownership"]
+            point_source_ownership = distributed_state["point_source_ownership"]
+            transparent_source_ownership = distributed_state[
+                "transparent_source_ownership"
+            ]
         for name in COMPONENTS:
-            raw[f"checkpoint/expected/{name}"] = replay_fields[name]
-            raw[f"checkpoint/replay/{name}"] = replay_again[name]
-        for key, value in serial_sources.items():
-            raw[f"source/serial/{key}"] = value
-        for key, value in distributed_sources.items():
-            raw[f"source/distributed/{key}"] = value
-        for key, value in serial_source_clock.items():
-            raw[f"source/serial/{key}"] = value
-        for rank, remote_clock in enumerate(gathered_source_clocks):
-            for key, value in remote_clock.items():
-                raw[f"source/distributed-rank-{rank}/{key}"] = value
+            raw[f"capture/{relative_step}/serial/{name}"] = serial_fields[name]
+            raw[f"capture/{relative_step}/distributed/{name}"] = distributed_state[
+                "fields"
+            ][name]
+        for key, value in serial_material.items():
+            raw[f"capture/{relative_step}/serial/{key}"] = value
+        for key, value in distributed_state["material"].items():
+            raw[f"capture/{relative_step}/distributed/{key}"] = value
+        for prefix, arrays in (
+            ("serial/source", serial_sources),
+            ("distributed/source", distributed_state["sources"]),
+            ("serial/source_clock", serial_source_clock),
+            ("serial/source_auxiliary", serial_source_auxiliary),
+        ):
+            for key, value in arrays.items():
+                raw[f"capture/{relative_step}/{prefix}/{key}"] = value
+        for rank, values in enumerate(distributed_state["clocks"]):
+            for key, value in values.items():
+                raw[f"capture/{relative_step}/distributed/rank-{rank}/clock/{key}"] = (
+                    value
+                )
+        for rank, values in enumerate(distributed_state["auxiliaries"]):
+            for key, value in values.items():
+                raw[
+                    f"capture/{relative_step}/distributed/rank-{rank}/auxiliary/{key}"
+                ] = value
+        capture_results.append(
+            {
+                "relative_step": relative_step,
+                "field_comparison": field_comparison,
+                "material_comparison": material_comparison,
+                "source_comparison": source_comparison,
+                "source_auxiliary_comparisons": source_auxiliary_comparisons,
+                "source_clock_comparisons": source_clock_comparisons,
+            }
+        )
+    checkpoint = distributed.checkpoint()
+    distributed.advance(5)
+    checkpoint_expected = _distributed_live_state(distributed, launch, dist)
+    distributed.load_checkpoint(checkpoint).advance(5)
+    checkpoint_replay = _distributed_live_state(distributed, launch, dist)
+    devices = [None, None]
+    local_device = torch.cuda.get_device_properties(launch.local_rank)
+    dist.all_gather_object(
+        devices,
+        _public_device_metadata(launch.local_rank, local_device),
+        group=distributed.group,
+    )
+    if launch.rank == 0:
+        checkpoint_expected_arrays = _persistent_replay_arrays(checkpoint_expected)
+        checkpoint_replay_arrays = _persistent_replay_arrays(checkpoint_replay)
+        replay_comparison = compare_arrays(
+            checkpoint_expected_arrays,
+            checkpoint_replay_arrays,
+            _live_clock_tolerances(checkpoint_expected_arrays, tolerance),
+        )
+        for label, arrays in (
+            ("expected", checkpoint_expected_arrays),
+            ("replay", checkpoint_replay_arrays),
+        ):
+            for key, value in arrays.items():
+                raw[f"checkpoint/{label}/{key}"] = value
+        source_comparison = capture_results[-1]["source_comparison"]
+        source_auxiliary_comparisons = capture_results[-1][
+            "source_auxiliary_comparisons"
+        ]
+        source_clock_comparisons = capture_results[-1]["source_clock_comparisons"]
         raw_path = output / "raw-arrays.npz"
         np.savez_compressed(raw_path, **raw)
         report = {
@@ -1187,18 +1342,23 @@ def run_two_gpu_partition_case(output):
                 "capture_steps": list(captures),
                 "drude_block_crosses_partition": True,
                 "ordered_point_sources": 4,
-                "point_source_ownership": source_ownership,
-                "source_crossings": 0,
+                "point_source_ownership": point_source_ownership,
+                "source_ownership": source_ownership,
+                "source_crossings": distributed.decomposition.source_crossings,
+                "transparent_source_ownership": transparent_source_ownership,
                 "source_coverage": (
-                    "point-source ownership and same-target last-wins on both ranks; "
-                    "this case does not claim an extended-source footprint crossing"
+                    "point-source ownership and same-target last-wins, plus one direct "
+                    "TFSF face region with owned targets on both sides of the forced cut"
                 ),
             },
             "devices": sorted(devices, key=lambda value: value["logical"]),
             "captures": capture_results,
             "source_comparison": source_comparison,
+            "source_auxiliary_comparisons": source_auxiliary_comparisons,
             "source_clock_comparisons": source_clock_comparisons,
             "source_ownership_passed": all(source_ownership),
+            "point_source_ownership_passed": all(point_source_ownership),
+            "transparent_source_ownership_passed": all(transparent_source_ownership),
             "checkpoint_comparison": replay_comparison,
             "candidate": candidate_provenance(),
             "raw_arrays": {
@@ -1210,9 +1370,13 @@ def run_two_gpu_partition_case(output):
         report["passed"] = _two_gpu_report_passed(
             capture_results,
             source_comparison,
+            source_auxiliary_comparisons,
             source_clock_comparisons,
             replay_comparison,
             source_ownership,
+            point_source_ownership,
+            transparent_source_ownership,
+            distributed.decomposition.source_crossings,
         )
         (output / "result.json").write_text(_canonical_json(report))
         print(json.dumps({"scope": report["scope"], "passed": report["passed"]}))

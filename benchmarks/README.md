@@ -250,6 +250,47 @@ pre-created strict correctness indexes in fixed eager then compiled-graph
 order. Both indexes must bind the same clean candidate, manifest, solver ABI,
 complete case set, and raw candidate NPZ archives.
 
+### Repeated-advance stability evidence
+
+`torch_memory_stability.py` is a focused correctness/stability collector for a
+small mixed material/source/CPML case. It is not a timing or throughput
+benchmark. A qualifying run requires compiled execution, a post-warm-up
+15-by-100 advance series, finite candidate and eager-reference live state at
+every sample, stable storage, clean post-warm-up compiler counters, and no
+dispatcher-visible full-domain copy/materialization event. CUDA records both
+live allocated and reserved samples. The collector deliberately does not claim
+that dispatcher profiling proves the absence of copies inside lowered kernels;
+that remains an explicit unverified criterion until separate lowering evidence
+is available.
+
+~~~sh
+uv run --no-sync python -m benchmarks.torch_memory_stability \
+  --device cuda:0 --compile-policy compile --mode qualify \
+  --warmup 10 --steps 100 --batches 15 --output /tmp/stability.json
+
+# This runs the same warm-up and collection path but makes no measured advance.
+# It is an observation-overhead control and can never qualify stability.
+uv run --no-sync python -m benchmarks.torch_memory_stability \
+  --device cpu --compile-policy eager --mode observation-control \
+  --warmup 10 --steps 100 --batches 15 --output /tmp/stability-control.json
+
+# Re-evaluation preserves the raw collector outcome; it is not a new run.
+uv run --no-sync python -m benchmarks.torch_memory_stability \
+  --reevaluate /tmp/stability.json --output /tmp/stability-reevaluated.json
+~~~
+
+Each collection binds its candidate commit/dirty status, collector hash, and
+runtime-source hash. A re-evaluation additionally binds the raw JSON hash, its
+original collector hash, and the current evaluator/runtime-source hashes; it
+records a current-check diagnostic separately from its effective decision. The
+effective decision can qualify only when the raw collection was already
+qualified and the current diagnostic remains qualified; it cannot promote a
+prior failed or partial collection into new evidence.
+Compare an advance series with its observation-only control before attributing
+an initial RSS transition to the solver. The control can identify collector or
+setup allocation, but it does not clear a later advance-series drift: that
+remains reported as unattributed until separately explained.
+
 The final completion bundle embeds all three correctness indexes as full
 artifact descriptors: the CPU scope owns the CPU index, and the single-GPU
 scope owns the two CUDA indexes in fixed eager then compiled-graph order.

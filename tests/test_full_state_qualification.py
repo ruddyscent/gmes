@@ -529,6 +529,93 @@ class NativeCaptureCompatibilityTest(unittest.TestCase):
         np.testing.assert_allclose(row[0, :3], (0.001, 1.7, 1.05), rtol=0, atol=0)
         self.assertTrue(np.isfinite(row[0, 3]))
 
+    def test_tfsf_live_reconstruction_rejects_identity_and_batch_mutations(self):
+        import torch
+
+        from gmes.torch_source import TorchPointSourceBatch, TorchTransparentBatch
+
+        manifest = qualification.native_oracle.load_manifest()
+        spec = next(
+            case
+            for case in manifest["correctness"]
+            if case["name"] == "tfsf-transparent"
+        )
+        simulation = qualification.torch_correctness._build_torch_simulation(
+            spec,
+            dt=0.025,
+            threads=1,
+            device="cpu",
+            precision="float64",
+            graph_mode="eager",
+            compile_mode="default",
+        )
+        simulation.advance(1)
+        captured = {}
+        qualification.torch_correctness._independent_snapshot(simulation, 1, captured)
+        baseline = qualification._native_tfsf_capture_state(simulation, captured, 1)
+        self.assertTrue(baseline)
+        duplicate_targets = copy.deepcopy(captured)
+        duplicate_key = "torch/step/1/sources/batches/0/targets"
+        duplicate_targets[duplicate_key][1] = duplicate_targets[duplicate_key][0]
+        with self.assertRaisesRegex(ValueError, "batch layout"):
+            qualification._native_tfsf_capture_state(simulation, duplicate_targets, 1)
+        batch = next(
+            batch
+            for batch in simulation.sources.batches
+            if isinstance(batch, TorchTransparentBatch) and batch.component == "Ex"
+        )
+        original_samples = batch.samples
+        batch.samples = batch.samples.to(torch.float64) + 0.25
+        invalid_indices = {}
+        qualification.torch_correctness._independent_snapshot(
+            simulation, 1, invalid_indices
+        )
+        batch.samples = original_samples
+        with self.assertRaisesRegex(ValueError, "batch layout"):
+            qualification._native_tfsf_capture_state(simulation, invalid_indices, 1)
+        auxiliary = next(
+            item
+            for item in simulation.sources.auxiliaries[0].sources.batches
+            if isinstance(item, TorchPointSourceBatch)
+        )
+        original_amplitude = auxiliary.overwrite_amplitudes[0].detach().clone()
+        with torch.no_grad():
+            auxiliary.overwrite_amplitudes[0] = 1.125
+        invalid_auxiliary = {}
+        qualification.torch_correctness._independent_snapshot(
+            simulation, 1, invalid_auxiliary
+        )
+        with torch.no_grad():
+            auxiliary.overwrite_amplitudes[0] = original_amplitude
+        with self.assertRaisesRegex(ValueError, "auxiliary drive"):
+            qualification._native_tfsf_capture_state(simulation, invalid_auxiliary, 1)
+        original_weight = batch.weights[0, 0].detach().clone()
+        with torch.no_grad():
+            batch.weights[0, 0] = torch.nextafter(
+                batch.weights[0, 0],
+                torch.tensor(float("inf"), dtype=batch.weights.dtype),
+            )
+        before_capture = {}
+        qualification.torch_correctness._independent_snapshot(
+            simulation, 1, before_capture
+        )
+        with torch.no_grad():
+            batch.weights[0, 0] = original_weight
+        with self.assertRaisesRegex(ValueError, "source state changed"):
+            qualification._validate_native_tfsf_capture_stability(
+                baseline,
+                qualification._native_tfsf_capture_state(simulation, before_capture, 1),
+            )
+        with torch.no_grad():
+            batch.weights[0, 0] = torch.nextafter(
+                batch.weights[0, 0],
+                torch.tensor(float("inf"), dtype=batch.weights.dtype),
+            )
+        after_capture = qualification._native_tfsf_capture_state(
+            simulation, captured, 1
+        )
+        qualification._validate_native_tfsf_capture_stability(baseline, after_capture)
+
     def test_compatibility_retains_current_scientific_inputs(self):
         current = qualification.native_oracle.load_manifest()
         legacy = copy.deepcopy(current)

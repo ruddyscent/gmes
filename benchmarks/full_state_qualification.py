@@ -403,6 +403,329 @@ def read_native_reference(path, manifest):
     )
 
 
+def _native_tfsf_index(values, label):
+    """Require one observer coordinate stored in a real native parameter row."""
+    values = np.asarray(values)
+    if values.shape != (3,) or not np.all(np.isfinite(values)):
+        raise ValueError(f"native TFSF {label} is not a finite three-index coordinate")
+    if not np.array_equal(values, np.floor(values)):
+        raise ValueError(f"native TFSF {label} is not an integral coordinate")
+    return tuple(values.astype(np.int64, copy=False))
+
+
+def _native_tfsf_direct_rules(simulation, spec):
+    """Build the fixed-case direct rules against the live candidate context."""
+    from gmes.torch_source import TorchSourceLoweringContext
+
+    if spec.get("name") != "tfsf-transparent" or spec.get("source") != "tfsf":
+        raise ValueError("native TFSF projection only supports tfsf-transparent")
+    if simulation.runtime.precision != "float64":
+        raise ValueError("native TFSF projection only supports frozen float64 evidence")
+    sources = torch_correctness._candidate_sources(spec)
+    if len(sources) != 1 or type(sources[0]).__name__ != "TotalFieldScatteredField":
+        raise ValueError("tfsf-transparent must lower one TotalFieldScatteredField")
+    source = sources[0]
+    source.amp = 1.0
+    rules = source.lower_torch_source(
+        TorchSourceLoweringContext(
+            simulation.space,
+            simulation.geom_tree,
+            simulation.state.paired_real,
+            simulation.dtype,
+            simulation.device,
+            simulation.plan.dt,
+        )
+    )
+    if not rules:
+        raise ValueError("tfsf-transparent direct lowering produced no rules")
+    return tuple(rules)
+
+
+def _native_tfsf_auxiliary_drive(simulation, batch, captured, step):
+    from gmes.torch_source import TorchPointSourceBatch
+
+    matches = [
+        ordinal
+        for ordinal, auxiliary in enumerate(simulation.sources.auxiliaries)
+        if auxiliary is batch.auxiliary
+    ]
+    if len(matches) != 1:
+        raise ValueError("live TFSF batch auxiliary ownership is ambiguous")
+    auxiliary_batches = [
+        item
+        for item in batch.auxiliary.sources.batches
+        if isinstance(item, TorchPointSourceBatch)
+    ]
+    if (
+        len(auxiliary_batches) != 1
+        or auxiliary_batches[0].component != "Ex"
+        or auxiliary_batches[0].paired_real
+    ):
+        raise ValueError("live TFSF auxiliary source layout is unsupported")
+    root = f"torch/step/{step}/auxiliary/{matches[0]}/sources/batches/0"
+    try:
+        targets = np.asarray(captured[f"{root}/overwrite_targets"])
+        models = np.asarray(captured[f"{root}/overwrite_models"])
+        parameters = np.asarray(captured[f"{root}/overwrite_parameters"])
+        amplitudes = np.asarray(captured[f"{root}/overwrite_amplitudes"])
+        additive_targets = np.asarray(captured[f"{root}/additive_targets"])
+    except KeyError as error:
+        raise ValueError(
+            "captured TFSF auxiliary source state is incomplete"
+        ) from error
+    if (
+        targets.dtype != np.dtype(np.int64)
+        or targets.shape != (1,)
+        or models.dtype != np.dtype(np.int8)
+        or models.shape != (1,)
+        or parameters.dtype != np.dtype(np.float64)
+        or parameters.shape != (1, 6)
+        or amplitudes.dtype != np.dtype(np.float64)
+        or amplitudes.shape != (1,)
+        or additive_targets.dtype != np.dtype(np.int64)
+        or additive_targets.shape != (0,)
+        or not bool(np.isfinite(amplitudes).all())
+        or not np.array_equal(amplitudes, np.ones(1, dtype=np.float64))
+    ):
+        raise ValueError("captured TFSF auxiliary drive is unsupported")
+
+
+def _native_tfsf_capture_state(simulation, captured, step):
+    from gmes.torch_source import TorchTransparentBatch
+
+    batches = [
+        (ordinal, batch)
+        for ordinal, batch in enumerate(simulation.sources.batches)
+        if isinstance(batch, TorchTransparentBatch)
+    ]
+    if not batches or len({id(batch.auxiliary) for _ordinal, batch in batches}) != 1:
+        raise ValueError("live TFSF auxiliary plan is unsupported")
+    state = {}
+    for ordinal, batch in batches:
+        root = f"torch/step/{step}/sources/batches/{ordinal}"
+        try:
+            targets = np.asarray(captured[f"{root}/targets"])
+            samples = np.asarray(captured[f"{root}/samples"])
+            weights = np.asarray(captured[f"{root}/weights"])
+        except KeyError as error:
+            raise ValueError("captured TFSF batch state is incomplete") from error
+        if (
+            targets.dtype != np.dtype(np.int64)
+            or samples.dtype != np.dtype(np.int64)
+            or weights.dtype != np.dtype(np.float64)
+            or targets.ndim != 1
+            or samples.shape != (len(targets), 2)
+            or weights.shape != samples.shape
+            or len(set(int(target) for target in targets)) != len(targets)
+            or not bool(np.isfinite(weights).all())
+        ):
+            raise ValueError("captured TFSF batch layout is unsupported")
+        _native_tfsf_auxiliary_drive(simulation, batch, captured, step)
+        for name, value in (
+            ("targets", targets),
+            ("samples", samples),
+            ("weights", weights),
+        ):
+            state[f"{ordinal}/{name}"] = value.copy()
+    return state
+
+
+def _validate_native_tfsf_capture_stability(baseline, candidate):
+    if set(baseline) != set(candidate):
+        raise ValueError("captured TFSF source schema changed")
+    for key in baseline:
+        before = baseline[key]
+        after = candidate[key]
+        if (
+            before.dtype != after.dtype
+            or before.shape != after.shape
+            or not np.array_equal(before, after)
+        ):
+            raise ValueError("captured TFSF source state changed")
+
+
+def _live_native_tfsf_rows(simulation, component, rules, *, captured, step):
+    """Rebuild one native-format face table from live candidate source-plan data.
+
+    The native observer records one face parameter per target as ``amp``, the
+    target medium scalar, two interpolation weights, and two auxiliary sample
+    coordinates. Face/sign are not archived. This fixed workload is accepted
+    only when one direct rule owns each target and the live Torch batch exactly
+    realizes that rule's two contribution terms.
+    """
+    from gmes.torch_fdtd import _field_shapes
+    from gmes.torch_source import TorchTransparentBatch
+
+    batches = [
+        (ordinal, batch)
+        for ordinal, batch in enumerate(simulation.sources.batches)
+        if isinstance(batch, TorchTransparentBatch) and batch.component == component
+    ]
+    if len(batches) != 1:
+        raise ValueError(f"live TFSF {component} must have one transparent batch")
+    batch_ordinal, batch = batches[0]
+    expected_auxiliary = "Hy" if component.startswith("E") else "Ex"
+    if (
+        batch.gaussian_width is not None
+        or batch.auxiliary_component != expected_auxiliary
+    ):
+        raise ValueError(
+            "live TFSF batch does not have transparent auxiliary semantics"
+        )
+    root = f"torch/step/{step}/sources/batches/{batch_ordinal}"
+    try:
+        targets = np.asarray(captured[f"{root}/targets"])
+        samples = np.asarray(captured[f"{root}/samples"])
+        weights = np.asarray(captured[f"{root}/weights"])
+    except KeyError as error:
+        raise ValueError("captured TFSF batch state is incomplete") from error
+    if (
+        targets.dtype != np.dtype(np.int64)
+        or samples.dtype != np.dtype(np.int64)
+        or weights.dtype != np.dtype(np.float64)
+        or targets.ndim != 1
+        or samples.shape != (len(targets), 2)
+        or weights.shape != samples.shape
+        or not bool(np.isfinite(weights).all())
+    ):
+        raise ValueError("live TFSF batch must have exactly two samples per target")
+    _native_tfsf_auxiliary_drive(simulation, batch, captured, step)
+    batch_rows = {}
+    for row, target in enumerate(targets):
+        if int(target) in batch_rows:
+            raise ValueError("live TFSF batch targets must be unique")
+        batch_rows[int(target)] = row
+    direct = {}
+    for rule in rules:
+        if rule.component != component:
+            continue
+        target = tuple(rule.target)
+        direct.setdefault(target, []).append(rule)
+    if not direct:
+        raise ValueError(f"live TFSF {component} has no direct rules")
+    if any(len(value) != 1 for value in direct.values()):
+        raise ValueError("live TFSF face ownership is ambiguous")
+    direct_linear = {
+        int(np.ravel_multi_index(target, simulation.plan.shapes[component])): target
+        for target in direct
+    }
+    if len(direct_linear) != len(direct) or set(batch_rows) != set(direct_linear):
+        raise ValueError("live TFSF batch has an orphaned source identity")
+    material_ids = np.asarray(
+        simulation.plan.components[component].material_ids
+    ).reshape(-1)
+    rows = []
+    amplitudes = []
+    for target_linear, target in direct_linear.items():
+        rule = direct[target][0]
+        sample_shape = _field_shapes(rule.auxiliary_spec.space)[rule.sample_component]
+        sample_linear = np.asarray(
+            (
+                np.ravel_multi_index(rule.sample0, sample_shape),
+                np.ravel_multi_index(rule.sample1, sample_shape),
+            ),
+            dtype=np.int64,
+        )
+        unit_contribution = np.asarray(
+            (
+                rule.coefficient * rule.weight0,
+                rule.coefficient * rule.weight1,
+            ),
+            dtype=np.float64,
+        )
+        row = batch_rows[target_linear]
+        if not np.array_equal(samples[row], sample_linear):
+            raise ValueError("live TFSF batch differs from direct lowering")
+        if not bool(np.isfinite(unit_contribution).all()) or bool(
+            np.any(unit_contribution == 0.0)
+        ):
+            raise ValueError("live TFSF unit contribution is unsupported")
+        live_amplitudes = weights[row] / unit_contribution
+        if (
+            not bool(np.isfinite(live_amplitudes).all())
+            or live_amplitudes[0] != live_amplitudes[1]
+        ):
+            raise ValueError("captured TFSF weights do not encode one amplitude")
+        amplitudes.append(float(live_amplitudes[0]))
+        try:
+            material = simulation.geometry[int(material_ids[target_linear])].material
+            medium = material.eps_inf if component.startswith("E") else material.mu_inf
+        except (AttributeError, IndexError, TypeError, ValueError) as error:
+            raise ValueError("live TFSF target medium is not representable") from error
+        target_values = np.asarray(target, dtype=np.int64)
+        if np.any(target_values > np.iinfo(np.int32).max):
+            raise ValueError("live TFSF target exceeds the native int32 contract")
+        values = np.asarray(
+            (
+                amplitudes[-1],
+                medium,
+                rule.weight0,
+                rule.weight1,
+                *rule.sample0,
+                *rule.sample1,
+            ),
+            dtype=np.complex128,
+        )
+        rows.append((target_linear, target_values.astype(np.int32), values))
+    if not amplitudes or not bool(np.all(np.asarray(amplitudes) == amplitudes[0])):
+        raise ValueError("captured TFSF face amplitudes differ")
+    rows.sort(key=lambda value: value[0])
+    return (
+        np.stack([target for _linear, target, _values in rows]),
+        np.concatenate([values for _linear, _target, values in rows]),
+    )
+
+
+def _live_native_tfsf_tables(simulation, spec, *, captured, capture_steps):
+    """Reconstruct native rows from live candidate values for the frozen case."""
+    rules = _native_tfsf_direct_rules(simulation, spec)
+    components = sorted({rule.component for rule in rules})
+    transparent = [
+        batch
+        for batch in simulation.sources.batches
+        if type(batch).__name__ == "TorchTransparentBatch"
+    ]
+    if not transparent or len({id(batch.auxiliary) for batch in transparent}) != 1:
+        raise ValueError("live TFSF auxiliary plan is unsupported")
+    tables = {}
+    for step in capture_steps:
+        for component in components:
+            indices, values = _live_native_tfsf_rows(
+                simulation, component, rules, captured=captured, step=step
+            )
+            prefix = f"step/{step}/source/{component}/0-Transparent{component}"
+            tables[f"{prefix}/indices"] = indices.copy()
+            tables[f"{prefix}/values"] = values.copy()
+    return tables
+
+
+def _validate_native_tfsf_identity(expected, candidate):
+    """Use only archived targets as a strict schema/identity join to live rows."""
+    expected_keys = {
+        key for key in expected if "/source/" in key and "Transparent" in key
+    }
+    if expected_keys != set(candidate):
+        raise ValueError("native TFSF source schema differs from live reconstruction")
+    for key in sorted(expected_keys):
+        if not key.endswith("/indices"):
+            continue
+        archived = np.asarray(expected[key])
+        live = np.asarray(candidate[key])
+        if (
+            archived.dtype != np.dtype(np.int32)
+            or archived.ndim != 2
+            or archived.shape[1] != 3
+        ):
+            raise ValueError("native TFSF archived targets must be int32 Nx3")
+        identities = [tuple(value) for value in archived]
+        if len(set(identities)) != len(identities):
+            raise ValueError("native TFSF archived targets must be unique")
+        if not np.array_equal(archived, live):
+            raise ValueError(
+                "native TFSF archived target is orphaned from live lowering"
+            )
+
+
 def _point_observables(simulation, step, arrays):
     """Project actual packed point waveforms to the observer's amp/value layout."""
     import torch
@@ -506,21 +829,38 @@ def run_native_case(reference, manifest, *, precision, output, device="cpu"):
         torch_correctness._logical_geometry_metadata(spec, dt),
     )
     completed = 0
+    native_tfsf = {}
+    native_tfsf_baseline = None
     for step in captures:
         simulation.advance(step - completed)
         torch_correctness._independent_snapshot(simulation, step, actual)
+        if spec.get("name") == "tfsf-transparent":
+            captured_tfsf = _native_tfsf_capture_state(simulation, actual, step)
+            if native_tfsf_baseline is None:
+                native_tfsf_baseline = captured_tfsf
+            else:
+                _validate_native_tfsf_capture_stability(
+                    native_tfsf_baseline, captured_tfsf
+                )
         _point_observables(simulation, step, actual)
         completed = step
     raw_keys = [key for key in actual if key.startswith("torch/")]
     raw = {key: actual.pop(key) for key in raw_keys}
     validate_capture_contract(actual, captures, shapes, precision=precision)
+    if native_tfsf:
+        _validate_native_tfsf_identity(expected, native_tfsf)
+        actual.update(native_tfsf)
     unresolved = []
     # Transparent packed parameters and native face descriptors use different
-    # layouts. Do not compare their bit patterns or certify an omitted mapping.
+    # layouts. Only the frozen tfsf-transparent case has a live, fail-closed
+    # reconstruction; retain every other parameter-layout gap.
     omitted = [
         key
         for key in expected
-        if "/source/" in key and "Transparent" in key and key.endswith("/values")
+        if "/source/" in key
+        and "Transparent" in key
+        and key.endswith("/values")
+        and key not in native_tfsf
     ]
     if omitted:
         unresolved.append("transparent-source-parameter-projection")

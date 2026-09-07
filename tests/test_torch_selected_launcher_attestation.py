@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 import tempfile
 import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from benchmarks import torch_selected_launcher_attestation as attestation
+
+PINNED_CUDA_PYTHON_ENV = "GMES_PINNED_CUDA_PYTHON"
 
 
 class _Config:
@@ -129,7 +133,7 @@ class _FakeRuntime:
 
 class SelectedLauncherObserverTest(unittest.TestCase):
     def _result(self, directory: Path, name: str, *, value: int = 1):
-        directory = directory / f"cache-{name}-{value}"
+        directory = directory.resolve(strict=True) / f"cache-{name}-{value}"
         directory.mkdir(exist_ok=True)
         cubin = directory / f"{name}.cubin"
         cubin.write_bytes(name.encode())
@@ -190,6 +194,39 @@ class SelectedLauncherObserverTest(unittest.TestCase):
         with self.assertRaises(TypeError):
             report["events"] = ()  # type: ignore[index]
         self.assertIn(b'"events"', observer.diagnostic_json())
+
+    def test_alias_root_is_canonicalized_for_positive_fixture_only(self):
+        runtime = _FakeRuntime()
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw).resolve(strict=True)
+            canonical = root / "canonical"
+            canonical.mkdir()
+            alias = root / "alias"
+            alias.symlink_to(canonical, target_is_directory=True)
+            with attestation.pinned_observer(runtime.adapter()) as observer:
+                with observer.attested_interval():
+                    self._five_events(observer, alias)
+            self.assertEqual(len(observer.diagnostic()["events"]), 5)
+
+            variant = canonical / "cache-parent-alias"
+            variant.mkdir()
+            cubin = alias / variant.name / f"{attestation.MAGNETIC_KERNEL}.cubin"
+            cubin.write_bytes(b"parent alias")
+            result = _StaticResult(
+                _launcher(
+                    attestation.MAGNETIC_KERNEL,
+                    _Config(),
+                    variant.name,
+                ),
+                cubin,
+                attestation.MAGNETIC_KERNEL,
+            )
+            with attestation.pinned_observer(runtime.adapter()) as observer:
+                result.make_launcher()
+            with self.assertRaisesRegex(
+                attestation.AttestationError, "CUBIN path is not canonical"
+            ):
+                observer.diagnostic()
 
     def test_restores_patched_methods_when_observed_body_raises(self):
         runtime = _FakeRuntime()
@@ -423,6 +460,36 @@ class SelectedLauncherObserverTest(unittest.TestCase):
 
 
 class PinnedRuntimeSourceGateTest(unittest.TestCase):
+    @staticmethod
+    def _pinned_runtime_interpreter() -> Path:
+        configured = os.environ.get(PINNED_CUDA_PYTHON_ENV)
+        if not configured:
+            raise unittest.SkipTest(
+                f"{PINNED_CUDA_PYTHON_ENV} is required for pinned runtime integration"
+            )
+        interpreter = Path(configured)
+        if not interpreter.is_file() or not os.access(interpreter, os.X_OK):
+            raise unittest.SkipTest(
+                f"configured pinned runtime interpreter is unavailable: {configured}"
+            )
+        return interpreter
+
+    def test_pinned_runtime_interpreter_requires_configured_regular_executable(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            with self.assertRaisesRegex(unittest.SkipTest, PINNED_CUDA_PYTHON_ENV):
+                self._pinned_runtime_interpreter()
+        with tempfile.TemporaryDirectory() as raw:
+            missing = Path(raw) / "missing-python"
+            with mock.patch.dict(
+                os.environ, {PINNED_CUDA_PYTHON_ENV: str(missing)}, clear=True
+            ):
+                with self.assertRaisesRegex(unittest.SkipTest, "unavailable"):
+                    self._pinned_runtime_interpreter()
+        with mock.patch.dict(
+            os.environ, {PINNED_CUDA_PYTHON_ENV: sys.executable}, clear=True
+        ):
+            self.assertEqual(self._pinned_runtime_interpreter(), Path(sys.executable))
+
     def test_real_python_load_lifecycle_with_cpu_native_loader_stub(self):
         self._run_pinned_script(
             """
@@ -491,8 +558,9 @@ print("real-python-load-stub-restore-ok")
 
     def _run_pinned_script(self, script, expected):
         root = Path(__file__).resolve().parents[1]
+        interpreter = self._pinned_runtime_interpreter()
         process = subprocess.run(
-            ["/tmp/gmes-issue-124-cuda-cu130-CUqJ9b/bin/python", "-c", script],
+            [str(interpreter), "-c", script],
             cwd=root,
             env={
                 **os.environ,
@@ -510,8 +578,7 @@ print("real-python-load-stub-restore-ok")
         self.assertEqual(process.stdout.strip(), expected)
 
     def test_pinned_cuda_runtime_source_gate_without_cuda_execution(self):
-        interpreter = Path("/tmp/gmes-issue-124-cuda-cu130-CUqJ9b/bin/python")
-        self.assertTrue(interpreter.is_file())
+        interpreter = self._pinned_runtime_interpreter()
         root = Path(__file__).resolve().parents[1]
         environment = {
             **os.environ,

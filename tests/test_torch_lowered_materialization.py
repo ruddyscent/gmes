@@ -29,7 +29,7 @@ class _IdentityAsyncCompile:
 
 class _JoinAsyncCompile(_IdentityAsyncCompile):
     def __init__(self, directory):
-        self.directory = Path(directory)
+        self.directory = Path(directory).resolve(strict=True)
 
     def triton(self, name, source):
         from tests.test_torch_selected_launcher_attestation import (
@@ -72,6 +72,7 @@ class WrapperCallJoinTest(unittest.TestCase):
                 _Autotuner._build_fast_launcher,
             ),
         ):
+            directory = Path(raw).resolve(strict=True)
             adapter = dataclasses.replace(
                 _FakeRuntime().adapter(), autotuner_type=CachingAutotuner
             )
@@ -85,7 +86,7 @@ class WrapperCallJoinTest(unittest.TestCase):
             modules = {}
             with observer:
                 extra = (
-                    _JoinAsyncCompile(raw).triton(
+                    _JoinAsyncCompile(directory).triton(
                         a.MAGNETIC_KERNEL, f"def {a.MAGNETIC_KERNEL}(): pass"
                     )
                     if mode == "unowned-live"
@@ -113,7 +114,7 @@ class Runner:
 runner = Runner(partitions=[])
 call = runner.call
 """
-                    path = Path(raw) / (region + ".py")
+                    path = directory / (region + ".py")
                     path.write_text(source)
                     module = _reload_python_module(
                         region, str(path), set_sys_modules=False
@@ -142,9 +143,9 @@ call = runner.call
                     with join.region(region, function):
                         dispatcher(region, function)
                 if mode == "unknown-tuner":
-                    modules["magnetic_half"].unrelated = _JoinAsyncCompile(raw).triton(
-                        "unrelated", "def unrelated(): pass"
-                    )
+                    modules["magnetic_half"].unrelated = _JoinAsyncCompile(
+                        directory
+                    ).triton("unrelated", "def unrelated(): pass")
                 elif mode == "receiver":
                     module = modules["magnetic_half"]
                     module.call = module.Runner([]).call
@@ -471,11 +472,43 @@ class ReturnedModuleEvidenceTest(unittest.TestCase):
     def _load(self, directory, name="wrapper", source=_IDENTITY_SOURCE):
         from torch._inductor.runtime.compile_tasks import _reload_python_module
 
+        directory = directory.resolve(strict=True)
         path = directory / (name + ".py")
         path.write_text(source)
         graph = types.SimpleNamespace(cache_path=str(path), cache_key=name)
         module = _reload_python_module(name, str(path), set_sys_modules=False)
         return graph, module
+
+    def test_alias_root_fixture_is_canonicalized_and_lexical_alias_rejects(self):
+        from torch._inductor.runtime.compile_tasks import _reload_python_module
+
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw).resolve(strict=True)
+            canonical = root / "canonical"
+            canonical.mkdir()
+            alias = root / "alias"
+            alias.symlink_to(canonical, target_is_directory=True)
+
+            graph, module = self._load(alias, "canonical_wrapper")
+            self.assertEqual(Path(graph.cache_path).parent, canonical)
+            lowering._returned_module_identity(graph, module, _IDENTITY_SOURCE)
+
+            lexical_path = alias / "lexical_wrapper.py"
+            lexical_path.write_text(_IDENTITY_SOURCE)
+            lexical_graph = types.SimpleNamespace(
+                cache_path=str(lexical_path), cache_key="lexical_wrapper"
+            )
+            lexical_module = _reload_python_module(
+                "lexical_wrapper", str(lexical_path), set_sys_modules=False
+            )
+            self.assertNotEqual(lexical_path.resolve(strict=True), lexical_path)
+            self.assertEqual(lexical_module.__file__, str(lexical_path))
+            with self.assertRaisesRegex(
+                ValueError, "returned module source/cache identity differs"
+            ):
+                lowering._returned_module_identity(
+                    lexical_graph, lexical_module, _IDENTITY_SOURCE
+                )
 
     def _simulation(self):
         return types.SimpleNamespace(
@@ -683,7 +716,10 @@ class ReturnedModuleEvidenceTest(unittest.TestCase):
             )
             self.assertEqual(
                 evidence.entries[-1][3]["cache_path"],
-                str(directory / ("private-basename-" + region + ".py")),
+                str(
+                    directory.resolve(strict=True)
+                    / ("private-basename-" + region + ".py")
+                ),
             )
             with mock.patch.object(
                 lowering,

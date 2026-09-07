@@ -72,7 +72,7 @@ class CiConfigurationTest(unittest.TestCase):
             "scientific-python-nightly-wheels/simple", self.prerelease_workflow
         )
         self.assertNotIn("--no-deps", self.prerelease_workflow)
-        self.assertIn("-e '.[hdf5]'", self.prerelease_workflow)
+        self.assertIn("-e .", self.prerelease_workflow)
         self.assertIn(
             "--extra-index-url https://download.pytorch.org/whl/cpu",
             self.prerelease_workflow,

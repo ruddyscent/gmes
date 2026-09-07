@@ -529,7 +529,7 @@ class NativeCaptureCompatibilityTest(unittest.TestCase):
         np.testing.assert_allclose(row[0, :3], (0.001, 1.7, 1.05), rtol=0, atol=0)
         self.assertTrue(np.isfinite(row[0, 3]))
 
-    def test_tfsf_live_reconstruction_rejects_identity_and_batch_mutations(self):
+    def test_tfsf_capture_validation_rejects_batch_mutations(self):
         import torch
 
         from gmes.torch_source import TorchPointSourceBatch, TorchTransparentBatch

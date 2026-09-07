@@ -27,6 +27,7 @@ from typing import Any
 import torch
 
 import gmes
+import gmes.torch_fdtd as _torch_fdtd
 from benchmarks.torch_tuning import (
     MANIFEST,
     _build_case,
@@ -1217,12 +1218,287 @@ def _project_returned_modules(
     return projected
 
 
+class _CaseProducerReceipt:
+    """Retain local constructor receipts without authenticating an Inductor cache."""
+
+    def __init__(
+        self,
+        spec: Mapping[str, object],
+        space: object,
+        geometry: Sequence[object],
+        sources: Sequence[object],
+        bloch: Sequence[float] | None,
+        runtime: object,
+    ):
+        self.spec = _canonical_json(spec)
+        self.space = space
+        self.geometry = tuple(geometry)
+        self.sources = sources
+        self.bloch = None if bloch is None else tuple(bloch)
+        self.runtime = runtime
+        self.simulation: object | None = None
+        self.plan: object | None = None
+        self.plan_components: tuple[object, ...] | None = None
+        self.plan_digest: str | None = None
+        self.key: str | None = None
+        self.preimage: tuple[object, ...] | None = None
+        self.preimage_bytes: bytes | None = None
+        self.halves: dict[str, tuple[object, object, object, object]] = {}
+        self.reasons: list[str] = []
+        self._patches: list[tuple[object, str, object]] = []
+        self._completed = False
+
+    def _patch(self, owner: object, name: str, factory: Any) -> None:
+        original = getattr(owner, name)
+        self._patches.append((owner, name, original))
+        setattr(owner, name, factory(original))
+
+    def _input_matches(self, kwargs: Mapping[str, object]) -> bool:
+        geometry = tuple(kwargs.get("geometry", ()))
+        return (
+            kwargs.get("space") is self.space
+            and len(geometry) == len(self.geometry)
+            and all(
+                observed is expected
+                for observed, expected in zip(geometry, self.geometry, strict=True)
+            )
+            and kwargs.get("sources") is self.sources
+            and (None if kwargs.get("bloch") is None else tuple(kwargs["bloch"]))
+            == self.bloch
+            and kwargs.get("runtime") is self.runtime
+        )
+
+    def __enter__(self) -> _CaseProducerReceipt:
+        receipt = self
+
+        def simulation_init(original: Any) -> Any:
+            def wrapped(instance: object, *args: object, **kwargs: object) -> object:
+                if receipt.simulation is None:
+                    receipt.simulation = instance
+                    if not receipt._input_matches(kwargs):
+                        receipt.reasons.append("producer-constructor-input-differs")
+                elif instance is not receipt.simulation:
+                    receipt.reasons.append("producer-nested-simulation")
+                try:
+                    result = original(instance, *args, **kwargs)
+                except BaseException:
+                    if instance is receipt.simulation:
+                        receipt.reasons.append("producer-construction-raised")
+                    raise
+                if instance is receipt.simulation:
+                    receipt._completed = True
+                return result
+
+            return wrapped
+
+        def plan_init(original: Any) -> Any:
+            def wrapped(
+                instance: object,
+                component_plans: object,
+                *args: object,
+                **kwargs: object,
+            ) -> object:
+                components = tuple(component_plans)  # Preserve the real iterable once.
+                result = original(instance, components, *args, **kwargs)
+                if receipt.simulation is not None and receipt.plan is None:
+                    receipt.plan = instance
+                    receipt.plan_components = components
+                elif receipt.simulation is not None:
+                    receipt.reasons.append("producer-duplicate-plan")
+                return result
+
+            return wrapped
+
+        def plan_digest(original: Any) -> Any:
+            def wrapped(instance: object) -> object:
+                result = original(instance)
+                if instance is receipt.simulation:
+                    receipt.plan_digest = result
+                return result
+
+            return wrapped
+
+        def key_digest(original: Any) -> Any:
+            def wrapped(instance: object) -> object:
+                result = original(instance)
+                if instance is receipt.simulation:
+                    preimage = getattr(instance, "_compile_cache_key_preimage", None)
+                    if not isinstance(preimage, tuple):
+                        receipt.reasons.append("producer-preimage-is-not-tuple")
+                    else:
+                        raw = repr(preimage).encode()
+                        if hashlib.sha256(raw).hexdigest() != result:
+                            receipt.reasons.append("producer-preimage-digest-differs")
+                        else:
+                            receipt.preimage = preimage
+                            receipt.preimage_bytes = raw
+                            receipt.key = result
+                return result
+
+            return wrapped
+
+        def compile_half(original: Any) -> Any:
+            def wrapped(
+                function: Any,
+                runtime: Any,
+                device: Any,
+                *,
+                dynamic: Any,
+                disable_cuda_graphs: bool = False,
+            ) -> object:
+                result = original(
+                    function,
+                    runtime,
+                    device,
+                    dynamic=dynamic,
+                    disable_cuda_graphs=disable_cuda_graphs,
+                )
+                receiver = getattr(function, "__self__", None)
+                method = getattr(function, "__func__", None)
+                region = (
+                    "electric_half"
+                    if method is _torch_fdtd.TorchSimulation._electric_half_update
+                    else (
+                        "magnetic_half"
+                        if method is _torch_fdtd.TorchSimulation._magnetic_half_update
+                        else None
+                    )
+                )
+                if receiver is receipt.simulation and region is not None:
+                    if disable_cuda_graphs:
+                        return result
+                    if region in receipt.halves:
+                        receipt.reasons.append("producer-duplicate-half-compile")
+                    elif runtime is not receipt.runtime or dynamic is not False:
+                        receipt.reasons.append("producer-half-compile-input-differs")
+                    else:
+                        receipt.halves[region] = (receiver, method, result, runtime)
+                return result
+
+            return wrapped
+
+        self._patch(_torch_fdtd.TorchSimulation, "__init__", simulation_init)
+        self._patch(_torch_fdtd.TorchSimulationPlan, "__init__", plan_init)
+        self._patch(_torch_fdtd.TorchSimulation, "_compute_plan_identity", plan_digest)
+        self._patch(
+            _torch_fdtd.TorchSimulation, "_compute_compile_cache_key", key_digest
+        )
+        self._patch(_torch_fdtd, "_compile_fullgraph", compile_half)
+        return self
+
+    def __exit__(self, *unused: object) -> bool:
+        while self._patches:
+            owner, name, original = self._patches.pop()
+            setattr(owner, name, original)
+        return False
+
+    def finalize(self, simulation: object) -> None:
+        if not self._completed or simulation is not self.simulation:
+            self.reasons.append("producer-simulation-association-differs")
+        if (
+            self.plan is None
+            or getattr(simulation, "plan", None) is not self.plan
+            or getattr(getattr(simulation, "state", None), "plan", None)
+            is not self.plan
+            or self.plan_components is None
+            or len(tuple(getattr(self.plan, "components", {}).values()))
+            != len(self.plan_components)
+            or any(
+                observed is not expected
+                for observed, expected in zip(
+                    tuple(getattr(self.plan, "components", {}).values()),
+                    self.plan_components,
+                    strict=True,
+                )
+            )
+        ):
+            self.reasons.append("producer-plan-association-differs")
+        if (
+            self.plan_digest is None
+            or getattr(simulation, "plan_identity", None) != self.plan_digest
+        ):
+            self.reasons.append("producer-plan-digest-differs")
+        if (
+            self.key is None
+            or self.preimage is None
+            or self.preimage_bytes is None
+            or getattr(simulation, "compile_cache_key", None) != self.key
+            or getattr(simulation, "_compile_cache_key_preimage", None)
+            is not self.preimage
+            or repr(self.preimage).encode() != self.preimage_bytes
+        ):
+            self.reasons.append("producer-specialization-digest-differs")
+        for region in COMPILED_REGIONS:
+            item = self.halves.get(region)
+            if (
+                item is None
+                or item[0] is not simulation
+                or getattr(simulation, "_" + region, None) is not item[2]
+            ):
+                self.reasons.append("producer-half-callable-differs:" + region)
+
+    def valid_for(self, simulation: object) -> bool:
+        if simulation is not self.simulation:
+            return False
+        if (
+            getattr(simulation, "plan", None) is not self.plan
+            or getattr(getattr(simulation, "state", None), "plan", None)
+            is not self.plan
+        ):
+            self.reasons.append("producer-plan-association-differs")
+        if (
+            getattr(simulation, "compile_cache_key", None) != self.key
+            or getattr(simulation, "_compile_cache_key_preimage", None)
+            is not self.preimage
+            or self.preimage is None
+            or self.preimage_bytes is None
+            or repr(self.preimage).encode() != self.preimage_bytes
+        ):
+            self.reasons.append("producer-specialization-digest-differs")
+        for region, item in self.halves.items():
+            if getattr(simulation, "_" + region, None) is not item[2]:
+                self.reasons.append("producer-half-callable-differs:" + region)
+        return not self.reasons
+
+    def diagnostic(self) -> dict[str, object]:
+        return {
+            "status": "incomplete",
+            "scope": "constructor-object-plan-and-gmes-specialization-producers-v1",
+            "aliases": {
+                "constructor": "constructor.0",
+                "simulation": "simulation.0",
+                "plan": "plan.0",
+                "electric_half": "electric_half.0",
+                "magnetic_half": "magnetic_half.0",
+            },
+            "caller_descriptor_sha256": _sha256_bytes(self.spec.encode()),
+            "plan_identity": self.plan_digest,
+            "gmes_specialization_sha256": self.key,
+            "specialization_algorithm": "sha256(repr(tuple).encode())",
+            "reasons": sorted(set(self.reasons)),
+            "unverified": [
+                "inductor-cache-input-authentication",
+                "descriptor-to-builder-output-binding",
+                "effective-source-transform-provenance",
+                "effective-constructor-parameter-binding",
+                "producer-callback-cardinality-order",
+                "plan-content-at-event",
+                "source-file-read-provenance",
+                "compiled-argument-mapping",
+                "device-execution",
+                "historical-execution",
+                "global-clone-absence",
+            ],
+        }
+
+
 class _ReturnedModuleEvidence:
     """Retain construction observations separately from selection/qualification."""
 
-    def __init__(self):
+    def __init__(self, producer_receipt: _CaseProducerReceipt | None = None):
         self.entries: list[tuple[Any, ...]] = []
         self.reasons: list[str] = []
+        self.producer_receipt = producer_receipt
 
     def capture(
         self, graph: Any, module: Any, emissions: list[str], context: tuple[Any, ...]
@@ -1234,6 +1510,11 @@ class _ReturnedModuleEvidence:
                 raise ValueError("module lacks one associated source emission")
             record, refs = _returned_module_identity(graph, module, emissions[0])
             simulation, region, function = context
+            if (
+                self.producer_receipt is not None
+                and not self.producer_receipt.valid_for(simulation)
+            ):
+                raise ValueError("constructor producer receipt is unavailable")
             if region not in COMPILED_REGIONS or function is not getattr(
                 simulation, "_" + region
             ):
@@ -1260,6 +1541,21 @@ class _ReturnedModuleEvidence:
     def diagnostic(self) -> dict[str, object]:
         records = []
         reasons = list(self.reasons)
+        producer_valid = True
+        if self.producer_receipt is not None:
+            simulations = {entry[4][0] for entry in self.entries}
+            if len(simulations) != 1:
+                producer_valid = False
+                self.producer_receipt.reasons.append(
+                    "producer-simulation-association-differs"
+                )
+            else:
+                producer_valid = self.producer_receipt.valid_for(
+                    next(iter(simulations))
+                )
+            reasons.extend(self.producer_receipt.reasons)
+            if not producer_valid:
+                reasons.append("producer-receipt-revalidation-failed")
         for graph, module, source, record, context, _refs in self.entries:
             try:
                 current, _ = _returned_module_identity(graph, module, source)
@@ -1271,7 +1567,8 @@ class _ReturnedModuleEvidence:
                     or simulation._cuda_graphs
                 ):
                     raise ValueError("returned module or dispatcher identity changed")
-                records.append(record)
+                if producer_valid:
+                    records.append(record)
             except AttributeError, TypeError, ValueError, OSError:
                 reasons.append("returned-module-revalidation-failed")
         if {record["construction_context"]["region"] for record in records} != set(
@@ -1300,6 +1597,11 @@ class _ReturnedModuleEvidence:
                         "historical-execution",
                         "global-clone-absence",
                     ],
+                    **(
+                        {"case_producer_receipt": self.producer_receipt.diagnostic()}
+                        if self.producer_receipt is not None
+                        else {}
+                    ),
                 }
             )
         )
@@ -1327,6 +1629,11 @@ class _WrapperCallJoin:
             raise AttestationError("wrapper-call-entry-missing-or-ambiguous")
         entry = entries[0]
         try:
+            if (
+                self.evidence.producer_receipt is not None
+                and not self.evidence.producer_receipt.valid_for(entry[4][0])
+            ):
+                raise ValueError("producer receipt changed")
             current, _ = _returned_module_identity(*entry[:3])
             current["construction_context"] = entry[3]["construction_context"]
             if current != entry[3]:
@@ -1615,26 +1922,35 @@ def capture_compiled_wrapper_audit(
     manifest = load_manifest(MANIFEST)
     spec, space, geometry, sources, bloch = _build_case(case, manifest)
     sources = _memory_sources(spec, sources)
-    simulation = gmes.TorchSimulation(
-        space=space,
-        geometry=geometry,
-        sources=sources,
-        bloch=bloch,
-        runtime=gmes.TorchRuntimeConfig(
-            device=device,
-            precision=precision,
-            compile_policy="compile",
-            cpu_threads=1,
-            cpu_interop_threads=1,
-        ),
+    runtime = gmes.TorchRuntimeConfig(
+        device=device,
+        precision=precision,
+        compile_policy="compile",
+        cpu_threads=1,
+        cpu_interop_threads=1,
     )
+    producer_receipt = (
+        _CaseProducerReceipt(spec, space, geometry, sources, bloch, runtime)
+        if observe_returned_modules or observe_launcher_join
+        else None
+    )
+    with producer_receipt if producer_receipt is not None else nullcontext():
+        simulation = gmes.TorchSimulation(
+            space=space,
+            geometry=geometry,
+            sources=sources,
+            bloch=bloch,
+            runtime=runtime,
+        )
+    if producer_receipt is not None:
+        producer_receipt.finalize(simulation)
     _initialize_fields(
         simulation, manifest["reference"]["seed"], manifest["reference"]["field_scale"]
     )
     active_region: list[str | None] = [None]
     active_function: list[Any] = [None]
     module_evidence = (
-        _ReturnedModuleEvidence()
+        _ReturnedModuleEvidence(producer_receipt)
         if observe_returned_modules or observe_launcher_join
         else None
     )

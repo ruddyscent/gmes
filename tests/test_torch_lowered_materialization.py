@@ -244,6 +244,214 @@ call = runner.call
         self.assertEqual(sources, ["source"])
 
 
+class CaseProducerReceiptTest(unittest.TestCase):
+    def _construct_all_material(self, *, descriptor_name=None, courant_ratio=None):
+        import gmes
+        import gmes.torch_fdtd as torch_fdtd
+        from benchmarks.torch_tuning import MANIFEST, _build_case, load_manifest
+
+        spec, space, geometry, sources, bloch = _build_case(
+            "all-material-2d", load_manifest(MANIFEST)
+        )
+        if descriptor_name is not None:
+            spec = {**spec, "name": descriptor_name}
+        sources = lowering._memory_sources(spec, sources)
+        runtime = gmes.TorchRuntimeConfig(
+            device="cpu",
+            precision="float64",
+            compile_policy="compile",
+            cpu_threads=1,
+            cpu_interop_threads=1,
+        )
+        originals = (
+            torch_fdtd.TorchSimulation.__init__,
+            torch_fdtd.TorchSimulationPlan.__init__,
+            torch_fdtd.TorchSimulation._compute_plan_identity,
+            torch_fdtd.TorchSimulation._compute_compile_cache_key,
+            torch_fdtd._compile_fullgraph,
+        )
+        receipt = lowering._CaseProducerReceipt(
+            spec, space, geometry, sources, bloch, runtime
+        )
+        with receipt:
+            arguments = {
+                "space": space,
+                "geometry": geometry,
+                "sources": sources,
+                "bloch": bloch,
+                "runtime": runtime,
+            }
+            if courant_ratio is not None:
+                arguments["courant_ratio"] = courant_ratio
+            simulation = gmes.TorchSimulation(
+                **arguments,
+            )
+        receipt.finalize(simulation)
+        self.assertEqual(
+            originals,
+            (
+                torch_fdtd.TorchSimulation.__init__,
+                torch_fdtd.TorchSimulationPlan.__init__,
+                torch_fdtd.TorchSimulation._compute_plan_identity,
+                torch_fdtd.TorchSimulation._compute_compile_cache_key,
+                torch_fdtd._compile_fullgraph,
+            ),
+        )
+        return simulation, receipt
+
+    def test_real_lazy_cpu_constructor_records_all_material_producers(self):
+        simulation, receipt = self._construct_all_material()
+        self.assertTrue(receipt.valid_for(simulation), receipt.reasons)
+        self.assertIs(receipt.plan, simulation.plan)
+        self.assertIs(receipt.plan, simulation.state.plan)
+        self.assertEqual(receipt.plan_digest, simulation.plan_identity)
+        self.assertEqual(receipt.key, simulation.compile_cache_key)
+        self.assertEqual(
+            hashlib.sha256(receipt.preimage_bytes).hexdigest(),
+            simulation.compile_cache_key,
+        )
+        self.assertEqual(set(receipt.halves), set(lowering.COMPILED_REGIONS))
+        report = receipt.diagnostic()
+        encoded = json.dumps(report)
+        self.assertEqual(report["status"], "incomplete")
+        self.assertNotIn("all-material-2d", encoded)
+        self.assertNotIn("_compile_cache_key_preimage", encoded)
+        self.assertNotIn("source-file-read-provenance", report["reasons"])
+        self.assertIn("inductor-cache-input-authentication", report["unverified"])
+        self.assertEqual(
+            report["scope"],
+            "constructor-object-plan-and-gmes-specialization-producers-v1",
+        )
+        self.assertIn("caller_descriptor_sha256", report)
+
+    def test_changed_descriptor_and_effective_courant_stay_explicitly_unverified(self):
+        simulation, receipt = self._construct_all_material(
+            descriptor_name="report-only-impostor", courant_ratio=0.5
+        )
+        self.assertTrue(receipt.valid_for(simulation), receipt.reasons)
+        self.assertEqual(receipt.plan.dt, simulation.plan.dt)
+        for gap in (
+            "descriptor-to-builder-output-binding",
+            "effective-source-transform-provenance",
+            "effective-constructor-parameter-binding",
+            "producer-callback-cardinality-order",
+        ):
+            self.assertIn(gap, receipt.diagnostic()["unverified"])
+
+    def test_cross_wiring_and_post_capture_preimage_replacement_reject(self):
+        simulation, receipt = self._construct_all_material()
+        self.assertFalse(receipt.valid_for(object()))
+        simulation._compile_cache_key_preimage = ("foreign",)
+        simulation.compile_cache_key = hashlib.sha256(
+            repr(("foreign",)).encode()
+        ).hexdigest()
+        self.assertFalse(receipt.valid_for(simulation))
+        self.assertIn("producer-specialization-digest-differs", receipt.reasons)
+
+    def test_constructor_exception_restores_all_receipt_hooks(self):
+        import gmes
+        import gmes.torch_fdtd as torch_fdtd
+        from benchmarks.torch_tuning import MANIFEST, _build_case, load_manifest
+
+        spec, space, geometry, sources, bloch = _build_case(
+            "all-material-2d", load_manifest(MANIFEST)
+        )
+        sources = lowering._memory_sources(spec, sources)
+        runtime = gmes.TorchRuntimeConfig(device="cpu", precision="float64")
+        receipt = lowering._CaseProducerReceipt(
+            spec, space, geometry, sources, bloch, runtime
+        )
+        original = torch_fdtd.TorchSimulation.__init__
+        with self.assertRaises(TypeError):
+            with receipt:
+                gmes.TorchSimulation(
+                    space=space,
+                    geometry=geometry,
+                    sources=sources,
+                    bloch=bloch,
+                    runtime=object(),
+                )
+        self.assertIs(torch_fdtd.TorchSimulation.__init__, original)
+        self.assertIn("producer-construction-raised", receipt.reasons)
+
+    def _synthetic_reports(self):
+        import gmes
+
+        simulation, receipt = self._construct_all_material()
+        evidence = lowering._ReturnedModuleEvidence(receipt)
+        with tempfile.TemporaryDirectory() as raw:
+            for region in lowering.COMPILED_REGIONS:
+                graph, module = ReturnedModuleEvidenceTest()._load(Path(raw), region)
+                evidence.capture(
+                    graph,
+                    module,
+                    [_IDENTITY_SOURCE],
+                    (simulation, region, getattr(simulation, "_" + region)),
+                )
+            observer = types.SimpleNamespace(diagnostic=lambda: None)
+            dispatcher = types.MethodType(
+                gmes.TorchSimulation._run_compute_region, simulation
+            )
+            join = lowering._WrapperCallJoin(evidence, observer, dispatcher)
+            join.completed = list(lowering.COMPILED_REGIONS)
+            for ordinal, region in enumerate(
+                (
+                    "magnetic_half",
+                    "electric_half",
+                    "electric_half",
+                    "electric_half",
+                    "electric_half",
+                )
+            ):
+                entry = next(item for item in evidence.entries if item[4][1] == region)
+                join.events.append(
+                    (
+                        (entry, entry[3]["kernels"][0], None),
+                        {
+                            "ordinal": ordinal,
+                            "branch": "synthetic",
+                            "cubin_sha256": "0" * 64,
+                            "selected_callable_id": None,
+                            "parent_callable_id": None,
+                        },
+                    )
+                )
+            yield simulation, receipt, evidence, join
+
+    def test_receipt_revalidation_suppresses_stale_module_and_join_projection(self):
+        for mode in ("normal", "preimage", "explicit", "plan", "modules-only"):
+            with self.subTest(mode=mode):
+                for simulation, receipt, evidence, join in self._synthetic_reports():
+                    if mode == "preimage":
+                        simulation._compile_cache_key_preimage = ("foreign",)
+                        simulation.compile_cache_key = hashlib.sha256(
+                            repr(("foreign",)).encode()
+                        ).hexdigest()
+                    elif mode == "explicit":
+                        receipt.reasons.append("producer-specialization-digest-differs")
+                    elif mode == "plan":
+                        simulation.plan = object()
+                    module_report = evidence.diagnostic()
+                    if mode == "normal":
+                        self.assertEqual(len(module_report["modules"]), 2)
+                        self.assertEqual(len(join.diagnostic()["events"]), 5)
+                    elif mode == "modules-only":
+                        self.assertEqual(len(module_report["modules"]), 2)
+                    else:
+                        self.assertEqual(module_report["modules"], [])
+                        self.assertIn(
+                            "producer-receipt-revalidation-failed",
+                            module_report["reasons"],
+                        )
+                        join_report = join.diagnostic()
+                        self.assertEqual(join_report["modules"], [])
+                        self.assertEqual(join_report["events"], [])
+                        self.assertIn(
+                            "producer-receipt-revalidation-failed",
+                            join_report["reasons"],
+                        )
+
+
 _IDENTITY_SOURCE = """from tests.test_torch_lowered_materialization import _IdentityAsyncCompile
 async_compile = _IdentityAsyncCompile()
 kernel = async_compile.triton('kernel', 'def kernel(): pass')

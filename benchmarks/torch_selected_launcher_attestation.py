@@ -336,6 +336,7 @@ class SelectedLauncherObserver(AbstractContextManager["SelectedLauncherObserver"
         self._expected = {(item.region, item.ordinal): item for item in PINNED_EVENTS}
         self._making: list[tuple[object, object]] = []
         self._loads: dict[int, _LoadedKernel] = {}
+        self._call_join: Any = None
 
     def __enter__(self) -> SelectedLauncherObserver:
         if self._entered or self._closed:
@@ -594,14 +595,36 @@ class SelectedLauncherObserver(AbstractContextManager["SelectedLauncherObserver"
         benchmark_run: bool = False,
         **kwargs: object,
     ) -> object:
-        snapshot = (
-            self._snapshot(instance, benchmark_run, kwargs) if self._attesting else None
-        )
-        result = original(
-            instance, *args, stream=stream, benchmark_run=benchmark_run, **kwargs
-        )
+        joined = None
+        observe = self._attesting
+        snapshot = self._snapshot(instance, benchmark_run, kwargs) if observe else None
+        if observe and self._call_join is not None:
+            frame = inspect.currentframe()
+            try:
+                joined = self._call_join.before_run(instance, frame.f_back.f_back)
+                observe = joined is not None
+                if not observe and not snapshot.slow_supported:
+                    self._problem("joined-nontarget-state-unsupported")
+            except AttestationError:
+                self._problem("wrapper-call-join-rejected")
+                observe = False
+            finally:
+                del frame
+        if not observe:
+            snapshot = None
+        try:
+            result = original(
+                instance, *args, stream=stream, benchmark_run=benchmark_run, **kwargs
+            )
+        except BaseException:
+            if self._attesting and self._call_join is not None:
+                self._problem("joined-host-launch-raised")
+            raise
         if snapshot is not None:
+            count = len(self._events)
             self._capture_selected(instance, snapshot)
+            if joined is not None and len(self._events) == count + 1:
+                self._call_join.selected(joined, self._events[-1])
         return result
 
     def _capture_construction(

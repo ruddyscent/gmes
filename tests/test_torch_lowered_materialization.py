@@ -2,13 +2,582 @@
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import tempfile
+import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from benchmarks import torch_lowered_materialization as lowering
+
+
+class _IdentityAsyncCompile:
+    """Resolve fixture globals without compiling or launching a device kernel."""
+
+    def triton(self, name, source):
+        from torch._inductor.runtime.triton_heuristics import CachingAutotuner
+
+        namespace = {}
+        exec(compile(source, "<CPU kernel fixture>", "exec"), namespace)
+        tuner = object.__new__(CachingAutotuner)
+        tuner.fn = namespace[name]
+        return tuner
+
+
+class _JoinAsyncCompile(_IdentityAsyncCompile):
+    def __init__(self, directory):
+        self.directory = Path(directory)
+
+    def triton(self, name, source):
+        from tests.test_torch_selected_launcher_attestation import (
+            _Config,
+            _launcher,
+            _StaticResult,
+        )
+
+        tuner = super().triton(name, source)
+        directory = self.directory / ("cache-" + name)
+        directory.mkdir(exist_ok=True)
+        path = directory / (name + ".cubin")
+        path.write_bytes(b"CPU fixture, not a device binary")
+        result = _StaticResult(_launcher(name, _Config(), directory.name), path, name)
+        tuner.launchers = [result.make_launcher()]
+        tuner._cached_launcher = None
+        tuner._plugins = []
+        tuner.triton_interpret = False
+        return tuner
+
+
+class WrapperCallJoinTest(unittest.TestCase):
+    def _exercise(self, mode="normal"):
+        from torch._inductor.runtime.compile_tasks import _reload_python_module
+        from torch._inductor.runtime.triton_heuristics import CachingAutotuner
+
+        import gmes
+        from benchmarks import torch_selected_launcher_attestation as a
+        from tests.test_torch_selected_launcher_attestation import (
+            _Autotuner,
+            _FakeRuntime,
+        )
+
+        with (
+            tempfile.TemporaryDirectory() as raw,
+            mock.patch.object(CachingAutotuner, "run", _Autotuner.run),
+            mock.patch.object(
+                CachingAutotuner,
+                "_build_fast_launcher",
+                _Autotuner._build_fast_launcher,
+            ),
+        ):
+            adapter = dataclasses.replace(
+                _FakeRuntime().adapter(), autotuner_type=CachingAutotuner
+            )
+            observer = a.pinned_observer(adapter)
+            evidence = lowering._ReturnedModuleEvidence()
+            simulation = types.SimpleNamespace(_cuda_graphs={})
+            dispatcher = types.MethodType(
+                gmes.TorchSimulation._run_compute_region, simulation
+            )
+            join = lowering._WrapperCallJoin(evidence, observer, dispatcher)
+            modules = {}
+            with observer:
+                extra = (
+                    _JoinAsyncCompile(raw).triton(
+                        a.MAGNETIC_KERNEL, f"def {a.MAGNETIC_KERNEL}(): pass"
+                    )
+                    if mode == "unowned-live"
+                    else None
+                )
+                for region, target, count in (
+                    ("electric_half", a.ELECTRIC_KERNEL, 4),
+                    ("magnetic_half", a.MAGNETIC_KERNEL, 1),
+                ):
+                    source = f"""from tests.test_torch_lowered_materialization import _JoinAsyncCompile
+async_compile = _JoinAsyncCompile({raw!r})
+{target} = async_compile.triton({target!r}, 'def {target}(): pass')
+unrelated = async_compile.triton('unrelated', 'def unrelated(): pass')
+class Runner:
+    def __init__(self, partitions):
+        self.partitions = partitions
+    def call(self, args):
+        if args and args[0] == 'silent':
+            return args
+        {"args[0].run(stream='cpu')" if mode == "unowned-live" else "pass"}
+        unrelated.run(stream='cpu')
+        for _ in range({count}):
+            {target}.run(stream='cpu')
+        return args
+runner = Runner(partitions=[])
+call = runner.call
+"""
+                    path = Path(raw) / (region + ".py")
+                    path.write_text(source)
+                    module = _reload_python_module(
+                        region, str(path), set_sys_modules=False
+                    )
+                    modules[region] = module
+
+                    def function(module=module, target=target):
+                        if mode == "nontarget-target":
+                            module.unrelated._cached_launcher = getattr(
+                                module, target
+                            ).launchers[0]
+                        if mode == "no-runner":
+                            return getattr(module, target).run(stream="cpu")
+                        result = module.call([extra])
+                        if mode == "silent-second-invocation":
+                            module.call(["silent"])
+                        return result
+
+                    setattr(simulation, "_" + region, function)
+                    evidence.capture(
+                        types.SimpleNamespace(cache_path=str(path), cache_key=region),
+                        module,
+                        [source],
+                        (simulation, region, function),
+                    )
+                    with join.region(region, function):
+                        dispatcher(region, function)
+                if mode == "unknown-tuner":
+                    modules["magnetic_half"].unrelated = _JoinAsyncCompile(raw).triton(
+                        "unrelated", "def unrelated(): pass"
+                    )
+                elif mode == "receiver":
+                    module = modules["magnetic_half"]
+                    module.call = module.Runner([]).call
+                elif mode == "cross-region":
+                    modules["magnetic_half"].unrelated = getattr(
+                        modules["electric_half"], a.ELECTRIC_KERNEL
+                    )
+                elif mode == "exception":
+
+                    def fail(*args, **kwargs):
+                        raise RuntimeError("CPU fixture launch exception")
+
+                    modules["magnetic_half"].unrelated._cached_launcher = fail
+                try:
+                    with join.advance():
+                        for region in ("magnetic_half", "electric_half"):
+                            function = getattr(simulation, "_" + region)
+                            with join.region(region, function):
+                                if mode == "missing-dispatch":
+                                    function()
+                                elif mode == "twice":
+                                    dispatcher(region, function)
+                                    dispatcher(region, function)
+                                else:
+                                    dispatcher(region, function)
+                except a.AttestationError, RuntimeError:
+                    self.assertNotEqual(mode, "normal")
+            self.assertIsNone(observer._call_join)
+            self.assertIsNone(join.active)
+            report = join.diagnostic()
+            self.assertEqual(report["status"], "incomplete")
+            if mode == "normal":
+                self.assertEqual(len(report["events"]), 5)
+                self.assertEqual(
+                    [item["region"] for item in report["events"]],
+                    ["magnetic_half"] + ["electric_half"] * 4,
+                )
+                self.assertEqual(set(join.completed), set(lowering.COMPILED_REGIONS))
+                self.assertTrue(
+                    all(item["host_returned_normally"] for item in report["events"])
+                )
+                encoded = json.dumps(report)
+                self.assertNotIn(raw, encoded)
+                self.assertNotIn('_id"', encoded)
+                self.assertIn(
+                    "bound-method-alias-invocation-provenance", report["unverified"]
+                )
+                self.assertIn(
+                    "silent-or-additional-runner-invocations", report["unverified"]
+                )
+                self.assertIn(
+                    "total-runner-entry-exit-cardinality", report["unverified"]
+                )
+            elif mode != "silent-second-invocation":
+                self.assertEqual(report["events"], [])
+                self.assertTrue(report["reasons"])
+            else:
+                self.assertEqual(len(report["events"]), 5)
+                self.assertIn(
+                    "silent-or-additional-runner-invocations", report["unverified"]
+                )
+                self.assertIn(
+                    "total-runner-entry-exit-cardinality", report["unverified"]
+                )
+
+    def test_silent_additional_runner_invocation_does_not_claim_cardinality(self):
+        self._exercise("silent-second-invocation")
+
+    def test_real_loader_dispatcher_frames_join_cpu_stub_launches(self):
+        self._exercise()
+
+    def test_unknown_cross_region_substitution_missing_duplicate_and_exception_reject(
+        self,
+    ):
+        for mode in (
+            "unknown-tuner",
+            "receiver",
+            "cross-region",
+            "missing-dispatch",
+            "twice",
+            "exception",
+            "unowned-live",
+            "nontarget-target",
+            "no-runner",
+        ):
+            with self.subTest(mode=mode):
+                self._exercise(mode)
+
+    def test_default_output_capture_does_not_install_module_or_join_hooks(self):
+        from torch._inductor.graph import GraphLowering
+
+        original = GraphLowering._compile_to_module_lines
+        sources = []
+        with lowering._capturing_output_code(sources.append):
+            self.assertIs(GraphLowering._compile_to_module_lines, original)
+            GraphLowering.save_output_code("source")
+        self.assertEqual(sources, ["source"])
+
+
+_IDENTITY_SOURCE = """from tests.test_torch_lowered_materialization import _IdentityAsyncCompile
+async_compile = _IdentityAsyncCompile()
+kernel = async_compile.triton('kernel', 'def kernel(): pass')
+def while_loop_body_graph_0(args):
+    return args
+class Runner:
+    def __init__(self, partitions):
+        self.partitions = partitions
+    def call(self, args):
+        return while_loop_body_graph_0(args)
+runner = Runner(partitions=[])
+call = runner.call
+"""
+
+
+class ReturnedModuleEvidenceTest(unittest.TestCase):
+    def _load(self, directory, name="wrapper", source=_IDENTITY_SOURCE):
+        from torch._inductor.runtime.compile_tasks import _reload_python_module
+
+        path = directory / (name + ".py")
+        path.write_text(source)
+        graph = types.SimpleNamespace(cache_path=str(path), cache_key=name)
+        module = _reload_python_module(name, str(path), set_sys_modules=False)
+        return graph, module
+
+    def _simulation(self):
+        return types.SimpleNamespace(
+            _electric_half=object(), _magnetic_half=object(), _cuda_graphs={}
+        )
+
+    def test_actual_python_module_loader_retains_bound_runner_and_tuner_objects(self):
+        with tempfile.TemporaryDirectory() as raw:
+            evidence = lowering._ReturnedModuleEvidence()
+            simulation = self._simulation()
+            for region in lowering.COMPILED_REGIONS:
+                graph, module = self._load(Path(raw), region)
+                evidence.capture(
+                    graph,
+                    module,
+                    [_IDENTITY_SOURCE],
+                    (simulation, region, getattr(simulation, "_" + region)),
+                )
+            report = evidence.diagnostic()
+            self.assertEqual(report["status"], "incomplete")
+            self.assertEqual(
+                report["reasons"],
+                [
+                    "wrapper-pin-mismatch:electric_half",
+                    "wrapper-pin-mismatch:magnetic_half",
+                ],
+            )
+            record = evidence.entries[-1][3]
+            self.assertEqual(record["call_id"], id(module.call))
+            self.assertEqual(record["receiver_id"], id(module.runner))
+            self.assertEqual(record["kernels"][0]["autotuner_id"], id(module.kernel))
+            self.assertEqual(
+                record["module_functions"][0]["code_id"],
+                id(module.while_loop_body_graph_0.__code__),
+            )
+            report["modules"].clear()
+            self.assertEqual(len(evidence.diagnostic()["modules"]), 2)
+
+    def test_substitutions_and_artifact_mutation_invalidate_returned_evidence(self):
+        for mode in (
+            "source",
+            "module-path",
+            "cache-key",
+            "receiver",
+            "call-code",
+            "tuner",
+            "tuner-function",
+            "loop-function",
+            "dispatch",
+            "replay",
+        ):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as raw:
+                graph, module = self._load(Path(raw))
+                simulation = self._simulation()
+                evidence = lowering._ReturnedModuleEvidence()
+                evidence.capture(
+                    graph,
+                    module,
+                    [_IDENTITY_SOURCE],
+                    (simulation, "electric_half", simulation._electric_half),
+                )
+                self.assertEqual(
+                    evidence.reasons,
+                    ["wrapper-pin-mismatch:electric_half"],
+                )
+                if mode == "source":
+                    Path(graph.cache_path).write_text(_IDENTITY_SOURCE + "# modified\n")
+                elif mode == "module-path":
+                    module.__file__ = graph.cache_path + ".foreign"
+                elif mode == "cache-key":
+                    graph.cache_key = "foreign"
+                elif mode == "receiver":
+                    module.call = module.Runner([]).call
+                elif mode == "call-code":
+                    module.Runner.call.__code__ = (lambda self, args: None).__code__
+                elif mode == "tuner":
+                    module.kernel = _IdentityAsyncCompile().triton(
+                        "kernel", "def kernel(): pass"
+                    )
+                elif mode == "tuner-function":
+                    module.kernel.fn = (
+                        _IdentityAsyncCompile()
+                        .triton("kernel", "def kernel(): pass")
+                        .fn
+                    )
+                elif mode == "loop-function":
+                    module.while_loop_body_graph_0 = lambda args: args
+                elif mode == "dispatch":
+                    simulation._electric_half = object()
+                else:
+                    simulation._cuda_graphs["electric_half"] = object()
+                report = evidence.diagnostic()
+                self.assertEqual(report["modules"], [])
+                self.assertTrue(report["reasons"])
+
+    def test_precapture_foreign_code_filenames_reject_including_nested_code(self):
+        for mode in ("call", "module-function", "nested"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as raw:
+                source = _IDENTITY_SOURCE
+                if mode == "nested":
+                    source = source.replace(
+                        "return while_loop_body_graph_0(args)",
+                        "def inner():\n            return args\n        return inner()",
+                    )
+                graph, module = self._load(Path(raw), source=source)
+                function = (
+                    module.while_loop_body_graph_0
+                    if mode == "module-function"
+                    else module.Runner.call
+                )
+                original = function.__code__
+                if mode == "nested":
+                    replacement = original.replace(
+                        co_consts=tuple(
+                            (
+                                item.replace(co_filename="<foreign-private-file>")
+                                if isinstance(item, types.CodeType)
+                                else item
+                            )
+                            for item in original.co_consts
+                        )
+                    )
+                else:
+                    replacement = original.replace(co_filename="<foreign-private-file>")
+                self.assertEqual(original, replacement)
+                function.__code__ = replacement
+                simulation = self._simulation()
+                evidence = lowering._ReturnedModuleEvidence()
+                evidence.capture(
+                    graph,
+                    module,
+                    [source],
+                    (simulation, "electric_half", simulation._electric_half),
+                )
+                self.assertEqual(evidence.diagnostic()["modules"], [])
+                self.assertIn("returned-module-capture-rejected", evidence.reasons)
+
+    def test_same_filename_code_and_foreign_tuner_remain_explicitly_unverified(self):
+        with tempfile.TemporaryDirectory() as raw:
+            graph, module = self._load(Path(raw))
+            original_code = module.Runner.call.__code__
+            module.Runner.call.__code__ = original_code.replace()
+            self.assertIsNot(original_code, module.Runner.call.__code__)
+            module.kernel = _IdentityAsyncCompile().triton(
+                "kernel", "def kernel(): return 'different body'"
+            )
+            simulation = self._simulation()
+            evidence = lowering._ReturnedModuleEvidence()
+            evidence.capture(
+                graph,
+                module,
+                [_IDENTITY_SOURCE],
+                (simulation, "electric_half", simulation._electric_half),
+            )
+            report = evidence.diagnostic()
+            self.assertEqual(len(report["modules"]), 1)
+            self.assertEqual(
+                evidence.entries[0][3]["kernels"][0]["autotuner_id"], id(module.kernel)
+            )
+            self.assertEqual(report["status"], "incomplete")
+            self.assertIn("structural-equivalence", report["python_code_matching"])
+            for gap in (
+                "code-object-loader-provenance",
+                "pre-capture-substitution-absence",
+                "source-declaration-to-autotuner-provenance",
+                "actual-wrapper-invocation-and-selected-launcher-join",
+                "device-execution",
+            ):
+                self.assertIn(gap, report["unverified"])
+
+    def test_json_projection_hides_personal_paths_keys_ids_and_preserves_aliases(self):
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw) / "PersonalName"
+            directory.mkdir()
+            simulation = self._simulation()
+            evidence = lowering._ReturnedModuleEvidence()
+            for region in lowering.COMPILED_REGIONS:
+                graph, module = self._load(directory, "private-basename-" + region)
+                graph.cache_key = module.key = "/private/arbitrary/cache-key"
+                setattr(simulation, "_" + region, module.call)
+                evidence.capture(
+                    graph, module, [_IDENTITY_SOURCE], (simulation, region, module.call)
+                )
+            report = evidence.diagnostic()
+            encoded = json.dumps(report)
+            for private in (
+                raw,
+                "PersonalName",
+                "private-basename",
+                "/private/arbitrary",
+                str(id(module)),
+                '"cache_path"',
+                '"module_cache_key"',
+                '_id"',
+            ):
+                self.assertNotIn(private, encoded)
+            self.assertEqual(report, evidence.diagnostic())
+            electric, magnetic = report["modules"]
+            self.assertEqual(
+                electric["construction_context"]["simulation"],
+                magnetic["construction_context"]["simulation"],
+            )
+            self.assertEqual(
+                electric["call"], electric["construction_context"]["dispatch_function"]
+            )
+            self.assertEqual(
+                evidence.entries[-1][3]["cache_path"],
+                str(directory / ("private-basename-" + region + ".py")),
+            )
+            with mock.patch.object(
+                lowering,
+                "_returned_module_identity",
+                side_effect=FileNotFoundError(
+                    2, "PersonalName error", "/private/error-path"
+                ),
+            ):
+                failed = evidence.diagnostic()
+                evidence.capture(
+                    graph, module, [_IDENTITY_SOURCE], (simulation, region, module.call)
+                )
+            for private in ("PersonalName", "/private/error-path"):
+                self.assertNotIn(private, json.dumps(failed))
+                self.assertNotIn(private, json.dumps(evidence.diagnostic()))
+            self.assertIn("returned-module-revalidation-failed", failed["reasons"])
+
+    def test_missing_emission_unknown_context_and_duplicate_declarations_reject(self):
+        for mode in ("missing", "multiple", "cross-region", "duplicate"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as raw:
+                source = _IDENTITY_SOURCE
+                if mode == "duplicate":
+                    source += "kernel = async_compile.triton('kernel', 'def kernel(): pass')\n"
+                graph, module = self._load(Path(raw), source=source)
+                simulation = self._simulation()
+                emissions = (
+                    []
+                    if mode == "missing"
+                    else [source] * (2 if mode == "multiple" else 1)
+                )
+                function = (
+                    simulation._magnetic_half
+                    if mode == "cross-region"
+                    else simulation._electric_half
+                )
+                evidence = lowering._ReturnedModuleEvidence()
+                evidence.capture(
+                    graph, module, emissions, (simulation, "electric_half", function)
+                )
+                self.assertTrue(evidence.reasons)
+                self.assertEqual(evidence.diagnostic()["modules"], [])
+
+    def test_capture_hook_pairs_post_rewrite_emission_and_restores_on_exception(self):
+        from torch._inductor.graph import GraphLowering
+
+        for fail in (False, True):
+            with self.subTest(fail=fail), tempfile.TemporaryDirectory() as raw:
+                code = types.SimpleNamespace(value=_IDENTITY_SOURCE)
+                graph = types.SimpleNamespace()
+
+                def producer(instance, wrapper_code):
+                    wrapper_code.value += "# runtime rewrite\n"
+                    GraphLowering.save_output_code(wrapper_code.value)
+                    if fail:
+                        raise RuntimeError("compile fixture failed")
+                    produced, module = self._load(Path(raw), source=wrapper_code.value)
+                    instance.__dict__.update(produced.__dict__)
+                    return module
+
+                observations = []
+                original_save = GraphLowering.save_output_code
+                original_compile = GraphLowering._compile_to_module_lines
+                with mock.patch.object(
+                    GraphLowering, "_compile_to_module_lines", producer
+                ):
+                    try:
+                        with lowering._capturing_output_code(
+                            lambda source: None, lambda *args: observations.append(args)
+                        ):
+                            module = GraphLowering._compile_to_module_lines(graph, code)
+                    except RuntimeError:
+                        self.assertTrue(fail)
+                    else:
+                        self.assertFalse(fail)
+                        self.assertIs(observations[0][1], module)
+                        self.assertEqual(observations[0][2], [code.value])
+                        lowering._returned_module_identity(graph, module, code.value)
+                    self.assertIs(GraphLowering._compile_to_module_lines, producer)
+                    self.assertIs(GraphLowering.save_output_code, original_save)
+                self.assertIs(GraphLowering._compile_to_module_lines, original_compile)
+                self.assertEqual(len(observations), 0 if fail else 1)
+
+    def test_callback_exception_restores_both_hooks(self):
+        from torch._inductor.graph import GraphLowering
+
+        original_save = GraphLowering.save_output_code
+        original_compile = GraphLowering._compile_to_module_lines
+
+        def producer(graph, code):
+            GraphLowering.save_output_code(code)
+            return object()
+
+        def reject(*args):
+            raise RuntimeError("module callback failed")
+
+        with mock.patch.object(GraphLowering, "_compile_to_module_lines", producer):
+            with self.assertRaisesRegex(RuntimeError, "module callback failed"):
+                with lowering._capturing_output_code(lambda source: None, reject):
+                    GraphLowering._compile_to_module_lines(object(), "source")
+            self.assertIs(GraphLowering._compile_to_module_lines, producer)
+            self.assertIs(GraphLowering.save_output_code, original_save)
+        self.assertIs(GraphLowering._compile_to_module_lines, original_compile)
 
 
 def _contract(*, regions: list[str] | None = None) -> dict[str, object]:

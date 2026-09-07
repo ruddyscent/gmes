@@ -19,8 +19,9 @@ import json
 import os
 import re
 from collections.abc import Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager, nullcontext
 from pathlib import Path, PurePosixPath
+from types import CodeType, MethodType, ModuleType
 from typing import Any
 
 import torch
@@ -1029,16 +1030,542 @@ def _memory_sources(
     )
 
 
+def _code_filenames_match(code: CodeType, path: str) -> bool:
+    return code.co_filename == path and all(
+        _code_filenames_match(child, path)
+        for child in code.co_consts
+        if isinstance(child, CodeType)
+    )
+
+
+def _returned_module_identity(
+    graph: Any, module: Any, source: str
+) -> tuple[dict[str, object], list[object]]:
+    """Inspect a returned module; this does not establish a subsequent invocation."""
+    from torch._inductor.runtime.triton_heuristics import CachingAutotuner
+
+    if not isinstance(module, ModuleType):
+        raise ValueError("returned wrapper is not a module")
+    path = Path(graph.cache_path)
+    if (
+        not path.is_absolute()
+        or path.is_symlink()
+        or not path.is_file()
+        or path.resolve(strict=True) != path
+        or str(path) != module.__file__
+        or not isinstance(graph.cache_key, str)
+        or not graph.cache_key
+        or graph.cache_key != module.key
+        or path.read_bytes() != source.encode("utf-8")
+    ):
+        raise ValueError("returned module source/cache identity differs")
+    code = compile(source, str(path), "exec", dont_inherit=True)
+    expected_codes: dict[str, CodeType] = {}
+
+    def collect(parent: CodeType) -> None:
+        for child in parent.co_consts:
+            if isinstance(child, CodeType):
+                if child.co_qualname in expected_codes:
+                    raise ValueError("ambiguous wrapper code definition")
+                expected_codes[child.co_qualname] = child
+                collect(child)
+
+    collect(code)
+    call = module.call
+    if (
+        not isinstance(call, MethodType)
+        or call.__self__ is not module.runner
+        or type(module.runner) is not module.Runner
+        or call.__func__ is not module.Runner.call
+        or type(module.runner.partitions) is not list
+        or module.runner.partitions
+        or call.__func__.__globals__ is not vars(module)
+        or call.__func__.__code__ != expected_codes.get("Runner.call")
+        or not _code_filenames_match(call.__func__.__code__, str(path))
+    ):
+        raise ValueError("unsupported or substituted wrapper Runner.call")
+    keepalive = [
+        graph,
+        module,
+        call,
+        call.__self__,
+        call.__func__,
+        call.__func__.__code__,
+    ]
+    kernels = []
+    functions = []
+    names: set[str] = set()
+    for node in ast.parse(source).body:
+        if isinstance(node, ast.FunctionDef):
+            function = vars(module).get(node.name)
+            if (
+                getattr(function, "__globals__", None) is not vars(module)
+                or getattr(function, "__code__", None) != expected_codes.get(node.name)
+                or not _code_filenames_match(function.__code__, str(path))
+            ):
+                raise ValueError("module function differs from emitted code")
+            keepalive.extend((function, function.__code__))
+            functions.append(
+                {
+                    "name": node.name,
+                    "function_id": id(function),
+                    "code_id": id(function.__code__),
+                }
+            )
+        if not (
+            isinstance(node, ast.Assign)
+            and isinstance(node.value, ast.Call)
+            and _call_name(node.value.func) == "async_compile.triton"
+        ):
+            continue
+        args = node.value.args
+        if (
+            len(node.targets) != 1
+            or not isinstance(node.targets[0], ast.Name)
+            or len(args) < 2
+            or not isinstance(args[0], ast.Constant)
+            or not isinstance(args[1], ast.Constant)
+            or not isinstance(args[1].value, str)
+            or args[0].value != node.targets[0].id
+            or node.targets[0].id in names
+        ):
+            raise ValueError("ambiguous or unsupported Triton declaration")
+        name = node.targets[0].id
+        names.add(name)
+        tuner = vars(module).get(name)
+        if not isinstance(tuner, CachingAutotuner) or tuner.fn.__name__ != name:
+            raise ValueError("Triton module global is not the resolved autotuner")
+        keepalive.extend((tuner, tuner.fn))
+        kernels.append(
+            {
+                "name": name,
+                "autotuner_id": id(tuner),
+                "function_id": id(tuner.fn),
+                "embedded_source_sha256": _sha256_bytes(args[1].value.encode()),
+            }
+        )
+    if not kernels:
+        raise ValueError("returned module has no Triton declarations")
+    return {
+        "source_sha256": _sha256_bytes(source.encode()),
+        "cache_path": str(path),
+        "module_cache_key": graph.cache_key,
+        "graph_id": id(graph),
+        "module_id": id(module),
+        "globals_id": id(vars(module)),
+        "call_id": id(call),
+        "receiver_id": id(call.__self__),
+        "call_function_id": id(call.__func__),
+        "call_code_id": id(call.__func__.__code__),
+        "kernels": kernels,
+        "module_functions": functions,
+    }, keepalive
+
+
+def _project_returned_modules(
+    records: list[dict[str, Any]], labels: dict[int, str] | None = None
+) -> list[dict[str, object]]:
+    """Export role labels, preserving aliases without publishing process identities."""
+    if labels is None:
+        labels = {}
+    projected = []
+    for record in sorted(
+        records, key=lambda item: item["construction_context"]["region"]
+    ):
+        context = record["construction_context"]
+        region = context["region"]
+
+        def label(identity: int, role: str, ordinal: int = 0) -> str:
+            if identity not in labels:
+                labels[identity] = f"{region}.{role}.{ordinal}"
+            return labels[identity]
+
+        module = {"source_sha256": record["source_sha256"], "region": region}
+        for role in (
+            "graph",
+            "module",
+            "globals",
+            "call",
+            "receiver",
+            "call_function",
+            "call_code",
+        ):
+            module[role] = label(record[role + "_id"], role)
+        module["construction_context"] = {
+            "simulation": label(context["simulation_id"], "simulation"),
+            "dispatch_function": label(
+                context["dispatch_function_id"], "dispatch_function"
+            ),
+        }
+        module["kernels"] = [
+            {
+                "declaration": f"{region}.declaration.{index}",
+                "autotuner": label(kernel["autotuner_id"], "autotuner", index),
+                "function": label(kernel["function_id"], "kernel_function", index),
+                "embedded_source_sha256": kernel["embedded_source_sha256"],
+            }
+            for index, kernel in enumerate(record["kernels"])
+        ]
+        module["module_functions"] = [
+            {
+                "function": label(function["function_id"], "module_function", index),
+                "code": label(function["code_id"], "module_function_code", index),
+            }
+            for index, function in enumerate(record["module_functions"])
+        ]
+        projected.append(module)
+    return projected
+
+
+class _ReturnedModuleEvidence:
+    """Retain construction observations separately from selection/qualification."""
+
+    def __init__(self):
+        self.entries: list[tuple[Any, ...]] = []
+        self.reasons: list[str] = []
+
+    def capture(
+        self, graph: Any, module: Any, emissions: list[str], context: tuple[Any, ...]
+    ) -> None:
+        from benchmarks.torch_selected_launcher_attestation import PINNED_WRAPPER_SHA256
+
+        try:
+            if len(emissions) != 1:
+                raise ValueError("module lacks one associated source emission")
+            record, refs = _returned_module_identity(graph, module, emissions[0])
+            simulation, region, function = context
+            if region not in COMPILED_REGIONS or function is not getattr(
+                simulation, "_" + region
+            ):
+                raise ValueError(
+                    "module construction has no matching simulation dispatcher context"
+                )
+            if simulation._cuda_graphs:
+                raise ValueError("graph replay context is unsupported")
+            if any(entry[4][1] == region for entry in self.entries):
+                raise ValueError(
+                    "multiple returned modules for one region are unsupported"
+                )
+            record["construction_context"] = {
+                "simulation_id": id(simulation),
+                "region": region,
+                "dispatch_function_id": id(function),
+            }
+            if record["source_sha256"] != PINNED_WRAPPER_SHA256[region]:
+                self.reasons.append("wrapper-pin-mismatch:" + region)
+            self.entries.append((graph, module, emissions[0], record, context, refs))
+        except AttributeError, TypeError, ValueError, OSError:
+            self.reasons.append("returned-module-capture-rejected")
+
+    def diagnostic(self) -> dict[str, object]:
+        records = []
+        reasons = list(self.reasons)
+        for graph, module, source, record, context, _refs in self.entries:
+            try:
+                current, _ = _returned_module_identity(graph, module, source)
+                current["construction_context"] = record["construction_context"]
+                simulation, region, function = context
+                if (
+                    current != record
+                    or function is not getattr(simulation, "_" + region)
+                    or simulation._cuda_graphs
+                ):
+                    raise ValueError("returned module or dispatcher identity changed")
+                records.append(record)
+            except AttributeError, TypeError, ValueError, OSError:
+                reasons.append("returned-module-revalidation-failed")
+        if {record["construction_context"]["region"] for record in records} != set(
+            COMPILED_REGIONS
+        ):
+            reasons.append("returned-module-coverage-incomplete")
+        return json.loads(
+            _canonical_json(
+                {
+                    "status": "incomplete",
+                    "scope": "returned-wrapper-construction-objects-v1",
+                    "python_code_matching": "structural-equivalence-and-module-globals-receiver-association",
+                    "tuner_inventory": "observed-named-module-globals",
+                    "identity_labels": "report-local-region-role-ordinal-with-alias-preservation",
+                    "modules": _project_returned_modules(records),
+                    "reasons": sorted(set(reasons)),
+                    "unverified": [
+                        "actual-wrapper-invocation-and-selected-launcher-join",
+                        "embedded-source-to-compiled-kernel",
+                        "code-object-loader-provenance",
+                        "pre-capture-substitution-absence",
+                        "source-declaration-to-autotuner-provenance",
+                        "case-plan-cache-input-binding",
+                        "whole-wrapper-non-target-ownership",
+                        "device-execution",
+                        "historical-execution",
+                        "global-clone-absence",
+                    ],
+                }
+            )
+        )
+
+
+class _WrapperCallJoin:
+    """Join live runner/dispatcher frames to host events without replacing runners."""
+
+    def __init__(
+        self, evidence: _ReturnedModuleEvidence, observer: Any, dispatcher: Any
+    ):
+        self.evidence, self.observer, self.dispatcher = evidence, observer, dispatcher
+        self.active: Any = None
+        self.recording = False
+        self.frames: dict[str, Any] = {}
+        self.completed: list[str] = []
+        self.events: list[tuple[Any, ...]] = []
+        self.reasons: list[str] = []
+
+    def _entry(self, region: str) -> tuple[Any, ...]:
+        from benchmarks.torch_selected_launcher_attestation import AttestationError
+
+        entries = [entry for entry in self.evidence.entries if entry[4][1] == region]
+        if len(entries) != 1:
+            raise AttestationError("wrapper-call-entry-missing-or-ambiguous")
+        entry = entries[0]
+        try:
+            current, _ = _returned_module_identity(*entry[:3])
+            current["construction_context"] = entry[3]["construction_context"]
+            if current != entry[3]:
+                raise ValueError("changed")
+        except AttributeError, TypeError, ValueError, OSError:
+            raise AttestationError("wrapper-call-entry-changed") from None
+        return entry
+
+    @contextmanager
+    def region(self, name: str, function: Any):
+        from benchmarks.torch_selected_launcher_attestation import AttestationError
+
+        try:
+            if self.recording:
+                if self.active is not None or name in self.completed:
+                    raise AttestationError("duplicate-or-nested-wrapper-region")
+                entry = self._entry(name)
+                simulation, region, captured = entry[4]
+                if (
+                    simulation is not self.dispatcher.__self__
+                    or function is not captured
+                    or function is not getattr(simulation, "_" + region)
+                    or simulation._cuda_graphs
+                ):
+                    raise AttestationError("wrapper-dispatch-context-changed")
+                self.active = entry
+            with self.observer.region(name):
+                yield
+            if self.recording:
+                self._entry(name)
+                if name not in self.frames:
+                    raise AttestationError("wrapper-frame-not-observed")
+                self.completed.append(name)
+        except BaseException:
+            self.reasons.append("wrapper-region-failed")
+            raise
+        finally:
+            self.active = None
+
+    @contextmanager
+    def advance(self):
+        from benchmarks.torch_selected_launcher_attestation import AttestationError
+
+        if self.recording or self.completed or self.observer._call_join is not None:
+            raise AttestationError("wrapper-call-join-is-single-use")
+        self.observer._call_join = self
+        self.recording = True
+        try:
+            with self.observer.attested_interval():
+                yield
+        except BaseException:
+            self.reasons.append("wrapper-advance-failed")
+            raise
+        finally:
+            self.recording = False
+            self.observer._call_join = None
+
+    def before_run(self, tuner: Any, caller: Any):
+        from benchmarks.torch_selected_launcher_attestation import (
+            ELECTRIC_KERNEL,
+            MAGNETIC_KERNEL,
+            AttestationError,
+        )
+
+        try:
+            if self.active is None:
+                raise ValueError("outside region")
+            _graph, module, _source, record, context, _refs = self.active
+            simulation, region, function = context
+            kernel_records = [
+                item for item in record["kernels"] if item["autotuner_id"] == id(tuner)
+            ]
+            if len(kernel_records) != 1:
+                raise ValueError("unowned tuner")
+            kernel = kernel_records[0]
+            if (
+                vars(module).get(kernel["name"]) is not tuner
+                or id(tuner.fn) != kernel["function_id"]
+                or tuner.fn.__name__ != kernel["name"]
+            ):
+                raise ValueError("changed tuner")
+            allowed_codes = {
+                record["call_code_id"],
+                *(item["code_id"] for item in record["module_functions"]),
+            }
+            if (
+                caller.f_globals is not vars(module)
+                or id(caller.f_code) not in allowed_codes
+            ):
+                raise ValueError("unowned caller")
+            frame = caller
+            runner_frame = None
+            while frame is not None:
+                if (
+                    id(frame.f_code) == record["call_code_id"]
+                    and frame.f_globals is vars(module)
+                    and frame.f_locals.get("self") is module.runner
+                ):
+                    if runner_frame is not None:
+                        raise ValueError("recursive runner")
+                    runner_frame = frame
+                if (
+                    frame.f_code is self.dispatcher.__func__.__code__
+                    and frame.f_globals is self.dispatcher.__func__.__globals__
+                ):
+                    if (
+                        frame.f_locals.get("self") is not simulation
+                        or frame.f_locals.get("name") != region
+                        or frame.f_locals.get("function") is not function
+                    ):
+                        raise ValueError("foreign dispatcher")
+                    break
+                frame = frame.f_back
+            if frame is None or runner_frame is None:
+                raise ValueError("missing live invocation")
+            if region in self.frames and self.frames[region] is not runner_frame:
+                raise ValueError("multiple runner invocations")
+            self.frames[region] = runner_frame
+            if kernel["name"] not in {MAGNETIC_KERNEL, ELECTRIC_KERNEL}:
+                launchers = [
+                    *getattr(tuner, "launchers", ()),
+                    getattr(tuner, "_cached_launcher", None),
+                ]
+                if any(
+                    id(item) in self.observer._constructors
+                    or id(item) in self.observer._fast_derivations
+                    for item in launchers
+                ):
+                    raise ValueError("target launcher in non-target global")
+                return None
+            expected_region = (
+                "magnetic_half"
+                if kernel["name"] == MAGNETIC_KERNEL
+                else "electric_half"
+            )
+            if region != expected_region:
+                raise ValueError("cross-region target")
+            return (self.active, kernel, runner_frame)
+        except AttributeError, TypeError, ValueError:
+            self.reasons.append("wrapper-run-ownership-rejected")
+            raise AttestationError("wrapper-run-ownership-rejected") from None
+
+    def selected(self, joined: tuple[Any, ...], event: dict[str, Any]) -> None:
+        self.events.append((joined, dict(event)))
+
+    def diagnostic(self) -> dict[str, object]:
+        reasons = list(self.reasons)
+        module_report = self.evidence.diagnostic()
+        reasons.extend(module_report["reasons"])
+        try:
+            self.observer.diagnostic()
+        except ValueError:
+            reasons.append("selected-launcher-observation-incomplete")
+        if set(self.completed) != set(COMPILED_REGIONS) or len(self.events) != 5:
+            reasons.append("wrapper-call-join-coverage-incomplete")
+        labels: dict[int, str] = {}
+        valid_regions = {item["region"] for item in module_report["modules"]}
+        modules = _project_returned_modules(
+            [
+                entry[3]
+                for entry in self.evidence.entries
+                if entry[4][1] in valid_regions
+            ],
+            labels,
+        )
+        events = []
+        valid = not any(
+            not reason.startswith("wrapper-pin-mismatch:") for reason in reasons
+        )
+        for (entry, kernel, _frame), event in self.events if valid else ():
+            region = entry[4][1]
+            projected = {
+                "region": region,
+                "ordinal": event["ordinal"],
+                "branch": event["branch"],
+                "cubin_sha256": event["cubin_sha256"],
+                "host_returned_normally": True,
+                "runner": labels[entry[3]["receiver_id"]],
+                "autotuner": labels[kernel["autotuner_id"]],
+            }
+            for role in ("selected_callable", "parent_callable"):
+                identity = event[role + "_id"]
+                if identity is not None:
+                    projected[role] = labels.setdefault(
+                        identity, f"{region}.{role}.{event['ordinal']}"
+                    )
+            events.append(projected)
+        return {
+            "status": "incomplete",
+            "scope": "live-wrapper-frame-selected-host-event-join-v1",
+            "python_code_matching": module_report["python_code_matching"],
+            "tuner_inventory": module_report["tuner_inventory"],
+            "identity_labels": module_report["identity_labels"],
+            "modules": modules,
+            "events": events,
+            "reasons": sorted(set(reasons)),
+            "unverified": [
+                *module_report["unverified"],
+                "bound-method-alias-invocation-provenance",
+                "silent-or-additional-runner-invocations",
+                "total-runner-entry-exit-cardinality",
+            ],
+            "claim": "one-observed-event-bearing-runner-frame-per-region-for-participating-host-calls",
+            "instrumentation": "host timing and frame retention changed; no device or memory qualification",
+        }
+
+
 @contextmanager
-def _capturing_output_code(callback: Any):
+def _capturing_output_code(callback: Any, module_callback: Any = None):
     from torch._inductor.graph import GraphLowering
 
     original = GraphLowering.save_output_code
-    GraphLowering.save_output_code = callback
+    original_compile = GraphLowering._compile_to_module_lines
+    pending: list[list[str]] = []
+
+    def save(source: str) -> None:
+        if pending:
+            pending[-1].append(source)
+        callback(source)
+
+    def compile_module(graph: Any, wrapper_code: Any):
+        emissions: list[str] = []
+        pending.append(emissions)
+        try:
+            module = original_compile(graph, wrapper_code)
+        finally:
+            pending.pop()
+        module_callback(graph, module, emissions)
+        return module
+
+    GraphLowering.save_output_code = save
+    if module_callback is not None:
+        GraphLowering._compile_to_module_lines = compile_module
     try:
         yield
     finally:
         GraphLowering.save_output_code = original
+        if module_callback is not None:
+            GraphLowering._compile_to_module_lines = original_compile
 
 
 def capture_compiled_wrapper_audit(
@@ -1049,12 +1576,19 @@ def capture_compiled_wrapper_audit(
     warmup_steps: int,
     cache_directory: Path,
     output_directory: Path,
+    observe_returned_modules: bool = False,
+    observe_launcher_join: bool = False,
 ) -> dict[str, object]:
     """Capture actual child-process CUDA compilation into a new audit bundle.
 
     The caller must create a new process and set ``TORCHINDUCTOR_CACHE_DIR`` to
     the supplied empty private directory before importing or constructing any
     compiled simulation.  This function intentionally never resets Dynamo.
+    ``observe_returned_modules`` adds incomplete construction-object evidence;
+    it does not change allocation-audit qualification or observe kernel selection.
+    ``observe_launcher_join`` also requests one additional instrumented advance
+    after warmup, joining live Python frames to selected host-launcher events.
+    Its frame retention and host overhead are not memory/performance evidence.
     """
     cache = Path(cache_directory).resolve(strict=True)
     output = Path(output_directory).resolve()
@@ -1098,26 +1632,64 @@ def capture_compiled_wrapper_audit(
         simulation, manifest["reference"]["seed"], manifest["reference"]["field_scale"]
     )
     active_region: list[str | None] = [None]
+    active_function: list[Any] = [None]
+    module_evidence = (
+        _ReturnedModuleEvidence()
+        if observe_returned_modules or observe_launcher_join
+        else None
+    )
     seen_regions: set[str] = set()
     sources_by_region: list[dict[str, object]] = []
     original_dispatch = simulation._run_compute_region
+    from benchmarks.torch_selected_launcher_attestation import pinned_observer
+
+    observer = pinned_observer() if observe_launcher_join else None
+    call_join = (
+        _WrapperCallJoin(module_evidence, observer, original_dispatch)
+        if observer is not None
+        else None
+    )
 
     def dispatch(name: Any, function: Any) -> None:
         active_region[0] = str(name)
+        active_function[0] = function
         seen_regions.add(str(name))
         try:
-            original_dispatch(name, function)
+            with (
+                call_join.region(name, function)
+                if call_join is not None
+                else nullcontext()
+            ):
+                original_dispatch(name, function)
         finally:
             active_region[0] = None
+            active_function[0] = None
 
     def save_output_code(source: str) -> None:
         sources_by_region.append({"region": active_region[0], "source": source})
 
+    def save_module(graph: Any, module: Any, emissions: list[str]) -> None:
+        module_evidence.capture(
+            graph, module, emissions, (simulation, active_region[0], active_function[0])
+        )
+
     simulation._run_compute_region = dispatch  # type: ignore[method-assign]
     try:
-        with _capturing_output_code(save_output_code):
+        with ExitStack() as stack:
+            if observer is not None:
+                stack.enter_context(observer)
+            stack.enter_context(
+                _capturing_output_code(
+                    save_output_code,
+                    save_module if module_evidence is not None else None,
+                )
+            )
             simulation.advance(warmup_steps)
-        _synchronize(simulation.device)
+            _synchronize(simulation.device)
+            if call_join is not None:
+                with call_join.advance():
+                    simulation.advance(1)
+                _synchronize(simulation.device)
     finally:
         simulation._run_compute_region = original_dispatch  # type: ignore[method-assign]
     diagnostics = simulation.diagnostics()
@@ -1155,6 +1727,16 @@ def capture_compiled_wrapper_audit(
         "reasons": audit["reasons"],
         "contract": contract,
         "bundle": bundle,
+        **(
+            {"returned_module_evidence": module_evidence.diagnostic()}
+            if module_evidence is not None
+            else {}
+        ),
+        **(
+            {"wrapper_call_join": call_join.diagnostic()}
+            if call_join is not None
+            else {}
+        ),
     }
 
 

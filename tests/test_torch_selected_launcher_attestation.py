@@ -33,16 +33,40 @@ def _launcher(name: str, config: _Config, cache_hash: str):
     return launch
 
 
+class _StaticKernel:
+    def __init__(self, cubin_path, kernel_name, kernel_hash):
+        self.cubin_path = str(cubin_path)
+        self.cubin_raw = cubin_path.read_bytes()
+        self.name = kernel_name
+        self.hash = kernel_hash
+        self.function = None
+        self.module = None
+        self.num_warps = 4
+        self.shared = 0
+        self.arg_tys = "O"
+        self.has_global_scratch = False
+        self.has_profile_scratch = False
+
+    def load_kernel(self, device):
+        if self.function is not None:
+            return
+        self.module, self.function = 101, 102
+        self.cubin_path = None
+        self.cubin_raw = None
+
+    def run(self, *args, stream):
+        return ("parent", args, stream)
+
+
 class _StaticResult:
     def __init__(self, launcher, cubin_path: Path, kernel_name: str):
         self._launcher = launcher
-        self.kernel = types.SimpleNamespace(
-            cubin_path=str(cubin_path),
-            hash=f"hash-{kernel_name}",
-            name=kernel_name,
-        )
+        self.config = launcher.config
+        self.kernel = _StaticKernel(cubin_path, kernel_name, launcher.cache_hash)
 
     def make_launcher(self):
+        self.kernel.load_kernel(0)
+        self._launcher.__globals__["runner"] = self.kernel.run
         return self._launcher
 
 
@@ -98,11 +122,15 @@ class _FakeRuntime:
             debug_active=lambda: self.debug,
             verify=lambda: None,
             cache_empty=lambda: self.cache_is_empty,
+            static_kernel_type=_StaticKernel,
+            cache_key=lambda kernel_hash: kernel_hash,
         )
 
 
 class SelectedLauncherObserverTest(unittest.TestCase):
     def _result(self, directory: Path, name: str, *, value: int = 1):
+        directory = directory / f"cache-{name}-{value}"
+        directory.mkdir(exist_ok=True)
         cubin = directory / f"{name}.cubin"
         cubin.write_bytes(name.encode())
         return _StaticResult(
@@ -111,6 +139,8 @@ class SelectedLauncherObserverTest(unittest.TestCase):
 
     def _prepare(self, observer, result, kernel_name, *, fast: bool):
         parent = result.make_launcher()
+        self.assertIsNone(result.kernel.cubin_path)
+        self.assertIsNone(result.kernel.cubin_raw)
         tuner = _Autotuner(kernel_name, parent)
         if fast:
             tuner._cached_launcher = tuner._build_fast_launcher(parent)
@@ -167,6 +197,7 @@ class SelectedLauncherObserverTest(unittest.TestCase):
         original_regular = _RegularResult.make_launcher
         original_fast = _Autotuner._build_fast_launcher
         original_run = _Autotuner.run
+        original_load = _StaticKernel.load_kernel
         with self.assertRaisesRegex(RuntimeError, "stop"):
             with attestation.pinned_observer(runtime.adapter()):
                 raise RuntimeError("stop")
@@ -174,6 +205,94 @@ class SelectedLauncherObserverTest(unittest.TestCase):
         self.assertIs(_RegularResult.make_launcher, original_regular)
         self.assertIs(_Autotuner._build_fast_launcher, original_fast)
         self.assertIs(_Autotuner.run, original_run)
+        self.assertIs(_StaticKernel.load_kernel, original_load)
+
+    def test_loaded_identity_and_artifact_mutations_reject_after_five_calls(self):
+        for mode in (
+            "kernel",
+            "foreign-runner",
+            "handle",
+            "path",
+            "artifact",
+            "missing",
+            "config",
+        ):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as raw:
+                with attestation.pinned_observer(_FakeRuntime().adapter()) as observer:
+                    self._five_events_outside_interval(observer, Path(raw))
+                    result = observer._live_results[next(iter(observer._constructors))]
+                    parent = observer._live_callables[
+                        next(iter(observer._constructors))
+                    ]
+                    loaded = observer._loads[id(result.kernel)]
+                    if mode == "kernel":
+                        replacement = _StaticKernel(
+                            Path(loaded.path), loaded.name, loaded.kernel_hash
+                        )
+                        replacement.__dict__.update(result.kernel.__dict__)
+                        result.kernel = replacement
+                    elif mode == "foreign-runner":
+                        foreign = _StaticKernel(
+                            Path(loaded.path), loaded.name, loaded.kernel_hash
+                        )
+                        parent.__globals__["runner"] = foreign.run
+                    elif mode == "handle":
+                        result.kernel.function += 1
+                    elif mode == "path":
+                        result.kernel.cubin_path = loaded.path
+                    elif mode == "artifact":
+                        Path(loaded.path).write_bytes(b"changed")
+                    elif mode == "missing":
+                        Path(loaded.path).unlink()
+                    else:
+                        result.config = _Config(999)
+                    with observer.attested_interval():
+                        with observer.region("magnetic_half"):
+                            _Autotuner(attestation.MAGNETIC_KERNEL, parent).run(
+                                stream="stream"
+                            )
+                        for tuner in self._electric_tuners:
+                            with observer.region("electric_half"):
+                                tuner.run(stream="stream")
+                with self.assertRaises(attestation.AttestationError):
+                    observer.diagnostic()
+
+    def _five_events_outside_interval(self, observer, directory):
+        self._prepare(
+            observer,
+            self._result(directory, attestation.MAGNETIC_KERNEL),
+            attestation.MAGNETIC_KERNEL,
+            fast=False,
+        )
+        self._electric_tuners = [
+            self._prepare(
+                observer,
+                self._result(directory, attestation.ELECTRIC_KERNEL),
+                attestation.ELECTRIC_KERNEL,
+                fast=True,
+            )[0]
+            for _ in range(4)
+        ]
+
+    def test_foreign_artifact_and_preexisting_load_are_rejected(self):
+        for mode in ("foreign", "foreign-bytes", "missing-raw", "preloaded"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as raw:
+                result = self._result(Path(raw), attestation.MAGNETIC_KERNEL)
+                if mode == "preloaded":
+                    result.kernel.load_kernel(0)
+                elif mode == "foreign-bytes":
+                    Path(result.kernel.cubin_path).write_bytes(b"foreign binary")
+                elif mode == "missing-raw":
+                    result.kernel.cubin_raw = None
+                else:
+                    foreign = Path(raw) / "foreign.cubin"
+                    foreign.write_bytes(b"foreign")
+                    result.kernel.cubin_path = str(foreign)
+                with attestation.pinned_observer(_FakeRuntime().adapter()) as observer:
+                    result.make_launcher()
+                self.assertTrue(observer._problems)
+                with self.assertRaises(attestation.AttestationError):
+                    observer.diagnostic()
 
     def test_pre_call_fast_path_rejects_unknown_parent_association(self):
         runtime = _FakeRuntime()
@@ -215,7 +334,9 @@ class SelectedLauncherObserverTest(unittest.TestCase):
             for mode in ("missing", "mutated", "symlink"):
                 with self.subTest(mode=mode):
                     with attestation.pinned_observer(runtime.adapter()) as observer:
-                        cubin = directory / f"{mode}.cubin"
+                        variant = directory / f"cache-{mode}"
+                        variant.mkdir()
+                        cubin = variant / f"{attestation.MAGNETIC_KERNEL}.cubin"
                         cubin.write_bytes(b"before")
                         if mode == "symlink":
                             linked = directory / "linked.cubin"
@@ -234,6 +355,8 @@ class SelectedLauncherObserverTest(unittest.TestCase):
                         tuner = _Autotuner(attestation.MAGNETIC_KERNEL, parent)
                         if mode == "mutated":
                             cubin.write_bytes(b"after")
+                        elif mode == "missing":
+                            cubin.unlink()
                         with observer.attested_interval():
                             with observer.region("magnetic_half"):
                                 tuner.run(stream="stream")
@@ -300,6 +423,92 @@ class SelectedLauncherObserverTest(unittest.TestCase):
 
 
 class PinnedRuntimeSourceGateTest(unittest.TestCase):
+    def test_real_python_load_lifecycle_with_cpu_native_loader_stub(self):
+        self._run_pinned_script(
+            """
+import tempfile
+import types
+from pathlib import Path
+from benchmarks import torch_selected_launcher_attestation as a
+from tests.test_torch_selected_launcher_attestation import _Config, _launcher
+from torch._inductor.runtime import static_triton_launcher as s, triton_heuristics as h
+
+owner = s.StaticallyLaunchedCudaKernel
+original = owner.load_kernel
+own_descriptor = owner.__dict__.get("load_kernel")
+for fail in (False, True):
+    with tempfile.TemporaryDirectory() as raw:
+        kernel = object.__new__(owner)
+        kernel.name = a.MAGNETIC_KERNEL
+        kernel.hash = "a" * 64
+        key = h.triton_hash_to_path_key(kernel.hash)
+        directory = Path(raw) / key
+        directory.mkdir()
+        path = directory / (kernel.name + ".cubin")
+        path.write_bytes(b"CPU fixture, not a device binary")
+        kernel.cubin_path = str(path)
+        kernel.cubin_raw = path.read_bytes()
+        kernel.function = kernel.module = None
+        kernel.num_warps = 4
+        kernel.shared = 0
+        kernel.arg_tys = "O"
+        kernel.has_global_scratch = kernel.has_profile_scratch = False
+        calls = []
+        def native_stub(*args):
+            calls.append(args)
+            assert args == (str(path), kernel.name, 0, 0)
+            if fail:
+                raise RuntimeError("native-loader-stub")
+            return (101, 102, 3, 0)
+        kernel.C_impl = types.SimpleNamespace(_load_kernel=native_stub)
+        result = types.SimpleNamespace(kernel=kernel, config=_Config())
+        def make(result):
+            result.kernel.load_kernel(0)
+            launch = _launcher(kernel.name, result.config, key)
+            launch.__globals__["runner"] = result.kernel.run
+            return launch
+        observer = a.pinned_observer()
+        try:
+            with observer:
+                parent = observer._observe_static_make_launcher(make, result)
+                assert kernel.cubin_path is None and kernel.cubin_raw is None
+                record = observer._constructors[id(parent)]
+                observer._verify_parent(record)
+                assert record.cubin_path == str(path)
+                assert not observer._problems, observer._problems
+        except RuntimeError as error:
+            assert fail and str(error) == "native-loader-stub"
+        else:
+            assert not fail
+        assert len(calls) == 1
+        assert owner.load_kernel is original
+        assert owner.__dict__.get("load_kernel") is own_descriptor
+        assert not observer._making
+print("real-python-load-stub-restore-ok")
+""",
+            "real-python-load-stub-restore-ok",
+        )
+
+    def _run_pinned_script(self, script, expected):
+        root = Path(__file__).resolve().parents[1]
+        process = subprocess.run(
+            ["/tmp/gmes-issue-124-cuda-cu130-CUqJ9b/bin/python", "-c", script],
+            cwd=root,
+            env={
+                **os.environ,
+                "CUDA_VISIBLE_DEVICES": "",
+                "PYTHONDONTWRITEBYTECODE": "1",
+                "PYTHONPATH": str(root),
+                "OMP_NUM_THREADS": "1",
+                "MKL_NUM_THREADS": "1",
+            },
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(process.returncode, 0, process.stderr)
+        self.assertEqual(process.stdout.strip(), expected)
+
     def test_pinned_cuda_runtime_source_gate_without_cuda_execution(self):
         interpreter = Path("/tmp/gmes-issue-124-cuda-cu130-CUqJ9b/bin/python")
         self.assertTrue(interpreter.is_file())

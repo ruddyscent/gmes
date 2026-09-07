@@ -37,6 +37,9 @@ PINNED_RUNTIME_SOURCES = MappingProxyType(
         "triton_heuristics.py": (
             "87a1937c8179f44b082736d6144b6f29e7cb56ec771a0fe973379aa99fcb3923"
         ),
+        "static_triton_launcher.py": (
+            "0510a7862f64f8fdab710cc03b4109490b1597b7c4548a79a0a025fc31179421"
+        ),
     }
 )
 PINNED_WRAPPER_SHA256 = MappingProxyType(
@@ -51,6 +54,7 @@ PINNED_WRAPPER_SHA256 = MappingProxyType(
 )
 MAGNETIC_KERNEL = "triton_poi_fused_copy_fma_mul_slice_sub_13"
 ELECTRIC_KERNEL = "triton_poi_fused_index_copy_view_38"
+_MISSING = object()
 
 
 class AttestationError(ValueError):
@@ -101,6 +105,38 @@ class _FastDerivation:
 
 
 @dataclass(frozen=True)
+class _LoadedKernel:
+    compile_result: object
+    kernel: object
+    name: str
+    kernel_hash: str
+    path: str
+    sha256: str
+    directory: str
+    state: str
+
+
+def _loaded_state(kernel: object) -> str:
+    return json.dumps(
+        _json_value(
+            {
+                name: getattr(kernel, name)
+                for name in (
+                    "module",
+                    "function",
+                    "num_warps",
+                    "shared",
+                    "arg_tys",
+                    "has_global_scratch",
+                    "has_profile_scratch",
+                )
+            }
+        ),
+        sort_keys=True,
+    )
+
+
+@dataclass(frozen=True)
 class _RunSnapshot:
     benchmark_run: bool
     cached_launcher: object | None
@@ -143,6 +179,8 @@ class _RuntimeAdapter:
     debug_active: Callable[[], bool]
     verify: Callable[[], None]
     cache_empty: Callable[[], bool]
+    static_kernel_type: type
+    cache_key: Callable[[str], str]
 
 
 def _sha256_regular_file(path: Path) -> tuple[str, str, str]:
@@ -233,7 +271,7 @@ def _pinned_runtime_adapter() -> _RuntimeAdapter:
     import torch
     import triton
     from torch._inductor import async_compile
-    from torch._inductor.runtime import triton_heuristics
+    from torch._inductor.runtime import static_triton_launcher, triton_heuristics
 
     def verify() -> None:
         if torch.__version__ != PINNED_TORCH_VERSION:
@@ -243,6 +281,7 @@ def _pinned_runtime_adapter() -> _RuntimeAdapter:
         paths = {
             "async_compile.py": inspect.getsourcefile(async_compile),
             "triton_heuristics.py": inspect.getsourcefile(triton_heuristics),
+            "static_triton_launcher.py": inspect.getsourcefile(static_triton_launcher),
         }
         for name, expected in PINNED_RUNTIME_SOURCES.items():
             raw_path = paths.get(name)
@@ -271,6 +310,8 @@ def _pinned_runtime_adapter() -> _RuntimeAdapter:
         debug_active=lambda: bool(triton_heuristics.get_active_debug_mode()),
         verify=verify,
         cache_empty=cache_empty,
+        static_kernel_type=static_triton_launcher.StaticallyLaunchedCudaKernel,
+        cache_key=triton_heuristics.triton_hash_to_path_key,
     )
 
 
@@ -293,6 +334,8 @@ class SelectedLauncherObserver(AbstractContextManager["SelectedLauncherObserver"
         self._region_counts: Counter[str] = Counter()
         self._problems: list[str] = []
         self._expected = {(item.region, item.ordinal): item for item in PINNED_EVENTS}
+        self._making: list[tuple[object, object]] = []
+        self._loads: dict[int, _LoadedKernel] = {}
 
     def __enter__(self) -> SelectedLauncherObserver:
         if self._entered or self._closed:
@@ -302,6 +345,9 @@ class SelectedLauncherObserver(AbstractContextManager["SelectedLauncherObserver"
             raise AttestationError("preexisting compiled Triton cache is unsupported")
         self._entered = True
         try:
+            self._patch(
+                self._adapter.static_kernel_type, "load_kernel", self._observe_load
+            )
             self._patch(
                 self._adapter.static_result_type,
                 "make_launcher",
@@ -416,7 +462,7 @@ class SelectedLauncherObserver(AbstractContextManager["SelectedLauncherObserver"
         self, owner: type, name: str, replacement: Callable[..., object]
     ) -> None:
         original = getattr(owner, name)
-        self._patches.append((owner, name, original))
+        self._patches.append((owner, name, owner.__dict__.get(name, _MISSING)))
 
         def patched(instance: object, *args: object, **kwargs: object) -> object:
             return replacement(original, instance, *args, **kwargs)
@@ -426,7 +472,80 @@ class SelectedLauncherObserver(AbstractContextManager["SelectedLauncherObserver"
     def _restore(self) -> None:
         while self._patches:
             owner, name, original = self._patches.pop()
-            setattr(owner, name, original)
+            if original is _MISSING:
+                delattr(owner, name)
+            else:
+                setattr(owner, name, original)
+
+    def _observe_load(
+        self,
+        original: Callable[..., object],
+        kernel: object,
+        *args: object,
+        **kwargs: object,
+    ) -> object:
+        pending = None
+        try:
+            if getattr(kernel, "name") in {MAGNETIC_KERNEL, ELECTRIC_KERNEL}:
+                if not self._making or self._making[-1][1] is not kernel:
+                    raise AttestationError("static load has no matching compile result")
+                compile_result, _ = self._making[-1]
+                name, kernel_hash = _kernel_metadata(compile_result)
+                if id(kernel) in self._loads or getattr(kernel, "function") is not None:
+                    raise AttestationError(
+                        "duplicate or preexisting static kernel load"
+                    )
+                path, digest, directory = _sha256_regular_file(Path(kernel.cubin_path))
+                if (
+                    not isinstance(kernel.cubin_raw, bytes)
+                    or hashlib.sha256(kernel.cubin_raw).hexdigest() != digest
+                ):
+                    raise AttestationError(
+                        "CUBIN bytes differ from compile-result kernel"
+                    )
+                if (
+                    Path(directory).name != self._adapter.cache_key(kernel_hash)
+                    or Path(path).name != f"{name}.cubin"
+                ):
+                    raise AttestationError(
+                        "CUBIN path differs from actual kernel identity"
+                    )
+                pending = (compile_result, name, kernel_hash, path, digest, directory)
+        except (AttributeError, TypeError, OSError, AttestationError) as error:
+            self._problem(f"static load is unsupported: {error}")
+        # The pinned load clears cubin_path/cubin_raw. Preserve the entry bytes,
+        # then associate them with the same kernel's normally returned load.
+        try:
+            result = original(kernel, *args, **kwargs)
+        except BaseException:
+            self._problem("static load raised")
+            raise
+        if pending is not None:
+            try:
+                compile_result, name, kernel_hash, path, digest, directory = pending
+                if (
+                    compile_result.kernel is not kernel
+                    or _kernel_metadata(compile_result) != (name, kernel_hash)
+                    or kernel.function is None
+                    or kernel.module is None
+                    or kernel.cubin_path is not None
+                    or kernel.cubin_raw is not None
+                    or _sha256_regular_file(Path(path)) != (path, digest, directory)
+                ):
+                    raise AttestationError("static kernel changed during load")
+                self._loads[id(kernel)] = _LoadedKernel(
+                    compile_result,
+                    kernel,
+                    name,
+                    kernel_hash,
+                    path,
+                    digest,
+                    directory,
+                    _loaded_state(kernel),
+                )
+            except (AttributeError, TypeError, OSError, AttestationError) as error:
+                self._problem(f"static load is unsupported: {error}")
+        return result
 
     def _observe_static_make_launcher(
         self,
@@ -435,7 +554,15 @@ class SelectedLauncherObserver(AbstractContextManager["SelectedLauncherObserver"
         *args: object,
         **kwargs: object,
     ) -> object:
-        launcher = original(instance, *args, **kwargs)
+        kernel = getattr(instance, "kernel", None)
+        self._making.append((instance, kernel))
+        try:
+            launcher = original(instance, *args, **kwargs)
+        except BaseException:
+            self._problem("static launcher construction raised")
+            raise
+        finally:
+            self._making.pop()
         self._capture_construction(instance, launcher, static=True)
         return launcher
 
@@ -494,8 +621,12 @@ class SelectedLauncherObserver(AbstractContextManager["SelectedLauncherObserver"
             cache_hash, config, globals_id, code_id, runner_id = _callable_metadata(
                 launcher
             )
-            cubin_path = Path(getattr(getattr(compile_result, "kernel"), "cubin_path"))
-            path, cubin_sha256, variant_directory = _sha256_regular_file(cubin_path)
+            loaded = self._verify_loaded(compile_result, launcher)
+            path, cubin_sha256, variant_directory = (
+                loaded.path,
+                loaded.sha256,
+                loaded.directory,
+            )
             self._constructors[callable_id] = _Construction(
                 callable_id=callable_id,
                 kernel_name=kernel_name,
@@ -512,7 +643,7 @@ class SelectedLauncherObserver(AbstractContextManager["SelectedLauncherObserver"
             )
             self._live_callables[callable_id] = launcher
             self._live_results[callable_id] = compile_result
-        except (AttributeError, TypeError, AttestationError) as error:
+        except (AttributeError, TypeError, OSError, AttestationError) as error:
             self._problem(f"target construction is unsupported: {error}")
 
     def _capture_fast_derivation(self, parent: object, derived: object) -> None:
@@ -522,6 +653,7 @@ class SelectedLauncherObserver(AbstractContextManager["SelectedLauncherObserver"
             record = self._constructors.get(parent_id)
             if record is None:
                 return
+            self._verify_parent(record)
             if parent_id == derived_id or derived_id in self._constructors:
                 raise AttestationError("fast callable identity is malformed")
             if derived_id in self._fast_derivations:
@@ -547,7 +679,7 @@ class SelectedLauncherObserver(AbstractContextManager["SelectedLauncherObserver"
                 runner_id=runner_id,
             )
             self._live_callables[derived_id] = derived
-        except (AttributeError, TypeError, AttestationError) as error:
+        except (AttributeError, TypeError, OSError, AttestationError) as error:
             self._problem(f"fast callable association is unsupported: {error}")
 
     def _snapshot(
@@ -645,8 +777,41 @@ class SelectedLauncherObserver(AbstractContextManager["SelectedLauncherObserver"
                 }
             )
             self._region_counts[region] += 1
-        except (AttributeError, TypeError, AttestationError) as error:
+        except (AttributeError, TypeError, OSError, AttestationError) as error:
             self._problem(f"selected launch is unsupported: {error}")
+
+    def _verify_loaded(self, compile_result: object, launcher: object) -> _LoadedKernel:
+        kernel = getattr(compile_result, "kernel")
+        loaded = self._loads.get(id(kernel))
+        if (
+            loaded is None
+            or loaded.kernel is not kernel
+            or loaded.compile_result is not compile_result
+        ):
+            raise AttestationError(
+                "compile result has no matching observed static load"
+            )
+        runner = launcher.__globals__["runner"]
+        if (
+            getattr(runner, "__self__", None) is not kernel
+            or getattr(runner, "__func__", None)
+            is not self._adapter.static_kernel_type.run
+            or _kernel_metadata(compile_result) != (loaded.name, loaded.kernel_hash)
+            or _loaded_state(kernel) != loaded.state
+            or kernel.cubin_path is not None
+            or kernel.cubin_raw is not None
+            or launcher.cache_hash != self._adapter.cache_key(loaded.kernel_hash)
+            or _canonical_config(compile_result.config)
+            != _canonical_config(launcher.config)
+        ):
+            raise AttestationError("loaded kernel or launcher metadata changed")
+        if _sha256_regular_file(Path(loaded.path)) != (
+            loaded.path,
+            loaded.sha256,
+            loaded.directory,
+        ):
+            raise AttestationError("selected launcher CUBIN changed after load")
+        return loaded
 
     def _verify_parent(self, record: _Construction) -> None:
         launcher = self._live_callables.get(record.callable_id)
@@ -669,8 +834,8 @@ class SelectedLauncherObserver(AbstractContextManager["SelectedLauncherObserver"
             or runner_id != record.runner_id
         ):
             raise AttestationError("selected parent callable metadata changed")
-        cubin_path = Path(getattr(getattr(compile_result, "kernel"), "cubin_path"))
-        path, digest, directory = _sha256_regular_file(cubin_path)
+        loaded = self._verify_loaded(compile_result, launcher)
+        path, digest, directory = loaded.path, loaded.sha256, loaded.directory
         if (
             path != record.cubin_path
             or digest != record.cubin_sha256

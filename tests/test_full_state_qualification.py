@@ -550,6 +550,25 @@ class DistributedSourceCrossingTest(unittest.TestCase):
             )
         baseline = qualification._source_auxiliary_arrays(serial)
         auxiliary = serial.sources.auxiliaries[0]
+        self.assertFalse(np.any(auxiliary.host_snapshot()["Ey"]))
+        checkpoint_key = next(
+            key for key in baseline if key.endswith("/checkpoint/state/pml_ey_0_state")
+        )
+        pml_ey_before = auxiliary.state.pml_ey_0_state.clone()
+        auxiliary.state.pml_ey_0_state[0, 0].add_(0.125)
+        try:
+            self.assertFalse(
+                qualification.compare_arrays(
+                    baseline,
+                    qualification._source_auxiliary_arrays(serial),
+                    qualification._comparison_tolerances(
+                        baseline, {"rtol": 1e-12, "atol": 1e-14}
+                    ),
+                )["passed"]
+            )
+        finally:
+            auxiliary.state.pml_ey_0_state.copy_(pml_ey_before)
+        self.assertIn(checkpoint_key, baseline)
         auxiliary.state.source_time.add_(0.125)
         auxiliary.state.time_step.mul_(2)
         self.assertFalse(

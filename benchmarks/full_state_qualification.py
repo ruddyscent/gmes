@@ -1044,6 +1044,9 @@ def _source_auxiliary_arrays(simulation):
     for ordinal, (record, auxiliary) in enumerate(
         zip(records["auxiliary"], simulation.sources.auxiliaries, strict=True)
     ):
+        checkpoint_prefix = f"source_aux/{ordinal}-{record['source']}/checkpoint/state"
+        for name, value in auxiliary.state.checkpoint().items():
+            result[f"{checkpoint_prefix}/{name}"] = torch_correctness._host(value)
         clock = _source_clock(auxiliary)
         prefix = f"source_aux/{ordinal}-{record['source']}/live_clock"
         result[f"{prefix}/step_count"] = clock["source/step_count"]

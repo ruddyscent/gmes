@@ -44,16 +44,22 @@ interior field element, a material-state element, a source-state element, a
 source-auxiliary-state element, missing/extra state, a broadcastable wrong
 shape, nonfinite values, missing captures, and incorrect clocks.
 
-The `two-gpu` mode is a separate, eager-only Torch serial-versus-two-rank
-check. Launch it with exactly two visible CUDA devices via `torchrun` and a new
-private `--output-dir`. It compares every field, owned material-state row,
-source payload, nested transparent-source auxiliary state, and live source
-clock at every standard capture. Its five-step checkpoint replay compares the
-same complete distributed persistent state, not fields alone. The fixed uneven
-split has a Drude block crossing the partition, point sources owned on both
-ranks including same-target last-wins ordering, and one TFSF face region with
-owned targets on both sides of the cut. It is neither a native comparison nor
-compiled qualification.
+The `two-gpu` mode is a separate Torch serial-versus-two-rank check. It defaults
+to eager execution; `--compile-policy compile` explicitly requests its scoped
+compiled variant. Launch either with exactly two visible CUDA devices via
+`torchrun` and a new private `--output-dir`. It compares every field, owned
+material-state row, source payload, nested transparent-source auxiliary
+checkpoint state, and live source clock at every standard capture. Auxiliary
+capture retains the existing field/material projection and separately includes
+every buffer returned by each auxiliary state checkpoint, including inactive
+component PML state. Static source-plan descriptors, such as nested point
+amplitudes, are not checkpoint state and are not included by this capture. Its
+five-step checkpoint replay compares the same complete distributed persistent
+state, not fields alone. The fixed uneven split has a Drude block crossing the
+partition, point sources owned on both ranks including same-target last-wins
+ordering, and one TFSF face region with owned targets on both sides of the cut.
+It is neither a native comparison nor production authority; eager results do
+not qualify the explicit compiled scope.
 
 The first local TFSF two-GPU capture predates the per-capture auxiliary and
 complete replay checks above, so it remains limited positive eager evidence.

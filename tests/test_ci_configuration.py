@@ -71,8 +71,18 @@ class CiConfigurationTest(unittest.TestCase):
         self.assertIn(
             "scientific-python-nightly-wheels/simple", self.prerelease_workflow
         )
-        self.assertIn("python -m pip install --no-deps -e .", self.prerelease_workflow)
+        self.assertNotIn("--no-deps", self.prerelease_workflow)
+        self.assertIn("-e .", self.prerelease_workflow)
+        self.assertIn(
+            "--extra-index-url https://download.pytorch.org/whl/cpu",
+            self.prerelease_workflow,
+        )
+        self.assertIn("python -m pip check", self.prerelease_workflow)
         self.assertIn("python -m unittest discover -v", self.prerelease_workflow)
+
+    def test_prerelease_installs_uv_for_packaging_tests(self):
+        self.assertIn("uses: astral-sh/setup-uv@", self.prerelease_workflow)
+        self.assertIn('version: "0.12.5"', self.prerelease_workflow)
 
     def test_workflow_checkouts_disable_persisted_credentials(self):
         checkout = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"

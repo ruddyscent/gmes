@@ -873,6 +873,19 @@ def call(args):
 """
 
 
+def _runner_wrapper(
+    *,
+    body: str = "",
+    helpers: str = "",
+    export: str = "runner = Runner()\ncall = runner.call\n",
+) -> str:
+    prefix, call = _wrapper().split("def call(args):\n", maxsplit=1)
+    scoped_call = "\n".join(
+        f"    {line}" if line else line for line in call.splitlines()
+    )
+    return f"{prefix}class Runner:\n    def call(self, args):\n{scoped_call}\n{body}{helpers}{export}"
+
+
 class LoweredMaterializationTest(unittest.TestCase):
     def _audit(self, source: str, *, contract: dict[str, object] | None = None):
         return lowering.audit_compiled_wrapper_sources(
@@ -886,6 +899,163 @@ class LoweredMaterializationTest(unittest.TestCase):
         self.assertTrue(audit["verified"])
         output = audit["wrappers"][0]["launches"][0]["outputs"][0]
         self.assertEqual(output["kind"], "direct-input")
+
+    def test_runner_scope_is_diagnostic_only(self):
+        audit = self._audit(_runner_wrapper())
+        self.assertFalse(audit["verified"])
+        self.assertIn("wrapper-execution-scope-incomplete", audit["reasons"])
+        self.assertEqual(
+            audit["wrappers"][0]["launches"][0]["outputs"][0]["kind"],
+            "direct-input",
+        )
+
+    def test_runner_call_scope_excludes_helper_and_get_args_collisions(self):
+        audit = self._audit(
+            _runner_wrapper(
+                body="""
+def get_args():
+    arg0_1 = rand_strided((8,), (1,), device='cuda:0', dtype=torch.float64)
+    buf0 = empty_strided_cuda((8,), (1,), torch.float64)
+    kernel.run(arg0_1, buf0, 8, grid=grid(8), stream=stream0)
+""",
+                helpers="""
+def helper():
+    arg0_1 = rand_strided((8,), (1,), device='cuda:0', dtype=torch.float64)
+    kernel.run(arg0_1, arg0_1, 8, grid=grid(8), stream=stream0)
+""",
+            )
+        )
+        self.assertFalse(audit["verified"])
+        self.assertIn("wrapper-execution-scope-incomplete", audit["reasons"])
+        wrapper = audit["wrappers"][0]
+        self.assertEqual(len(wrapper["launches"]), 1)
+        self.assertEqual(wrapper["launches"][0]["outputs"][0]["kind"], "direct-input")
+        self.assertEqual(audit["full_domain_output_candidates"], [])
+
+    def test_runner_call_scope_excludes_nested_function_collisions(self):
+        source = _runner_wrapper().replace(
+            "        kernel.run(arg0_1, arg0_1, 8, grid=grid(8), stream=stream0)",
+            """        def nested():
+            arg0_1 = rand_strided((8,), (1,), device='cuda:0', dtype=torch.float64)
+            kernel.run(arg0_1, arg0_1, 8, grid=grid(8), stream=stream0)
+        kernel.run(arg0_1, arg0_1, 8, grid=grid(8), stream=stream0)""",
+        )
+        audit = self._audit(source)
+        self.assertFalse(audit["verified"])
+        self.assertIn("wrapper-execution-scope-incomplete", audit["reasons"])
+        self.assertEqual(len(audit["wrappers"][0]["launches"]), 1)
+
+    def test_runner_call_reachable_helper_and_closure_alias_fail_closed(self):
+        helper = """
+def hidden_copy(arg0_1):
+    assert_size_stride(arg0_1, (8,), (1,))
+    copied = empty_strided_cuda((8,), (1,), torch.float64)
+    kernel.run(arg0_1, copied, 8, grid=grid(8), stream=stream0)
+    return copied
+"""
+        launch = "        kernel.run(arg0_1, arg0_1, 8, grid=grid(8), stream=stream0)"
+        closure = """        def hidden_copy():
+            copied = empty_strided_cuda((8,), (1,), torch.float64)
+            kernel.run(arg0_1, copied, 8, grid=grid(8), stream=stream0)
+            return copied
+        invoke = hidden_copy
+        invoke()
+"""
+        for source in (
+            _runner_wrapper(helpers=helper).replace(
+                launch, launch + "\n        hidden_copy(arg0_1)"
+            ),
+            _runner_wrapper().replace(launch, closure + launch),
+        ):
+            with self.subTest(source=source):
+                audit = self._audit(source)
+                self.assertFalse(audit["verified"])
+                self.assertIn("wrapper-execution-call-unresolved", audit["reasons"])
+
+    def test_runner_call_requires_supported_export_binding(self):
+        for export, reason in (
+            ("", "wrapper-execution-entry-missing"),
+            (
+                "runner = Runner()\ncall = hidden_entry\n",
+                "wrapper-execution-entry-unresolved",
+            ),
+            (
+                "runner = Runner()\ncall = runner.call\ncall = hidden_entry\n",
+                "wrapper-execution-entry-rebound",
+            ),
+        ):
+            with self.subTest(export=export):
+                audit = self._audit(_runner_wrapper(export=export))
+                self.assertFalse(audit["verified"])
+                self.assertIn(reason, audit["reasons"])
+                self.assertIn("wrapper-execution-scope-incomplete", audit["reasons"])
+
+    def test_runner_scope_guard_rejects_known_and_annotated_rebindings(self):
+        helper = """
+def hidden_copy(arg0_1):
+    copied = empty_strided_cuda((8,), (1,), torch.float64)
+    kernel.run(arg0_1, copied, 8, grid=grid(8), stream=stream0)
+"""
+        launch = "        kernel.run(arg0_1, arg0_1, 8, grid=grid(8), stream=stream0)"
+        primitive_rebound = _runner_wrapper(helpers=helper).replace(
+            launch,
+            "        copy_if_misaligned = hidden_copy\n"
+            "        copy_if_misaligned(arg0_1)\n" + launch,
+        )
+        annotated_export = _runner_wrapper(
+            helpers=helper,
+            export="runner = Runner()\ncall = runner.call\ncall: object = hidden_copy\n",
+        )
+        for source in (primitive_rebound, annotated_export):
+            with self.subTest(source=source):
+                audit = self._audit(source)
+                self.assertFalse(audit["verified"])
+                self.assertIn("wrapper-execution-scope-incomplete", audit["reasons"])
+
+    def test_runner_call_local_reassignment_stays_unmapped(self):
+        audit = self._audit(
+            _runner_wrapper(
+                body="""
+""",
+                helpers="""
+""",
+            ).replace(
+                "assert_size_stride(arg0_1, (8,), (1,))\n        ",
+                "assert_size_stride(arg0_1, (8,), (1,))\n        arg0_1 = copy_if_misaligned(arg0_1)\n        ",
+            )
+        )
+        self.assertFalse(audit["verified"])
+        self.assertIn("launch-output-unmapped:kernel:out_ptr0", audit["reasons"])
+
+    def test_runner_call_list_loop_and_clone_outputs_stay_unmapped(self):
+        for replacement in (
+            """        value = arg0_1.clone()
+        kernel.run(arg0_1, value, 8, grid=grid(8), stream=stream0)""",
+            """        values = [arg0_1]
+        for _ in range(1):
+            values[0] = copy_if_misaligned(values[0])
+        kernel.run(arg0_1, values[0], 8, grid=grid(8), stream=stream0)""",
+        ):
+            with self.subTest(replacement=replacement):
+                source = _runner_wrapper().replace(
+                    "        kernel.run(arg0_1, arg0_1, 8, grid=grid(8), stream=stream0)",
+                    replacement,
+                )
+                audit = self._audit(source)
+                self.assertFalse(audit["verified"])
+                self.assertIn(
+                    "launch-output-unmapped:kernel:out_ptr0", audit["reasons"]
+                )
+
+    def test_ambiguous_runner_entrypoints_fail_closed(self):
+        source = (
+            _runner_wrapper()
+            + "\nclass Runner:\n    def call(self, args):\n        pass\n"
+        )
+        audit = self._audit(source)
+        self.assertFalse(audit["verified"])
+        self.assertIn("wrapper-execution-scope-ambiguous", audit["reasons"])
+        self.assertIn("wrapper-execution-scope-incomplete", audit["reasons"])
 
     def test_arithmetic_field_workspaces_and_pool_reuse_are_diagnostic_only(self):
         for allocation in (

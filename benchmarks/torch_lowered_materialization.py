@@ -447,10 +447,10 @@ def _kernel_definitions(
 
 
 def _argument_layouts(
-    tree: ast.AST,
+    nodes: Sequence[ast.AST],
 ) -> dict[str, tuple[tuple[int, ...], tuple[int, ...]]]:
     result = {}
-    for node in ast.walk(tree):
+    for node in nodes:
         if not (
             isinstance(node, ast.Call)
             and _call_name(node.func) == "assert_size_stride"
@@ -463,6 +463,137 @@ def _argument_layouts(
         if shape is not None and stride is not None and len(shape) == len(stride):
             result[node.args[0].id] = (shape, stride)
     return result
+
+
+def _execution_scope_nodes(nodes: Sequence[ast.AST]) -> tuple[ast.AST, ...]:
+    """Return nodes in one execution scope without descending into nested scopes."""
+    result = []
+    pending = list(reversed(nodes))
+    scope_nodes = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
+    while pending:
+        node = pending.pop()
+        if isinstance(node, scope_nodes):
+            continue
+        result.append(node)
+        children = [
+            child
+            for child in ast.iter_child_nodes(node)
+            if not isinstance(child, scope_nodes)
+        ]
+        pending.extend(reversed(children))
+    return tuple(result)
+
+
+def _execution_scope(
+    tree: ast.Module, reasons: list[str]
+) -> tuple[tuple[ast.AST, ...], bool] | None:
+    """Select a bound production entrypoint or an explicit legacy flat call.
+
+    A production entrypoint receives only scoped diagnostics: its whole-wrapper
+    coverage remains incomplete even when the selected body has no other reason.
+    """
+    runners = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "Runner"
+    ]
+    calls = [
+        node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == "call"
+    ]
+    if runners:
+        reasons.append("wrapper-execution-scope-incomplete")
+        if len(runners) != 1 or calls:
+            reasons.append("wrapper-execution-scope-ambiguous")
+            return None
+        runner_calls = [
+            node
+            for node in runners[0].body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == "call"
+        ]
+        if len(runner_calls) != 1:
+            reasons.append("wrapper-execution-scope-ambiguous")
+            return None
+        bindings = [
+            (index, node)
+            for index, node in enumerate(tree.body)
+            if isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id in {"runner", "call"}
+        ]
+        runner_bindings = [
+            item for item in bindings if item[1].targets[0].id == "runner"
+        ]
+        call_bindings = [item for item in bindings if item[1].targets[0].id == "call"]
+        if not runner_bindings or not call_bindings:
+            reasons.append("wrapper-execution-entry-missing")
+            return None
+        if len(runner_bindings) != 1 or len(call_bindings) != 1:
+            reasons.append("wrapper-execution-entry-rebound")
+            return None
+        runner_index, runner_binding = runner_bindings[0]
+        call_index, call_binding = call_bindings[0]
+        runner_value = runner_binding.value
+        call_value = call_binding.value
+        if (
+            runner_index >= call_index
+            or not isinstance(runner_value, ast.Call)
+            or not isinstance(runner_value.func, ast.Name)
+            or runner_value.func.id != "Runner"
+            or not isinstance(call_value, ast.Attribute)
+            or not isinstance(call_value.value, ast.Name)
+            or call_value.value.id != "runner"
+            or call_value.attr != "call"
+        ):
+            reasons.append("wrapper-execution-entry-unresolved")
+            return None
+        return _execution_scope_nodes(runner_calls[0].body), True
+    if calls:
+        if len(calls) != 1:
+            reasons.append("wrapper-execution-scope-ambiguous")
+            return None
+        return tuple(ast.walk(tree)), False
+    return tuple(ast.walk(tree)), False
+
+
+def _has_unresolved_execution_call(
+    nodes: Sequence[ast.AST], kernels: Mapping[str, object]
+) -> bool:
+    """Reject reachable call paths that this bounded reader does not analyze."""
+    known_calls = {
+        *KNOWN_ALLOCATORS,
+        *KNOWN_ALIAS_FACTORIES,
+        "assert_alignment",
+        "assert_size_stride",
+        "copy_if_misaligned",
+        "get_raw_stream",
+        "grid",
+        "torch.cuda._DeviceGuard",
+        "torch.cuda.set_device",
+    }
+    for node in nodes:
+        if not isinstance(node, ast.Call):
+            continue
+        name = _call_name(node.func)
+        if name in known_calls or (
+            name is not None and name.startswith("extern_kernels.")
+        ):
+            continue
+        if isinstance(node.func, ast.Attribute):
+            if node.func.attr in {*COPY_METHODS, "clear"}:
+                continue
+            if (
+                node.func.attr == "run"
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id in kernels
+            ):
+                continue
+        return True
+    return False
 
 
 def _allocation_from_call(call: ast.Call) -> dict[str, object] | None:
@@ -612,10 +743,16 @@ def _audit_wrapper(
         reasons.append("wrapper-is-unparseable")
         return result
     kernels = _kernel_definitions(tree, reasons)
-    argument_layouts = _argument_layouts(tree)
+    scope = _execution_scope(tree, reasons)
+    if scope is None:
+        return result
+    scope_nodes, restricted_scope = scope
+    if restricted_scope and _has_unresolved_execution_call(scope_nodes, kernels):
+        reasons.append("wrapper-execution-call-unresolved")
+    argument_layouts = _argument_layouts(scope_nodes)
     allocations: dict[str, Mapping[str, object]] = {}
     aliases: dict[str, ast.AST] = {}
-    for node in ast.walk(tree):
+    for node in scope_nodes:
         if not (
             isinstance(node, ast.Assign)
             and len(node.targets) == 1
@@ -636,7 +773,7 @@ def _audit_wrapper(
         if isinstance(node.value, (ast.Name, ast.Call)):
             aliases[target] = node.value
     launch_count = 0
-    for node in ast.walk(tree):
+    for node in scope_nodes:
         if not isinstance(node, ast.Call):
             continue
         function_name = _call_name(node.func)
@@ -784,7 +921,7 @@ def _audit_wrapper(
             elif resolved["kind"] != "direct-input":
                 reasons.append(f"launch-output-unmapped:{kernel_name}:{parameter}")
         result["launches"].append(launch)
-    for node in ast.walk(tree):
+    for node in scope_nodes:
         if not (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)

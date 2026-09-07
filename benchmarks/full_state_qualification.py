@@ -27,6 +27,8 @@ KIND = "issue114-local-full-array-qualification-v1"
 COMPATIBILITY_KIND = "issue114-native-capture-schema-compatibility-v1"
 NATIVE_EXECUTION_SCOPE = "eager-full-state-native-correctness"
 TWO_GPU_EXECUTION_SCOPE = "eager-two-gpu-full-state-serial-torch-comparison"
+TWO_GPU_COMPILED_EXECUTION_SCOPE = "compiled-two-gpu-full-state-serial-torch-comparison"
+TWO_GPU_COMPILE_POLICIES = ("eager", "compile")
 LEGACY_OBSERVER_MANIFEST_SHA256 = (
     "1646db1a9d7b8d1f15a6336527e63c669deca188cf6429d9c21b4fed8c93bb29"
 )
@@ -1241,13 +1243,60 @@ def _two_gpu_report_exit_code(report):
     return 0 if passed else 1
 
 
-def run_two_gpu_partition_case(output):
-    """Run one eager serial-versus-two-GPU full field/state partition case.
+def _two_gpu_execution_record(compile_policy):
+    """Describe the selected local execution policy without production authority."""
+    if compile_policy not in TWO_GPU_COMPILE_POLICIES:
+        raise ValueError("two-GPU compile policy must be 'eager' or 'compile'")
+    if compile_policy == "compile":
+        return {
+            "scope": TWO_GPU_COMPILED_EXECUTION_SCOPE,
+            "compile_policy": compile_policy,
+            "execution_mode": "graph",
+        }
+    return {
+        "scope": TWO_GPU_EXECUTION_SCOPE,
+        "compile_policy": compile_policy,
+        "execution_mode": "eager",
+    }
+
+
+def _two_gpu_runtime_options(compile_policy, *, launch=None):
+    """Keep the serial and distributed runtime policies identical."""
+    _two_gpu_execution_record(compile_policy)
+    options = {
+        "precision": "float64",
+        "compile_policy": compile_policy,
+        "execution_policy": "auto",
+        "cpu_threads": 1,
+        "cpu_interop_threads": 1,
+    }
+    if launch is not None:
+        options["launch"] = launch
+    return options
+
+
+def _capture_two_gpu_compute_regions(distributed, serial, *, rank, compile_policy):
+    """Capture both post-load compute regions only for the explicit graph policy."""
+    if compile_policy == "eager":
+        return
+    _two_gpu_execution_record(compile_policy)
+    distributed.capture_cuda_graphs()
+    if rank == 0:
+        if serial is None:
+            raise ValueError("rank zero serial runtime is required for graph capture")
+        serial.capture_cuda_graphs()
+
+
+def run_two_gpu_partition_case(output, *, compile_policy="eager"):
+    """Run one serial-versus-two-GPU full field/state partition case.
 
     This is a distributed Torch correctness check, not native qualification and
-    not compiler qualification. It must be started under exactly two torchrun
-    ranks and writes its private evidence only on rank zero.
+    not production qualification. ``compile_policy='compile'`` explicitly
+    captures the same post-load compute regions for both runtimes. It must be
+    started under exactly two torchrun ranks and writes private evidence only
+    on rank zero.
     """
+    execution = _two_gpu_execution_record(compile_policy)
     import torch
     import torch.distributed as dist
 
@@ -1271,12 +1320,7 @@ def run_two_gpu_partition_case(output):
     )
     runtime = gmes.TorchRuntimeConfig(
         device=f"cuda:{launch.local_rank}",
-        precision="float64",
-        compile_policy="eager",
-        execution_policy="auto",
-        cpu_threads=1,
-        cpu_interop_threads=1,
-        launch=launch,
+        **_two_gpu_runtime_options(compile_policy, launch=launch),
     )
     distributed = gmes.TorchDistributedSimulation(
         space=space,
@@ -1294,14 +1338,16 @@ def run_two_gpu_partition_case(output):
             sources=_partition_sources(gmes),
             runtime=gmes.TorchRuntimeConfig(
                 device="cuda:0",
-                precision="float64",
-                compile_policy="eager",
-                execution_policy="auto",
-                cpu_threads=1,
-                cpu_interop_threads=1,
+                **_two_gpu_runtime_options(compile_policy),
             ),
             dt=0.025,
         ).load_host_fields(fields)
+    _capture_two_gpu_compute_regions(
+        distributed,
+        serial if launch.rank == 0 else None,
+        rank=launch.rank,
+        compile_policy=compile_policy,
+    )
     distributed.advance(2)
     if launch.rank == 0:
         serial.advance(2)
@@ -1441,9 +1487,8 @@ def run_two_gpu_partition_case(output):
         np.savez_compressed(raw_path, **raw)
         report = {
             "kind": KIND,
-            "scope": TWO_GPU_EXECUTION_SCOPE,
+            **execution,
             "native_qualification": False,
-            "compile_policy": "eager",
             "execution_policy": "auto",
             "case": {
                 "space": [5, 4, 4],
@@ -1523,13 +1568,20 @@ def main():
     parser.add_argument(
         "--precision", choices=("float64", "float32"), default="float64"
     )
+    parser.add_argument(
+        "--compile-policy", choices=TWO_GPU_COMPILE_POLICIES, default="eager"
+    )
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--legacy-manifest", type=Path)
     parser.add_argument("--historical-artifact-root", type=Path)
     parser.add_argument("--compatibility-manifest", type=Path)
     args = parser.parse_args()
     if args.mode == "two-gpu":
-        return run_two_gpu_partition_case(args.output_dir)
+        return run_two_gpu_partition_case(
+            args.output_dir, compile_policy=args.compile_policy
+        )
+    if args.compile_policy != "eager":
+        parser.error("--compile-policy is supported only with --mode two-gpu")
     if args.output_dir.exists():
         parser.error("output directory must be new")
     current_manifest = torch_correctness._load_trusted_manifest()[0]

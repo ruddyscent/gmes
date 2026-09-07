@@ -341,7 +341,7 @@ class FullArrayComparatorTest(unittest.TestCase):
                 self.subTest(exit_code=exit_code),
                 patch.object(
                     qualification, "run_two_gpu_partition_case", return_value=exit_code
-                ),
+                ) as runner,
                 patch.object(
                     sys,
                     "argv",
@@ -355,6 +355,93 @@ class FullArrayComparatorTest(unittest.TestCase):
                 ),
             ):
                 self.assertEqual(qualification.main(), exit_code)
+                self.assertEqual(runner.call_args.kwargs["compile_policy"], "eager")
+
+    def test_two_gpu_compile_policy_records_and_propagates_to_both_runtimes(self):
+        launch = SimpleNamespace(rank=0)
+        distributed_options = qualification._two_gpu_runtime_options(
+            "compile", launch=launch
+        )
+        serial_options = qualification._two_gpu_runtime_options("compile")
+        self.assertEqual(distributed_options["compile_policy"], "compile")
+        self.assertEqual(serial_options["compile_policy"], "compile")
+        self.assertIs(distributed_options["launch"], launch)
+        self.assertNotIn("launch", serial_options)
+        self.assertEqual(
+            qualification._two_gpu_execution_record("compile"),
+            {
+                "scope": "compiled-two-gpu-full-state-serial-torch-comparison",
+                "compile_policy": "compile",
+                "execution_mode": "graph",
+            },
+        )
+
+    def test_two_gpu_capture_is_disabled_by_default_and_ordered_for_compile(self):
+        calls = []
+
+        class Runtime:
+            def __init__(self, name):
+                self.name = name
+
+            def capture_cuda_graphs(self):
+                calls.append(self.name)
+
+        distributed = Runtime("distributed")
+        serial = Runtime("serial")
+        qualification._capture_two_gpu_compute_regions(
+            distributed, serial, rank=0, compile_policy="eager"
+        )
+        self.assertEqual(calls, [])
+        qualification._capture_two_gpu_compute_regions(
+            distributed, serial, rank=0, compile_policy="compile"
+        )
+        self.assertEqual(calls, ["distributed", "serial"])
+
+    def test_two_gpu_cli_accepts_compile_and_rejects_other_modes(self):
+        with (
+            patch.object(
+                qualification, "run_two_gpu_partition_case", return_value=0
+            ) as runner,
+            patch.object(
+                sys,
+                "argv",
+                [
+                    "full_state_qualification.py",
+                    "--mode",
+                    "two-gpu",
+                    "--compile-policy",
+                    "compile",
+                    "--output-dir",
+                    "unused-private-output",
+                ],
+            ),
+        ):
+            self.assertEqual(qualification.main(), 0)
+            self.assertEqual(runner.call_args.kwargs["compile_policy"], "compile")
+        with (
+            patch.object(
+                sys,
+                "argv",
+                [
+                    "full_state_qualification.py",
+                    "--mode",
+                    "analytic",
+                    "--compile-policy",
+                    "compile",
+                    "--output-dir",
+                    "unused-private-output",
+                ],
+            ),
+            self.assertRaisesRegex(SystemExit, "2") as error,
+        ):
+            qualification.main()
+        self.assertEqual(error.exception.code, 2)
+
+    def test_two_gpu_rejects_unknown_compile_policy_before_hardware_import(self):
+        with self.assertRaisesRegex(ValueError, "compile policy"):
+            qualification.run_two_gpu_partition_case(
+                "unused-private-output", compile_policy="automatic"
+            )
 
 
 class DistributedSourceCrossingTest(unittest.TestCase):

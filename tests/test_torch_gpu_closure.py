@@ -6,12 +6,12 @@ import copy
 import hashlib
 import json
 import tempfile
-import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
 import numpy as np
+import pytest
 
 from benchmarks import (
     torch_tuning,
@@ -73,10 +73,9 @@ def _two_gpu_environment():
     }
 
 
-class SingleGpuCudaSuiteTest(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.manifest = torch_tuning.load_manifest(torch_tuning.MANIFEST)
+class _SingleGpuCudaFixture:
+    def initialize(self):
+        self.manifest = torch_tuning.load_manifest(torch_tuning.MANIFEST)
 
     def result(self, name):
         reference = self.manifest["reference"]
@@ -233,6 +232,12 @@ class SingleGpuCudaSuiteTest(unittest.TestCase):
                 self.environment(),
             )
 
+
+class TestSingleGpuCudaSuite(_SingleGpuCudaFixture):
+    @pytest.fixture(autouse=True)
+    def _initialize_fixture(self):
+        self.initialize()
+
     def test_cuda_suite_requires_all_cases_raw_traces_and_two_runtime_modes(self):
         results = [self.result(name) for name in torch_tuning.CUDA_GATES]
         with mock.patch.object(
@@ -247,39 +252,30 @@ class SingleGpuCudaSuiteTest(unittest.TestCase):
                 self.manifest,
                 self.environment(),
             )
-            self.assertTrue(gate["passed"])
-            self.assertTrue(gate["case_closure_complete"])
-            self.assertTrue(gate["correctness_evidence_bound"])
-            self.assertEqual(gate["contract_id"], "single-gpu-cuda-closure-v2")
-            self.assertEqual(
-                gate["correctness_indexes"],
-                [
-                    {
-                        "runtime_mode": index["runtime_mode"],
-                        "source_artifact": index["source_artifact"],
-                    }
-                    for index in self.correctness_indexes()
-                ],
-            )
-            self.assertTrue(
-                all(
-                    set(record) == {"runtime_mode", "source_artifact"}
-                    and set(record["source_artifact"])
-                    == set(torch_tuning.CUDA_CORRECTNESS_SOURCE_DESCRIPTOR_KEYS)
-                    for record in gate["correctness_indexes"]
-                )
-            )
-            self.assertEqual(
+            assert gate["passed"]
+            assert gate["case_closure_complete"]
+            assert gate["correctness_evidence_bound"]
+            assert gate["contract_id"] == "single-gpu-cuda-closure-v2"
+            assert gate["correctness_indexes"] == [
                 {
-                    mode["precision"]
-                    for mode in gate["required_correctness_runtime_modes"]
-                },
-                {"float32"},
+                    "runtime_mode": index["runtime_mode"],
+                    "source_artifact": index["source_artifact"],
+                }
+                for index in self.correctness_indexes()
+            ]
+            assert all(
+                set(record) == {"runtime_mode", "source_artifact"}
+                and set(record["source_artifact"])
+                == set(torch_tuning.CUDA_CORRECTNESS_SOURCE_DESCRIPTOR_KEYS)
+                for record in gate["correctness_indexes"]
             )
-            self.assertEqual(
-                gate["required_case_precisions"][-1],
-                {"case": "single-gpu-3d", "precision": "float64"},
-            )
+            assert {
+                mode["precision"] for mode in gate["required_correctness_runtime_modes"]
+            } == {"float32"}
+            assert gate["required_case_precisions"][-1] == {
+                "case": "single-gpu-3d",
+                "precision": "float64",
+            }
 
             failed_environment = self.environment()
             failed_environment["gpu_topology_command_status"] = 1
@@ -290,12 +286,12 @@ class SingleGpuCudaSuiteTest(unittest.TestCase):
                 self.manifest,
                 failed_environment,
             )
-            self.assertFalse(failed["environment_complete"])
-            self.assertFalse(failed["passed"])
+            assert not (failed["environment_complete"])
+            assert not (failed["passed"])
 
             transfer = copy.deepcopy(results)
             transfer[0]["profiler"]["host_to_device_events"] = 1
-            self.assertFalse(
+            assert not (
                 torch_tuning._cuda_suite_gate(
                     transfer,
                     self.correctness_indexes(),
@@ -305,12 +301,14 @@ class SingleGpuCudaSuiteTest(unittest.TestCase):
                 )["passed"]
             )
 
+            # Each failure mutation starts from the same complete two-mode result;
+            # retain this sequence so the final gate is checked against one closure.
             undersized = copy.deepcopy(results)
             for result in undersized:
                 for record in result["state_finiteness"]["stages"].values():
                     record["floating_or_complex_buffer_count"] = 1
                     record["floating_or_complex_element_count"] = 1
-            self.assertFalse(
+            assert not (
                 torch_tuning._cuda_suite_gate(
                     undersized,
                     self.correctness_indexes(),
@@ -322,7 +320,7 @@ class SingleGpuCudaSuiteTest(unittest.TestCase):
 
             mixed_names = copy.deepcopy(results)
             mixed_names[0]["state_progress"]["changed_buffers"] = ["ex", 1]
-            self.assertFalse(
+            assert not (
                 torch_tuning._cuda_suite_gate(
                     mixed_names,
                     self.correctness_indexes(),
@@ -339,14 +337,14 @@ class SingleGpuCudaSuiteTest(unittest.TestCase):
                 self.manifest,
                 self.environment(),
             )
-            self.assertFalse(incomplete["passed"])
-            self.assertFalse(incomplete["case_closure_complete"])
-            self.assertFalse(incomplete["correctness_evidence_bound"])
+            assert not (incomplete["passed"])
+            assert not (incomplete["case_closure_complete"])
+            assert not (incomplete["correctness_evidence_bound"])
 
             wrong_precision = copy.deepcopy(results)
             wrong_precision[-1]["runtime"]["precision"] = "float32"
             wrong_precision[-1]["runtime"]["field_storage_dtype"] = "torch.float32"
-            self.assertFalse(
+            assert not (
                 torch_tuning._cuda_suite_gate(
                     wrong_precision,
                     self.correctness_indexes(),
@@ -362,7 +360,7 @@ class SingleGpuCudaSuiteTest(unittest.TestCase):
             ] = 1
             nonfinite[-1]["state_finiteness"]["stages"]["post_timed"]["finite"] = False
             nonfinite[-1]["state_finiteness"]["passed"] = False
-            self.assertFalse(
+            assert not (
                 torch_tuning._cuda_suite_gate(
                     nonfinite,
                     self.correctness_indexes(),
@@ -379,7 +377,7 @@ class SingleGpuCudaSuiteTest(unittest.TestCase):
                     record["floating_or_complex_buffer_count"] = 1
                     record["floating_or_complex_element_count"] = 1
                     record["nonfinite_element_count"] = False
-            self.assertFalse(
+            assert not (
                 torch_tuning._cuda_suite_gate(
                     malformed,
                     self.correctness_indexes(),
@@ -389,28 +387,41 @@ class SingleGpuCudaSuiteTest(unittest.TestCase):
                 )["passed"]
             )
 
-    def test_cuda_correctness_source_descriptors_are_exact_and_distinct(self):
+    @pytest.mark.parametrize(
+        "mutation_name",
+        (
+            "extra descriptor key",
+            "missing descriptor key",
+            "extra candidate key",
+            "mismatched candidate",
+        ),
+        ids=(
+            "extra-descriptor-key",
+            "missing-descriptor-key",
+            "extra-candidate-key",
+            "mismatched-candidate",
+        ),
+    )
+    def test_cuda_correctness_source_descriptors_are_exact_and_distinct(
+        self, mutation_name
+    ):
         valid = self.correctness_indexes()
         gate = self.gate(valid)
-        self.assertTrue(gate["correctness_evidence_bound"])
-        self.assertEqual(
-            [
-                record["source_artifact"]["sha256"]
-                for record in gate["correctness_indexes"]
-            ],
-            [
-                index["source_artifact"]["sha256"]
-                for index in self.correctness_indexes()
-            ],
-        )
-        self.assertEqual(
+        assert gate["correctness_evidence_bound"]
+        assert [
+            record["source_artifact"]["sha256"]
+            for record in gate["correctness_indexes"]
+        ] == [
+            index["source_artifact"]["sha256"] for index in self.correctness_indexes()
+        ]
+        assert (
             len(
                 {
                     record["source_artifact"]["sha256"]
                     for record in gate["correctness_indexes"]
                 }
-            ),
-            2,
+            )
+            == 2
         )
 
         mutations = {}
@@ -428,38 +439,26 @@ class SingleGpuCudaSuiteTest(unittest.TestCase):
             "candidate_git_commit"
         ] = ("b" * 40)
         mutations["mismatched candidate"] = mismatched_candidate
-        for name, indexes in mutations.items():
-            with self.subTest(name=name):
-                invalid = self.gate(indexes)
-                self.assertFalse(invalid["correctness_evidence_bound"])
-                self.assertFalse(invalid["passed"])
-                self.assertTrue(
-                    any(
-                        "source artifact descriptor" in error
-                        for error in invalid["errors"]
-                    )
-                )
+        invalid = self.gate(mutations[mutation_name])
+        assert not invalid["correctness_evidence_bound"]
+        assert not invalid["passed"]
+        assert any("source artifact descriptor" in error for error in invalid["errors"])
 
         duplicate = copy.deepcopy(valid)
         duplicate[1]["source_artifact"] = copy.deepcopy(duplicate[0]["source_artifact"])
         reused = self.gate(duplicate)
-        self.assertFalse(reused["correctness_evidence_bound"])
-        self.assertFalse(reused["passed"])
-        self.assertTrue(
-            any("source artifact descriptor" in error for error in reused["errors"])
-        )
+        assert not (reused["correctness_evidence_bound"])
+        assert not (reused["passed"])
+        assert any("source artifact descriptor" in error for error in reused["errors"])
 
         same_digest = copy.deepcopy(valid)
         same_digest[1]["source_artifact"]["sha256"] = same_digest[0]["source_artifact"][
             "sha256"
         ]
         reused_digest = self.gate(same_digest)
-        self.assertFalse(reused_digest["correctness_evidence_bound"])
-        self.assertTrue(
-            any(
-                "source artifact descriptor" in error
-                for error in reused_digest["errors"]
-            )
+        assert not (reused_digest["correctness_evidence_bound"])
+        assert any(
+            "source artifact descriptor" in error for error in reused_digest["errors"]
         )
 
         same_path = copy.deepcopy(valid)
@@ -467,26 +466,20 @@ class SingleGpuCudaSuiteTest(unittest.TestCase):
             "path"
         ]
         reused_path = self.gate(same_path)
-        self.assertFalse(reused_path["correctness_evidence_bound"])
-        self.assertTrue(
-            any("paths are not distinct" in error for error in reused_path["errors"])
-        )
+        assert not (reused_path["correctness_evidence_bound"])
+        assert any("paths are not distinct" in error for error in reused_path["errors"])
 
         reordered = self.gate(list(reversed(valid)))
-        self.assertFalse(reordered["correctness_evidence_bound"])
-        self.assertFalse(reordered["passed"])
-        self.assertIn(
-            "CUDA correctness runtime mode closure differs",
-            reordered["errors"],
-        )
+        assert not (reordered["correctness_evidence_bound"])
+        assert not (reordered["passed"])
+        assert "CUDA correctness runtime mode closure differs" in reordered["errors"]
 
         relabeled = copy.deepcopy(valid)
         relabeled[0]["runtime_mode"] = copy.deepcopy(relabeled[1]["runtime_mode"])
         duplicate_mode = self.gate(relabeled)
-        self.assertFalse(duplicate_mode["correctness_evidence_bound"])
-        self.assertIn(
-            "CUDA correctness runtime mode closure differs",
-            duplicate_mode["errors"],
+        assert not (duplicate_mode["correctness_evidence_bound"])
+        assert (
+            "CUDA correctness runtime mode closure differs" in duplicate_mode["errors"]
         )
 
         swapped_descriptors = copy.deepcopy(valid)
@@ -498,11 +491,9 @@ class SingleGpuCudaSuiteTest(unittest.TestCase):
             swapped_descriptors[0]["source_artifact"],
         )
         swapped = self.gate(swapped_descriptors)
-        self.assertFalse(swapped["correctness_evidence_bound"])
-        self.assertFalse(swapped["passed"])
-        self.assertTrue(
-            any("source artifact descriptor" in error for error in swapped["errors"])
-        )
+        assert not (swapped["correctness_evidence_bound"])
+        assert not (swapped["passed"])
+        assert any("source artifact descriptor" in error for error in swapped["errors"])
 
     def test_cuda_correctness_loader_revalidates_ordered_eager_and_graph_indexes(
         self,
@@ -513,11 +504,10 @@ class SingleGpuCudaSuiteTest(unittest.TestCase):
             self.manifest,
             {"candidate_git_commit": "a" * 40},
         )
-        self.assertEqual(missing, [])
-        self.assertEqual(
-            missing_errors,
-            ["CUDA correctness requires exactly eager and graph receipts"],
-        )
+        assert missing == []
+        assert missing_errors == [
+            "CUDA correctness requires exactly eager and graph receipts"
+        ]
         indexes = self.correctness_indexes()
         with (
             mock.patch.object(
@@ -542,11 +532,11 @@ class SingleGpuCudaSuiteTest(unittest.TestCase):
                 self.manifest,
                 {"candidate_git_commit": "a" * 40},
             )
-        self.assertEqual(errors, [])
-        self.assertEqual(loaded, indexes)
-        self.assertEqual(loader.call_count, 2)
-        self.assertEqual(receipt_loader.call_count, 2)
-        self.assertEqual(binding.call_count, 2)
+        assert errors == []
+        assert loaded == indexes
+        assert loader.call_count == 2
+        assert receipt_loader.call_count == 2
+        assert binding.call_count == 2
 
         duplicate = copy.deepcopy(indexes)
         duplicate[1]["source_artifact"] = copy.deepcopy(duplicate[0]["source_artifact"])
@@ -573,13 +563,11 @@ class SingleGpuCudaSuiteTest(unittest.TestCase):
                 self.manifest,
                 {"candidate_git_commit": "a" * 40},
             )
-        self.assertTrue(
-            any("source artifact descriptor" in error for error in duplicate_errors)
-        )
+        assert any("source artifact descriptor" in error for error in duplicate_errors)
 
 
-class TwoGpuEvidenceContractTest(unittest.TestCase):
-    def setUp(self):
+class _TwoGpuEvidenceFixture:
+    def initialize(self):
         self.args = SimpleNamespace(
             case="strong-mixed",
             warmup=5,
@@ -796,6 +784,12 @@ class TwoGpuEvidenceContractTest(unittest.TestCase):
         }
         return serial_worker, distributed_worker, subprocesses
 
+
+class TestTwoGpuEvidenceContract(_TwoGpuEvidenceFixture):
+    @pytest.fixture(autouse=True)
+    def _initialize_fixture(self):
+        two_gpu_evidence_fixture(self)
+
     def test_combiner_requires_complete_both_rank_and_raw_profile_evidence(self):
         serial, distributed, subprocesses = self.workers()
         result = torch_two_gpu._combine_worker_results(
@@ -804,12 +798,12 @@ class TwoGpuEvidenceContractTest(unittest.TestCase):
             subprocesses,
             self.args,
         )
-        self.assertTrue(result["acceptance"]["passed"])
-        self.assertTrue(all(result["acceptance"]["checks"].values()))
-        self.assertEqual(result["acceptance"]["ratio"], 2.0)
-        self.assertEqual(
-            result["imbalance"]["rank_seconds_ratio_per_repeat"],
-            [0.5 / 0.49] * self.args.repeats,
+        assert result["acceptance"]["passed"]
+        assert all(result["acceptance"]["checks"].values())
+        assert result["acceptance"]["ratio"] == 2.0
+        assert (
+            result["imbalance"]["rank_seconds_ratio_per_repeat"]
+            == [0.5 / 0.49] * self.args.repeats
         )
 
         tampered = copy.deepcopy(distributed)
@@ -820,8 +814,8 @@ class TwoGpuEvidenceContractTest(unittest.TestCase):
             subprocesses,
             self.args,
         )
-        self.assertFalse(failed["acceptance"]["passed"])
-        self.assertFalse(failed["acceptance"]["checks"]["steady_state_transfers_zero"])
+        assert not (failed["acceptance"]["passed"])
+        assert not (failed["acceptance"]["checks"]["steady_state_transfers_zero"])
 
         wrong_rank = copy.deepcopy(distributed)
         wrong_rank["rank_evidence"][1]["device"] = "cuda:0"
@@ -831,7 +825,7 @@ class TwoGpuEvidenceContractTest(unittest.TestCase):
             subprocesses,
             self.args,
         )
-        self.assertFalse(failed["acceptance"]["checks"]["rank_evidence_complete"])
+        assert not (failed["acceptance"]["checks"]["rank_evidence_complete"])
 
         bad_descriptor = copy.deepcopy(subprocesses)
         bad_descriptor["serial"]["stdout_sha256"] = "f" * 64
@@ -841,16 +835,16 @@ class TwoGpuEvidenceContractTest(unittest.TestCase):
             bad_descriptor,
             self.args,
         )
-        self.assertFalse(failed["acceptance"]["checks"]["independent_subprocesses"])
+        assert not (failed["acceptance"]["checks"]["independent_subprocesses"])
 
     def test_worker_commands_are_separate_serial_and_torchrun_children(self):
         commands = torch_two_gpu._worker_commands(self.args, Path("/tmp/bundle"))
         serial = commands["serial"][0]
         distributed = commands["distributed"][0]
-        self.assertIn("benchmarks.torch_two_gpu", serial)
-        self.assertNotIn("torch.distributed.run", serial)
-        self.assertIn("torch.distributed.run", distributed)
-        self.assertNotEqual(serial, distributed)
+        assert "benchmarks.torch_two_gpu" in serial
+        assert "torch.distributed.run" not in serial
+        assert "torch.distributed.run" in distributed
+        assert serial != distributed
 
     def test_trace_summary_reports_raw_transfers_phases_and_overlap(self):
         events = [
@@ -866,18 +860,15 @@ class TwoGpuEvidenceContractTest(unittest.TestCase):
             path = Path(directory) / "rank.json"
             path.write_text(json.dumps({"traceEvents": events}), encoding="utf-8")
             summary = torch_two_gpu._trace_summary(path)
-        self.assertEqual(summary["host_to_device_events"], 1)
-        self.assertEqual(summary["device_to_host_events"], 0)
-        self.assertEqual(summary["nccl_kernel_launches"], 1)
-        self.assertEqual(summary["nccl_compute_overlap_us"], 5)
-        self.assertEqual(summary["nccl_exposed_us"], 5)
-        self.assertEqual(
-            set(summary["halo_annotations"]),
-            set(torch_two_gpu.HALO_ANNOTATIONS),
-        )
+        assert summary["host_to_device_events"] == 1
+        assert summary["device_to_host_events"] == 0
+        assert summary["nccl_kernel_launches"] == 1
+        assert summary["nccl_compute_overlap_us"] == 5
+        assert summary["nccl_exposed_us"] == 5
+        assert set(summary["halo_annotations"]) == set(torch_two_gpu.HALO_ANNOTATIONS)
 
 
-class TwoGpuCorrectnessClosureTest(unittest.TestCase):
+class TestTwoGpuCorrectnessClosure:
     @staticmethod
     def candidate():
         return {
@@ -962,7 +953,7 @@ class TwoGpuCorrectnessClosureTest(unittest.TestCase):
             True,
             _two_gpu_environment(),
         )
-        self.assertTrue(accepted["passed"])
+        assert accepted["passed"]
 
         bad_environment = _two_gpu_environment()
         bad_environment["host_contract"]["common_identity"]["os"] = "Linux"
@@ -972,7 +963,7 @@ class TwoGpuCorrectnessClosureTest(unittest.TestCase):
             True,
             bad_environment,
         )
-        self.assertFalse(rejected["checks"]["environment_complete"])
+        assert not (rejected["checks"]["environment_complete"])
 
         records[0]["rank_storage"].append(self.storage(2))
         rejected = torch_two_gpu_correctness._suite_acceptance(
@@ -981,8 +972,8 @@ class TwoGpuCorrectnessClosureTest(unittest.TestCase):
             True,
             _two_gpu_environment(),
         )
-        self.assertFalse(rejected["passed"])
-        self.assertFalse(rejected["checks"]["rank_storage_stable"])
+        assert not (rejected["passed"])
+        assert not (rejected["checks"]["rank_storage_stable"])
 
     def test_enforced_suite_rejects_raw_array_self_report_tamper(self):
         records = self.records()
@@ -1003,8 +994,8 @@ class TwoGpuCorrectnessClosureTest(unittest.TestCase):
         rejected = torch_two_gpu_correctness._suite_acceptance(
             records, stability, True, _two_gpu_environment()
         )
-        self.assertFalse(rejected["checks"]["raw_full_fields_bound"])
-        self.assertFalse(rejected["passed"])
+        assert not (rejected["checks"]["raw_full_fields_bound"])
+        assert not (rejected["passed"])
 
     def test_raw_npz_writer_binds_order_shape_dtype_and_candidate(self):
         shapes = torch_two_gpu_correctness._field_shapes((2, 2, 2), 1)
@@ -1026,26 +1017,20 @@ class TwoGpuCorrectnessClosureTest(unittest.TestCase):
                 field_dtype="float64",
             )
             with np.load(path, allow_pickle=False) as archive:
-                self.assertEqual(archive.files, names)
-            self.assertEqual(set(evidence), {"artifact", "array_names", "field_shapes"})
-            self.assertEqual(
-                set(evidence["artifact"]),
-                {
-                    "path",
-                    "sha256",
-                    "size_bytes",
-                    "media_type",
-                    "candidate_evidence",
-                },
-            )
-            self.assertEqual(
-                evidence["artifact"]["path"],
-                "correctness-raw/long-stability.npz",
-            )
+                assert archive.files == names
+            assert set(evidence) == {"artifact", "array_names", "field_shapes"}
+            assert set(evidence["artifact"]) == {
+                "path",
+                "sha256",
+                "size_bytes",
+                "media_type",
+                "candidate_evidence",
+            }
+            assert evidence["artifact"]["path"] == "correctness-raw/long-stability.npz"
 
             bad_arrays = dict(arrays)
             bad_arrays[names[0]] = bad_arrays[names[0]].astype(np.float32)
-            with self.assertRaisesRegex(ValueError, "raw evidence array is invalid"):
+            with pytest.raises(ValueError, match="raw evidence array is invalid"):
                 torch_two_gpu_correctness._write_raw_evidence(
                     root / "correctness-raw" / "bad.npz",
                     bad_arrays,
@@ -1066,7 +1051,7 @@ class TwoGpuCorrectnessClosureTest(unittest.TestCase):
             else:
                 component = name.rsplit("/", 1)[-1]
                 arrays[name] = np.zeros(shapes[component], dtype=np.float64)
-        self.assertEqual(len(names), 84)
+        assert len(names) == 84
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             path = root / "correctness-raw" / "axis-0-real.npz"
@@ -1079,17 +1064,14 @@ class TwoGpuCorrectnessClosureTest(unittest.TestCase):
                 expected_names=names,
                 field_dtype="float64",
             )
-            self.assertEqual(evidence["array_names"], names)
+            assert evidence["array_names"] == names
             with np.load(path, allow_pickle=False) as archive:
-                self.assertEqual(archive.files, names)
-                self.assertEqual(
-                    archive["storage/rank/0/initial"].dtype,
-                    np.dtype("uint64"),
-                )
+                assert archive.files == names
+                assert archive["storage/rank/0/initial"].dtype == np.dtype("uint64")
 
             bad_arrays = dict(arrays)
             bad_arrays["storage/rank/0/initial"] = np.asarray([11, 12], dtype=np.int64)
-            with self.assertRaisesRegex(ValueError, "raw evidence array is invalid"):
+            with pytest.raises(ValueError, match="raw evidence array is invalid"):
                 torch_two_gpu_correctness._write_raw_evidence(
                     root / "correctness-raw" / "bad-address.npz",
                     bad_arrays,
@@ -1105,18 +1087,15 @@ class TwoGpuCorrectnessClosureTest(unittest.TestCase):
         summary, initial_values, final_values = (
             torch_two_gpu_correctness._storage_record(0, initial, dict(initial))
         )
-        self.assertEqual(summary["address_names"], ["fields/Ex", "state/0"])
-        self.assertEqual(summary["address_count"], 2)
-        self.assertEqual(summary["rank"], 0)
-        self.assertEqual(initial_values.dtype, np.dtype("uint64"))
-        self.assertEqual(initial_values.tolist(), [11, 22])
+        assert summary["address_names"] == ["fields/Ex", "state/0"]
+        assert summary["address_count"] == 2
+        assert summary["rank"] == 0
+        assert initial_values.dtype == np.dtype("uint64")
+        assert initial_values.tolist() == [11, 22]
         np.testing.assert_array_equal(initial_values, final_values)
-        self.assertEqual(summary["initial_sha256"], summary["final_sha256"])
-        self.assertEqual(
-            summary["initial_sha256"],
-            torch_two_gpu_correctness._storage_digest(
-                summary["address_names"], initial_values
-            ),
+        assert summary["initial_sha256"] == summary["final_sha256"]
+        assert summary["initial_sha256"] == torch_two_gpu_correctness._storage_digest(
+            summary["address_names"], initial_values
         )
 
         changed = dict(initial)
@@ -1124,13 +1103,11 @@ class TwoGpuCorrectnessClosureTest(unittest.TestCase):
         changed_summary, _, _ = torch_two_gpu_correctness._storage_record(
             0, initial, changed
         )
-        self.assertFalse(changed_summary["addresses_stable"])
-        self.assertNotEqual(
-            changed_summary["initial_sha256"], changed_summary["final_sha256"]
-        )
+        assert not (changed_summary["addresses_stable"])
+        assert changed_summary["initial_sha256"] != changed_summary["final_sha256"]
 
 
-class TwoGpuFailureDescriptorTest(unittest.TestCase):
+class TestTwoGpuFailureDescriptor:
     def test_failure_logs_use_bundle_relative_typed_descriptors(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1144,19 +1121,21 @@ class TwoGpuFailureDescriptorTest(unittest.TestCase):
                 candidate,
                 "text/plain; charset=utf-8",
             )
-        self.assertEqual(
-            set(descriptor),
-            {
-                "path",
-                "sha256",
-                "size_bytes",
-                "media_type",
-                "candidate_evidence",
-            },
-        )
-        self.assertEqual(descriptor["path"], "failures/probe.stdout")
-        self.assertEqual(descriptor["media_type"], "text/plain; charset=utf-8")
+        assert set(descriptor) == {
+            "path",
+            "sha256",
+            "size_bytes",
+            "media_type",
+            "candidate_evidence",
+        }
+        assert descriptor["path"] == "failures/probe.stdout"
+        assert descriptor["media_type"] == "text/plain; charset=utf-8"
 
 
-if __name__ == "__main__":
-    unittest.main()
+def two_gpu_evidence_fixture(fixture=None):
+    """Return an initialized two-GPU evidence fixture without test-class coupling."""
+
+    if fixture is None:
+        fixture = _TwoGpuEvidenceFixture()
+    fixture.initialize()
+    return fixture

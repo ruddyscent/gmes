@@ -87,7 +87,7 @@ jobs:
           uv run --no-sync python -m mypy.stubtest --mypy-config-file pyproject.toml gmes.constant
           uv run --no-sync python -m pylint $(git ls-files 'gmes/*.py') setup.py
       - name: Run complete supported CPU suite
-        run: uv run --no-sync python -m unittest discover -v
+        run: uv run --no-sync python -m pytest -v
 
   build-distributions:
     name: Build and test universal distributions

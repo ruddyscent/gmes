@@ -2,11 +2,10 @@
 
 import subprocess
 import sys
-import unittest
 from pathlib import Path
 
 
-class TypingFixtureTest(unittest.TestCase):
+class TestTypingFixture:
     """Exercise misuse cases separately from the passing canonical fixture."""
 
     def test_invalid_public_api_sample_is_rejected(self):
@@ -25,9 +24,5 @@ class TypingFixtureTest(unittest.TestCase):
             text=True,
         )
         output = result.stdout + result.stderr
-        self.assertNotEqual(result.returncode, 0, output)
-        self.assertEqual(output.count("[arg-type]"), 3, output)
-
-
-if __name__ == "__main__":
-    unittest.main()
+        assert result.returncode != 0, output
+        assert output.count("[arg-type]") == 3, output

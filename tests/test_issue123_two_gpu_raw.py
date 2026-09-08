@@ -5,20 +5,19 @@ import hashlib
 import io
 import json
 import tempfile
-import unittest
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from unittest import mock
 
 import numpy as np
+import pytest
 
 from benchmarks import issue123_completion as completion
 
 
-class TwoGpuRawCorrectnessTest(unittest.TestCase):
-    def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temporary.cleanup)
-        self.directory = Path(self.temporary.name)
+class _TwoGpuRawFixture:
+    def initialize(self, stack):
+        self.directory = Path(stack.enter_context(tempfile.TemporaryDirectory()))
         self.candidate = {
             "candidate_git_commit": "a" * 40,
             "candidate_git_status": "",
@@ -210,13 +209,20 @@ class TwoGpuRawCorrectnessTest(unittest.TestCase):
             )
         return result, reader
 
+
+class TestTwoGpuRawCorrectness(_TwoGpuRawFixture):
+    @pytest.fixture(autouse=True)
+    def _initialize_fixture(self):
+        with two_gpu_raw_fixture(self):
+            yield
+
     def test_full_raw_fields_and_storage_are_recomputed(self):
         document, _case_arrays, _long_arrays = self.document()
 
         result, reader = self.validate(document)
 
-        self.assertEqual(result, (False, {"validated": True}))
-        self.assertEqual(len(reader._seen), 19)
+        assert result == (False, {"validated": True})
+        assert len(reader._seen) == 19
 
     def test_embedded_scalars_cannot_hide_raw_field_tampering(self):
         document, case_arrays, _long_arrays = self.document()
@@ -227,7 +233,7 @@ class TwoGpuRawCorrectnessTest(unittest.TestCase):
             f"raw/{case}.npz", arrays
         )
 
-        with self.assertRaisesRegex(completion.EvidenceError, "raw evidence"):
+        with pytest.raises(completion.EvidenceError, match="raw evidence"):
             self.validate(document)
 
     def test_storage_digest_and_long_field_tampering_fail_closed(self):
@@ -238,7 +244,7 @@ class TwoGpuRawCorrectnessTest(unittest.TestCase):
         document["cases"][0]["raw_evidence"]["artifact"] = self.write_npz(
             f"raw/{case}.npz", arrays
         )
-        with self.assertRaisesRegex(completion.EvidenceError, "storage digest"):
+        with pytest.raises(completion.EvidenceError, match="storage digest"):
             self.validate(document)
 
         document, _case_arrays, long_arrays = self.document()
@@ -247,32 +253,39 @@ class TwoGpuRawCorrectnessTest(unittest.TestCase):
         document["long_stability"]["raw_evidence"]["artifact"] = self.write_npz(
             "raw/long.npz", long_arrays
         )
-        with self.assertRaisesRegex(completion.EvidenceError, "raw evidence"):
+        with pytest.raises(completion.EvidenceError, match="raw evidence"):
             self.validate(document)
 
-    def test_missing_extra_and_reused_raw_archives_fail_closed(self):
-        for mutation in ("missing", "extra"):
-            with self.subTest(mutation=mutation):
-                document, case_arrays, _long_arrays = self.document()
-                case = completion.TWO_GPU_CORRECTNESS_CASES[0]
-                arrays = copy.deepcopy(case_arrays[case])
-                if mutation == "missing":
-                    arrays.pop("capture/1/distributed/Ex")
-                else:
-                    arrays["unexpected"] = np.zeros(1, dtype=np.float64)
-                document["cases"][0]["raw_evidence"]["artifact"] = self.write_npz(
-                    f"raw/{case}.npz", arrays
-                )
-                with self.assertRaises(completion.EvidenceError):
-                    self.validate(document)
+    @pytest.mark.parametrize("mutation", ("missing", "extra", "reused"), ids=str)
+    def test_missing_extra_and_reused_raw_archives_fail_closed(self, mutation):
+        document, case_arrays, _long_arrays = self.document()
+        if mutation == "reused":
+            document["cases"][2]["raw_evidence"]["artifact"] = copy.deepcopy(
+                document["cases"][0]["raw_evidence"]["artifact"]
+            )
+            with pytest.raises(completion.EvidenceError, match="reuses"):
+                self.validate(document)
+            return
 
-        document, _case_arrays, _long_arrays = self.document()
-        document["cases"][2]["raw_evidence"]["artifact"] = copy.deepcopy(
-            document["cases"][0]["raw_evidence"]["artifact"]
+        case = completion.TWO_GPU_CORRECTNESS_CASES[0]
+        arrays = copy.deepcopy(case_arrays[case])
+        if mutation == "missing":
+            arrays.pop("capture/1/distributed/Ex")
+        else:
+            arrays["unexpected"] = np.zeros(1, dtype=np.float64)
+        document["cases"][0]["raw_evidence"]["artifact"] = self.write_npz(
+            f"raw/{case}.npz", arrays
         )
-        with self.assertRaisesRegex(completion.EvidenceError, "reuses"):
+        with pytest.raises(completion.EvidenceError):
             self.validate(document)
 
 
-if __name__ == "__main__":
-    unittest.main()
+@contextmanager
+def two_gpu_raw_fixture(fixture=None):
+    """Yield a two-GPU raw fixture with immediate temporary-root cleanup."""
+
+    with ExitStack() as stack:
+        if fixture is None:
+            fixture = _TwoGpuRawFixture()
+        fixture.initialize(stack)
+        yield fixture

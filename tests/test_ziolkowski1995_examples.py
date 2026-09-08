@@ -1,5 +1,4 @@
 import os
-import unittest
 from importlib.util import find_spec
 from math import pi
 from pathlib import Path
@@ -9,6 +8,7 @@ from tempfile import TemporaryDirectory
 from textwrap import dedent
 
 import numpy as np
+import pytest
 
 from examples.ziolkowski1995_common import (
     F0_HZ,
@@ -40,11 +40,12 @@ from examples.ziolkowski1995_common import (
     ultrafast_scenario,
 )
 from gmes import TorchSimulation
+from tests.test_torch_fdtd import restore_torch_runtime as restore_torch_runtime
 
 MATPLOTLIB_AVAILABLE = find_spec("matplotlib") is not None
 
 
-class ZiolkowskiOptionalDependencyTest(unittest.TestCase):
+class TestZiolkowskiOptionalDependency:
     def test_computational_helpers_import_without_plot_extra(self):
         script = dedent("""
             import sys
@@ -78,7 +79,7 @@ class ZiolkowskiOptionalDependencyTest(unittest.TestCase):
             capture_output=True,
             text=True,
         )
-        self.assertEqual(result.returncode, 0, result.stderr)
+        assert result.returncode == 0, result.stderr
 
     def test_cli_help_is_headless_and_import_safe(self):
         root = Path(__file__).parents[1]
@@ -90,10 +91,12 @@ class ZiolkowskiOptionalDependencyTest(unittest.TestCase):
             capture_output=True,
             text=True,
         )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("--quick", result.stdout)
+        assert result.returncode == 0, result.stderr
+        assert "--quick" in result.stdout
 
-    @unittest.skipUnless(MATPLOTLIB_AVAILABLE, "plot extra is not installed")
+    @pytest.mark.skipif(
+        not (MATPLOTLIB_AVAILABLE), reason="plot extra is not installed"
+    )
     def test_plot_helpers_render_with_plot_extra(self):
         distance = np.array([0.0, 0.5, 1.0])
         snapshot = SpatialSnapshot(
@@ -107,23 +110,28 @@ class ZiolkowskiOptionalDependencyTest(unittest.TestCase):
         with TemporaryDirectory() as directory:
             output = Path(directory) / "population.png"
             plot_population(snapshot, 1, output, title="Population")
-            self.assertGreater(output.stat().st_size, 0)
+            assert output.stat().st_size > 0
 
 
-class ZiolkowskiUnitsTest(unittest.TestCase):
-    def test_si_round_trips(self):
-        for value in (1e-15, 5e-14, 1e-10):
-            with self.subTest(time=value):
-                self.assertAlmostEqual(UNITS.time_si(UNITS.time(value)), value)
-        for value in (1.0, 4.2186e9, 2.272e10):
-            with self.subTest(field=value):
-                self.assertTrue(
-                    np.isclose(
-                        UNITS.electric_field_si(UNITS.electric_field(value)),
-                        value,
-                        rtol=1e-15,
-                    )
-                )
+class TestZiolkowskiUnits:
+    @pytest.mark.parametrize(
+        ("quantity", "value"),
+        (
+            pytest.param("time", 1e-15, id="time-femtosecond"),
+            pytest.param("time", 5e-14, id="time-fifty-femtoseconds"),
+            pytest.param("time", 1e-10, id="time-hundred-picoseconds"),
+            pytest.param("field", 1.0, id="field-unit"),
+            pytest.param("field", 4.2186e9, id="field-sit"),
+            pytest.param("field", 2.272e10, id="field-ultrafast"),
+        ),
+    )
+    def test_si_round_trips(self, quantity, value):
+        if quantity == "time":
+            assert round(abs(UNITS.time_si(UNITS.time(value)) - value), 7) == 0
+        else:
+            assert np.isclose(
+                UNITS.electric_field_si(UNITS.electric_field(value)), value, rtol=1e-15
+            )
 
     def test_dm2_conversion_preserves_both_couplings(self):
         parameters = UNITS.dm2_parameters(
@@ -145,12 +153,12 @@ class ZiolkowskiUnitsTest(unittest.TestCase):
         expected_maxwell = (
             N_ATOM_M3 * GAMMA_C_M / (PAPER_EPS0 * UNITS.electric_field_v_m)
         )
-        self.assertAlmostEqual(gamma, expected_bloch)
-        self.assertAlmostEqual(atom_density * gamma, expected_maxwell)
-        self.assertAlmostEqual(parameters["omega"][0], 2 * pi / LAMBDA0_UM)
+        assert round(abs(gamma - expected_bloch), 7) == 0
+        assert round(abs(atom_density * gamma - expected_maxwell), 7) == 0
+        assert round(abs(parameters["omega"][0] - 2 * pi / LAMBDA0_UM), 7) == 0
 
 
-class ZiolkowskiSourceTest(unittest.TestCase):
+class TestZiolkowskiSource:
     def test_carrier_intensity_recovers_unit_sinusoid(self):
         sample_interval = PERIOD_S / 100
         times = np.arange(1_000) * sample_interval
@@ -161,24 +169,24 @@ class ZiolkowskiSourceTest(unittest.TestCase):
             field, sample_interval, 3.0, periods=3, window="hann"
         )
 
-        self.assertTrue(np.allclose(intensity[100:-100], 1.0, atol=0.01))
-        self.assertTrue(np.allclose(hann_intensity[200:-200], 1.0, atol=0.01))
-        with self.assertRaisesRegex(ValueError, "period count"):
+        assert np.allclose(intensity[100:-100], 1.0, atol=0.01)
+        assert np.allclose(hann_intensity[200:-200], 1.0, atol=0.01)
+        with pytest.raises(ValueError, match="period count"):
             carrier_intensity(field, sample_interval, 3.0, periods=0)
-        with self.assertRaisesRegex(ValueError, "unsupported envelope window"):
+        with pytest.raises(ValueError, match="unsupported envelope window"):
             carrier_intensity(field, sample_interval, 3.0, window="triangle")
 
     def test_sech_pulse_support_and_envelope_area(self):
         width = UNITS.time(20 / F0_HZ)
         pulse = SechSinePulse(UNITS.angular_frequency(OMEGA0_RAD_S), width)
-        self.assertEqual(pulse.oscillator(-1), 0)
-        self.assertEqual(pulse.oscillator(width + 1), 0)
-        self.assertEqual(pulse.envelope(width / 2), 1)
+        assert pulse.oscillator(-1) == 0
+        assert pulse.oscillator(width + 1) == 0
+        assert pulse.envelope(width / 2) == 1
 
         times = np.linspace(0, width, 100_001)
         numerical = np.trapezoid([pulse.envelope(time) for time in times], times)
         analytic = width / 10 * np.arctan(np.sinh(10))
-        self.assertAlmostEqual(numerical, analytic, places=10)
+        assert round(abs(numerical - analytic), 10) == 0
 
     def test_ultrafast_pulse_has_zero_area_and_smooth_endpoints(self):
         width = UNITS.time(PERIOD_S)
@@ -186,28 +194,26 @@ class ZiolkowskiSourceTest(unittest.TestCase):
         times = np.linspace(0, width, 100_001)
         values = np.array([pulse.oscillator(time) for time in times])
 
-        self.assertEqual(values[0], 0)
-        self.assertEqual(values[-1], 0)
-        self.assertAlmostEqual(np.trapezoid(values, times), 0, places=12)
-        self.assertAlmostEqual(
-            (values[1] - values[0]) / (times[1] - times[0]), 0, places=6
-        )
-        self.assertAlmostEqual(
-            (values[-1] - values[-2]) / (times[-1] - times[-2]), 0, places=6
+        assert values[0] == 0
+        assert values[-1] == 0
+        assert round(abs(np.trapezoid(values, times) - 0), 12) == 0
+        assert round(abs((values[1] - values[0]) / (times[1] - times[0]) - 0), 6) == 0
+        assert (
+            round(abs((values[-1] - values[-2]) / (times[-1] - times[-2]) - 0), 6) == 0
         )
 
     def test_gain_and_pump_probe_delays(self):
         width = UNITS.time(PERIOD_S)
         omega = UNITS.angular_frequency(OMEGA0_RAD_S)
         sine = SmoothSine(omega, width)
-        self.assertEqual(sine.oscillator(-1), 0)
+        assert sine.oscillator(-1) == 0
         turn_on = np.array(
             [sine.envelope(time) for time in np.linspace(0, sine.rise_time, 101)]
         )
-        self.assertEqual(turn_on[0], 0)
-        self.assertEqual(turn_on[-1], 1)
-        self.assertTrue(np.all(np.diff(turn_on) >= 0))
-        self.assertAlmostEqual(sine.oscillator(5 * width + width / 4), 1)
+        assert turn_on[0] == 0
+        assert turn_on[-1] == 1
+        assert np.all(np.diff(turn_on) >= 0)
+        assert round(abs(sine.oscillator(5 * width + width / 4) - 1), 7) == 0
 
         signal = PumpProbe(omega, width, beta=1e-4, delay=20 * width)
         delayed_turn_on = np.array(
@@ -216,31 +222,32 @@ class ZiolkowskiSourceTest(unittest.TestCase):
                 for time in np.linspace(signal.delay, signal.delay + 5 * width, 101)
             ]
         )
-        self.assertTrue(np.all(np.diff(delayed_turn_on) >= 0))
-        self.assertEqual(signal.probe.oscillator(-1), 0)
-        self.assertEqual(signal.oscillator(10 * width), 0)
-        self.assertNotEqual(signal.oscillator(20 * width + width / 4), 0)
+        assert np.all(np.diff(delayed_turn_on) >= 0)
+        assert signal.probe.oscillator(-1) == 0
+        assert signal.oscillator(10 * width) == 0
+        assert signal.oscillator(20 * width + width / 4) != 0
 
 
-class ZiolkowskiScenarioTest(unittest.TestCase):
+class TestZiolkowskiScenario:
     def test_paper_cell_counts_and_resolutions(self):
-        self.assertEqual(sit_scenario(2).cells, 20_000)
-        self.assertEqual(ultrafast_scenario(5).cells, 2_000)
-        self.assertEqual(ultrafast_scenario(9).cells, 5_000)
-        self.assertEqual(gain_scenario().cells, 2_000)
+        assert sit_scenario(2).cells == 20_000
+        assert ultrafast_scenario(5).cells == 2_000
+        assert ultrafast_scenario(9).cells == 5_000
+        assert gain_scenario().cells == 2_000
         pump_probe = pump_probe_scenario(20)
-        self.assertEqual(pump_probe.cells, 4_000)
-        self.assertAlmostEqual(
-            pump_probe.domain_um / pump_probe.cells, LAMBDA0_UM / 400
+        assert pump_probe.cells == 4_000
+        assert (
+            round(abs(pump_probe.domain_um / pump_probe.cells - LAMBDA0_UM / 400), 7)
+            == 0
         )
 
     def test_material_and_probe_geometry(self):
         scenario = gain_scenario(quick=True)
         simulation = make_simulation(scenario)
-        self.assertIsInstance(simulation, TorchSimulation)
-        self.assertEqual(simulation.plan.shapes["Ex"][2] - 1, scenario.cells)
+        assert isinstance(simulation, TorchSimulation)
+        assert simulation.plan.shapes["Ex"][2] - 1 == scenario.cells
         expected_dt = 0.5 / np.sqrt(sum(delta**-2 for delta in simulation.plan.dr))
-        self.assertAlmostEqual(simulation.plan.dt, expected_dt)
+        assert round(abs(simulation.plan.dt - expected_dt), 7) == 0
 
         dm2 = next(
             state
@@ -258,12 +265,10 @@ class ZiolkowskiScenarioTest(unittest.TestCase):
             coordinate = distance - scenario.domain_um / 2
             index = int(simulation.space.space_to_ex_index(0, 0, coordinate)[2])
             if expected_rho30 is None:
-                self.assertNotIn(index, dm2_z_indices)
+                assert index not in dm2_z_indices
             else:
-                self.assertIn(index, dm2_z_indices)
-                self.assertEqual(
-                    sample_snapshot(simulation).rho3[index], expected_rho30
-                )
+                assert index in dm2_z_indices
+                assert sample_snapshot(simulation).rho3[index] == expected_rho30
 
     def test_torch_snapshot_checkpoint_and_sampling_clock(self):
         scenario = gain_scenario(quick=True)
@@ -272,38 +277,30 @@ class ZiolkowskiScenarioTest(unittest.TestCase):
         first_time = 2 * UNITS.time_si(simulation.plan.dt)
         snapshots = run_snapshots(simulation, (first_time,))
         snapshot = snapshots[first_time]
-        self.assertEqual(snapshot.electric.shape, (scenario.cells,))
-        self.assertTrue(np.isfinite(snapshot.electric).all())
-        self.assertEqual(int(simulation.state.step_count.detach().cpu()), 2)
-        self.assertTrue(
-            np.isclose(
-                simulation.dm2_state_snapshot()[0]["time"],
-                2 * simulation.plan.dt,
-            )
+        assert snapshot.electric.shape == (scenario.cells,)
+        assert np.isfinite(snapshot.electric).all()
+        assert int(simulation.state.step_count.detach().cpu()) == 2
+        assert np.isclose(
+            simulation.dm2_state_snapshot()[0]["time"],
+            2 * simulation.plan.dt,
         )
         simulation.load_checkpoint(checkpoint)
-        self.assertEqual(int(simulation.state.step_count.detach().cpu()), 0)
+        assert int(simulation.state.step_count.detach().cpu()) == 0
 
         result = run_gain(
             scenario,
             duration_s=2 * UNITS.time_si(simulation.plan.dt),
             sample_stride=1,
         )
-        self.assertTrue(
-            np.allclose(
-                result.time_s,
-                UNITS.time_si(simulation.plan.dt * np.array((0.5, 1.5))),
-            )
+        assert np.allclose(
+            result.time_s,
+            UNITS.time_si(simulation.plan.dt * np.array((0.5, 1.5))),
         )
-        self.assertTrue(np.isfinite(result.input_intensity).all())
-        self.assertTrue(np.isfinite(result.output_intensity).all())
+        assert np.isfinite(result.input_intensity).all()
+        assert np.isfinite(result.output_intensity).all()
 
     def test_relaxation_parameters_are_figure_specific(self):
-        self.assertEqual(gain_scenario().t1_s, GAIN_T1_S)
-        self.assertEqual(gain_scenario().t2_s, GAIN_T2_S)
-        self.assertEqual(sit_scenario(2).t1_s, SIT_T1_S)
-        self.assertEqual(sit_scenario(2).t2_s, SIT_T2_S)
-
-
-if __name__ == "__main__":
-    unittest.main()
+        assert gain_scenario().t1_s == GAIN_T1_S
+        assert gain_scenario().t2_s == GAIN_T2_S
+        assert sit_scenario(2).t1_s == SIT_T1_S
+        assert sit_scenario(2).t2_s == SIT_T2_S

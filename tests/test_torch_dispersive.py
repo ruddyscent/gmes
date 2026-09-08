@@ -2,14 +2,15 @@
 
 import json
 import os
-import unittest
 from pathlib import Path
 
 import numpy as np
+import pytest
 import torch
 
 import gmes
 from gmes import torch_dispersive
+from tests.test_torch_fdtd import restore_torch_runtime as restore_torch_runtime
 
 _COMPONENTS = ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")
 _CAPTURE_STEPS = (1, 2, 5, 20, 100)
@@ -171,7 +172,7 @@ def _reference_and_torch(
     return reference, simulation
 
 
-def _assert_fields(test, reference, simulation, *, model, complex_fields):
+def _assert_fields(reference, simulation, *, model, complex_fields):
     if complex_fields:
         tolerance_name = (
             "complex64" if simulation.dtype == torch.float32 else "complex128"
@@ -182,7 +183,7 @@ def _assert_fields(test, reference, simulation, *, model, complex_fields):
     actual = simulation.state.host_snapshot()
     expected = reference.state.host_snapshot()
     for name, field in expected.items():
-        test.assertTrue(np.all(np.isfinite(actual[name])))
+        assert np.all(np.isfinite(actual[name])), name
         np.testing.assert_allclose(
             actual[name],
             field,
@@ -192,51 +193,51 @@ def _assert_fields(test, reference, simulation, *, model, complex_fields):
         )
 
 
-class DispersiveOracleTest(unittest.TestCase):
-    def test_scalar_recurrences_match_explicit_independent_equations(self):
-        for model, coefficients in (
-            ("drude", (0.2, 0.7, -0.3)),
-            ("lorentz", (-0.4, 0.6, 0.25)),
-        ):
-            with self.subTest(model=model):
-                a = np.asarray(coefficients, dtype=np.float64).reshape(3, 1, 1)
-                c = np.asarray((0.4, -0.2, 0.8), dtype=np.float64).reshape(3, 1)
-                previous = np.asarray([[[0.3]]], dtype=np.float64)
-                current = np.asarray([[[-0.1]]], dtype=np.float64)
-                field_now = np.asarray([[0.5]], dtype=np.float64)
-                curl = np.asarray([[-0.25]], dtype=np.float64)
-                pole_work = (
-                    a[0, :, :, None] * previous
-                    + a[1, :, :, None] * current
-                    + a[2, :, :, None] * field_now[None, :, :]
-                )
-                response = np.sum(pole_work - current, axis=0)
-                expected_field = (
-                    c[0, :, None] * curl
-                    + c[1, :, None] * response
-                    + c[2, :, None] * field_now
-                )
-                tensors = [
-                    torch.from_numpy(value.copy())
-                    for value in (a, c, previous, current)
-                ]
-                work = torch.zeros_like(tensors[2])
-                delta = torch.zeros_like(tensors[2])
-                actual_field = torch.zeros_like(torch.from_numpy(field_now))
-                actual_response = torch.zeros_like(actual_field)
-                torch_dispersive._update_two_level_tensors(
-                    *tensors,
-                    work,
-                    delta,
-                    torch.from_numpy(field_now),
-                    actual_field,
-                    torch.from_numpy(curl),
-                    actual_response,
-                )
-                np.testing.assert_allclose(actual_field.numpy(), expected_field)
-                np.testing.assert_allclose(tensors[2].numpy(), current)
-                np.testing.assert_allclose(tensors[3].numpy(), pole_work)
+class TestDispersiveOracle:
+    @pytest.mark.parametrize(
+        ("model", "coefficients"),
+        (("drude", (0.2, 0.7, -0.3)), ("lorentz", (-0.4, 0.6, 0.25))),
+        ids=("drude", "lorentz"),
+    )
+    def test_scalar_recurrences_match_explicit_independent_equations(
+        self, model, coefficients
+    ):
+        a = np.asarray(coefficients, dtype=np.float64).reshape(3, 1, 1)
+        c = np.asarray((0.4, -0.2, 0.8), dtype=np.float64).reshape(3, 1)
+        previous = np.asarray([[[0.3]]], dtype=np.float64)
+        current = np.asarray([[[-0.1]]], dtype=np.float64)
+        field_now = np.asarray([[0.5]], dtype=np.float64)
+        curl = np.asarray([[-0.25]], dtype=np.float64)
+        pole_work = (
+            a[0, :, :, None] * previous
+            + a[1, :, :, None] * current
+            + a[2, :, :, None] * field_now[None, :, :]
+        )
+        response = np.sum(pole_work - current, axis=0)
+        expected_field = (
+            c[0, :, None] * curl + c[1, :, None] * response + c[2, :, None] * field_now
+        )
+        tensors = [
+            torch.from_numpy(value.copy()) for value in (a, c, previous, current)
+        ]
+        work = torch.zeros_like(tensors[2])
+        delta = torch.zeros_like(tensors[2])
+        actual_field = torch.zeros_like(torch.from_numpy(field_now))
+        actual_response = torch.zeros_like(actual_field)
+        torch_dispersive._update_two_level_tensors(
+            *tensors,
+            work,
+            delta,
+            torch.from_numpy(field_now),
+            actual_field,
+            torch.from_numpy(curl),
+            actual_response,
+        )
+        np.testing.assert_allclose(actual_field.numpy(), expected_field)
+        np.testing.assert_allclose(tensors[2].numpy(), current)
+        np.testing.assert_allclose(tensors[3].numpy(), pole_work)
 
+    def test_scalar_ade_recurrence_matches_explicit_independent_equations(self):
         a = np.asarray((0.2, 0.7, -0.3), dtype=np.float64).reshape(3, 1, 1)
         b = np.asarray((0.1, 0.6, -0.2, 0.3, 0.4), dtype=np.float64).reshape(5, 1, 1)
         c = np.asarray((0.4, -0.2, 0.15, 0.8), dtype=np.float64).reshape(4, 1)
@@ -331,122 +332,130 @@ class DispersiveOracleTest(unittest.TestCase):
             ),
         )
 
-        for model, scale in (("dcp-plrc", 1.0), ("dcp-rc", -0.75)):
-            with self.subTest(model=model):
-                a = np.asarray((0.2, -0.1, 0.7), dtype=np.float64).reshape(3, 1, 1)
-                b = scale * np.asarray(
-                    ((0.3, -0.2), (-0.1, 0.4), (0.6, 0.25)),
-                    dtype=np.float64,
-                ).reshape(3, 1, 1, 2)
-                c = np.asarray((0.4, 0.8, -0.2), dtype=np.float64).reshape(3, 1)
-                pole_state = np.asarray([[[0.15]]], dtype=np.float64)
-                point_state = np.asarray([[[[0.25, -0.35]]]], dtype=np.float64)
-                field_now = np.asarray([[0.5]], dtype=np.float64)
-                curl = np.asarray([[-0.25]], dtype=np.float64)
-                response = np.sum(pole_state, axis=0)
-                response += np.sum(point_state[..., 0], axis=0)
-                expected_field = (
-                    c[0, :, None] * curl
-                    + c[1, :, None] * field_now
-                    + c[2, :, None] * response
-                )
-                expected_pole = (
-                    a[0, :, :, None] * expected_field[None, :, :]
-                    + a[1, :, :, None] * field_now[None, :, :]
-                    + a[2, :, :, None] * pole_state
-                )
-                expected_point = np.empty_like(point_state)
-                expected_point[..., 0] = (
-                    b[0, ..., 0, None] * expected_field[None, :, :]
-                    + b[1, ..., 0, None] * field_now[None, :, :]
-                    + b[2, ..., 0, None] * point_state[..., 0]
-                    - b[2, ..., 1, None] * point_state[..., 1]
-                )
-                expected_point[..., 1] = (
-                    b[0, ..., 1, None] * expected_field[None, :, :]
-                    + b[1, ..., 1, None] * field_now[None, :, :]
-                    + b[2, ..., 0, None] * point_state[..., 1]
-                    + b[2, ..., 1, None] * point_state[..., 0]
-                )
-                tensors = [
-                    torch.from_numpy(value.copy())
-                    for value in (a, b, c, pole_state, point_state)
-                ]
-                pole_work = torch.zeros_like(tensors[3])
-                point_work = torch.zeros_like(tensors[4])
-                actual_field = torch.zeros_like(torch.from_numpy(field_now))
-                actual_response = torch.zeros_like(actual_field)
-                point_response = torch.zeros_like(actual_field)
-                torch_dispersive._update_dcp_convolution_tensors(
-                    *tensors,
-                    pole_work,
-                    point_work,
-                    torch.from_numpy(field_now),
-                    actual_field,
-                    torch.from_numpy(curl),
-                    actual_response,
-                    point_response,
-                )
-                np.testing.assert_allclose(actual_field.numpy(), expected_field)
-                np.testing.assert_allclose(tensors[3].numpy(), expected_pole)
-                np.testing.assert_allclose(tensors[4].numpy(), expected_point)
+    @pytest.mark.parametrize(
+        ("model", "scale"),
+        (("dcp-plrc", 1.0), ("dcp-rc", -0.75)),
+        ids=("dcp-plrc", "dcp-rc"),
+    )
+    def test_scalar_convolution_recurrences_match_explicit_independent_equations(
+        self, model, scale
+    ):
+        a = np.asarray((0.2, -0.1, 0.7), dtype=np.float64).reshape(3, 1, 1)
+        b = scale * np.asarray(
+            ((0.3, -0.2), (-0.1, 0.4), (0.6, 0.25)),
+            dtype=np.float64,
+        ).reshape(3, 1, 1, 2)
+        c = np.asarray((0.4, 0.8, -0.2), dtype=np.float64).reshape(3, 1)
+        pole_state = np.asarray([[[0.15]]], dtype=np.float64)
+        point_state = np.asarray([[[[0.25, -0.35]]]], dtype=np.float64)
+        field_now = np.asarray([[0.5]], dtype=np.float64)
+        curl = np.asarray([[-0.25]], dtype=np.float64)
+        response = np.sum(pole_state, axis=0)
+        response += np.sum(point_state[..., 0], axis=0)
+        expected_field = (
+            c[0, :, None] * curl + c[1, :, None] * field_now + c[2, :, None] * response
+        )
+        expected_pole = (
+            a[0, :, :, None] * expected_field[None, :, :]
+            + a[1, :, :, None] * field_now[None, :, :]
+            + a[2, :, :, None] * pole_state
+        )
+        expected_point = np.empty_like(point_state)
+        expected_point[..., 0] = (
+            b[0, ..., 0, None] * expected_field[None, :, :]
+            + b[1, ..., 0, None] * field_now[None, :, :]
+            + b[2, ..., 0, None] * point_state[..., 0]
+            - b[2, ..., 1, None] * point_state[..., 1]
+        )
+        expected_point[..., 1] = (
+            b[0, ..., 1, None] * expected_field[None, :, :]
+            + b[1, ..., 1, None] * field_now[None, :, :]
+            + b[2, ..., 0, None] * point_state[..., 1]
+            + b[2, ..., 1, None] * point_state[..., 0]
+        )
+        tensors = [
+            torch.from_numpy(value.copy())
+            for value in (a, b, c, pole_state, point_state)
+        ]
+        pole_work = torch.zeros_like(tensors[3])
+        point_work = torch.zeros_like(tensors[4])
+        actual_field = torch.zeros_like(torch.from_numpy(field_now))
+        actual_response = torch.zeros_like(actual_field)
+        point_response = torch.zeros_like(actual_field)
+        torch_dispersive._update_dcp_convolution_tensors(
+            *tensors,
+            pole_work,
+            point_work,
+            torch.from_numpy(field_now),
+            actual_field,
+            torch.from_numpy(curl),
+            actual_response,
+            point_response,
+        )
+        np.testing.assert_allclose(actual_field.numpy(), expected_field)
+        np.testing.assert_allclose(tensors[3].numpy(), expected_pole)
+        np.testing.assert_allclose(tensors[4].numpy(), expected_point)
 
-    def test_all_families_match_capture_steps_from_nonzero_fields_and_state(self):
-        for model in ("drude", "lorentz", "dcp-ade", "dcp-plrc", "dcp-rc"):
-            with self.subTest(model=model):
-                reference, simulation = _reference_and_torch(model)
+    @pytest.mark.parametrize(
+        "model",
+        ("drude", "lorentz", "dcp-ade", "dcp-plrc", "dcp-rc"),
+        ids=("drude", "lorentz", "dcp-ade", "dcp-plrc", "dcp-rc"),
+    )
+    def test_all_families_match_capture_steps_from_nonzero_fields_and_state(
+        self, model
+    ):
+        reference, simulation = _reference_and_torch(model)
+        reference.step()
+        reference.step()
+        simulation.advance(2)
+        persistent = {
+            name: value
+            for name, value in simulation.state.state_dict().items()
+            if name.startswith("bucket_")
+        }
+        assert persistent
+        assert any(torch.count_nonzero(value) for value in persistent.values())
+
+        completed = 0
+        for capture in _CAPTURE_STEPS:
+            increment = capture - completed
+            simulation.advance(increment)
+            for _ in range(increment):
                 reference.step()
-                reference.step()
-                simulation.advance(2)
-                persistent = {
-                    name: value
-                    for name, value in simulation.state.state_dict().items()
-                    if name.startswith("bucket_")
-                }
-                self.assertTrue(persistent)
-                self.assertTrue(
-                    any(torch.count_nonzero(value) for value in persistent.values())
-                )
+            _assert_fields(
+                reference,
+                simulation,
+                model=model,
+                complex_fields=False,
+            )
+            completed = capture
 
-                completed = 0
-                for capture in _CAPTURE_STEPS:
-                    increment = capture - completed
-                    simulation.advance(increment)
-                    for _ in range(increment):
-                        reference.step()
-                    _assert_fields(
-                        self,
-                        reference,
-                        simulation,
-                        model=model,
-                        complex_fields=False,
-                    )
-                    completed = capture
-
-    def test_paired_real_complex_recurrences_match_dense_reference(self):
+    @pytest.mark.parametrize(
+        "model", ("drude", "lorentz", "dcp-ade", "dcp-plrc", "dcp-rc"), ids=str
+    )
+    def test_paired_real_complex_recurrences_match_dense_reference(self, model):
         bloch = (0.07, 0.11, 0.13)
-        for model in ("drude", "lorentz", "dcp-ade", "dcp-plrc", "dcp-rc"):
-            with self.subTest(model=model):
-                reference, simulation = _reference_and_torch(
-                    model,
-                    bloch=bloch,
-                    compile_policy="compile" if model == "dcp-plrc" else "eager",
-                )
-                simulation.advance(5)
-                for _ in range(5):
-                    reference.step()
-                _assert_fields(
-                    self,
-                    reference,
-                    simulation,
-                    model=model,
-                    complex_fields=True,
-                )
-                for name, value in simulation.state.named_buffers():
-                    self.assertFalse(value.is_complex(), name)
+        reference, simulation = _reference_and_torch(
+            model,
+            bloch=bloch,
+            compile_policy="compile" if model == "dcp-plrc" else "eager",
+        )
+        simulation.advance(5)
+        for _ in range(5):
+            reference.step()
+        _assert_fields(
+            reference,
+            simulation,
+            model=model,
+            complex_fields=True,
+        )
+        for name, value in simulation.state.named_buffers():
+            assert not value.is_complex(), name
 
+    def test_paired_real_mixed_grouping_matches_dense_reference(self, request):
+        bloch = (0.07, 0.11, 0.13)
         previous_threads = torch.get_num_threads()
-        self.addCleanup(torch.set_num_threads, previous_threads)
+        request.addfinalizer(lambda: torch.set_num_threads(previous_threads))
         reference = gmes.TorchSimulation(
             space=gmes.Cartesian((8, 2, 2), 2),
             geometry=_mixed_geometry(),
@@ -468,13 +477,12 @@ class DispersiveOracleTest(unittest.TestCase):
                 experimental_dispersive_grouping=True,
             ),
         )
-        self.assertIsNotNone(simulation._dispersive_overlay)
+        assert simulation._dispersive_overlay is not None
         simulation.load_host_fields(_seed_reference(reference, complex_fields=True))
         simulation.advance(5)
         for _ in range(5):
             reference.step()
         _assert_fields(
-            self,
             reference,
             simulation,
             model="mixed",
@@ -483,7 +491,7 @@ class DispersiveOracleTest(unittest.TestCase):
         addresses = simulation.buffer_addresses()
         checkpoint = simulation.checkpoint()
         simulation.advance(1).load_checkpoint(checkpoint)
-        self.assertEqual(simulation.buffer_addresses(), addresses)
+        assert simulation.buffer_addresses() == addresses
 
     def test_forced_policies_are_exactly_equal(self):
         results = {}
@@ -510,40 +518,36 @@ class DispersiveOracleTest(unittest.TestCase):
                 profile_memory=True,
             ) as profile:
                 simulation.advance(20)
-            self.assertEqual(addresses, simulation.buffer_addresses())
+            assert addresses == simulation.buffer_addresses()
             results[policy] = simulation.state.host_snapshot()
             diagnostics = simulation.diagnostics()["dispersive"]
             representations[policy] = diagnostics["execution_representation"]
-            self.assertTrue(diagnostics["policy_executions"])
-            self.assertEqual(
-                {item["policy"] for item in diagnostics["policy_executions"]},
-                {policy},
-            )
-            self.assertEqual(
-                {
-                    item["execution_representation"]
-                    for item in diagnostics["policy_executions"]
-                },
-                {gmes.torch_plan.EXECUTION_REPRESENTATIONS[policy]},
-            )
+            assert diagnostics["policy_executions"]
+            assert {item["policy"] for item in diagnostics["policy_executions"]} == {
+                policy
+            }
+            assert {
+                item["execution_representation"]
+                for item in diagnostics["policy_executions"]
+            } == {gmes.torch_plan.EXECUTION_REPRESENTATIONS[policy]}
             operation_names = {event.key for event in profile.key_averages()}
             observed_writes = operation_names & set(expected_operations.values())
-            self.assertEqual(observed_writes, {expected_operations[policy]})
+            assert observed_writes == {expected_operations[policy]}
             expected_event = next(
                 event
                 for event in profile.key_averages()
                 if event.key == expected_operations[policy]
             )
-            self.assertEqual(expected_event.self_cpu_memory_usage, 0)
+            assert expected_event.self_cpu_memory_usage == 0
             compile_cache_keys.add(simulation.compile_cache_key)
             plan_buffers = dict(simulation.plan.named_buffers())
             for descriptor in simulation.plan.dispersive_buckets:
                 mask_name = f"{descriptor.prefix}_execution_mask"
                 targets_name = f"{descriptor.prefix}_execution_targets"
-                self.assertEqual(mask_name in plan_buffers, policy == "dense")
-                self.assertEqual(targets_name in plan_buffers, policy == "tiled")
-        self.assertEqual(len(set(representations.values())), 3)
-        self.assertEqual(len(compile_cache_keys), 3)
+                assert (mask_name in plan_buffers) == (policy == "dense")
+                assert (targets_name in plan_buffers) == (policy == "tiled")
+        assert len(set(representations.values())) == 3
+        assert len(compile_cache_keys) == 3
         for component in _COMPONENTS:
             np.testing.assert_array_equal(
                 results["dense"][component], results["compact"][component]
@@ -569,19 +573,14 @@ class DispersiveOracleTest(unittest.TestCase):
             simulation.load_host_fields(fields)
             addresses = simulation.buffer_addresses()
             simulation.advance(2)
-            self.assertEqual(addresses, simulation.buffer_addresses())
+            assert addresses == simulation.buffer_addresses()
             results[policy] = simulation.state.host_snapshot()
             compile_cache_keys.add(simulation.compile_cache_key)
-            self.assertEqual(
-                {
-                    item["execution_representation"]
-                    for item in simulation.diagnostics()["dispersive"][
-                        "policy_executions"
-                    ]
-                },
-                {gmes.torch_plan.EXECUTION_REPRESENTATIONS[policy]},
-            )
-        self.assertEqual(len(compile_cache_keys), 3)
+            assert {
+                item["execution_representation"]
+                for item in simulation.diagnostics()["dispersive"]["policy_executions"]
+            } == {gmes.torch_plan.EXECUTION_REPRESENTATIONS[policy]}
+        assert len(compile_cache_keys) == 3
         for component in _COMPONENTS:
             np.testing.assert_array_equal(
                 results["dense"][component], results["compact"][component]
@@ -598,7 +597,7 @@ class DispersiveOracleTest(unittest.TestCase):
             )
             addresses = simulation.buffer_addresses()
             simulation.advance(5)
-            self.assertEqual(addresses, simulation.buffer_addresses())
+            assert addresses == simulation.buffer_addresses()
             results[policy] = simulation.state.host_snapshot()
         for component in _COMPONENTS:
             np.testing.assert_array_equal(
@@ -608,40 +607,44 @@ class DispersiveOracleTest(unittest.TestCase):
                 results["dense"][component], results["tiled"][component]
             )
 
-    def test_collapsed_1d_2d_and_3d_fields_match_dense_reference(self):
-        for size in ((4, 0, 0), (4, 3, 0), (2, 2, 2)):
-            for model in ("drude", "dcp-rc"):
-                with self.subTest(size=size, model=model):
-                    reference, simulation = _reference_and_torch(model, size=size)
-                    simulation.advance(5)
-                    for _ in range(5):
-                        reference.step()
-                    _assert_fields(
-                        self,
-                        reference,
-                        simulation,
-                        model=model,
-                        complex_fields=False,
-                    )
+    @pytest.mark.parametrize(
+        "size",
+        ((4, 0, 0), (4, 3, 0), (2, 2, 2)),
+        ids=("one-dimensional", "two-dimensional", "three-dimensional"),
+    )
+    @pytest.mark.parametrize("model", ("drude", "dcp-rc"), ids=("drude", "dcp-rc"))
+    def test_collapsed_1d_2d_and_3d_fields_match_dense_reference(self, size, model):
+        reference, simulation = _reference_and_torch(model, size=size)
+        simulation.advance(5)
+        for _ in range(5):
+            reference.step()
+        _assert_fields(
+            reference,
+            simulation,
+            model=model,
+            complex_fields=False,
+        )
 
-    def test_float32_all_families_match_performance_tolerance(self):
-        for model in ("drude", "lorentz", "dcp-ade", "dcp-plrc", "dcp-rc"):
-            with self.subTest(model=model):
-                reference, simulation = _reference_and_torch(model, precision="float32")
-                simulation.advance(20)
-                for _ in range(20):
-                    reference.step()
-                _assert_fields(
-                    self,
-                    reference,
-                    simulation,
-                    model=model,
-                    complex_fields=False,
-                )
+    @pytest.mark.parametrize(
+        "model",
+        ("drude", "lorentz", "dcp-ade", "dcp-plrc", "dcp-rc"),
+        ids=("drude", "lorentz", "dcp-ade", "dcp-plrc", "dcp-rc"),
+    )
+    def test_float32_all_families_match_performance_tolerance(self, model):
+        reference, simulation = _reference_and_torch(model, precision="float32")
+        simulation.advance(20)
+        for _ in range(20):
+            reference.step()
+        _assert_fields(
+            reference,
+            simulation,
+            model=model,
+            complex_fields=False,
+        )
 
-    def test_compiled_exact_schema_float32_matches_bucketed_execution(self):
+    def test_compiled_exact_schema_float32_matches_bucketed_execution(self, request):
         previous_threads = torch.get_num_threads()
-        self.addCleanup(torch.set_num_threads, previous_threads)
+        request.addfinalizer(lambda: torch.set_num_threads(previous_threads))
 
         def build(*, experimental):
             return gmes.TorchSimulation(
@@ -658,7 +661,7 @@ class DispersiveOracleTest(unittest.TestCase):
 
         reference = build(experimental=False)
         simulation = build(experimental=True)
-        self.assertIsNotNone(simulation._dispersive_overlay)
+        assert simulation._dispersive_overlay is not None
         rng = np.random.default_rng(887)
         fields = {
             name: rng.normal(size=tuple(field.shape)) * 1e-3
@@ -689,7 +692,7 @@ class DispersiveOracleTest(unittest.TestCase):
                 )
         for value in simulation._dispersive_overlay.buffers():
             if value.is_floating_point():
-                self.assertEqual(value.dtype, torch.float32)
+                assert value.dtype == torch.float32
 
     def test_compiled_bulk_phases_preserve_dispersive_oracle_and_storage(self):
         torch._dynamo.reset()
@@ -700,7 +703,6 @@ class DispersiveOracleTest(unittest.TestCase):
         for _ in range(5):
             reference.step()
         _assert_fields(
-            self,
             reference,
             simulation,
             model="dcp-plrc",
@@ -709,23 +711,25 @@ class DispersiveOracleTest(unittest.TestCase):
         graphs = torch._dynamo.utils.counters["stats"]["unique_graphs"]
         addresses = simulation.buffer_addresses()
         simulation.advance(5)
-        self.assertEqual(graphs, torch._dynamo.utils.counters["stats"]["unique_graphs"])
-        self.assertEqual(addresses, simulation.buffer_addresses())
+        assert graphs == torch._dynamo.utils.counters["stats"]["unique_graphs"]
+        assert addresses == simulation.buffer_addresses()
 
-    def test_zero_width_conductive_variants_match_dense_reference(self):
-        for model in ("drude", "lorentz", "dcp-ade", "dcp-plrc", "dcp-rc"):
-            with self.subTest(model=model):
-                reference, simulation = _reference_and_torch(model, poles=0, points=0)
-                simulation.advance(20)
-                for _ in range(20):
-                    reference.step()
-                _assert_fields(
-                    self,
-                    reference,
-                    simulation,
-                    model=model,
-                    complex_fields=False,
-                )
+    @pytest.mark.parametrize(
+        "model",
+        ("drude", "lorentz", "dcp-ade", "dcp-plrc", "dcp-rc"),
+        ids=("drude", "lorentz", "dcp-ade", "dcp-plrc", "dcp-rc"),
+    )
+    def test_zero_width_conductive_variants_match_dense_reference(self, model):
+        reference, simulation = _reference_and_torch(model, poles=0, points=0)
+        simulation.advance(20)
+        for _ in range(20):
+            reference.step()
+        _assert_fields(
+            reference,
+            simulation,
+            model=model,
+            complex_fields=False,
+        )
 
     def test_long_run_pulse_spectrum_boundary_energy_and_stability(self):
         reference, simulation = _reference_and_torch(
@@ -751,7 +755,6 @@ class DispersiveOracleTest(unittest.TestCase):
                 reference.step()
             actual = simulation.state.host_snapshot()
             _assert_fields(
-                self,
                 reference,
                 simulation,
                 model="dcp-plrc",
@@ -773,8 +776,8 @@ class DispersiveOracleTest(unittest.TestCase):
             torch_energy = sum(
                 float(np.sum(np.abs(actual[name]) ** 2)) for name in _COMPONENTS
             )
-            self.assertAlmostEqual(torch_energy, reference_energy, places=16)
-            self.assertLess(float(np.max(np.abs(torch_line))), 1e-3)
+            assert round(abs(torch_energy - reference_energy), 16) == 0
+            assert float(np.max(np.abs(torch_line))) < 1e-3
             completed = capture
 
     def test_mixed_families_share_one_complete_field_execution(self):
@@ -798,36 +801,40 @@ class DispersiveOracleTest(unittest.TestCase):
         for _ in range(20):
             reference.step()
         _assert_fields(
-            self,
             reference,
             simulation,
             model="mixed",
             complex_fields=False,
         )
-        self.assertEqual(
-            {item.model for item in simulation.plan.dispersive_buckets},
-            {"drude", "lorentz", "dcp-ade", "dcp-plrc", "dcp-rc"},
+        assert {item.model for item in simulation.plan.dispersive_buckets} == {
+            "drude",
+            "lorentz",
+            "dcp-ade",
+            "dcp-plrc",
+            "dcp-rc",
+        }
+
+    @pytest.mark.skipif(not (torch.cuda.is_available()), reason="CUDA is unavailable")
+    @pytest.mark.parametrize(
+        "model",
+        ("drude", "lorentz", "dcp-ade", "dcp-plrc", "dcp-rc"),
+        ids=("drude", "lorentz", "dcp-ade", "dcp-plrc", "dcp-rc"),
+    )
+    def test_cuda_eager_float32_all_families_match_cpu_reference(self, model):
+        reference, simulation = _reference_and_torch(
+            model, precision="float32", device="cuda:0"
+        )
+        simulation.advance(5)
+        for _ in range(5):
+            reference.step()
+        _assert_fields(
+            reference,
+            simulation,
+            model=model,
+            complex_fields=False,
         )
 
-    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is unavailable")
-    def test_cuda_eager_float32_all_families_match_cpu_reference(self):
-        for model in ("drude", "lorentz", "dcp-ade", "dcp-plrc", "dcp-rc"):
-            with self.subTest(model=model):
-                reference, simulation = _reference_and_torch(
-                    model, precision="float32", device="cuda:0"
-                )
-                simulation.advance(5)
-                for _ in range(5):
-                    reference.step()
-                _assert_fields(
-                    self,
-                    reference,
-                    simulation,
-                    model=model,
-                    complex_fields=False,
-                )
-
-    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is unavailable")
+    @pytest.mark.skipif(not (torch.cuda.is_available()), reason="CUDA is unavailable")
     def test_cuda_compiled_float32_has_stable_storage_and_allocation(self):
         torch._dynamo.reset()
         reference, simulation = _reference_and_torch(
@@ -840,7 +847,6 @@ class DispersiveOracleTest(unittest.TestCase):
         for _ in range(5):
             reference.step()
         _assert_fields(
-            self,
             reference,
             simulation,
             model="dcp-plrc",
@@ -852,76 +858,77 @@ class DispersiveOracleTest(unittest.TestCase):
         allocated = torch.cuda.memory_allocated(simulation.device)
         simulation.advance(8)
         torch.cuda.synchronize(simulation.device)
-        self.assertEqual(graphs, torch._dynamo.utils.counters["stats"]["unique_graphs"])
-        self.assertEqual(addresses, simulation.buffer_addresses())
-        self.assertEqual(allocated, torch.cuda.memory_allocated(simulation.device))
+        assert graphs == torch._dynamo.utils.counters["stats"]["unique_graphs"]
+        assert addresses == simulation.buffer_addresses()
+        assert allocated == torch.cuda.memory_allocated(simulation.device)
 
-    def test_mixed_pml_and_dispersive_underlying_match_capture_steps(self):
+    @pytest.mark.parametrize("experimental", (False, True), ids=("baseline", "grouped"))
+    def test_mixed_pml_and_dispersive_underlying_match_capture_steps(
+        self, request, experimental
+    ):
         previous_threads = torch.get_num_threads()
-        self.addCleanup(torch.set_num_threads, previous_threads)
-        for experimental in (False, True):
-            with self.subTest(experimental=experimental):
-                reference = gmes.TorchSimulation(
-                    space=gmes.Cartesian((8, 6, 0), 4),
-                    geometry=_mixed_pml_geometry(),
-                    runtime=gmes.TorchRuntimeConfig(
-                        device="cpu",
-                        cpu_threads=2,
-                        execution_policy="dense",
-                    ),
-                )
-                simulation = gmes.TorchSimulation(
-                    space=gmes.Cartesian((8, 6, 0), 4),
-                    geometry=_mixed_pml_geometry(),
-                    runtime=gmes.TorchRuntimeConfig(
-                        device="cpu",
-                        cpu_threads=2,
-                        compile_policy="compile" if experimental else "eager",
-                        experimental_dispersive_grouping=experimental,
-                    ),
-                )
-                if experimental:
-                    self.assertIsNotNone(simulation._dispersive_overlay)
-                else:
-                    self.assertIsNone(simulation._dispersive_overlay)
-                simulation.load_host_fields(
-                    _seed_reference(reference, complex_fields=False)
-                )
-                completed = 0
-                for capture in _CAPTURE_STEPS:
-                    increment = capture - completed
-                    simulation.advance(increment)
-                    for _ in range(increment):
-                        reference.step()
-                    _assert_fields(
-                        self,
-                        reference,
-                        simulation,
-                        model="mixed",
-                        complex_fields=False,
-                    )
-                    completed = capture
-                self.assertEqual(
-                    {item.model for item in simulation.plan.dispersive_buckets},
-                    {"drude", "lorentz", "dcp-ade", "dcp-plrc", "dcp-rc"},
-                )
-                pml_buckets = [
-                    bucket
-                    for component in simulation.plan.components.values()
-                    for bucket in component.buckets
-                    if bucket.signature.model == "cpml"
-                ]
-                self.assertTrue(
-                    all(len(bucket.region_keys) == 6 for bucket in pml_buckets)
-                )
+        request.addfinalizer(lambda: torch.set_num_threads(previous_threads))
+        reference = gmes.TorchSimulation(
+            space=gmes.Cartesian((8, 6, 0), 4),
+            geometry=_mixed_pml_geometry(),
+            runtime=gmes.TorchRuntimeConfig(
+                device="cpu",
+                cpu_threads=2,
+                execution_policy="dense",
+            ),
+        )
+        simulation = gmes.TorchSimulation(
+            space=gmes.Cartesian((8, 6, 0), 4),
+            geometry=_mixed_pml_geometry(),
+            runtime=gmes.TorchRuntimeConfig(
+                device="cpu",
+                cpu_threads=2,
+                compile_policy="compile" if experimental else "eager",
+                experimental_dispersive_grouping=experimental,
+            ),
+        )
+        if experimental:
+            assert simulation._dispersive_overlay is not None
+        else:
+            assert simulation._dispersive_overlay is None
+        simulation.load_host_fields(_seed_reference(reference, complex_fields=False))
+        completed = 0
+        for capture in _CAPTURE_STEPS:
+            increment = capture - completed
+            simulation.advance(increment)
+            for _ in range(increment):
+                reference.step()
+            _assert_fields(
+                reference,
+                simulation,
+                model="mixed",
+                complex_fields=False,
+            )
+            completed = capture
+        assert {item.model for item in simulation.plan.dispersive_buckets} == {
+            "drude",
+            "lorentz",
+            "dcp-ade",
+            "dcp-plrc",
+            "dcp-rc",
+        }
+        pml_buckets = [
+            bucket
+            for component in simulation.plan.components.values()
+            for bucket in component.buckets
+            if bucket.signature.model == "cpml"
+        ]
+        assert all(len(bucket.region_keys) == 6 for bucket in pml_buckets)
 
 
-class DispersiveStorageTest(unittest.TestCase):
-    def test_compiled_exact_schema_groups_preserve_logical_state_and_results(self):
+class TestDispersiveStorage:
+    def test_compiled_exact_schema_groups_preserve_logical_state_and_results(
+        self, request
+    ):
         processors = os.cpu_count() or 1
         schema_threads = min(4, processors)
         previous_threads = torch.get_num_threads()
-        self.addCleanup(torch.set_num_threads, previous_threads)
+        request.addfinalizer(lambda: torch.set_num_threads(previous_threads))
         torch._dynamo.reset()
         graphs_before = torch._dynamo.utils.counters["stats"]["unique_graphs"]
 
@@ -944,33 +951,31 @@ class DispersiveStorageTest(unittest.TestCase):
         two_level = build("compile", experimental=True, scope="two-level")
         dcp_convolution = build("compile", experimental=True, scope="dcp-convolution")
         overlay = compiled._dispersive_overlay
-        self.assertIsNone(eager._dispersive_overlay)
-        self.assertIsNone(default_compiled._dispersive_overlay)
-        self.assertIsNotNone(overlay)
-        self.assertEqual(len(overlay.groups), 6)
-        self.assertEqual(len(overlay.entries), 9)
-        self.assertEqual(len(two_level._dispersive_overlay.groups), 3)
-        self.assertEqual(len(two_level._dispersive_overlay.entries), 12)
-        self.assertEqual(
-            {group.recurrence for group in two_level._dispersive_overlay.groups},
-            {"two-level"},
-        )
-        self.assertEqual(len(dcp_convolution._dispersive_overlay.groups), 3)
-        self.assertEqual(len(dcp_convolution._dispersive_overlay.entries), 12)
-        self.assertEqual(
-            {group.recurrence for group in dcp_convolution._dispersive_overlay.groups},
-            {"dcp-convolution"},
-        )
-        self.assertEqual(
+        assert eager._dispersive_overlay is None
+        assert default_compiled._dispersive_overlay is None
+        assert overlay is not None
+        assert len(overlay.groups) == 6
+        assert len(overlay.entries) == 9
+        assert len(two_level._dispersive_overlay.groups) == 3
+        assert len(two_level._dispersive_overlay.entries) == 12
+        assert {group.recurrence for group in two_level._dispersive_overlay.groups} == {
+            "two-level"
+        }
+        assert len(dcp_convolution._dispersive_overlay.groups) == 3
+        assert len(dcp_convolution._dispersive_overlay.entries) == 12
+        assert {
+            group.recurrence for group in dcp_convolution._dispersive_overlay.groups
+        } == {"dcp-convolution"}
+        assert (
             tuple(
                 tuple(span.descriptor.model for span in group.spans)
                 for group in overlay.groups
-            ),
-            (
+            )
+            == (
                 ("dcp-plrc", "dcp-rc"),
                 ("drude", "lorentz"),
             )
-            * 3,
+            * 3
         )
         for group in overlay.groups:
             descriptors = tuple(span.descriptor for span in group.spans)
@@ -990,7 +995,7 @@ class DispersiveStorageTest(unittest.TestCase):
                 actual = getattr(overlay, f"{group.prefix}_{suffix}")
                 torch.testing.assert_close(actual, expected, rtol=0, atol=0)
             targets = getattr(overlay, f"{group.prefix}_targets")
-            self.assertEqual(torch.unique(targets).numel(), targets.numel())
+            assert torch.unique(targets).numel() == targets.numel()
             persistent_suffixes = (
                 ("previous", "current")
                 if group.recurrence == "two-level"
@@ -1002,59 +1007,45 @@ class DispersiveStorageTest(unittest.TestCase):
                         compiled.state, f"{span.descriptor.prefix}_{suffix}"
                     )
                     physical = getattr(overlay, f"{group.prefix}_{suffix}")
-                    self.assertEqual(
-                        logical.untyped_storage().data_ptr(),
-                        physical.untyped_storage().data_ptr(),
+                    assert (
+                        logical.untyped_storage().data_ptr()
+                        == physical.untyped_storage().data_ptr()
                     )
 
         eager_state = eager.state.state_dict()
         compiled_state = compiled.state.state_dict()
-        self.assertEqual(tuple(eager_state), tuple(compiled_state))
-        self.assertEqual(
-            {name: tuple(value.shape) for name, value in eager_state.items()},
-            {name: tuple(value.shape) for name, value in compiled_state.items()},
-        )
+        assert tuple(eager_state) == tuple(compiled_state)
+        assert {name: tuple(value.shape) for name, value in eager_state.items()} == {
+            name: tuple(value.shape) for name, value in compiled_state.items()
+        }
         for name, expected in eager_state.items():
             if name.startswith("bucket_"):
                 actual = compiled_state[name]
-                self.assertEqual(actual.dtype, expected.dtype)
-                self.assertEqual(actual.device, expected.device)
-                self.assertTrue(actual.is_contiguous())
-                self.assertEqual(actual.stride(), expected.stride())
-                self.assertEqual(actual.view(-1).shape, expected.view(-1).shape)
+                assert actual.dtype == expected.dtype
+                assert actual.device == expected.device
+                assert actual.is_contiguous()
+                assert actual.stride() == expected.stride()
+                assert actual.view(-1).shape == expected.view(-1).shape
         for name in compiled.state._grouped_dispersive_state_names:
-            self.assertNotEqual(
-                compiled_state[name].untyped_storage().data_ptr(),
-                getattr(compiled.state, name).untyped_storage().data_ptr(),
+            assert (
+                compiled_state[name].untyped_storage().data_ptr()
+                != getattr(compiled.state, name).untyped_storage().data_ptr()
             )
-        self.assertEqual(eager.plan_identity, compiled.plan_identity)
-        self.assertEqual(eager.plan_identity, default_compiled.plan_identity)
-        self.assertNotEqual(
-            compiled.compile_cache_key,
-            default_compiled.compile_cache_key,
-        )
-        self.assertNotEqual(
-            compiled.compile_cache_key,
-            two_level.compile_cache_key,
-        )
-        self.assertNotEqual(
-            two_level.compile_cache_key,
-            dcp_convolution.compile_cache_key,
-        )
+        assert eager.plan_identity == compiled.plan_identity
+        assert eager.plan_identity == default_compiled.plan_identity
+        assert compiled.compile_cache_key != default_compiled.compile_cache_key
+        assert compiled.compile_cache_key != two_level.compile_cache_key
+        assert two_level.compile_cache_key != dcp_convolution.compile_cache_key
         compiled.advance(1)
-        self.assertEqual(
-            torch._dynamo.utils.counters["stats"]["unique_graphs"] - graphs_before,
-            2,
+        assert (
+            torch._dynamo.utils.counters["stats"]["unique_graphs"] - graphs_before == 2
         )
         compiled.load_checkpoint(eager.checkpoint())
         graphs = torch._dynamo.utils.counters["stats"]["unique_graphs"]
         addresses = compiled.buffer_addresses()
         compiled.advance(1)
-        self.assertEqual(
-            torch._dynamo.utils.counters["stats"]["unique_graphs"],
-            graphs,
-        )
-        self.assertEqual(compiled.buffer_addresses(), addresses)
+        assert torch._dynamo.utils.counters["stats"]["unique_graphs"] == graphs
+        assert compiled.buffer_addresses() == addresses
         compiled.load_checkpoint(eager.checkpoint())
         eager.load_checkpoint(compiled.checkpoint())
         compiled.load_checkpoint(eager.checkpoint())
@@ -1086,7 +1077,7 @@ class DispersiveStorageTest(unittest.TestCase):
         addresses = compiled.buffer_addresses()
         checkpoint = eager.checkpoint()
         compiled.advance(1).load_checkpoint(checkpoint)
-        self.assertEqual(compiled.buffer_addresses(), addresses)
+        assert compiled.buffer_addresses() == addresses
         for name, expected in eager.state.state_dict().items():
             torch.testing.assert_close(
                 compiled.state.state_dict()[name],
@@ -1095,44 +1086,32 @@ class DispersiveStorageTest(unittest.TestCase):
                 atol=0,
             )
         incompatible = compiled.state.load_state_dict(eager.state.state_dict())
-        self.assertEqual(incompatible.missing_keys, [])
-        self.assertEqual(incompatible.unexpected_keys, [])
-        self.assertEqual(compiled.buffer_addresses(), addresses)
+        assert incompatible.missing_keys == []
+        assert incompatible.unexpected_keys == []
+        assert compiled.buffer_addresses() == addresses
         incompatible = eager.state.load_state_dict(compiled.state.state_dict())
-        self.assertEqual(incompatible.missing_keys, [])
-        self.assertEqual(incompatible.unexpected_keys, [])
-        with self.assertRaisesRegex(ValueError, "assign=False"):
+        assert incompatible.missing_keys == []
+        assert incompatible.unexpected_keys == []
+        with pytest.raises(ValueError, match="assign=False"):
             compiled.state.load_state_dict(eager.state.state_dict(), assign=True)
 
         diagnostics = compiled.diagnostics()["dispersive"]
-        self.assertEqual(
-            diagnostics["execution_representation"],
-            "exact-schema-grouped-io-v1",
+        assert diagnostics["execution_representation"] == "exact-schema-grouped-io-v1"
+        assert diagnostics["execution_entries_per_step"] == 9
+        assert diagnostics["logical_buckets_per_step"] == len(
+            compiled.plan.dispersive_buckets
         )
-        self.assertEqual(diagnostics["execution_entries_per_step"], 9)
-        self.assertEqual(
-            diagnostics["logical_buckets_per_step"],
-            len(compiled.plan.dispersive_buckets),
-        )
-        self.assertEqual(diagnostics["exact_schema_groups"], 6)
-        self.assertEqual(diagnostics["experimental_grouping_scope"], "combined")
-        self.assertEqual(len(diagnostics["exact_schema_spans"]), 6)
-        self.assertEqual(
-            tuple(
-                span["model"]
-                for span in diagnostics["exact_schema_spans"][0]["logical_spans"]
-            ),
-            ("dcp-plrc", "dcp-rc"),
-        )
-        self.assertEqual(
-            diagnostics["launches_per_step"],
-            len(compiled.plan.dispersive_buckets),
-        )
-        self.assertTrue(
-            any(
-                name.startswith("dispersive_overlay.")
-                for name in compiled.buffer_addresses()
-            )
+        assert diagnostics["exact_schema_groups"] == 6
+        assert diagnostics["experimental_grouping_scope"] == "combined"
+        assert len(diagnostics["exact_schema_spans"]) == 6
+        assert tuple(
+            span["model"]
+            for span in diagnostics["exact_schema_spans"][0]["logical_spans"]
+        ) == ("dcp-plrc", "dcp-rc")
+        assert diagnostics["launches_per_step"] == len(compiled.plan.dispersive_buckets)
+        assert any(
+            name.startswith("dispersive_overlay.")
+            for name in compiled.buffer_addresses()
         )
 
     def test_state_uses_exact_width_real_soa_and_fixed_storage(self):
@@ -1169,7 +1148,7 @@ class DispersiveStorageTest(unittest.TestCase):
             bloch=(0.03, 0.05, 0.07),
             runtime=gmes.TorchRuntimeConfig(device="cpu", cpu_threads=2),
         )
-        self.assertGreater(len(simulation.plan.dispersive_buckets), 5)
+        assert len(simulation.plan.dispersive_buckets) > 5
         persistent = simulation.state.state_dict()
         for descriptor in simulation.plan.dispersive_buckets:
             values = [
@@ -1179,29 +1158,21 @@ class DispersiveStorageTest(unittest.TestCase):
             ]
             actual = sum(value.numel() for value in values)
             expected = descriptor.target_count * descriptor.state_width * 2
-            self.assertEqual(actual, expected, descriptor)
-            self.assertTrue(all(value.dtype == torch.float64 for value in values))
+            assert actual == expected, descriptor
+            assert all(value.dtype == torch.float64 for value in values)
             coefficients = getattr(simulation.plan, f"{descriptor.prefix}_a")
-            self.assertTrue(coefficients.is_contiguous())
-            self.assertFalse(coefficients.is_complex())
+            assert coefficients.is_contiguous()
+            assert not coefficients.is_complex()
 
         addresses = simulation.buffer_addresses()
         simulation.advance(20)
-        self.assertEqual(addresses, simulation.buffer_addresses())
-        self.assertEqual(simulation.plan.unsupported_models, ())
+        assert addresses == simulation.buffer_addresses()
+        assert simulation.plan.unsupported_models == ()
         diagnostics = simulation.diagnostics()["dispersive"]
-        self.assertEqual(
-            diagnostics["models"],
-            ("dcp-ade", "dcp-rc", "drude", "lorentz"),
+        assert diagnostics["models"] == ("dcp-ade", "dcp-rc", "drude", "lorentz")
+        assert diagnostics["state_width_policy"] == "exact"
+        assert diagnostics["padding_elements"] == 0
+        assert diagnostics["padding_elements_avoided"] > 0
+        assert diagnostics["launches_per_step"] == len(
+            simulation.plan.dispersive_buckets
         )
-        self.assertEqual(diagnostics["state_width_policy"], "exact")
-        self.assertEqual(diagnostics["padding_elements"], 0)
-        self.assertGreater(diagnostics["padding_elements_avoided"], 0)
-        self.assertEqual(
-            diagnostics["launches_per_step"],
-            len(simulation.plan.dispersive_buckets),
-        )
-
-
-if __name__ == "__main__":
-    unittest.main()

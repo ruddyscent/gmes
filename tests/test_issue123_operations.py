@@ -7,11 +7,13 @@ import io
 import json
 import shutil
 import tempfile
-import unittest
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 from urllib.parse import urlencode
+
+import pytest
 
 from benchmarks import issue123_completion as completion
 from benchmarks import issue123_operations as operations
@@ -41,14 +43,10 @@ class _SyntheticBaselineLease:
         self.closed = True
 
 
-class Issue123OperationsTest(unittest.TestCase):
-    def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
-        self.private_temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self.private_temporary.cleanup)
-        self.private_root = Path(self.private_temporary.name)
+class _Issue123OperationsFixture:
+    def initialize(self, stack):
+        self.root = Path(stack.enter_context(tempfile.TemporaryDirectory()))
+        self.private_root = Path(stack.enter_context(tempfile.TemporaryDirectory()))
         self.candidate = {
             "candidate_git_commit": "a" * 40,
             "candidate_git_status": "",
@@ -90,11 +88,9 @@ class Issue123OperationsTest(unittest.TestCase):
             },
         }
         self.production_superseded_comments = operations.SUPERSEDED_OWNER_COMMENTS
-        owner_patch = mock.patch.object(
-            operations, "OWNER_LOGIN", SYNTHETIC_OWNER_LOGIN
+        stack.enter_context(
+            mock.patch.object(operations, "OWNER_LOGIN", SYNTHETIC_OWNER_LOGIN)
         )
-        owner_patch.start()
-        self.addCleanup(owner_patch.stop)
         synthetic_baseline = {
             "BASELINE_V3_ROOT_COMMIT": "b" * 40,
             "BASELINE_RELEASE_TAG": "issue-123-synthetic-baseline-v3",
@@ -113,9 +109,7 @@ class Issue123OperationsTest(unittest.TestCase):
             "BASELINE_V3_HOST_COMMITMENT": "7" * 64,
         }
         for name, value in synthetic_baseline.items():
-            patcher = mock.patch.object(operations, name, value)
-            patcher.start()
-            self.addCleanup(patcher.stop)
+            stack.enter_context(mock.patch.object(operations, name, value))
         self.superseded_comment_bodies = {}
         synthetic_specs = []
         for ordinal, specification in enumerate(
@@ -134,11 +128,11 @@ class Issue123OperationsTest(unittest.TestCase):
             )
             self.superseded_comment_bodies[changed["id"]] = body
             synthetic_specs.append(changed)
-        superseded_patch = mock.patch.object(
-            operations, "SUPERSEDED_OWNER_COMMENTS", tuple(synthetic_specs)
+        stack.enter_context(
+            mock.patch.object(
+                operations, "SUPERSEDED_OWNER_COMMENTS", tuple(synthetic_specs)
+            )
         )
-        superseded_patch.start()
-        self.addCleanup(superseded_patch.stop)
         self.issue_fields = self._issue_contract_fields()
         self.pr_fields = self._pr_contract_fields()
         self.handoff_fields = self._handoff_contract_fields()
@@ -1124,7 +1118,7 @@ class Issue123OperationsTest(unittest.TestCase):
                     for suffix, role in role_by_suffix.items()
                     if endpoint.endswith(suffix)
                 ]
-                self.assertEqual(len(matches), 1, endpoint)
+                assert len(matches) == 1, endpoint
                 role = matches[0]
             graphql_variables = kwargs.get("graphql_variables")
             request = {
@@ -1164,12 +1158,19 @@ class Issue123OperationsTest(unittest.TestCase):
         run.assert_not_called()
         return output, index, scope
 
+
+class TestIssue123Operations(_Issue123OperationsFixture):
+    @pytest.fixture(autouse=True)
+    def _initialize_fixture(self):
+        with issue123_operations_fixture(self):
+            yield
+
     def test_capture_and_completion_recompute_raw_api_evidence(self):
         output, index_path, scope_path = self._capture()
         expected_output = output.resolve()
-        self.assertEqual(index_path.parent, expected_output)
-        self.assertEqual(scope_path.parent, expected_output)
-        self.assertFalse(index_path.parent.name.startswith("."))
+        assert index_path.parent == expected_output
+        assert scope_path.parent == expected_output
+        assert not (index_path.parent.name.startswith("."))
         document = json.loads(index_path.read_text())
         scope = json.loads(scope_path.read_text())
         result = completion._validate_operations_scope(
@@ -1177,58 +1178,63 @@ class Issue123OperationsTest(unittest.TestCase):
             completion.ArtifactReader(output, self.candidate),
             self.candidate,
         )
-        self.assertEqual(result["pull_request"]["head_sha"], "a" * 40)
-        self.assertEqual(
-            result["codeql_analyses"]["/language:python"]["results_count"], 7
+        assert result["pull_request"]["head_sha"] == "a" * 40
+        assert result["codeql_analyses"]["/language:python"]["results_count"] == 7
+        assert result["codeql_quality_blockers"] == []
+        assert document["schema_version"] == 2
+        assert (
+            document["repository"],
+            document["target_issue_number"],
+            document["handoff_issue_number"],
+            document["pull_request_number"],
+        ) == (operations.REPOSITORY, 123, 115, 167)
+        assert result["closing_issue_numbers"] == [123]
+        assert result["candidate_commit_verification"]["reason"] == "valid"
+        assert document["technical_release_tag"] == self.release_tag
+        assert document["technical_release_id"] == self.release_id
+        assert len(document["responses"]) == 22
+        assert set(document["responses"]) == operations.RESPONSE_ROLES
+        assert set(document["response_captures"]) == operations.RESPONSE_ROLES
+        assert all(
+            set(record) == {"request", "artifact"}
+            for record in document["responses"].values()
         )
-        self.assertEqual(result["codeql_quality_blockers"], [])
-        self.assertEqual(document["schema_version"], 2)
-        self.assertEqual(
-            (
-                document["repository"],
-                document["target_issue_number"],
-                document["handoff_issue_number"],
-                document["pull_request_number"],
-            ),
-            (operations.REPOSITORY, 123, 115, 167),
+        assert set(result["technical_release"]["assets"]) == {
+            "technical_evidence",
+            "technical_summary",
+            "raw_timing",
+            "event_profiler",
+        }
+        assert result["issue_contract_amendment_comment_id"] == 800
+        assert result["pr_candidate_insight_comment_id"] == 950
+        assert result["graphql_review_total"] == 0
+        assert not (result["final_acceptance"])
+        assert (
+            result["final_acceptance_authority"]
+            == "same-process-live-verification-required"
         )
-        self.assertEqual(result["closing_issue_numbers"], [123])
-        self.assertEqual(result["candidate_commit_verification"]["reason"], "valid")
-        self.assertEqual(document["technical_release_tag"], self.release_tag)
-        self.assertEqual(document["technical_release_id"], self.release_id)
-        self.assertEqual(len(document["responses"]), 22)
-        self.assertEqual(set(document["responses"]), operations.RESPONSE_ROLES)
-        self.assertEqual(set(document["response_captures"]), operations.RESPONSE_ROLES)
-        self.assertTrue(
-            all(
-                set(record) == {"request", "artifact"}
-                for record in document["responses"].values()
-            )
-        )
-        self.assertEqual(
-            set(result["technical_release"]["assets"]),
-            {
-                "technical_evidence",
-                "technical_summary",
-                "raw_timing",
-                "event_profiler",
-            },
-        )
-        self.assertEqual(result["issue_contract_amendment_comment_id"], 800)
-        self.assertEqual(result["pr_candidate_insight_comment_id"], 950)
-        self.assertEqual(result["graphql_review_total"], 0)
-        self.assertFalse(result["final_acceptance"])
-        self.assertEqual(
-            result["final_acceptance_authority"],
-            "same-process-live-verification-required",
-        )
-        self.assertFalse(result["publication"]["offline_final_acceptance"])
-        self.assertEqual(
-            [record["id"] for record in result["superseded_owner_comments"]],
-            [910001, 910002, 910003, 910004],
-        )
+        assert not (result["publication"]["offline_final_acceptance"])
+        assert [record["id"] for record in result["superseded_owner_comments"]] == [
+            910001,
+            910002,
+            910003,
+            910004,
+        ]
 
-    def test_raw_tampering_cannot_hide_operational_blockers(self):
+    @pytest.mark.parametrize(
+        "case_index",
+        range(7),
+        ids=(
+            "security-alert",
+            "analysis-error",
+            "wrong-check-head",
+            "wrong-workflow-pr",
+            "forged-identical-compare",
+            "masked-change-request",
+            "unresolved-review",
+        ),
+    )
+    def test_raw_tampering_cannot_hide_operational_blockers(self, case_index):
         _output, index_path, _scope = self._capture()
         document = json.loads(index_path.read_text())
         cases = []
@@ -1292,12 +1298,13 @@ class Issue123OperationsTest(unittest.TestCase):
             "reviewThreads"
         ]["nodes"][0]["isResolved"] = False
         cases.append(("review", unresolved))
-        for label, raw in cases:
-            with self.subTest(label=label), self.assertRaises(operations.EvidenceError):
-                operations.evaluate_operations(document, raw, self.candidate)
+        with pytest.raises(operations.EvidenceError):
+            operations.evaluate_operations(
+                document, cases[case_index][1], self.candidate
+            )
 
     def test_capture_rejects_any_pull_request_other_than_167(self):
-        with self.assertRaisesRegex(operations.EvidenceError, "must be #167"):
+        with pytest.raises(operations.EvidenceError, match="must be #167"):
             operations.capture_operations(
                 repository=operations.REPOSITORY,
                 pull_request_number=166,
@@ -1314,7 +1321,7 @@ class Issue123OperationsTest(unittest.TestCase):
         with (
             mock.patch.object(operations, "candidate_evidence", return_value=rejected),
             mock.patch.object(operations, "_github_api_capture") as github_api,
-            self.assertRaisesRegex(operations.EvidenceError, "rejected candidate"),
+            pytest.raises(operations.EvidenceError, match="rejected candidate"),
         ):
             operations.capture_operations(
                 repository=operations.REPOSITORY,
@@ -1336,7 +1343,7 @@ class Issue123OperationsTest(unittest.TestCase):
                 operations, "candidate_evidence", return_value=self.candidate
             ),
             mock.patch.object(operations, "_github_api_capture") as github_api,
-            self.assertRaisesRegex(operations.EvidenceError, "non-v FINAL_SHA"),
+            pytest.raises(operations.EvidenceError, match="non-v FINAL_SHA"),
         ):
             operations.capture_operations(
                 repository=operations.REPOSITORY,
@@ -1349,7 +1356,21 @@ class Issue123OperationsTest(unittest.TestCase):
             )
         github_api.assert_not_called()
 
-    def test_wrong_pr_or_issue_identity_fails_closed(self):
+    @pytest.mark.parametrize(
+        "case_index",
+        range(8),
+        ids=(
+            "index-repository",
+            "index-target-issue",
+            "index-handoff-issue",
+            "index-pull-request",
+            "target-response",
+            "target-is-pull-request",
+            "handoff-response",
+            "pull-response",
+        ),
+    )
+    def test_wrong_pr_or_issue_identity_fails_closed(self, case_index):
         _output, index_path, _scope = self._capture()
         document = json.loads(index_path.read_text())
         cases = []
@@ -1376,11 +1397,16 @@ class Issue123OperationsTest(unittest.TestCase):
         wrong_pull = copy.deepcopy(self.responses)
         wrong_pull["pull_request"]["number"] = 168
         cases.append(("pull-response", document, wrong_pull))
-        for label, changed_document, raw in cases:
-            with self.subTest(label=label), self.assertRaises(operations.EvidenceError):
-                operations.evaluate_operations(changed_document, raw, self.candidate)
+        _label, changed_document, raw = cases[case_index]
+        with pytest.raises(operations.EvidenceError):
+            operations.evaluate_operations(changed_document, raw, self.candidate)
 
-    def test_closing_references_require_exactly_issue_123(self):
+    @pytest.mark.parametrize(
+        "case_index",
+        range(4),
+        ids=("missing", "extra", "wrong-target", "wrong-repository"),
+    )
+    def test_closing_references_require_exactly_issue_123(self, case_index):
         _output, index_path, _scope = self._capture()
         document = json.loads(index_path.read_text())
         cases = []
@@ -1413,11 +1439,24 @@ class Issue123OperationsTest(unittest.TestCase):
             "closingIssuesReferences"
         ]["nodes"][0]["repository"]["nameWithOwner"] = "someone/gmes"
         cases.append(("wrong-repository", wrong_repository))
-        for label, raw in cases:
-            with self.subTest(label=label), self.assertRaises(operations.EvidenceError):
-                operations.evaluate_operations(document, raw, self.candidate)
+        with pytest.raises(operations.EvidenceError):
+            operations.evaluate_operations(
+                document, cases[case_index][1], self.candidate
+            )
 
-    def test_candidate_commit_must_match_final_sha_and_be_verified(self):
+    @pytest.mark.parametrize(
+        "case_index",
+        range(6),
+        ids=(
+            "unverified",
+            "invalid-reason",
+            "wrong-sha",
+            "wrong-api-url",
+            "wrong-html-url",
+            "missing-verified-at",
+        ),
+    )
+    def test_candidate_commit_must_match_final_sha_and_be_verified(self, case_index):
         _output, index_path, _scope = self._capture()
         document = json.loads(index_path.read_text())
         cases = []
@@ -1447,11 +1486,23 @@ class Issue123OperationsTest(unittest.TestCase):
             "verified_at"
         ] = None
         cases.append(("verified-at", missing_verification_time))
-        for label, raw in cases:
-            with self.subTest(label=label), self.assertRaises(operations.EvidenceError):
-                operations.evaluate_operations(document, raw, self.candidate)
+        with pytest.raises(operations.EvidenceError):
+            operations.evaluate_operations(
+                document, cases[case_index][1], self.candidate
+            )
 
-    def test_issue_115_requires_completed_state_reason(self):
+    @pytest.mark.parametrize(
+        "case_index",
+        range(5),
+        ids=(
+            "none",
+            "not-planned",
+            "uppercase-completed",
+            "missing",
+            "deleted-runtime-item",
+        ),
+    )
+    def test_issue_115_requires_completed_state_reason(self, case_index):
         _output, index_path, _scope = self._capture()
         document = json.loads(index_path.read_text())
         cases = []
@@ -1469,9 +1520,10 @@ class Issue123OperationsTest(unittest.TestCase):
             if "torch.utils.benchmark" not in line
         )
         cases.append(("deleted-runtime-item", deleted_checklist_item))
-        for label, raw in cases:
-            with self.subTest(label=label), self.assertRaises(operations.EvidenceError):
-                operations.evaluate_operations(document, raw, self.candidate)
+        with pytest.raises(operations.EvidenceError):
+            operations.evaluate_operations(
+                document, cases[case_index][1], self.candidate
+            )
 
     def test_technical_release_and_asset_ledger_fail_closed(self):
         _output, index_path, _scope = self._capture()
@@ -1578,8 +1630,10 @@ class Issue123OperationsTest(unittest.TestCase):
         )
         cases.append(("cross-asset-url", mismatched_comment_url))
 
+        # Each release mutation is evaluated against the same captured index so
+        # cross-record consistency stays fixed throughout this sequential audit.
         for label, raw in cases:
-            with self.subTest(label=label), self.assertRaises(operations.EvidenceError):
+            with (pytest.raises(operations.EvidenceError),):
                 operations.evaluate_operations(document, raw, self.candidate)
 
     def test_structured_owner_contracts_reject_field_and_authorship_attacks(self):
@@ -1788,32 +1842,26 @@ class Issue123OperationsTest(unittest.TestCase):
         )
         cases.append(("obsolete-owner-baseline-pair", obsolete_baselines))
 
+        # Contract mutations share one captured response closure and are kept
+        # sequential to ensure no failed evaluation contaminates the next copy.
         for label, raw in cases:
-            with self.subTest(label=label), self.assertRaises(operations.EvidenceError):
+            with (pytest.raises(operations.EvidenceError),):
                 operations.evaluate_operations(document, raw, self.candidate)
 
     def test_superseded_owner_comment_provenance_is_exact_and_complete(self):
-        self.assertEqual(
-            tuple(
-                specification["field"]
-                for specification in self.production_superseded_comments
-            ),
-            tuple(SYNTHETIC_SUPERSEDED_IDS),
-        )
-        self.assertEqual(
-            tuple(
-                specification["id"]
-                for specification in operations.SUPERSEDED_OWNER_COMMENTS
-            ),
-            tuple(SYNTHETIC_SUPERSEDED_IDS.values()),
-        )
-        self.assertTrue(
-            all(
-                specification["id"] not in SYNTHETIC_SUPERSEDED_IDS.values()
-                and len(specification["body_sha256"]) == 64
-                and specification["required_fragments"]
-                for specification in self.production_superseded_comments
-            )
+        assert tuple(
+            specification["field"]
+            for specification in self.production_superseded_comments
+        ) == tuple(SYNTHETIC_SUPERSEDED_IDS)
+        assert tuple(
+            specification["id"]
+            for specification in operations.SUPERSEDED_OWNER_COMMENTS
+        ) == tuple(SYNTHETIC_SUPERSEDED_IDS.values())
+        assert all(
+            specification["id"] not in SYNTHETIC_SUPERSEDED_IDS.values()
+            and len(specification["body_sha256"]) == 64
+            and specification["required_fragments"]
+            for specification in self.production_superseded_comments
         )
         _output, index_path, _scope = self._capture()
         document = json.loads(index_path.read_text())
@@ -1823,41 +1871,47 @@ class Issue123OperationsTest(unittest.TestCase):
         records = {
             record["id"]: record for record in result["superseded_owner_comments"]
         }
-        self.assertEqual(set(records), set(self.superseded_comment_bodies))
+        assert set(records) == set(self.superseded_comment_bodies)
         for specification in operations.SUPERSEDED_OWNER_COMMENTS:
             identifier = specification["id"]
             record = records[identifier]
-            self.assertEqual(record["role"], specification["role"])
-            self.assertEqual(record["stream"], specification["stream"])
-            self.assertEqual(record["owner_login"], SYNTHETIC_OWNER_LOGIN)
-            self.assertEqual(
-                record["body_sha256"],
-                hashlib.sha256(
+            assert record["role"] == specification["role"]
+            assert record["stream"] == specification["stream"]
+            assert record["owner_login"] == SYNTHETIC_OWNER_LOGIN
+            assert (
+                record["body_sha256"]
+                == hashlib.sha256(
                     self.superseded_comment_bodies[identifier].encode()
-                ).hexdigest(),
+                ).hexdigest()
             )
 
-    def test_superseded_owner_comments_cannot_be_absent_or_substituted(self):
+    @pytest.mark.parametrize(
+        "specification_index",
+        range(4),
+        ids=("baseline", "dm2-issue", "dm2-pr", "single-gpu"),
+    )
+    @pytest.mark.parametrize("attack", ("absent", "content", "association"), ids=str)
+    def test_superseded_owner_comments_cannot_be_absent_or_substituted(
+        self, specification_index, attack
+    ):
         _output, index_path, _scope = self._capture()
         document = json.loads(index_path.read_text())
         parent_by_stream = {
             "issue_123_comments": "issue_123",
             "pull_request_comments": "pull_request",
         }
-        for specification in operations.SUPERSEDED_OWNER_COMMENTS:
-            stream = specification["stream"]
-            identifier = specification["id"]
+        specification = operations.SUPERSEDED_OWNER_COMMENTS[specification_index]
+        stream = specification["stream"]
+        identifier = specification["id"]
+        if attack == "absent":
             absent = copy.deepcopy(self.responses)
             absent[stream][0] = [
                 comment for comment in absent[stream][0] if comment["id"] != identifier
             ]
             absent[parent_by_stream[stream]]["comments"] -= 1
-            with (
-                self.subTest(identifier=identifier, attack="absent"),
-                self.assertRaises(operations.EvidenceError),
-            ):
+            with pytest.raises(operations.EvidenceError):
                 self._evaluate(document, absent)
-
+        elif attack == "content":
             substituted = copy.deepcopy(self.responses)
             comment = next(
                 item
@@ -1866,12 +1920,9 @@ class Issue123OperationsTest(unittest.TestCase):
                 if item["id"] == identifier
             )
             comment["body"] += " substituted"
-            with (
-                self.subTest(identifier=identifier, attack="content"),
-                self.assertRaises(operations.EvidenceError),
-            ):
+            with pytest.raises(operations.EvidenceError):
                 self._evaluate(document, substituted)
-
+        else:
             non_owner = copy.deepcopy(self.responses)
             comment = next(
                 item
@@ -1880,13 +1931,22 @@ class Issue123OperationsTest(unittest.TestCase):
                 if item["id"] == identifier
             )
             comment["author_association"] = "CONTRIBUTOR"
-            with (
-                self.subTest(identifier=identifier, attack="association"),
-                self.assertRaises(operations.EvidenceError),
-            ):
+            with pytest.raises(operations.EvidenceError):
                 self._evaluate(document, non_owner)
 
-    def test_operational_chronology_fails_closed(self):
+    @pytest.mark.parametrize(
+        "case_index",
+        range(6),
+        ids=(
+            "issue-115-handoff",
+            "commit-verification",
+            "ci-run-completion",
+            "codeql-job-completion",
+            "created-after-updated",
+            "comment-created-after-updated",
+        ),
+    )
+    def test_operational_chronology_fails_closed(self, case_index):
         _output, index_path, _scope = self._capture()
         document = json.loads(index_path.read_text())
         cases = []
@@ -1923,11 +1983,15 @@ class Issue123OperationsTest(unittest.TestCase):
         handoff["updated_at"] = "2026-09-03T00:59:59Z"
         cases.append(("comment-created-after-updated", reversed_comment))
 
-        for label, raw in cases:
-            with self.subTest(label=label), self.assertRaises(operations.EvidenceError):
-                self._evaluate(document, raw)
+        with pytest.raises(operations.EvidenceError):
+            self._evaluate(document, cases[case_index][1])
 
-    def test_publication_receipt_identity_substitution_fails_closed(self):
+    @pytest.mark.parametrize(
+        "case_index",
+        range(4),
+        ids=("final-sha", "asset-ledger", "release-id", "boolean-schema"),
+    )
+    def test_publication_receipt_identity_substitution_fails_closed(self, case_index):
         _output, index_path, _scope = self._capture()
         document = json.loads(index_path.read_text())
         cases = []
@@ -1959,10 +2023,9 @@ class Issue123OperationsTest(unittest.TestCase):
         boolean_schema["schema_version"] = True
         cases.append(("boolean-schema", boolean_schema))
 
-        for label, receipt in cases:
-            changed = self._replace_receipt_document(document, receipt)
-            with self.subTest(label=label), self.assertRaises(operations.EvidenceError):
-                operations.evaluate_operations(changed, self.responses, self.candidate)
+        changed = self._replace_receipt_document(document, cases[case_index][1])
+        with pytest.raises(operations.EvidenceError):
+            operations.evaluate_operations(changed, self.responses, self.candidate)
 
     def test_complete_review_thread_pagination_is_recomputed(self):
         _output, index_path, _scope = self._capture()
@@ -1984,7 +2047,7 @@ class Issue123OperationsTest(unittest.TestCase):
         second_connection["nodes"] = [{"id": "thread-100", "isResolved": True}]
         raw["review_threads"].append(second)
         result = self._evaluate(document, raw)
-        self.assertEqual(result["review_threads"], 101)
+        assert result["review_threads"] == 101
 
     def test_complete_issue_comment_pagination_is_recomputed(self):
         _output, index_path, _scope = self._capture()
@@ -2008,9 +2071,12 @@ class Issue123OperationsTest(unittest.TestCase):
         raw["issue_123_comments"] = [ordinary, final_page]
         raw["issue_123"]["comments"] = 100 + len(final_page)
         result = self._evaluate(document, raw)
-        self.assertEqual(result["issue_contract_amendment_comment_id"], marker["id"])
+        assert result["issue_contract_amendment_comment_id"] == marker["id"]
 
-    def test_deleted_terminal_rest_pages_fail_closed(self):
+    @pytest.mark.parametrize(
+        "role", ("reviews", "codeql_analyses", "codeql_alerts"), ids=str
+    )
+    def test_deleted_terminal_rest_pages_fail_closed(self, role):
         _output, index_path, _scope = self._capture()
         document = json.loads(index_path.read_text())
 
@@ -2065,26 +2131,23 @@ class Issue123OperationsTest(unittest.TestCase):
         alerts["codeql_alerts"] = [alert_records[:100], alert_records[100:]]
         cases["codeql_alerts"] = alerts
 
-        for role, raw in cases.items():
-            with self.subTest(role=role):
-                complete_document = self._coherent_document(document, raw)
-                operations.evaluate_operations(complete_document, raw, self.candidate)
-                deleted_raw = copy.deepcopy(raw)
-                deleted_raw[role].pop()
-                deleted_document = copy.deepcopy(complete_document)
-                capture = deleted_document["response_captures"][role]
-                capture["pages"].pop()
-                canonical = operations._canonical_json_bytes(deleted_raw[role])
-                capture["canonical_response_size_bytes"] = len(canonical)
-                capture["canonical_response_sha256"] = hashlib.sha256(
-                    canonical
-                ).hexdigest()
-                with self.assertRaisesRegex(
-                    operations.EvidenceError, "body ledger|final-page/no-next"
-                ):
-                    operations.evaluate_operations(
-                        deleted_document, deleted_raw, self.candidate
-                    )
+        raw = cases[role]
+        complete_document = self._coherent_document(document, raw)
+        operations.evaluate_operations(complete_document, raw, self.candidate)
+        deleted_raw = copy.deepcopy(raw)
+        deleted_raw[role].pop()
+        deleted_document = copy.deepcopy(complete_document)
+        capture = deleted_document["response_captures"][role]
+        capture["pages"].pop()
+        canonical = operations._canonical_json_bytes(deleted_raw[role])
+        capture["canonical_response_size_bytes"] = len(canonical)
+        capture["canonical_response_sha256"] = hashlib.sha256(canonical).hexdigest()
+        with pytest.raises(
+            operations.EvidenceError, match="body ledger|final-page/no-next"
+        ):
+            operations.evaluate_operations(
+                deleted_document, deleted_raw, self.candidate
+            )
 
     def test_rest_page_ledger_rejects_route_filter_and_last_substitution(self):
         _output, index_path, _scope = self._capture()
@@ -2120,7 +2183,7 @@ class Issue123OperationsTest(unittest.TestCase):
             page = changed["response_captures"][role]["pages"][0]
             page["headers"]["link"]["next"] = url
             page["next"]["value"] = url
-            with self.subTest(label=label), self.assertRaises(operations.EvidenceError):
+            with (pytest.raises(operations.EvidenceError),):
                 operations.evaluate_operations(changed, raw, self.candidate)
 
         wrong_last = copy.deepcopy(complete)
@@ -2128,8 +2191,8 @@ class Issue123OperationsTest(unittest.TestCase):
         wrong_last_page["headers"]["link"][
             "last"
         ] = f"https://api.github.com/{endpoint}?page=3&per_page=100"
-        self.assertTrue(original["has_next"])
-        with self.assertRaisesRegex(operations.EvidenceError, "final page"):
+        assert original["has_next"]
+        with pytest.raises(operations.EvidenceError, match="final page"):
             operations.evaluate_operations(wrong_last, raw, self.candidate)
 
     def test_malformed_pagination_and_request_metadata_fail_closed(self):
@@ -2177,8 +2240,10 @@ class Issue123OperationsTest(unittest.TestCase):
         missing_response = copy.deepcopy(self.responses)
         del missing_response["candidate_commit"]
         raw_cases.append(("raw-response-closure", missing_response))
+        # Raw and captured-document mutations are two ordered phases against one
+        # evidence snapshot, so keep both phases sequential.
         for label, raw in raw_cases:
-            with self.subTest(label=label), self.assertRaises(operations.EvidenceError):
+            with (pytest.raises(operations.EvidenceError),):
                 operations.evaluate_operations(document, raw, self.candidate)
 
         document_cases = []
@@ -2244,7 +2309,7 @@ class Issue123OperationsTest(unittest.TestCase):
         )
         document_cases.append(("response-closure", extra_response))
         for label, changed in document_cases:
-            with self.subTest(label=label), self.assertRaises(operations.EvidenceError):
+            with (pytest.raises(operations.EvidenceError),):
                 operations.evaluate_operations(changed, self.responses, self.candidate)
 
     def test_offline_operations_receipt_cannot_grant_final_acceptance(self):
@@ -2253,13 +2318,13 @@ class Issue123OperationsTest(unittest.TestCase):
         result = operations.evaluate_operations(
             document, self.responses, self.candidate
         )
-        self.assertFalse(result["final_acceptance"])
+        assert not (result["final_acceptance"])
         receipt_output = self.root / "offline-must-not-authorize.json"
         with (
             mock.patch.object(
                 operations, "candidate_evidence", return_value=self.candidate
             ),
-            self.assertRaisesRegex(operations.EvidenceError, "not authenticated"),
+            pytest.raises(operations.EvidenceError, match="not authenticated"),
         ):
             operations.verify_operations_live(
                 index_path=index_path,
@@ -2273,7 +2338,7 @@ class Issue123OperationsTest(unittest.TestCase):
                 receipt_output=receipt_output,
                 post_bundle_lease={},
             )
-        self.assertFalse(receipt_output.exists())
+        assert not (receipt_output.exists())
 
     def test_live_receipt_preflight_uses_authenticated_b1_roots_not_cli_aliases(self):
         source = self.root / "retained-source-b1"
@@ -2325,12 +2390,12 @@ class Issue123OperationsTest(unittest.TestCase):
                 "_capture_production_baseline_authority",
             ) as baseline,
         ):
+            # Candidate paths share one authenticated lease and patch stack; their
+            # cleanup assertions apply to the sequence as a whole.
             for candidate in candidates:
                 with (
-                    self.subTest(candidate=candidate.name),
-                    self.assertRaisesRegex(
-                        operations.EvidenceError,
-                        "overlaps protected evidence",
+                    pytest.raises(
+                        operations.EvidenceError, match="overlaps protected evidence"
                     ),
                 ):
                     with operations.open_verified_operations_live(
@@ -2345,10 +2410,10 @@ class Issue123OperationsTest(unittest.TestCase):
                         receipt_output=candidate,
                         post_bundle_lease=lease,
                     ):
-                        self.fail("overlapping receipt path was accepted")
+                        pytest.fail("overlapping receipt path was accepted")
         baseline.assert_not_called()
-        self.assertEqual(list(source.iterdir()), [])
-        self.assertEqual(list(reopened.iterdir()), [])
+        assert list(source.iterdir()) == []
+        assert list(reopened.iterdir()) == []
 
     def test_live_initial_authority_failure_leaves_no_receipt(self):
         source = self.root / "initial-authority-source-b1"
@@ -2393,9 +2458,7 @@ class Issue123OperationsTest(unittest.TestCase):
                 "_capture_production_baseline_authority",
                 side_effect=operations.EvidenceError("GitHub API request failed"),
             ),
-            self.assertRaisesRegex(
-                operations.EvidenceError, "GitHub API request failed"
-            ),
+            pytest.raises(operations.EvidenceError, match="GitHub API request failed"),
         ):
             with operations.open_verified_operations_live(
                 index_path=index_root / "index.json",
@@ -2409,8 +2472,8 @@ class Issue123OperationsTest(unittest.TestCase):
                 receipt_output=receipt_output,
                 post_bundle_lease=lease,
             ):
-                self.fail("initial authority failure was accepted")
-        self.assertFalse(receipt_output.exists())
+                pytest.fail("initial authority failure was accepted")
+        assert not (receipt_output.exists())
 
     def test_live_verification_is_same_process_authority_and_canonical_provenance(self):
         self._use_checked_final_issue()
@@ -2479,29 +2542,21 @@ class Issue123OperationsTest(unittest.TestCase):
             )
         fresh.assert_called_once_with(document)
         publication_check.assert_called_once()
-        self.assertGreaterEqual(baseline_lease.require_count, 4)
-        self.assertEqual(
-            receipt["schema_version"],
-            operations.LIVE_VERIFICATION_RECEIPT_SCHEMA_VERSION,
+        assert baseline_lease.require_count >= 4
+        assert (
+            receipt["schema_version"]
+            == operations.LIVE_VERIFICATION_RECEIPT_SCHEMA_VERSION
         )
-        self.assertEqual(
-            receipt["post_bundle_acknowledgment"],
-            self._acknowledgment(post_bundle_expectation),
+        assert receipt["post_bundle_acknowledgment"] == self._acknowledgment(
+            post_bundle_expectation
         )
-        self.assertEqual(receipt["baseline_validation"], baseline_validation)
-        self.assertTrue(receipt["same_process_live_accepted"])
-        self.assertFalse(receipt["receipt_replay_authority"])
-        self.assertEqual(
-            receipt["authority"], "same-process-authenticated-gh-live-verification"
-        )
-        self.assertEqual(len(receipt["queries"]), len(operations.RESPONSE_ROLE_ORDER))
-        self.assertEqual(
-            set(receipt["operations_index"]),
-            {"size_bytes", "sha256"},
-        )
-        self.assertEqual(
-            receipt_output.read_bytes(), operations._canonical_json_bytes(receipt)
-        )
+        assert receipt["baseline_validation"] == baseline_validation
+        assert receipt["same_process_live_accepted"]
+        assert not (receipt["receipt_replay_authority"])
+        assert receipt["authority"] == "same-process-authenticated-gh-live-verification"
+        assert len(receipt["queries"]) == len(operations.RESPONSE_ROLE_ORDER)
+        assert set(receipt["operations_index"]) == {"size_bytes", "sha256"}
+        assert receipt_output.read_bytes() == operations._canonical_json_bytes(receipt)
         serialized = receipt_output.read_text().lower()
         for forbidden in (
             "authorization",
@@ -2512,9 +2567,12 @@ class Issue123OperationsTest(unittest.TestCase):
             "password",
             "hunter2",
         ):
-            self.assertNotIn(forbidden, serialized)
+            assert forbidden not in serialized
 
-    def test_live_verification_rejects_stale_values_and_page_metadata(self):
+    @pytest.mark.parametrize(
+        "case_index", range(2), ids=("stale-value", "stale-page-metadata")
+    )
+    def test_live_verification_rejects_stale_values_and_page_metadata(self, case_index):
         self._use_checked_final_issue()
         _output, index_path, _scope = self._capture()
         document = json.loads(index_path.read_text())
@@ -2536,55 +2594,49 @@ class Issue123OperationsTest(unittest.TestCase):
             "etag"
         ] = '"stale-etag"'
         attacks.append(("metadata", copy.deepcopy(self.responses), stale_captures))
-        for label, responses, captures in attacks:
-            receipt_output = self.private_root / f"stale-{label}.json"
-            with (
-                mock.patch.object(
-                    operations, "candidate_evidence", return_value=self.candidate
-                ),
-                mock.patch.object(
-                    operations,
-                    "_fresh_github_capture",
-                    return_value=(responses, captures),
-                ),
-                mock.patch.object(
-                    operations, "_validate_downloaded_publication"
-                ) as publication_check,
-                self.subTest(label=label),
-                self.assertRaisesRegex(
-                    operations.EvidenceError, "stale or substituted"
-                ),
-            ):
-                source_bundle_root = self.root / f"stale-{label}-source-b1"
-                reopened_bundle_root = self.root / f"stale-{label}-reopened-b1"
-                source_bundle_root.mkdir()
-                reopened_bundle_root.mkdir()
-                operations._verify_operations_live_with_baseline(
-                    index_path=index_path,
-                    manifest=operations.DEFAULT_MANIFEST,
-                    publication_policy=self.root / "policy.json",
-                    publication_policy_sha256="e" * 64,
-                    publication_assets={
-                        role: self.root / name
-                        for role, name in operations.TECHNICAL_RELEASE_ASSETS.items()
-                    },
-                    receipt_output=receipt_output,
-                    post_bundle_expectation=post_bundle_expectation,
-                    source_bundle_root=source_bundle_root,
-                    reopened_bundle_root=reopened_bundle_root,
-                    baseline_lease=_SyntheticBaselineLease(self._baseline_validation()),
-                )
-            publication_check.assert_not_called()
-            self.assertFalse(receipt_output.exists())
+        label, responses, captures = attacks[case_index]
+        receipt_output = self.private_root / f"stale-{label}.json"
+        with (
+            mock.patch.object(
+                operations, "candidate_evidence", return_value=self.candidate
+            ),
+            mock.patch.object(
+                operations,
+                "_fresh_github_capture",
+                return_value=(responses, captures),
+            ),
+            mock.patch.object(
+                operations, "_validate_downloaded_publication"
+            ) as publication_check,
+            pytest.raises(operations.EvidenceError, match="stale or substituted"),
+        ):
+            source_bundle_root = self.root / f"stale-{label}-source-b1"
+            reopened_bundle_root = self.root / f"stale-{label}-reopened-b1"
+            source_bundle_root.mkdir()
+            reopened_bundle_root.mkdir()
+            operations._verify_operations_live_with_baseline(
+                index_path=index_path,
+                manifest=operations.DEFAULT_MANIFEST,
+                publication_policy=self.root / "policy.json",
+                publication_policy_sha256="e" * 64,
+                publication_assets={
+                    role: self.root / name
+                    for role, name in operations.TECHNICAL_RELEASE_ASSETS.items()
+                },
+                receipt_output=receipt_output,
+                post_bundle_expectation=post_bundle_expectation,
+                source_bundle_root=source_bundle_root,
+                reopened_bundle_root=reopened_bundle_root,
+                baseline_lease=_SyntheticBaselineLease(self._baseline_validation()),
+            )
+        publication_check.assert_not_called()
+        assert not receipt_output.exists()
 
     def test_strict_publication_validator_rejects_recomputed_forged_witness(self):
         from benchmarks import issue123_publication as publication
-        from tests.test_issue123_publication import Issue123PublicationTest
+        from tests.test_issue123_publication import issue123_publication_fixture
 
-        fixture = Issue123PublicationTest(
-            "test_offline_release_capture_and_receipt_are_independently_reopenable"
-        )
-        fixture.setUp()
+        fixture = issue123_publication_fixture()
         release_anchor = fixture._release_capture()
         receipt_raw = publication.finalize_publication(
             fixture.assets,
@@ -2655,10 +2707,8 @@ class Issue123OperationsTest(unittest.TestCase):
             asset_paths,
             operations_result,
         )
-        self.assertEqual(
-            validated["strict_four_byte_validator"], "same-process-invoked"
-        )
-        self.assertEqual(validated["release_identity_anchor"], release_anchor)
+        assert validated["strict_four_byte_validator"] == "same-process-invoked"
+        assert validated["release_identity_anchor"] == release_anchor
 
         forged = copy.deepcopy(receipt)
         for index, claim in enumerate(forged["execution_witness"]["claims"], start=1):
@@ -2686,7 +2736,7 @@ class Issue123OperationsTest(unittest.TestCase):
                 "validate_publication_receipt",
                 wraps=publication.validate_publication_receipt,
             ) as strict_validator,
-            self.assertRaises(operations.EvidenceError),
+            pytest.raises(operations.EvidenceError),
         ):
             operations._validate_downloaded_publication(
                 forged_envelope,
@@ -2697,19 +2747,16 @@ class Issue123OperationsTest(unittest.TestCase):
             )
         strict_validator.assert_called_once()
         strict_assets = strict_validator.call_args.args[1]
-        self.assertEqual(set(strict_assets), set(fixture.assets))
-        self.assertTrue(
-            all(strict_assets[name] == fixture.assets[name] for name in fixture.assets)
+        assert set(strict_assets) == set(fixture.assets)
+        assert all(
+            strict_assets[name] == fixture.assets[name] for name in fixture.assets
         )
-        self.assertEqual(
-            strict_validator.call_args.kwargs,
-            {
-                "expected_policy": fixture.policy,
-                "expected_release_identity": fixture.release_identity,
-                "expected_bindings": fixture.bindings,
-                "expected_assets": fixture.ledger,
-            },
-        )
+        assert strict_validator.call_args.kwargs == {
+            "expected_policy": fixture.policy,
+            "expected_release_identity": fixture.release_identity,
+            "expected_bindings": fixture.bindings,
+            "expected_assets": fixture.ledger,
+        }
 
         forged_policy = copy.deepcopy(forged)
         forged_policy["hashes"]["trusted_policy_sha256"] = "f" * 64
@@ -2721,7 +2768,7 @@ class Issue123OperationsTest(unittest.TestCase):
         forged_policy_result["publication"]["receipt_size_bytes"] = (
             forged_policy_envelope["size_bytes"]
         )
-        with self.assertRaisesRegex(operations.EvidenceError, "policy digest"):
+        with pytest.raises(operations.EvidenceError, match="policy digest"):
             operations._validate_downloaded_publication(
                 forged_policy_envelope,
                 policy_path,
@@ -2763,35 +2810,31 @@ class Issue123OperationsTest(unittest.TestCase):
                 parameters={"per_page": "100"},
                 paginated=True,
             )
-        self.assertEqual(json.loads(raw), [[{"id": 1}], [{"id": 2}]])
-        self.assertTrue(capture["pages"][0]["has_next"])
-        self.assertFalse(capture["pages"][1]["has_next"])
-        self.assertIsNone(capture["pages"][1]["next"])
-        self.assertEqual(
-            set(capture["pages"][0]["headers"]),
-            set(operations.SAFE_RESPONSE_HEADERS),
+        assert json.loads(raw) == [[{"id": 1}], [{"id": 2}]]
+        assert capture["pages"][0]["has_next"]
+        assert not (capture["pages"][1]["has_next"])
+        assert capture["pages"][1]["next"] is None
+        assert set(capture["pages"][0]["headers"]) == set(
+            operations.SAFE_RESPONSE_HEADERS
         )
-        self.assertNotIn("authorization", json.dumps(capture).lower())
-        self.assertNotIn("oauth", json.dumps(capture).lower())
-        self.assertNotIn("cookie", json.dumps(capture).lower())
+        assert "authorization" not in json.dumps(capture).lower()
+        assert "oauth" not in json.dumps(capture).lower()
+        assert "cookie" not in json.dumps(capture).lower()
         command = run.call_args.args[0]
-        self.assertEqual(
-            command[:5],
-            [
-                "gh",
-                "api",
-                "--hostname",
-                "github.com",
-                "repos/ruddyscent/gmes/issues/123/comments",
-            ],
-        )
-        self.assertIn("--include", command)
-        self.assertIn("--paginate", command)
-        self.assertIn("--jq", command)
-        self.assertIn("Accept: application/vnd.github+json", command)
-        self.assertIn("X-GitHub-Api-Version: 2022-11-28", command)
-        self.assertEqual(command[command.index("--jq") + 1], ".")
-        self.assertNotIn("--slurp", command)
+        assert command[:5] == [
+            "gh",
+            "api",
+            "--hostname",
+            "github.com",
+            "repos/ruddyscent/gmes/issues/123/comments",
+        ]
+        assert "--include" in command
+        assert "--paginate" in command
+        assert "--jq" in command
+        assert "Accept: application/vnd.github+json" in command
+        assert "X-GitHub-Api-Version: 2022-11-28" in command
+        assert command[command.index("--jq") + 1] == "."
+        assert "--slurp" not in command
 
     def test_github_api_direct_success_never_spawns_auth_status(self):
         completed = mock.Mock(
@@ -2812,9 +2855,9 @@ class Issue123OperationsTest(unittest.TestCase):
             raw, _capture = operations._github_api_capture(
                 "repos/ruddyscent/gmes/issues/123"
             )
-        self.assertEqual(json.loads(raw), {"id": 1})
-        self.assertEqual(run.call_count, 1)
-        self.assertEqual(run.call_args.args[0][:2], ["gh", "api"])
+        assert json.loads(raw) == {"id": 1}
+        assert run.call_count == 1
+        assert run.call_args.args[0][:2] == ["gh", "api"]
 
     def test_github_api_failure_preserves_original_cause_without_status(self):
         api_error = operations.subprocess.CalledProcessError(
@@ -2829,18 +2872,15 @@ class Issue123OperationsTest(unittest.TestCase):
                 "run",
                 side_effect=api_error,
             ) as run,
-            self.assertRaisesRegex(
-                operations.EvidenceError, "GitHub API request failed"
+            pytest.raises(
+                operations.EvidenceError, match="GitHub API request failed"
             ) as raised,
         ):
             operations._github_api_capture(endpoint)
-        self.assertIs(raised.exception.__cause__, api_error)
-        self.assertEqual(run.call_count, 1)
-        self.assertEqual(run.call_args_list[0].args[0][:2], ["gh", "api"])
-        self.assertEqual(
-            run.call_args_list[0].kwargs,
-            {"check": True, "capture_output": True},
-        )
+        assert raised.value.__cause__ is api_error
+        assert run.call_count == 1
+        assert run.call_args_list[0].args[0][:2] == ["gh", "api"]
+        assert run.call_args_list[0].kwargs == {"check": True, "capture_output": True}
 
     def test_capture_initial_api_failure_leaves_no_partial_output(self):
         output = self.root / "not-created" / "initial-api-failure-output"
@@ -2858,9 +2898,7 @@ class Issue123OperationsTest(unittest.TestCase):
                 "run",
                 side_effect=api_error,
             ) as run,
-            self.assertRaisesRegex(
-                operations.EvidenceError, "GitHub API request failed"
-            ),
+            pytest.raises(operations.EvidenceError, match="GitHub API request failed"),
         ):
             operations.capture_operations(
                 repository=operations.REPOSITORY,
@@ -2871,9 +2909,9 @@ class Issue123OperationsTest(unittest.TestCase):
                 publication_receipt=self.publication_receipt_path,
                 output_directory=output,
             )
-        self.assertEqual(run.call_count, 1)
-        self.assertFalse(output.exists())
-        self.assertFalse(output.parent.exists())
+        assert run.call_count == 1
+        assert not (output.exists())
+        assert not (output.parent.exists())
 
     def test_capture_late_api_failure_cleans_staging_and_allows_retry(self):
         output_name = "late-api-failure-output"
@@ -2883,14 +2921,14 @@ class Issue123OperationsTest(unittest.TestCase):
             if endpoint.endswith(f"/actions/runs/10/jobs"):
                 raise operations.EvidenceError("synthetic ci_jobs failure")
 
-        with self.assertRaisesRegex(operations.EvidenceError, "synthetic ci_jobs"):
+        with pytest.raises(operations.EvidenceError, match="synthetic ci_jobs"):
             self._capture(output_name, before_capture=fail_ci_jobs)
-        self.assertFalse(output.exists())
-        self.assertEqual(list(self.root.glob(f".{output_name}.*")), [])
+        assert not (output.exists())
+        assert list(self.root.glob(f".{output_name}.*")) == []
         retry_output, index_path, scope_path = self._capture(output_name)
-        self.assertEqual(retry_output, output)
-        self.assertTrue(index_path.is_file())
-        self.assertTrue(scope_path.is_file())
+        assert retry_output == output
+        assert index_path.is_file()
+        assert scope_path.is_file()
 
     def test_capture_rejects_destination_appearing_during_assembly(self):
         output_name = "appeared-during-assembly"
@@ -2902,12 +2940,10 @@ class Issue123OperationsTest(unittest.TestCase):
                 output.mkdir()
                 sentinel.write_text("foreign")
 
-        with self.assertRaisesRegex(
-            operations.EvidenceError, "appeared during assembly"
-        ):
+        with pytest.raises(operations.EvidenceError, match="appeared during assembly"):
             self._capture(output_name, before_capture=create_foreign_destination)
-        self.assertEqual(sentinel.read_text(), "foreign")
-        self.assertEqual(list(self.root.glob(f".{output_name}.*")), [])
+        assert sentinel.read_text() == "foreign"
+        assert list(self.root.glob(f".{output_name}.*")) == []
 
     def test_capture_rejects_dangling_destination_symlink_during_assembly(self):
         output_name = "dangling-output"
@@ -2918,13 +2954,11 @@ class Issue123OperationsTest(unittest.TestCase):
             if endpoint == "graphql":
                 output.symlink_to(target)
 
-        with self.assertRaisesRegex(
-            operations.EvidenceError, "appeared during assembly"
-        ):
+        with pytest.raises(operations.EvidenceError, match="appeared during assembly"):
             self._capture(output_name, before_capture=create_dangling_destination)
-        self.assertTrue(output.is_symlink())
-        self.assertEqual(output.readlink(), target)
-        self.assertEqual(list(self.root.glob(f".{output_name}.*")), [])
+        assert output.is_symlink()
+        assert output.readlink() == target
+        assert list(self.root.glob(f".{output_name}.*")) == []
 
     def test_github_api_graphql_command_pins_query_and_typed_pr(self):
         response = {
@@ -2962,29 +2996,24 @@ class Issue123OperationsTest(unittest.TestCase):
                     "number": operations.PULL_REQUEST_NUMBER,
                 },
             )
-        self.assertEqual(json.loads(raw), [response])
-        self.assertIsNone(
-            capture["pages"][0]["headers"]["x-github-api-version-selected"]
-        )
-        self.assertEqual(capture["pages"][0]["headers"]["link"], {})
+        assert json.loads(raw) == [response]
+        assert capture["pages"][0]["headers"]["x-github-api-version-selected"] is None
+        assert capture["pages"][0]["headers"]["link"] == {}
         command = run.call_args.args[0]
-        self.assertEqual(
-            command[:5],
-            ["gh", "api", "--hostname", "github.com", "graphql"],
-        )
-        self.assertIn("--include", command)
-        self.assertIn("--paginate", command)
-        self.assertIn("--jq", command)
-        self.assertIn("Accept: application/vnd.github+json", command)
-        self.assertIn("X-GitHub-Api-Version: 2022-11-28", command)
+        assert command[:5] == ["gh", "api", "--hostname", "github.com", "graphql"]
+        assert "--include" in command
+        assert "--paginate" in command
+        assert "--jq" in command
+        assert "Accept: application/vnd.github+json" in command
+        assert "X-GitHub-Api-Version: 2022-11-28" in command
         query_argument = next(item for item in command if item.startswith("query="))
         query = query_argument.removeprefix("query=")
-        self.assertIn("closingIssuesReferences(first:2)", query)
-        self.assertIn("reviews(first:1,states:", query)
-        self.assertIn("reviewThreads(first:100,after:$endCursor)", query)
+        assert "closingIssuesReferences(first:2)" in query
+        assert "reviews(first:1,states:" in query
+        assert "reviewThreads(first:100,after:$endCursor)" in query
         number_argument = f"number={operations.PULL_REQUEST_NUMBER}"
-        self.assertEqual(command[command.index(number_argument) - 1], "-F")
-        self.assertNotIn("--slurp", command)
+        assert command[command.index(number_argument) - 1] == "-F"
+        assert "--slurp" not in command
 
     def test_final_checklist_requires_exact_state_order_and_section(self):
         checked = {
@@ -2997,16 +3026,17 @@ class Issue123OperationsTest(unittest.TestCase):
             "updated_at": "2026-09-03T01:31:00Z",
         }
         observation = operations._validate_post_bundle_checklist(checked, "checked")
-        self.assertEqual(observation["state"], "checked")
+        assert observation["state"] == "checked"
         unchecked = {
             **checked,
             "body": checked["body"].replace("[x]", "[ ]"),
             "updated_at": "2026-09-03T01:30:00Z",
         }
-        self.assertEqual(
-            operations.checklist_transition_sha256(unchecked, "unchecked"),
-            operations.checklist_transition_sha256(checked, "checked"),
-        )
+        assert operations.checklist_transition_sha256(
+            unchecked, "unchecked"
+        ) == operations.checklist_transition_sha256(checked, "checked")
+        # These transition variants share the checked/unchecked digest pair and
+        # intentionally precede the exact checklist rejection matrix below.
         for label, changed_body in (
             ("unrelated-text", checked["body"] + "synthetic trailing line\n"),
             (
@@ -3026,17 +3056,15 @@ class Issue123OperationsTest(unittest.TestCase):
             ),
         ):
             changed = {**checked, "body": changed_body}
-            with self.subTest(transition=label):
-                try:
-                    changed_transition = operations.checklist_transition_sha256(
-                        changed, "checked"
-                    )
-                except operations.EvidenceError:
-                    continue
-                self.assertNotEqual(
-                    changed_transition,
-                    operations.checklist_transition_sha256(unchecked, "unchecked"),
+            try:
+                changed_transition = operations.checklist_transition_sha256(
+                    changed, "checked"
                 )
+            except operations.EvidenceError:
+                continue
+            assert changed_transition != operations.checklist_transition_sha256(
+                unchecked, "unchecked"
+            )
         attacks = {
             "missing": checked["body"].replace(
                 operations.FINAL_CHECKLIST_CHECKED[1], ""
@@ -3059,10 +3087,7 @@ class Issue123OperationsTest(unittest.TestCase):
             + operations.FINAL_CHECKLIST_CHECKED[0],
         }
         for label, body in attacks.items():
-            with (
-                self.subTest(label=label),
-                self.assertRaises(operations.EvidenceError),
-            ):
+            with (pytest.raises(operations.EvidenceError),):
                 operations._validate_post_bundle_checklist(
                     {**checked, "body": body}, "checked"
                 )
@@ -3082,10 +3107,10 @@ class Issue123OperationsTest(unittest.TestCase):
             checked,
             "checked",
         )
-        self.assertEqual(unchecked_digest, checked_digest)
-        self.assertNotEqual(
-            hashlib.sha256(operations._canonical_json_bytes(unchecked)).hexdigest(),
-            hashlib.sha256(operations._canonical_json_bytes(checked)).hexdigest(),
+        assert unchecked_digest == checked_digest
+        assert (
+            hashlib.sha256(operations._canonical_json_bytes(unchecked)).hexdigest()
+            != hashlib.sha256(operations._canonical_json_bytes(checked)).hexdigest()
         )
         attacks = {
             "number": lambda value: value.update(number=124),
@@ -3100,11 +3125,10 @@ class Issue123OperationsTest(unittest.TestCase):
         for label, mutate in attacks.items():
             changed = copy.deepcopy(checked)
             mutate(changed)
-            with self.subTest(label=label):
-                self.assertNotEqual(
-                    operations.checklist_transition_sha256(changed, "checked"),
-                    unchecked_digest,
-                )
+            assert (
+                operations.checklist_transition_sha256(changed, "checked")
+                != unchecked_digest
+            )
 
     def test_baseline_live_authority_rejects_missing_or_mutated_exact_bytes(self):
         authority, download_by_id = operations._synthetic_baseline_authority_fixture()
@@ -3165,13 +3189,12 @@ class Issue123OperationsTest(unittest.TestCase):
         ) as lease:
             result = lease.validation
             lease.require_unchanged()
-        self.assertEqual(len(result["asset_ledger"]), 2)
-        self.assertEqual(
-            [item["name"] for item in result["asset_ledger"]],
-            [asset.name for asset in authority.assets],
-        )
-        self.assertNotIn("salt", json.dumps(result).lower())
-        self.assertNotIn("hostname", json.dumps(result).lower())
+        assert len(result["asset_ledger"]) == 2
+        assert [item["name"] for item in result["asset_ledger"]] == [
+            asset.name for asset in authority.assets
+        ]
+        assert "salt" not in json.dumps(result).lower()
+        assert "hostname" not in json.dumps(result).lower()
 
         reordered_release = copy.deepcopy(release)
         reordered_release["assets"].reverse()
@@ -3183,10 +3206,7 @@ class Issue123OperationsTest(unittest.TestCase):
         reordered_download = mock.Mock(
             side_effect=lambda identifier: download_by_id[identifier]
         )
-        with self.assertRaisesRegex(
-            operations.EvidenceError,
-            "closure or order",
-        ):
+        with pytest.raises(operations.EvidenceError, match="closure or order"):
             operations._capture_baseline_authority(
                 code_authority=authority,
                 manifest_authority=authority,
@@ -3201,9 +3221,8 @@ class Issue123OperationsTest(unittest.TestCase):
             assets=authority.assets,
         )
         authority_capture = mock.Mock()
-        with self.assertRaisesRegex(
-            operations.EvidenceError,
-            "code, manifest, and authenticated B1",
+        with pytest.raises(
+            operations.EvidenceError, match="code, manifest, and authenticated B1"
         ):
             operations._capture_baseline_authority(
                 code_authority=authority,
@@ -3214,6 +3233,8 @@ class Issue123OperationsTest(unittest.TestCase):
             )
         authority_capture.assert_not_called()
 
+        # Each retained-tree mutation opens and closes a lease against the same
+        # authenticated authority capture; preserve that ordered lifecycle.
         for attack in (
             "append",
             "same-size",
@@ -3222,37 +3243,36 @@ class Issue123OperationsTest(unittest.TestCase):
             "mode",
             "extra-file",
         ):
-            with self.subTest(retained_attack=attack):
-                lease = operations._capture_baseline_authority(
-                    code_authority=authority,
-                    manifest_authority=authority,
-                    b1_authority=authority,
-                    api_capture=capture,
-                    asset_download=lambda identifier: download_by_id[identifier],
-                    observed_at="2026-09-03T02:00:00Z",
-                )
-                first = lease._root / authority.assets[0].name
-                original = first.read_bytes()
-                if attack == "append":
-                    first.write_bytes(original + b"x")
-                elif attack == "same-size":
-                    changed = bytearray(original)
-                    changed[0] ^= 1
-                    first.write_bytes(changed)
-                elif attack == "inode-replacement":
-                    replacement = first.with_name("replacement")
-                    replacement.write_bytes(original)
-                    replacement.replace(first)
-                elif attack == "symlink":
-                    first.unlink()
-                    first.symlink_to(authority.assets[1].name)
-                elif attack == "mode":
-                    first.chmod(0o640)
-                else:
-                    (lease._root / "unexpected-third-entry").write_bytes(b"x")
-                with self.assertRaises(operations.EvidenceError):
-                    lease.require_unchanged()
-                lease.close()
+            lease = operations._capture_baseline_authority(
+                code_authority=authority,
+                manifest_authority=authority,
+                b1_authority=authority,
+                api_capture=capture,
+                asset_download=lambda identifier: download_by_id[identifier],
+                observed_at="2026-09-03T02:00:00Z",
+            )
+            first = lease._root / authority.assets[0].name
+            original = first.read_bytes()
+            if attack == "append":
+                first.write_bytes(original + b"x")
+            elif attack == "same-size":
+                changed = bytearray(original)
+                changed[0] ^= 1
+                first.write_bytes(changed)
+            elif attack == "inode-replacement":
+                replacement = first.with_name("replacement")
+                replacement.write_bytes(original)
+                replacement.replace(first)
+            elif attack == "symlink":
+                first.unlink()
+                first.symlink_to(authority.assets[1].name)
+            elif attack == "mode":
+                first.chmod(0o640)
+            else:
+                (lease._root / "unexpected-third-entry").write_bytes(b"x")
+            with pytest.raises(operations.EvidenceError):
+                lease.require_unchanged()
+            lease.close()
 
         missing_release = copy.deepcopy(release)
         missing_release["assets"] = missing_release["assets"][:-1]
@@ -3262,10 +3282,7 @@ class Issue123OperationsTest(unittest.TestCase):
             operations._canonical_json_bytes(missing_release),
             {"fixture": "release"},
         )
-        with self.assertRaisesRegex(
-            operations.EvidenceError,
-            "closure or order",
-        ):
+        with pytest.raises(operations.EvidenceError, match="closure or order"):
             operations._capture_baseline_authority(
                 code_authority=authority,
                 manifest_authority=authority,
@@ -3277,7 +3294,7 @@ class Issue123OperationsTest(unittest.TestCase):
 
         mutated = dict(download_by_id)
         mutated[release_assets[1]["id"]] += b"mutated"
-        with self.assertRaisesRegex(operations.EvidenceError, "bytes differ"):
+        with pytest.raises(operations.EvidenceError, match="bytes differ"):
             operations._capture_baseline_authority(
                 code_authority=authority,
                 manifest_authority=authority,
@@ -3285,34 +3302,39 @@ class Issue123OperationsTest(unittest.TestCase):
                 api_capture=capture,
                 asset_download=lambda identifier: mutated[identifier],
             )
-        with self.assertRaisesRegex(operations.EvidenceError, "unsupported"):
+        with pytest.raises(operations.EvidenceError, match="unsupported"):
             operations._capture_production_baseline_authority(
                 operations.DEFAULT_MANIFEST,
                 authority="immutable-mirror",
                 b1_authority=operations.PRODUCTION_BASELINE_AUTHORITY_SET,
             )
 
-    def test_live_receipt_privacy_scan_is_recursive(self):
+    @pytest.mark.parametrize(
+        "unsafe",
+        (
+            {"nested": [{"private_path": "/private/fixture"}]},
+            {"nested": [{"value": "github_pat_" + "syntheticinvalid" * 2}]},
+        ),
+        ids=("private-path", "token-shaped-value"),
+    )
+    def test_live_receipt_privacy_scan_is_recursive(self, unsafe):
         operations._assert_provenance_receipt_safe(
             {
                 "safe_commitment_sha256": "a" * 64,
                 "nested": [{"role": "synthetic-role", "size_bytes": 1}],
             }
         )
-        for unsafe in (
-            {"nested": [{"private_path": "/private/fixture"}]},
-            {"nested": [{"value": "github_pat_" + "syntheticinvalid" * 2}]},
-        ):
-            with self.assertRaises(operations.EvidenceError):
-                operations._assert_provenance_receipt_safe(unsafe)
+        with pytest.raises(operations.EvidenceError):
+            operations._assert_provenance_receipt_safe(unsafe)
 
     def test_verify_live_cli_uses_authenticated_b1_lease_not_caller_json(self):
         from benchmarks import issue123_privacy as privacy
-        from tests.test_issue123_bundle import Issue123BundleTest
+        from tests.test_issue123_bundle import issue123_bundle_fixture
 
-        bundle = Issue123BundleTest()
-        bundle.setUp()
-        self.addCleanup(bundle.doCleanups)
+        with issue123_bundle_fixture() as bundle:
+            self._verify_live_cli_with_bundle(bundle, privacy)
+
+    def _verify_live_cli_with_bundle(self, bundle, privacy):
         bundle.candidate = copy.deepcopy(self.candidate)
         runtime_raw_by_role = {
             role: completion._compact_canonical_json_bytes(
@@ -3377,8 +3399,8 @@ class Issue123OperationsTest(unittest.TestCase):
             runtime_raw_by_role=runtime_raw_by_role,
             issue_document=self.responses["issue_123"],
         )
-        self.assertEqual(b1_runtime_records, runtime_records)
-        self.assertEqual(b1_scope_artifacts, scope_artifacts)
+        assert b1_runtime_records == runtime_records
+        assert b1_scope_artifacts == scope_artifacts
         b1_reopened_root = bundle.directory / "operations-cli-b1-reopened"
         shutil.copytree(b1_source.parent, b1_reopened_root)
         b1_reopened = b1_reopened_root / "completion-index.json"
@@ -3487,17 +3509,17 @@ class Issue123OperationsTest(unittest.TestCase):
             ),
         ):
             status = operations.main(arguments)
-        self.assertEqual(status, 0)
+        assert status == 0
         receipt = json.loads(receipt_path.read_bytes())
-        self.assertEqual(
-            receipt["schema_version"],
-            operations.LIVE_VERIFICATION_RECEIPT_SCHEMA_VERSION,
+        assert (
+            receipt["schema_version"]
+            == operations.LIVE_VERIFICATION_RECEIPT_SCHEMA_VERSION
         )
-        self.assertEqual(
-            receipt["baseline_validation"]["release_identity"]["tag_name"],
-            operations.BASELINE_RELEASE_TAG,
+        assert (
+            receipt["baseline_validation"]["release_identity"]["tag_name"]
+            == operations.BASELINE_RELEASE_TAG
         )
-        self.assertTrue(receipt["same_process_live_accepted"])
+        assert receipt["same_process_live_accepted"]
 
         stderr = io.StringIO()
         stdout = io.StringIO()
@@ -3508,11 +3530,31 @@ class Issue123OperationsTest(unittest.TestCase):
             old_status = operations._cli(
                 [*arguments, "--post-bundle-expectation", "forbidden.json"]
             )
-        self.assertEqual(old_status, 2)
-        self.assertEqual(stderr.getvalue(), "issue123-operations-usage-failed\n")
-        self.assertEqual(stdout.getvalue(), "")
+        assert old_status == 2
+        assert stderr.getvalue() == "issue123-operations-usage-failed\n"
+        assert stdout.getvalue() == ""
 
-    def test_operations_cli_failure_tokens_never_render_private_text(self):
+    @pytest.mark.parametrize(
+        ("command", "token", "boundary"),
+        (
+            ("capture", "issue123-operations-capture-failed\n", operations.main),
+            ("capture", "issue123-operations-capture-failed\n", operations._cli),
+            (
+                "verify-live",
+                "issue123-operations-verify-live-failed\n",
+                operations.main,
+            ),
+            (
+                "verify-live",
+                "issue123-operations-verify-live-failed\n",
+                operations._cli,
+            ),
+        ),
+        ids=("capture-main", "capture-cli", "verify-live-main", "verify-live-cli"),
+    )
+    def test_operations_cli_failure_tokens_never_render_private_text(
+        self, command, token, boundary
+    ):
         marker = (
             "/tmp/synthetic-private.invalid/identity "
             + "salt="
@@ -3521,31 +3563,32 @@ class Issue123OperationsTest(unittest.TestCase):
             + "cd" * 32
             + " raw-body=fixture-private-value"
         )
-        for command, token in (
-            ("capture", "issue123-operations-capture-failed\n"),
-            ("verify-live", "issue123-operations-verify-live-failed\n"),
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(
+                operations,
+                "_main",
+                side_effect=operations.EvidenceError(marker),
+            ),
+            mock.patch("sys.stdout", new=stdout),
+            mock.patch("sys.stderr", new=stderr),
         ):
-            for boundary in (operations.main, operations._cli):
-                stdout = io.StringIO()
-                stderr = io.StringIO()
-                with (
-                    self.subTest(command=command, boundary=boundary.__name__),
-                    mock.patch.object(
-                        operations,
-                        "_main",
-                        side_effect=operations.EvidenceError(marker),
-                    ),
-                    mock.patch("sys.stdout", new=stdout),
-                    mock.patch("sys.stderr", new=stderr),
-                ):
-                    status = boundary([command])
-                self.assertEqual(status, 2)
-                self.assertEqual(stdout.getvalue(), "")
-                self.assertEqual(stderr.getvalue(), token)
-                rendered = stdout.getvalue() + stderr.getvalue()
-                self.assertNotIn("Traceback", rendered)
-                self.assertNotIn(marker, rendered)
+            status = boundary([command])
+        assert status == 2
+        assert stdout.getvalue() == ""
+        assert stderr.getvalue() == token
+        rendered = stdout.getvalue() + stderr.getvalue()
+        assert "Traceback" not in rendered
+        assert marker not in rendered
 
 
-if __name__ == "__main__":
-    unittest.main()
+@contextmanager
+def issue123_operations_fixture(fixture=None):
+    """Yield an operations fixture with LIFO cleanup for patches and temp roots."""
+
+    with ExitStack() as stack:
+        if fixture is None:
+            fixture = _Issue123OperationsFixture()
+        fixture.initialize(stack)
+        yield fixture

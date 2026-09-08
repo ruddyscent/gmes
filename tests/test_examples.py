@@ -1,17 +1,18 @@
-import unittest
 from pathlib import Path
 from subprocess import run
 from sys import executable
 from textwrap import dedent
 
 import numpy as np
+import pytest
 
 from examples.air2d import DISPLAY_COMPONENTS
 from examples.air2d import make_simulation as make_air2d
 from examples.slab_waveguide import make_simulation
+from tests.test_torch_fdtd import restore_torch_runtime as restore_torch_runtime
 
 
-class ReadmeQuickStartTest(unittest.TestCase):
+class TestReadmeQuickStart:
     def test_air2d_base_simulation_runs_without_optional_output(self):
         script = dedent("""
             import sys
@@ -41,33 +42,44 @@ class ReadmeQuickStartTest(unittest.TestCase):
             capture_output=True,
             text=True,
         )
-        self.assertEqual(result.returncode, 0, result.stderr)
+        assert result.returncode == 0, result.stderr
 
-    def test_air2d_snapshot_has_display_components(self):
+    @pytest.mark.parametrize(
+        "component",
+        DISPLAY_COMPONENTS,
+        ids=[component.__name__ for component in DISPLAY_COMPONENTS],
+    )
+    def test_air2d_snapshot_has_display_components(self, component):
         simulation = make_air2d(verbose=False)
         simulation.step()
         snapshot = simulation.host_snapshot()
-        for component in DISPLAY_COMPONENTS:
-            with self.subTest(component=component.__name__):
-                self.assertGreater(snapshot[component.__name__].size, 0)
+        assert snapshot[component.__name__].size > 0
 
 
-class SlabWaveguideExampleTest(unittest.TestCase):
-    def test_finite_slab_covers_the_intended_waveguide(self):
+class TestSlabWaveguideExample:
+    @pytest.mark.parametrize(
+        ("point", "expected_eps"),
+        (
+            ((-6, 0, 0), 12),
+            ((0, 0, 0), 12),
+            ((6, 0, 0), 12),
+            ((-6, 0.6, 0), 1),
+            ((0, 0.6, 0), 1),
+            ((6, 0.6, 0), 1),
+        ),
+        ids=(
+            "left-slab",
+            "center-slab",
+            "right-slab",
+            "left-air",
+            "center-air",
+            "right-air",
+        ),
+    )
+    def test_finite_slab_covers_the_intended_waveguide(self, point, expected_eps):
         simulation = make_simulation(verbose=False)
         slab = simulation.geometry[1]
 
-        self.assertTrue(np.isfinite(slab.size).all())
-        for point in ((-6, 0, 0), (0, 0, 0), (6, 0, 0)):
-            with self.subTest(point=point):
-                material, _ = simulation.geom_tree.material_of_point(point)
-                self.assertEqual(material.eps_inf, 12)
-
-        for point in ((-6, 0.6, 0), (0, 0.6, 0), (6, 0.6, 0)):
-            with self.subTest(point=point):
-                material, _ = simulation.geom_tree.material_of_point(point)
-                self.assertEqual(material.eps_inf, 1)
-
-
-if __name__ == "__main__":
-    unittest.main()
+        assert np.isfinite(slab.size).all()
+        material, _ = simulation.geom_tree.material_of_point(point)
+        assert material.eps_inf == expected_eps

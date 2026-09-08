@@ -50,4 +50,4 @@ jobs:
             -e .
           python -m pip check
       - name: Run tests
-        run: python -m unittest discover -v
+        run: python -m pytest -v

@@ -6,11 +6,11 @@ import json
 import sys
 import tempfile
 import types
-import unittest
 from pathlib import Path
 from unittest import mock
 
 import numpy as np
+import pytest
 
 _HELPER_PATH = Path(__file__).parents[1] / "benchmarks" / "package_cutover.py"
 _SPEC = importlib.util.spec_from_file_location("package_cutover", _HELPER_PATH)
@@ -41,31 +41,30 @@ class _Distribution:
         return self.root
 
 
-class PackageCutoverUnitTest(unittest.TestCase):
+class TestPackageCutoverUnit:
     """These tests use fake metadata only; they are not installed-artifact proof."""
 
-    def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
-        self.installed = self.root / "site-packages" / "gmes"
-        self.installed.mkdir(parents=True)
-        (self.installed / "__init__.py").write_text("\n")
-        self.checkout = self.root / "checkout"
-        self.checkout.mkdir()
-        self.archive = self.root / "gmes-0.10.0-py3-none-any.whl"
-        self.archive.write_bytes(b"unit-only archive")
+    @pytest.fixture(autouse=True)
+    def _temporary_workspace(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.root = Path(directory)
+            self.installed = self.root / "site-packages" / "gmes"
+            self.installed.mkdir(parents=True)
+            (self.installed / "__init__.py").write_text("\n")
+            self.checkout = self.root / "checkout"
+            self.checkout.mkdir()
+            self.archive = self.root / "gmes-0.10.0-py3-none-any.whl"
+            self.archive.write_bytes(b"unit-only archive")
+            yield
 
     def test_provenance_requires_exact_pep610_archive_hash_and_scrubs_url(self):
         digest = hashlib.sha256(self.archive.read_bytes()).hexdigest()
         result = cutover.installed_provenance(
             self.archive, distribution=_Distribution(self.installed, digest)
         )
-        self.assertEqual(result["archive"]["sha256"], digest)
-        self.assertEqual(
-            result["direct_url"]["url"], "https://example.invalid/gmes.whl"
-        )
-        with self.assertRaisesRegex(cutover.CutoverError, "does not match"):
+        assert result["archive"]["sha256"] == digest
+        assert result["direct_url"]["url"] == "https://example.invalid/gmes.whl"
+        with pytest.raises(cutover.CutoverError, match="does not match"):
             cutover.installed_provenance(
                 self.archive, distribution=_Distribution(self.installed, "0" * 64)
             )
@@ -73,15 +72,12 @@ class PackageCutoverUnitTest(unittest.TestCase):
     def test_origin_validation_rejects_checkout_and_native_gmes_modules(self):
         module = types.ModuleType("gmes")
         module.__file__ = str(self.installed / "__init__.py")
-        self.assertEqual(
-            cutover.verify_module_origins(
-                self.installed, (self.checkout,), modules={"gmes": module}
-            ),
-            {"gmes": str((self.installed / "__init__.py").resolve())},
-        )
+        assert cutover.verify_module_origins(
+            self.installed, (self.checkout,), modules={"gmes": module}
+        ) == {"gmes": str((self.installed / "__init__.py").resolve())}
         module.__file__ = str(self.checkout / "gmes.py")
         (self.checkout / "gmes.py").write_text("\n")
-        with self.assertRaisesRegex(cutover.CutoverError, "outside"):
+        with pytest.raises(cutover.CutoverError, match="outside"):
             cutover.verify_module_origins(
                 self.installed, (self.checkout,), modules={"gmes": module}
             )
@@ -91,7 +87,7 @@ class PackageCutoverUnitTest(unittest.TestCase):
         native.__file__ = str(native_path)
         base = types.ModuleType("gmes")
         base.__file__ = str(self.installed / "__init__.py")
-        with self.assertRaisesRegex(cutover.CutoverError, "native"):
+        with pytest.raises(cutover.CutoverError, match="native"):
             cutover.verify_module_origins(
                 self.installed,
                 (self.checkout,),
@@ -99,8 +95,8 @@ class PackageCutoverUnitTest(unittest.TestCase):
             )
 
     def test_cpu_contract_and_two_gpu_device_requirements_are_fail_closed(self):
-        self.assertIsNone(cutover._require_device("cpu", 0))
-        with self.assertRaisesRegex(cutover.CutoverError, "requires --required"):
+        assert cutover._require_device("cpu", 0) is None
+        with pytest.raises(cutover.CutoverError, match="requires --required"):
             cutover._require_device("cpu", 1)
         fake_torch = types.SimpleNamespace(
             cuda=types.SimpleNamespace(
@@ -111,8 +107,8 @@ class PackageCutoverUnitTest(unittest.TestCase):
         with mock.patch.object(
             cutover.importlib, "import_module", return_value=fake_torch
         ):
-            self.assertIs(cutover._require_device("cuda:0", 2), fake_torch)
-            with self.assertRaisesRegex(cutover.CutoverError, "exactly two"):
+            assert cutover._require_device("cuda:0", 2) is fake_torch
+            with pytest.raises(cutover.CutoverError, match="exactly two"):
                 cutover._require_device("cuda:0", 3)
 
     def test_two_gpu_result_requires_real_rank_ownership_and_replay_evidence(self):
@@ -149,10 +145,10 @@ class PackageCutoverUnitTest(unittest.TestCase):
             "informational_speedup": 0.5,
         }
         validated = cutover._validate_two_gpu_result(result, provenance)
-        self.assertEqual(validated["device_count"], 2)
-        self.assertEqual(validated["single_vs_two_maximum_error"], 0.0)
+        assert validated["device_count"] == 2
+        assert validated["single_vs_two_maximum_error"] == 0.0
         ranks[1]["device"] = "cuda:0"
-        with self.assertRaisesRegex(cutover.CutoverError, "ownership"):
+        with pytest.raises(cutover.CutoverError, match="ownership"):
             cutover._validate_two_gpu_result(result, provenance)
 
     def test_field_comparison_rejects_nonfinite_later_component(self):
@@ -162,19 +158,19 @@ class PackageCutoverUnitTest(unittest.TestCase):
         }
         altered = {name: value.copy() for name, value in fields.items()}
         altered["Hz"][0, 0, 0] = np.nan
-        with self.assertRaisesRegex(cutover.CutoverError, "Hz.*non-finite"):
+        with pytest.raises(cutover.CutoverError, match="Hz.*non-finite"):
             cutover._maximum_field_error(fields, altered)
         altered["Hz"] = np.zeros((1, 2, 2), dtype=np.float64)
-        with self.assertRaisesRegex(cutover.CutoverError, "Hz.*mismatched shapes"):
+        with pytest.raises(cutover.CutoverError, match="Hz.*mismatched shapes"):
             cutover._maximum_field_error(fields, altered)
 
     def test_evidence_record_uses_exclusive_creation(self):
         evidence = self.root / "evidence"
         first = {"schema": cutover.EVIDENCE_SCHEMA, "first": True}
         path = cutover._write_record(evidence, first)
-        with self.assertRaisesRegex(cutover.CutoverError, "already exists"):
+        with pytest.raises(cutover.CutoverError, match="already exists"):
             cutover._write_record(evidence, {"schema": cutover.EVIDENCE_SCHEMA})
-        self.assertEqual(json.loads(path.read_text()), first)
+        assert json.loads(path.read_text()) == first
 
     def test_main_preserves_failed_worker_output_in_evidence(self):
         evidence = self.root / "worker-evidence"
@@ -203,9 +199,9 @@ class PackageCutoverUnitTest(unittest.TestCase):
             "run_cutover",
             side_effect=cutover.WorkerCutoverError("worker failed", worker),
         ):
-            self.assertEqual(cutover.main(request), 1)
+            assert cutover.main(request) == 1
         record = json.loads((evidence / cutover.EVIDENCE_FILENAME).read_text())
-        self.assertEqual(record["result"]["worker"], worker)
+        assert record["result"]["worker"] == worker
 
     def test_main_records_real_outcome_without_claiming_publication(self):
         evidence = self.root / "evidence"
@@ -228,13 +224,9 @@ class PackageCutoverUnitTest(unittest.TestCase):
             "run_cutover",
             return_value={"schema": cutover.EVIDENCE_SCHEMA, "passed": True},
         ):
-            self.assertEqual(cutover.main(request), 0)
+            assert cutover.main(request) == 0
         record = json.loads((evidence / cutover.EVIDENCE_FILENAME).read_text())
-        self.assertEqual(record["status"], "passed")
-        self.assertEqual(record["exit_code"], 0)
-        self.assertIn("--candidate-label", record["command"]["argv"])
-        self.assertIn("not publication evidence", record["scope"])
-
-
-if __name__ == "__main__":
-    unittest.main()
+        assert record["status"] == "passed"
+        assert record["exit_code"] == 0
+        assert "--candidate-label" in record["command"]["argv"]
+        assert "not publication evidence" in record["scope"]

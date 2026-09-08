@@ -7,9 +7,10 @@ import hashlib
 import json
 import tempfile
 import types
-import unittest
 from pathlib import Path
 from unittest import mock
+
+import pytest
 
 from benchmarks import torch_lowered_materialization as lowering
 
@@ -51,7 +52,7 @@ class _JoinAsyncCompile(_IdentityAsyncCompile):
         return tuner
 
 
-class WrapperCallJoinTest(unittest.TestCase):
+class TestWrapperCallJoin:
     def _exercise(self, mode="normal"):
         from torch._inductor.runtime.compile_tasks import _reload_python_module
         from torch._inductor.runtime.triton_heuristics import CachingAutotuner
@@ -172,44 +173,37 @@ call = runner.call
                                 else:
                                     dispatcher(region, function)
                 except a.AttestationError, RuntimeError:
-                    self.assertNotEqual(mode, "normal")
-            self.assertIsNone(observer._call_join)
-            self.assertIsNone(join.active)
+                    assert (mode) != ("normal")
+            assert (observer._call_join) is None
+            assert (join.active) is None
             report = join.diagnostic()
-            self.assertEqual(report["status"], "incomplete")
+            assert (report["status"]) == ("incomplete")
             if mode == "normal":
-                self.assertEqual(len(report["events"]), 5)
-                self.assertEqual(
-                    [item["region"] for item in report["events"]],
-                    ["magnetic_half"] + ["electric_half"] * 4,
+                assert (len(report["events"])) == (5)
+                assert ([item["region"] for item in report["events"]]) == (
+                    ["magnetic_half"] + ["electric_half"] * 4
                 )
-                self.assertEqual(set(join.completed), set(lowering.COMPILED_REGIONS))
-                self.assertTrue(
-                    all(item["host_returned_normally"] for item in report["events"])
-                )
+                assert (set(join.completed)) == (set(lowering.COMPILED_REGIONS))
+                assert all(item["host_returned_normally"] for item in report["events"])
                 encoded = json.dumps(report)
-                self.assertNotIn(raw, encoded)
-                self.assertNotIn('_id"', encoded)
-                self.assertIn(
-                    "bound-method-alias-invocation-provenance", report["unverified"]
+                assert (raw) not in (encoded)
+                assert ('_id"') not in (encoded)
+                assert ("bound-method-alias-invocation-provenance") in (
+                    report["unverified"]
                 )
-                self.assertIn(
-                    "silent-or-additional-runner-invocations", report["unverified"]
+                assert ("silent-or-additional-runner-invocations") in (
+                    report["unverified"]
                 )
-                self.assertIn(
-                    "total-runner-entry-exit-cardinality", report["unverified"]
-                )
+                assert ("total-runner-entry-exit-cardinality") in (report["unverified"])
             elif mode != "silent-second-invocation":
-                self.assertEqual(report["events"], [])
-                self.assertTrue(report["reasons"])
+                assert (report["events"]) == ([])
+                assert report["reasons"]
             else:
-                self.assertEqual(len(report["events"]), 5)
-                self.assertIn(
-                    "silent-or-additional-runner-invocations", report["unverified"]
+                assert (len(report["events"])) == (5)
+                assert ("silent-or-additional-runner-invocations") in (
+                    report["unverified"]
                 )
-                self.assertIn(
-                    "total-runner-entry-exit-cardinality", report["unverified"]
-                )
+                assert ("total-runner-entry-exit-cardinality") in (report["unverified"])
 
     def test_silent_additional_runner_invocation_does_not_claim_cardinality(self):
         self._exercise("silent-second-invocation")
@@ -231,8 +225,7 @@ call = runner.call
             "nontarget-target",
             "no-runner",
         ):
-            with self.subTest(mode=mode):
-                self._exercise(mode)
+            self._exercise(mode)
 
     def test_default_output_capture_does_not_install_module_or_join_hooks(self):
         from torch._inductor.graph import GraphLowering
@@ -240,12 +233,12 @@ call = runner.call
         original = GraphLowering._compile_to_module_lines
         sources = []
         with lowering._capturing_output_code(sources.append):
-            self.assertIs(GraphLowering._compile_to_module_lines, original)
+            assert (GraphLowering._compile_to_module_lines) is (original)
             GraphLowering.save_output_code("source")
-        self.assertEqual(sources, ["source"])
+        assert (sources) == (["source"])
 
 
-class CaseProducerReceiptTest(unittest.TestCase):
+class TestCaseProducerReceipt:
     def _construct_all_material(self, *, descriptor_name=None, courant_ratio=None):
         import gmes
         import gmes.torch_fdtd as torch_fdtd
@@ -288,66 +281,63 @@ class CaseProducerReceiptTest(unittest.TestCase):
                 **arguments,
             )
         receipt.finalize(simulation)
-        self.assertEqual(
-            originals,
+        assert (originals) == (
             (
                 torch_fdtd.TorchSimulation.__init__,
                 torch_fdtd.TorchSimulationPlan.__init__,
                 torch_fdtd.TorchSimulation._compute_plan_identity,
                 torch_fdtd.TorchSimulation._compute_compile_cache_key,
                 torch_fdtd._compile_fullgraph,
-            ),
+            )
         )
         return simulation, receipt
 
     def test_real_lazy_cpu_constructor_records_all_material_producers(self):
         simulation, receipt = self._construct_all_material()
-        self.assertTrue(receipt.valid_for(simulation), receipt.reasons)
-        self.assertIs(receipt.plan, simulation.plan)
-        self.assertIs(receipt.plan, simulation.state.plan)
-        self.assertEqual(receipt.plan_digest, simulation.plan_identity)
-        self.assertEqual(receipt.key, simulation.compile_cache_key)
-        self.assertEqual(
-            hashlib.sha256(receipt.preimage_bytes).hexdigest(),
-            simulation.compile_cache_key,
+        assert receipt.valid_for(simulation)
+        assert (receipt.plan) is (simulation.plan)
+        assert (receipt.plan) is (simulation.state.plan)
+        assert (receipt.plan_digest) == (simulation.plan_identity)
+        assert (receipt.key) == (simulation.compile_cache_key)
+        assert (hashlib.sha256(receipt.preimage_bytes).hexdigest()) == (
+            simulation.compile_cache_key
         )
-        self.assertEqual(set(receipt.halves), set(lowering.COMPILED_REGIONS))
+        assert (set(receipt.halves)) == (set(lowering.COMPILED_REGIONS))
         report = receipt.diagnostic()
         encoded = json.dumps(report)
-        self.assertEqual(report["status"], "incomplete")
-        self.assertNotIn("all-material-2d", encoded)
-        self.assertNotIn("_compile_cache_key_preimage", encoded)
-        self.assertNotIn("source-file-read-provenance", report["reasons"])
-        self.assertIn("inductor-cache-input-authentication", report["unverified"])
-        self.assertEqual(
-            report["scope"],
-            "constructor-object-plan-and-gmes-specialization-producers-v1",
+        assert (report["status"]) == ("incomplete")
+        assert ("all-material-2d") not in (encoded)
+        assert ("_compile_cache_key_preimage") not in (encoded)
+        assert ("source-file-read-provenance") not in (report["reasons"])
+        assert ("inductor-cache-input-authentication") in (report["unverified"])
+        assert (report["scope"]) == (
+            "constructor-object-plan-and-gmes-specialization-producers-v1"
         )
-        self.assertIn("caller_descriptor_sha256", report)
+        assert ("caller_descriptor_sha256") in (report)
 
     def test_changed_descriptor_and_effective_courant_stay_explicitly_unverified(self):
         simulation, receipt = self._construct_all_material(
             descriptor_name="report-only-impostor", courant_ratio=0.5
         )
-        self.assertTrue(receipt.valid_for(simulation), receipt.reasons)
-        self.assertEqual(receipt.plan.dt, simulation.plan.dt)
+        assert receipt.valid_for(simulation)
+        assert (receipt.plan.dt) == (simulation.plan.dt)
         for gap in (
             "descriptor-to-builder-output-binding",
             "effective-source-transform-provenance",
             "effective-constructor-parameter-binding",
             "producer-callback-cardinality-order",
         ):
-            self.assertIn(gap, receipt.diagnostic()["unverified"])
+            assert (gap) in (receipt.diagnostic()["unverified"])
 
     def test_cross_wiring_and_post_capture_preimage_replacement_reject(self):
         simulation, receipt = self._construct_all_material()
-        self.assertFalse(receipt.valid_for(object()))
+        assert not (receipt.valid_for(object()))
         simulation._compile_cache_key_preimage = ("foreign",)
         simulation.compile_cache_key = hashlib.sha256(
             repr(("foreign",)).encode()
         ).hexdigest()
-        self.assertFalse(receipt.valid_for(simulation))
-        self.assertIn("producer-specialization-digest-differs", receipt.reasons)
+        assert not (receipt.valid_for(simulation))
+        assert ("producer-specialization-digest-differs") in (receipt.reasons)
 
     def test_constructor_exception_restores_all_receipt_hooks(self):
         import gmes
@@ -363,7 +353,7 @@ class CaseProducerReceiptTest(unittest.TestCase):
             spec, space, geometry, sources, bloch, runtime
         )
         original = torch_fdtd.TorchSimulation.__init__
-        with self.assertRaises(TypeError):
+        with pytest.raises(TypeError):
             with receipt:
                 gmes.TorchSimulation(
                     space=space,
@@ -372,8 +362,8 @@ class CaseProducerReceiptTest(unittest.TestCase):
                     bloch=bloch,
                     runtime=object(),
                 )
-        self.assertIs(torch_fdtd.TorchSimulation.__init__, original)
-        self.assertIn("producer-construction-raised", receipt.reasons)
+        assert (torch_fdtd.TorchSimulation.__init__) is (original)
+        assert ("producer-construction-raised") in (receipt.reasons)
 
     def _synthetic_reports(self):
         import gmes
@@ -382,7 +372,7 @@ class CaseProducerReceiptTest(unittest.TestCase):
         evidence = lowering._ReturnedModuleEvidence(receipt)
         with tempfile.TemporaryDirectory() as raw:
             for region in lowering.COMPILED_REGIONS:
-                graph, module = ReturnedModuleEvidenceTest()._load(Path(raw), region)
+                graph, module = TestReturnedModuleEvidence()._load(Path(raw), region)
                 evidence.capture(
                     graph,
                     module,
@@ -421,36 +411,33 @@ class CaseProducerReceiptTest(unittest.TestCase):
 
     def test_receipt_revalidation_suppresses_stale_module_and_join_projection(self):
         for mode in ("normal", "preimage", "explicit", "plan", "modules-only"):
-            with self.subTest(mode=mode):
-                for simulation, receipt, evidence, join in self._synthetic_reports():
-                    if mode == "preimage":
-                        simulation._compile_cache_key_preimage = ("foreign",)
-                        simulation.compile_cache_key = hashlib.sha256(
-                            repr(("foreign",)).encode()
-                        ).hexdigest()
-                    elif mode == "explicit":
-                        receipt.reasons.append("producer-specialization-digest-differs")
-                    elif mode == "plan":
-                        simulation.plan = object()
-                    module_report = evidence.diagnostic()
-                    if mode == "normal":
-                        self.assertEqual(len(module_report["modules"]), 2)
-                        self.assertEqual(len(join.diagnostic()["events"]), 5)
-                    elif mode == "modules-only":
-                        self.assertEqual(len(module_report["modules"]), 2)
-                    else:
-                        self.assertEqual(module_report["modules"], [])
-                        self.assertIn(
-                            "producer-receipt-revalidation-failed",
-                            module_report["reasons"],
-                        )
-                        join_report = join.diagnostic()
-                        self.assertEqual(join_report["modules"], [])
-                        self.assertEqual(join_report["events"], [])
-                        self.assertIn(
-                            "producer-receipt-revalidation-failed",
-                            join_report["reasons"],
-                        )
+            for simulation, receipt, evidence, join in self._synthetic_reports():
+                if mode == "preimage":
+                    simulation._compile_cache_key_preimage = ("foreign",)
+                    simulation.compile_cache_key = hashlib.sha256(
+                        repr(("foreign",)).encode()
+                    ).hexdigest()
+                elif mode == "explicit":
+                    receipt.reasons.append("producer-specialization-digest-differs")
+                elif mode == "plan":
+                    simulation.plan = object()
+                module_report = evidence.diagnostic()
+                if mode == "normal":
+                    assert (len(module_report["modules"])) == (2)
+                    assert (len(join.diagnostic()["events"])) == (5)
+                elif mode == "modules-only":
+                    assert (len(module_report["modules"])) == (2)
+                else:
+                    assert (module_report["modules"]) == ([])
+                    assert ("producer-receipt-revalidation-failed") in (
+                        module_report["reasons"]
+                    )
+                    join_report = join.diagnostic()
+                    assert (join_report["modules"]) == ([])
+                    assert (join_report["events"]) == ([])
+                    assert ("producer-receipt-revalidation-failed") in (
+                        join_report["reasons"]
+                    )
 
 
 _IDENTITY_SOURCE = """from tests.test_torch_lowered_materialization import _IdentityAsyncCompile
@@ -468,7 +455,7 @@ call = runner.call
 """
 
 
-class ReturnedModuleEvidenceTest(unittest.TestCase):
+class TestReturnedModuleEvidence:
     def _load(self, directory, name="wrapper", source=_IDENTITY_SOURCE):
         from torch._inductor.runtime.compile_tasks import _reload_python_module
 
@@ -490,7 +477,7 @@ class ReturnedModuleEvidenceTest(unittest.TestCase):
             alias.symlink_to(canonical, target_is_directory=True)
 
             graph, module = self._load(alias, "canonical_wrapper")
-            self.assertEqual(Path(graph.cache_path).parent, canonical)
+            assert (Path(graph.cache_path).parent) == (canonical)
             lowering._returned_module_identity(graph, module, _IDENTITY_SOURCE)
 
             lexical_path = alias / "lexical_wrapper.py"
@@ -501,10 +488,10 @@ class ReturnedModuleEvidenceTest(unittest.TestCase):
             lexical_module = _reload_python_module(
                 "lexical_wrapper", str(lexical_path), set_sys_modules=False
             )
-            self.assertNotEqual(lexical_path.resolve(strict=True), lexical_path)
-            self.assertEqual(lexical_module.__file__, str(lexical_path))
-            with self.assertRaisesRegex(
-                ValueError, "returned module source/cache identity differs"
+            assert (lexical_path.resolve(strict=True)) != (lexical_path)
+            assert (lexical_module.__file__) == (str(lexical_path))
+            with pytest.raises(
+                ValueError, match="returned module source/cache identity differs"
             ):
                 lowering._returned_module_identity(
                     lexical_graph, lexical_module, _IDENTITY_SOURCE
@@ -528,24 +515,22 @@ class ReturnedModuleEvidenceTest(unittest.TestCase):
                     (simulation, region, getattr(simulation, "_" + region)),
                 )
             report = evidence.diagnostic()
-            self.assertEqual(report["status"], "incomplete")
-            self.assertEqual(
-                report["reasons"],
+            assert (report["status"]) == ("incomplete")
+            assert (report["reasons"]) == (
                 [
                     "wrapper-pin-mismatch:electric_half",
                     "wrapper-pin-mismatch:magnetic_half",
-                ],
+                ]
             )
             record = evidence.entries[-1][3]
-            self.assertEqual(record["call_id"], id(module.call))
-            self.assertEqual(record["receiver_id"], id(module.runner))
-            self.assertEqual(record["kernels"][0]["autotuner_id"], id(module.kernel))
-            self.assertEqual(
-                record["module_functions"][0]["code_id"],
-                id(module.while_loop_body_graph_0.__code__),
+            assert (record["call_id"]) == (id(module.call))
+            assert (record["receiver_id"]) == (id(module.runner))
+            assert (record["kernels"][0]["autotuner_id"]) == (id(module.kernel))
+            assert (record["module_functions"][0]["code_id"]) == (
+                id(module.while_loop_body_graph_0.__code__)
             )
             report["modules"].clear()
-            self.assertEqual(len(evidence.diagnostic()["modules"]), 2)
+            assert (len(evidence.diagnostic()["modules"])) == (2)
 
     def test_substitutions_and_artifact_mutation_invalidate_returned_evidence(self):
         for mode in (
@@ -560,7 +545,7 @@ class ReturnedModuleEvidenceTest(unittest.TestCase):
             "dispatch",
             "replay",
         ):
-            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as raw:
+            with tempfile.TemporaryDirectory() as raw:
                 graph, module = self._load(Path(raw))
                 simulation = self._simulation()
                 evidence = lowering._ReturnedModuleEvidence()
@@ -570,10 +555,7 @@ class ReturnedModuleEvidenceTest(unittest.TestCase):
                     [_IDENTITY_SOURCE],
                     (simulation, "electric_half", simulation._electric_half),
                 )
-                self.assertEqual(
-                    evidence.reasons,
-                    ["wrapper-pin-mismatch:electric_half"],
-                )
+                assert (evidence.reasons) == (["wrapper-pin-mismatch:electric_half"])
                 if mode == "source":
                     Path(graph.cache_path).write_text(_IDENTITY_SOURCE + "# modified\n")
                 elif mode == "module-path":
@@ -601,12 +583,12 @@ class ReturnedModuleEvidenceTest(unittest.TestCase):
                 else:
                     simulation._cuda_graphs["electric_half"] = object()
                 report = evidence.diagnostic()
-                self.assertEqual(report["modules"], [])
-                self.assertTrue(report["reasons"])
+                assert (report["modules"]) == ([])
+                assert report["reasons"]
 
     def test_precapture_foreign_code_filenames_reject_including_nested_code(self):
         for mode in ("call", "module-function", "nested"):
-            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as raw:
+            with tempfile.TemporaryDirectory() as raw:
                 source = _IDENTITY_SOURCE
                 if mode == "nested":
                     source = source.replace(
@@ -633,7 +615,7 @@ class ReturnedModuleEvidenceTest(unittest.TestCase):
                     )
                 else:
                     replacement = original.replace(co_filename="<foreign-private-file>")
-                self.assertEqual(original, replacement)
+                assert (original) == (replacement)
                 function.__code__ = replacement
                 simulation = self._simulation()
                 evidence = lowering._ReturnedModuleEvidence()
@@ -643,15 +625,15 @@ class ReturnedModuleEvidenceTest(unittest.TestCase):
                     [source],
                     (simulation, "electric_half", simulation._electric_half),
                 )
-                self.assertEqual(evidence.diagnostic()["modules"], [])
-                self.assertIn("returned-module-capture-rejected", evidence.reasons)
+                assert (evidence.diagnostic()["modules"]) == ([])
+                assert ("returned-module-capture-rejected") in (evidence.reasons)
 
     def test_same_filename_code_and_foreign_tuner_remain_explicitly_unverified(self):
         with tempfile.TemporaryDirectory() as raw:
             graph, module = self._load(Path(raw))
             original_code = module.Runner.call.__code__
             module.Runner.call.__code__ = original_code.replace()
-            self.assertIsNot(original_code, module.Runner.call.__code__)
+            assert (original_code) is not (module.Runner.call.__code__)
             module.kernel = _IdentityAsyncCompile().triton(
                 "kernel", "def kernel(): return 'different body'"
             )
@@ -664,12 +646,12 @@ class ReturnedModuleEvidenceTest(unittest.TestCase):
                 (simulation, "electric_half", simulation._electric_half),
             )
             report = evidence.diagnostic()
-            self.assertEqual(len(report["modules"]), 1)
-            self.assertEqual(
-                evidence.entries[0][3]["kernels"][0]["autotuner_id"], id(module.kernel)
+            assert (len(report["modules"])) == (1)
+            assert (evidence.entries[0][3]["kernels"][0]["autotuner_id"]) == (
+                id(module.kernel)
             )
-            self.assertEqual(report["status"], "incomplete")
-            self.assertIn("structural-equivalence", report["python_code_matching"])
+            assert (report["status"]) == ("incomplete")
+            assert ("structural-equivalence") in (report["python_code_matching"])
             for gap in (
                 "code-object-loader-provenance",
                 "pre-capture-substitution-absence",
@@ -677,7 +659,7 @@ class ReturnedModuleEvidenceTest(unittest.TestCase):
                 "actual-wrapper-invocation-and-selected-launcher-join",
                 "device-execution",
             ):
-                self.assertIn(gap, report["unverified"])
+                assert (gap) in (report["unverified"])
 
     def test_json_projection_hides_personal_paths_keys_ids_and_preserves_aliases(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -704,22 +686,20 @@ class ReturnedModuleEvidenceTest(unittest.TestCase):
                 '"module_cache_key"',
                 '_id"',
             ):
-                self.assertNotIn(private, encoded)
-            self.assertEqual(report, evidence.diagnostic())
+                assert (private) not in (encoded)
+            assert (report) == (evidence.diagnostic())
             electric, magnetic = report["modules"]
-            self.assertEqual(
-                electric["construction_context"]["simulation"],
-                magnetic["construction_context"]["simulation"],
+            assert (electric["construction_context"]["simulation"]) == (
+                magnetic["construction_context"]["simulation"]
             )
-            self.assertEqual(
-                electric["call"], electric["construction_context"]["dispatch_function"]
+            assert (electric["call"]) == (
+                electric["construction_context"]["dispatch_function"]
             )
-            self.assertEqual(
-                evidence.entries[-1][3]["cache_path"],
+            assert (evidence.entries[-1][3]["cache_path"]) == (
                 str(
                     directory.resolve(strict=True)
                     / ("private-basename-" + region + ".py")
-                ),
+                )
             )
             with mock.patch.object(
                 lowering,
@@ -733,13 +713,13 @@ class ReturnedModuleEvidenceTest(unittest.TestCase):
                     graph, module, [_IDENTITY_SOURCE], (simulation, region, module.call)
                 )
             for private in ("PersonalName", "/private/error-path"):
-                self.assertNotIn(private, json.dumps(failed))
-                self.assertNotIn(private, json.dumps(evidence.diagnostic()))
-            self.assertIn("returned-module-revalidation-failed", failed["reasons"])
+                assert (private) not in (json.dumps(failed))
+                assert (private) not in (json.dumps(evidence.diagnostic()))
+            assert ("returned-module-revalidation-failed") in (failed["reasons"])
 
     def test_missing_emission_unknown_context_and_duplicate_declarations_reject(self):
         for mode in ("missing", "multiple", "cross-region", "duplicate"):
-            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as raw:
+            with tempfile.TemporaryDirectory() as raw:
                 source = _IDENTITY_SOURCE
                 if mode == "duplicate":
                     source += "kernel = async_compile.triton('kernel', 'def kernel(): pass')\n"
@@ -759,14 +739,14 @@ class ReturnedModuleEvidenceTest(unittest.TestCase):
                 evidence.capture(
                     graph, module, emissions, (simulation, "electric_half", function)
                 )
-                self.assertTrue(evidence.reasons)
-                self.assertEqual(evidence.diagnostic()["modules"], [])
+                assert evidence.reasons
+                assert (evidence.diagnostic()["modules"]) == ([])
 
     def test_capture_hook_pairs_post_rewrite_emission_and_restores_on_exception(self):
         from torch._inductor.graph import GraphLowering
 
         for fail in (False, True):
-            with self.subTest(fail=fail), tempfile.TemporaryDirectory() as raw:
+            with tempfile.TemporaryDirectory() as raw:
                 code = types.SimpleNamespace(value=_IDENTITY_SOURCE)
                 graph = types.SimpleNamespace()
 
@@ -791,16 +771,16 @@ class ReturnedModuleEvidenceTest(unittest.TestCase):
                         ):
                             module = GraphLowering._compile_to_module_lines(graph, code)
                     except RuntimeError:
-                        self.assertTrue(fail)
+                        assert fail
                     else:
-                        self.assertFalse(fail)
-                        self.assertIs(observations[0][1], module)
-                        self.assertEqual(observations[0][2], [code.value])
+                        assert not (fail)
+                        assert (observations[0][1]) is (module)
+                        assert (observations[0][2]) == ([code.value])
                         lowering._returned_module_identity(graph, module, code.value)
-                    self.assertIs(GraphLowering._compile_to_module_lines, producer)
-                    self.assertIs(GraphLowering.save_output_code, original_save)
-                self.assertIs(GraphLowering._compile_to_module_lines, original_compile)
-                self.assertEqual(len(observations), 0 if fail else 1)
+                    assert (GraphLowering._compile_to_module_lines) is (producer)
+                    assert (GraphLowering.save_output_code) is (original_save)
+                assert (GraphLowering._compile_to_module_lines) is (original_compile)
+                assert (len(observations)) == (0 if fail else 1)
 
     def test_callback_exception_restores_both_hooks(self):
         from torch._inductor.graph import GraphLowering
@@ -816,12 +796,12 @@ class ReturnedModuleEvidenceTest(unittest.TestCase):
             raise RuntimeError("module callback failed")
 
         with mock.patch.object(GraphLowering, "_compile_to_module_lines", producer):
-            with self.assertRaisesRegex(RuntimeError, "module callback failed"):
+            with pytest.raises(RuntimeError, match="module callback failed"):
                 with lowering._capturing_output_code(lambda source: None, reject):
                     GraphLowering._compile_to_module_lines(object(), "source")
-            self.assertIs(GraphLowering._compile_to_module_lines, producer)
-            self.assertIs(GraphLowering.save_output_code, original_save)
-        self.assertIs(GraphLowering._compile_to_module_lines, original_compile)
+            assert (GraphLowering._compile_to_module_lines) is (producer)
+            assert (GraphLowering.save_output_code) is (original_save)
+        assert (GraphLowering._compile_to_module_lines) is (original_compile)
 
 
 def _contract(*, regions: list[str] | None = None) -> dict[str, object]:
@@ -922,7 +902,7 @@ def _runner_wrapper(
     return f"{prefix}class Runner:\n    def call(self, args):\n{scoped_call}\n{body}{helpers}{export}"
 
 
-class LoweredMaterializationTest(unittest.TestCase):
+class TestLoweredMaterialization:
     def _audit(self, source: str, *, contract: dict[str, object] | None = None):
         return lowering.audit_compiled_wrapper_sources(
             sources=[{"region": "electric", "source": source}],
@@ -931,18 +911,17 @@ class LoweredMaterializationTest(unittest.TestCase):
 
     def test_direct_inplace_output_is_verified(self):
         audit = self._audit(_wrapper())
-        self.assertEqual(audit["status"], "verified")
-        self.assertTrue(audit["verified"])
+        assert (audit["status"]) == ("verified")
+        assert audit["verified"]
         output = audit["wrappers"][0]["launches"][0]["outputs"][0]
-        self.assertEqual(output["kind"], "direct-input")
+        assert (output["kind"]) == ("direct-input")
 
     def test_runner_scope_is_diagnostic_only(self):
         audit = self._audit(_runner_wrapper())
-        self.assertFalse(audit["verified"])
-        self.assertIn("wrapper-execution-scope-incomplete", audit["reasons"])
-        self.assertEqual(
-            audit["wrappers"][0]["launches"][0]["outputs"][0]["kind"],
-            "direct-input",
+        assert not (audit["verified"])
+        assert ("wrapper-execution-scope-incomplete") in (audit["reasons"])
+        assert (audit["wrappers"][0]["launches"][0]["outputs"][0]["kind"]) == (
+            "direct-input"
         )
 
     def test_runner_call_scope_excludes_helper_and_get_args_collisions(self):
@@ -961,12 +940,12 @@ def helper():
 """,
             )
         )
-        self.assertFalse(audit["verified"])
-        self.assertIn("wrapper-execution-scope-incomplete", audit["reasons"])
+        assert not (audit["verified"])
+        assert ("wrapper-execution-scope-incomplete") in (audit["reasons"])
         wrapper = audit["wrappers"][0]
-        self.assertEqual(len(wrapper["launches"]), 1)
-        self.assertEqual(wrapper["launches"][0]["outputs"][0]["kind"], "direct-input")
-        self.assertEqual(audit["full_domain_output_candidates"], [])
+        assert (len(wrapper["launches"])) == (1)
+        assert (wrapper["launches"][0]["outputs"][0]["kind"]) == ("direct-input")
+        assert (audit["full_domain_output_candidates"]) == ([])
 
     def test_runner_call_scope_excludes_nested_function_collisions(self):
         source = _runner_wrapper().replace(
@@ -977,9 +956,9 @@ def helper():
         kernel.run(arg0_1, arg0_1, 8, grid=grid(8), stream=stream0)""",
         )
         audit = self._audit(source)
-        self.assertFalse(audit["verified"])
-        self.assertIn("wrapper-execution-scope-incomplete", audit["reasons"])
-        self.assertEqual(len(audit["wrappers"][0]["launches"]), 1)
+        assert not (audit["verified"])
+        assert ("wrapper-execution-scope-incomplete") in (audit["reasons"])
+        assert (len(audit["wrappers"][0]["launches"])) == (1)
 
     def test_runner_call_reachable_helper_and_closure_alias_fail_closed(self):
         helper = """
@@ -1003,10 +982,9 @@ def hidden_copy(arg0_1):
             ),
             _runner_wrapper().replace(launch, closure + launch),
         ):
-            with self.subTest(source=source):
-                audit = self._audit(source)
-                self.assertFalse(audit["verified"])
-                self.assertIn("wrapper-execution-call-unresolved", audit["reasons"])
+            audit = self._audit(source)
+            assert not (audit["verified"])
+            assert ("wrapper-execution-call-unresolved") in (audit["reasons"])
 
     def test_runner_call_requires_supported_export_binding(self):
         for export, reason in (
@@ -1020,11 +998,10 @@ def hidden_copy(arg0_1):
                 "wrapper-execution-entry-rebound",
             ),
         ):
-            with self.subTest(export=export):
-                audit = self._audit(_runner_wrapper(export=export))
-                self.assertFalse(audit["verified"])
-                self.assertIn(reason, audit["reasons"])
-                self.assertIn("wrapper-execution-scope-incomplete", audit["reasons"])
+            audit = self._audit(_runner_wrapper(export=export))
+            assert not (audit["verified"])
+            assert (reason) in (audit["reasons"])
+            assert ("wrapper-execution-scope-incomplete") in (audit["reasons"])
 
     def test_runner_scope_guard_rejects_known_and_annotated_rebindings(self):
         helper = """
@@ -1043,10 +1020,9 @@ def hidden_copy(arg0_1):
             export="runner = Runner()\ncall = runner.call\ncall: object = hidden_copy\n",
         )
         for source in (primitive_rebound, annotated_export):
-            with self.subTest(source=source):
-                audit = self._audit(source)
-                self.assertFalse(audit["verified"])
-                self.assertIn("wrapper-execution-scope-incomplete", audit["reasons"])
+            audit = self._audit(source)
+            assert not (audit["verified"])
+            assert ("wrapper-execution-scope-incomplete") in (audit["reasons"])
 
     def test_runner_call_local_reassignment_stays_unmapped(self):
         audit = self._audit(
@@ -1060,8 +1036,8 @@ def hidden_copy(arg0_1):
                 "assert_size_stride(arg0_1, (8,), (1,))\n        arg0_1 = copy_if_misaligned(arg0_1)\n        ",
             )
         )
-        self.assertFalse(audit["verified"])
-        self.assertIn("launch-output-unmapped:kernel:out_ptr0", audit["reasons"])
+        assert not (audit["verified"])
+        assert ("launch-output-unmapped:kernel:out_ptr0") in (audit["reasons"])
 
     def test_runner_call_list_loop_and_clone_outputs_stay_unmapped(self):
         for replacement in (
@@ -1072,16 +1048,13 @@ def hidden_copy(arg0_1):
             values[0] = copy_if_misaligned(values[0])
         kernel.run(arg0_1, values[0], 8, grid=grid(8), stream=stream0)""",
         ):
-            with self.subTest(replacement=replacement):
-                source = _runner_wrapper().replace(
-                    "        kernel.run(arg0_1, arg0_1, 8, grid=grid(8), stream=stream0)",
-                    replacement,
-                )
-                audit = self._audit(source)
-                self.assertFalse(audit["verified"])
-                self.assertIn(
-                    "launch-output-unmapped:kernel:out_ptr0", audit["reasons"]
-                )
+            source = _runner_wrapper().replace(
+                "        kernel.run(arg0_1, arg0_1, 8, grid=grid(8), stream=stream0)",
+                replacement,
+            )
+            audit = self._audit(source)
+            assert not (audit["verified"])
+            assert ("launch-output-unmapped:kernel:out_ptr0") in (audit["reasons"])
 
     def test_ambiguous_runner_entrypoints_fail_closed(self):
         source = (
@@ -1089,28 +1062,26 @@ def hidden_copy(arg0_1):
             + "\nclass Runner:\n    def call(self, args):\n        pass\n"
         )
         audit = self._audit(source)
-        self.assertFalse(audit["verified"])
-        self.assertIn("wrapper-execution-scope-ambiguous", audit["reasons"])
-        self.assertIn("wrapper-execution-scope-incomplete", audit["reasons"])
+        assert not (audit["verified"])
+        assert ("wrapper-execution-scope-ambiguous") in (audit["reasons"])
+        assert ("wrapper-execution-scope-incomplete") in (audit["reasons"])
 
     def test_arithmetic_field_workspaces_and_pool_reuse_are_diagnostic_only(self):
         for allocation in (
             "buf0 = empty_strided_cuda((8,), (1,), torch.float64)",
             "buf0 = alloc_from_pool((8,), (1,), torch.float64)",
         ):
-            with self.subTest(allocation=allocation):
-                audit = self._audit(_arithmetic_wrapper(allocation=allocation))
-                self.assertEqual(audit["status"], "verified")
-                self.assertTrue(audit["verified"])
-                candidates = audit["full_domain_output_candidates"]
-                self.assertEqual(len(candidates), 1)
-                self.assertEqual(
-                    candidates[0]["classification"],
-                    "arithmetic-produced-field-workspace",
-                )
-                self.assertEqual(
-                    candidates[0]["reused_storage"], "alloc_from_pool" in allocation
-                )
+            audit = self._audit(_arithmetic_wrapper(allocation=allocation))
+            assert (audit["status"]) == ("verified")
+            assert audit["verified"]
+            candidates = audit["full_domain_output_candidates"]
+            assert (len(candidates)) == (1)
+            assert (candidates[0]["classification"]) == (
+                "arithmetic-produced-field-workspace"
+            )
+            assert (candidates[0]["reused_storage"]) == (
+                "alloc_from_pool" in allocation
+            )
 
     def test_identity_field_copy_and_unknown_payload_fail_closed(self):
         identity = self._audit(
@@ -1119,11 +1090,10 @@ def hidden_copy(arg0_1):
                 output="buf0",
             )
         )
-        self.assertFalse(identity["verified"])
-        self.assertIn("field-identity-copy:kernel:out_ptr0", identity["reasons"])
-        self.assertEqual(
-            identity["full_domain_output_candidates"][0]["classification"],
-            "field-identity-copy",
+        assert not (identity["verified"])
+        assert ("field-identity-copy:kernel:out_ptr0") in (identity["reasons"])
+        assert (identity["full_domain_output_candidates"][0]["classification"]) == (
+            "field-identity-copy"
         )
 
         for payload in (
@@ -1131,18 +1101,15 @@ def hidden_copy(arg0_1):
             "value = tl.load(in_ptr0)\n    value = tl.load(in_ptr0)\n    tl.store(out_ptr0, value)",
             "if xnumel:\n        value = tl.load(in_ptr0) + tl.load(in_ptr0)\n        tl.store(out_ptr0, value)",
         ):
-            with self.subTest(payload=payload):
-                unknown = self._audit(
-                    _wrapper(
-                        allocation="buf0 = alloc_from_pool((8,), (1,), torch.float64)",
-                        output="buf0",
-                        payload=payload,
-                    )
+            unknown = self._audit(
+                _wrapper(
+                    allocation="buf0 = alloc_from_pool((8,), (1,), torch.float64)",
+                    output="buf0",
+                    payload=payload,
                 )
-                self.assertFalse(unknown["verified"])
-                self.assertIn(
-                    "field-producer-unknown:kernel:out_ptr0", unknown["reasons"]
-                )
+            )
+            assert not (unknown["verified"])
+            assert ("field-producer-unknown:kernel:out_ptr0") in (unknown["reasons"])
 
     def test_selector_and_opaque_payloads_are_not_arithmetic_provenance(self):
         payloads = (
@@ -1160,23 +1127,19 @@ def hidden_copy(arg0_1):
             "    tl.store(out_ptr0, value)",
         )
         for payload in payloads:
-            with self.subTest(payload=payload):
-                source = _arithmetic_wrapper(
-                    allocation="buf0 = empty_strided_cuda((8,), (1,), torch.float64)"
-                ).replace(
-                    "left = tl.load(in_ptr0)\n    right = tl.load(in_ptr1)\n"
-                    "    tl.store(out_ptr0, left - right)",
-                    payload,
-                )
-                audit = self._audit(source)
-                self.assertFalse(audit["verified"])
-                self.assertIn(
-                    "field-producer-unknown:kernel:out_ptr0", audit["reasons"]
-                )
-                self.assertEqual(
-                    audit["full_domain_output_candidates"][0]["classification"],
-                    "field-producer-unknown",
-                )
+            source = _arithmetic_wrapper(
+                allocation="buf0 = empty_strided_cuda((8,), (1,), torch.float64)"
+            ).replace(
+                "left = tl.load(in_ptr0)\n    right = tl.load(in_ptr1)\n"
+                "    tl.store(out_ptr0, left - right)",
+                payload,
+            )
+            audit = self._audit(source)
+            assert not (audit["verified"])
+            assert ("field-producer-unknown:kernel:out_ptr0") in (audit["reasons"])
+            assert (audit["full_domain_output_candidates"][0]["classification"]) == (
+                "field-producer-unknown"
+            )
 
     def test_larger_or_nonfield_outputs_are_not_clone_candidates(self):
         for allocation in (
@@ -1186,12 +1149,11 @@ def hidden_copy(arg0_1):
             "buf0 = empty_strided_cuda((8,), (1,), torch.float32)",
             "buf0 = empty_strided_cuda((8,), (2,), torch.float64)",
         ):
-            with self.subTest(allocation=allocation):
-                audit = self._audit(_wrapper(allocation=allocation, output="buf0"))
-                self.assertEqual(audit["status"], "verified")
-                self.assertTrue(audit["verified"])
-                self.assertEqual(audit["full_domain_output_candidates"], [])
-                self.assertEqual(len(audit["non_field_output_exclusions"]), 1)
+            audit = self._audit(_wrapper(allocation=allocation, output="buf0"))
+            assert (audit["status"]) == ("verified")
+            assert audit["verified"]
+            assert (audit["full_domain_output_candidates"]) == ([])
+            assert (len(audit["non_field_output_exclusions"])) == (1)
 
     def test_unknown_factory_mapping_and_opaque_paths_fail_closed(self):
         for source, reason in (
@@ -1202,17 +1164,16 @@ def hidden_copy(arg0_1):
             (_wrapper(output="buf0"), "launch-output-unmapped:kernel:out_ptr0"),
             ("extern_kernels.opaque()", "opaque-external-kernel"),
         ):
-            with self.subTest(reason=reason):
-                audit = self._audit(source)
-                self.assertEqual(audit["status"], "unverified")
-                self.assertIn(reason, audit["reasons"])
+            audit = self._audit(source)
+            assert (audit["status"]) == ("unverified")
+            assert (reason) in (audit["reasons"])
 
     def test_missing_required_region_fails_closed(self):
         audit = self._audit(
             _wrapper(), contract=_contract(regions=["electric", "magnetic"])
         )
-        self.assertEqual(audit["status"], "unverified")
-        self.assertIn("missing-region-coverage:magnetic", audit["reasons"])
+        assert (audit["status"]) == ("unverified")
+        assert ("missing-region-coverage:magnetic") in (audit["reasons"])
 
     def test_both_required_halves_need_separate_payload_provenance(self):
         contract = _contract(regions=["electric", "magnetic"])
@@ -1233,22 +1194,22 @@ def hidden_copy(arg0_1):
             ],
             contract=contract,
         )
-        self.assertTrue(audit["verified"])
-        self.assertEqual(audit["region_coverage"]["missing"], [])
-        self.assertEqual(len(audit["full_domain_output_candidates"]), 2)
+        assert audit["verified"]
+        assert (audit["region_coverage"]["missing"]) == ([])
+        assert (len(audit["full_domain_output_candidates"])) == (2)
 
     def test_malformed_field_layout_and_runtime_digest_fail_closed(self):
         contract = _contract()
         contract["field_buffers"][0]["dtype"] = "torch.float32"  # type: ignore[index]
         audit = self._audit(_wrapper(), contract=contract)
-        self.assertEqual(audit["status"], "unverified")
-        self.assertIn("contract-field-buffers", audit["reasons"])
+        assert (audit["status"]) == ("unverified")
+        assert ("contract-field-buffers") in (audit["reasons"])
 
         contract = _contract()
         contract["runtime_source_sha256"] = "1" * 64
         audit = self._audit(_wrapper(), contract=contract)
-        self.assertEqual(audit["status"], "unverified")
-        self.assertIn("contract-runtime-source-digest", audit["reasons"])
+        assert (audit["status"]) == ("unverified")
+        assert ("contract-runtime-source-digest") in (audit["reasons"])
 
     def test_bundle_rehashes_sources_and_rejects_contract_mismatch(self):
         source = _wrapper()
@@ -1261,12 +1222,12 @@ def hidden_copy(arg0_1):
             verified = lowering.verify_compiled_wrapper_audit(
                 output_directory=root, expected_contract=_contract()
             )
-            self.assertTrue(verified["verified"])
+            assert verified["verified"]
             descriptor = json.loads((root / "lowering-manifest.json").read_text())[
                 "wrappers"
             ][0]
             (root / descriptor["path"]).write_text("tampered")
-            with self.assertRaisesRegex(ValueError, "digest or size"):
+            with pytest.raises(ValueError, match="digest or size"):
                 lowering.verify_compiled_wrapper_audit(
                     output_directory=root, expected_contract=_contract()
                 )
@@ -1277,11 +1238,7 @@ def hidden_copy(arg0_1):
             lowering._write_bundle(root, audit)
             contract = _contract()
             contract["compile_cache_key"] = "9" * 64
-            with self.assertRaisesRegex(ValueError, "contract differs"):
+            with pytest.raises(ValueError, match="contract differs"):
                 lowering.verify_compiled_wrapper_audit(
                     output_directory=root, expected_contract=contract
                 )
-
-
-if __name__ == "__main__":
-    unittest.main()

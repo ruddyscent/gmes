@@ -1,6 +1,5 @@
-import unittest
-
 import numpy as np
+import pytest
 
 from gmes import (
     Block,
@@ -17,58 +16,65 @@ from gmes import (
 from gmes.pygeom import GeomBoxTree
 
 
-class ConeBoundsTest(unittest.TestCase):
-    def test_rotated_end_caps_define_cartesian_bounds(self):
+class TestConeBounds:
+    @pytest.mark.parametrize(
+        ("shape_class", "radius", "radius2", "axis"),
+        tuple(
+            (shape_class, radius, radius2, axis)
+            for shape_class, radius, radius2 in ((Cylinder, 1.2, 1.2), (Cone, 1.2, 0.4))
+            for axis in ((1, 1, 0), (1, -2, 3), (-3, 1, 2))
+        ),
+        ids=tuple(
+            f"{shape_class.__name__.lower()}-axis-{axis_index}"
+            for shape_class in (Cylinder, Cone)
+            for axis_index in range(3)
+        ),
+    )
+    def test_rotated_end_caps_define_cartesian_bounds(
+        self, shape_class, radius, radius2, axis
+    ):
         center = np.array((0.25, -0.5, 0.75))
-        axes = ((1, 1, 0), (1, -2, 3), (-3, 1, 2))
+        if shape_class is Cylinder:
+            shape = shape_class(
+                Dielectric(),
+                center=center,
+                axis=axis,
+                radius=radius,
+                height=1.5,
+            )
+        else:
+            shape = shape_class(
+                Dielectric(),
+                center=center,
+                axis=axis,
+                radius=radius,
+                radius2=radius2,
+                height=1.5,
+            )
 
-        for shape_class, radius, radius2 in (
-            (Cylinder, 1.2, 1.2),
-            (Cone, 1.2, 0.4),
-        ):
-            for axis in axes:
-                with self.subTest(shape=shape_class.__name__, axis=axis):
-                    if shape_class is Cylinder:
-                        shape = shape_class(
-                            Dielectric(),
-                            center=center,
-                            axis=axis,
-                            radius=radius,
-                            height=1.5,
-                        )
-                    else:
-                        shape = shape_class(
-                            Dielectric(),
-                            center=center,
-                            axis=axis,
-                            radius=radius,
-                            radius2=radius2,
-                            height=1.5,
-                        )
+        box = shape.geom_box()
+        radial = np.sqrt(1 - shape.axis * shape.axis)
+        low_cap = center - 0.75 * shape.axis
+        high_cap = center + 0.75 * shape.axis
+        expected_low = np.minimum(
+            low_cap - radius * radial,
+            high_cap - radius2 * radial,
+        )
+        expected_high = np.maximum(
+            low_cap + radius * radial,
+            high_cap + radius2 * radial,
+        )
 
-                    box = shape.geom_box()
-                    radial = np.sqrt(1 - shape.axis * shape.axis)
-                    low_cap = center - 0.75 * shape.axis
-                    high_cap = center + 0.75 * shape.axis
-                    expected_low = np.minimum(
-                        low_cap - radius * radial,
-                        high_cap - radius2 * radial,
-                    )
-                    expected_high = np.maximum(
-                        low_cap + radius * radial,
-                        high_cap + radius2 * radial,
-                    )
+        np.testing.assert_allclose(box.low, expected_low)
+        np.testing.assert_allclose(box.high, expected_high)
 
-                    np.testing.assert_allclose(box.low, expected_low)
-                    np.testing.assert_allclose(box.high, expected_high)
-
-                    perpendicular = np.cross(shape.axis, (0, 0, 1))
-                    if np.linalg.norm(perpendicular) < 1e-12:
-                        perpendicular = np.cross(shape.axis, (0, 1, 0))
-                    perpendicular /= np.linalg.norm(perpendicular)
-                    point = center - 0.7 * shape.axis + 0.9 * radius * perpendicular
-                    self.assertTrue(shape.in_object(tuple(point)))
-                    self.assertTrue(box.in_box(tuple(point)))
+        perpendicular = np.cross(shape.axis, (0, 0, 1))
+        if np.linalg.norm(perpendicular) < 1e-12:
+            perpendicular = np.cross(shape.axis, (0, 1, 0))
+        perpendicular /= np.linalg.norm(perpendicular)
+        point = center - 0.7 * shape.axis + 0.9 * radius * perpendicular
+        assert shape.in_object(tuple(point))
+        assert box.in_box(tuple(point))
 
     def test_tree_keeps_rotated_cylinder_interior_point(self):
         default = DefaultMedium(Dielectric(1))
@@ -80,36 +86,35 @@ class ConeBoundsTest(unittest.TestCase):
 
         shape, _ = tree.object_of_point(point)
 
-        self.assertIs(shape, cylinder)
+        assert shape is cylinder
 
 
-class ShellBoundsTest(unittest.TestCase):
-    def test_shell_bounds_and_tree_follow_center(self):
+class TestShellBounds:
+    @pytest.mark.parametrize("center", ((0, 0, 0), (5, 0, 0)), ids=("origin", "offset"))
+    def test_shell_bounds_and_tree_follow_center(self, center):
         space = Cartesian(size=(12, 4, 4), resolution=10)
 
-        for center in ((0, 0, 0), (5, 0, 0)):
-            with self.subTest(center=center):
-                default = DefaultMedium(Dielectric(1))
-                shell = Shell(
-                    Dielectric(4),
-                    center=center,
-                    size=(2, 2, 2),
-                    thickness=0.2,
-                )
-                default.init(space)
-                shell.init(space)
-                tree = GeomBoxTree((default, shell))
-                point = (center[0] + 0.9, center[1], center[2])
+        default = DefaultMedium(Dielectric(1))
+        shell = Shell(
+            Dielectric(4),
+            center=center,
+            size=(2, 2, 2),
+            thickness=0.2,
+        )
+        default.init(space)
+        shell.init(space)
+        tree = GeomBoxTree((default, shell))
+        point = (center[0] + 0.9, center[1], center[2])
 
-                np.testing.assert_allclose(shell.box.low, np.array(center) - 1)
-                np.testing.assert_allclose(shell.box.high, np.array(center) + 1)
-                self.assertTrue(shell.in_object(point))
-                self.assertTrue(shell.box.in_box(point))
-                shape, _ = tree.object_of_point(point)
-                self.assertIs(shape, shell)
+        np.testing.assert_allclose(shell.box.low, np.array(center) - 1)
+        np.testing.assert_allclose(shell.box.high, np.array(center) + 1)
+        assert shell.in_object(point)
+        assert shell.box.in_box(point)
+        shape, _ = tree.object_of_point(point)
+        assert shape is shell
 
 
-class SkewBasisTest(unittest.TestCase):
+class TestSkewBasis:
     def test_block_uses_inverse_basis_coordinates(self):
         block = Block(
             Dielectric(),
@@ -123,8 +128,8 @@ class SkewBasisTest(unittest.TestCase):
         inside = block.center + 0.9 * block.e1 + 0.9 * block.e2
         outside = block.center + 1.1 * block.e1
 
-        self.assertTrue(block.in_object(tuple(inside)))
-        self.assertFalse(block.in_object(tuple(outside)))
+        assert block.in_object(tuple(inside))
+        assert not block.in_object(tuple(outside))
 
     def test_ellipsoid_uses_inverse_basis_coordinates(self):
         ellipsoid = Ellipsoid(
@@ -139,11 +144,11 @@ class SkewBasisTest(unittest.TestCase):
         inside = ellipsoid.center + 0.6 * ellipsoid.e1 + 0.6 * ellipsoid.e2
         outside = ellipsoid.center + 0.8 * ellipsoid.e1 + 0.8 * ellipsoid.e2
 
-        self.assertTrue(ellipsoid.in_object(tuple(inside)))
-        self.assertFalse(ellipsoid.in_object(tuple(outside)))
+        assert ellipsoid.in_object(tuple(inside))
+        assert not ellipsoid.in_object(tuple(outside))
 
 
-class BatchGeometryLookupTest(unittest.TestCase):
+class TestBatchGeometryLookup:
     def test_grid_lookup_matches_pointwise_for_all_builtin_geometries(self):
         space = Cartesian(size=(20, 4, 4), resolution=2)
         space.dt = 0.1
@@ -193,13 +198,11 @@ class BatchGeometryLookupTest(unittest.TestCase):
             for z in axes[2]
         ]
 
-        self.assertEqual(batched_materials, [material for material, _ in pointwise])
-        self.assertEqual(
-            batched_underlying, [underlying for _, underlying in pointwise]
-        )
-        self.assertEqual(batched_materials[:-1], materials)
-        self.assertIs(batched_materials[-1], shell_material)
-        self.assertIs(batched_underlying[-1], default_material)
+        assert batched_materials == [material for material, _ in pointwise]
+        assert batched_underlying == [underlying for _, underlying in pointwise]
+        assert batched_materials[:-1] == materials
+        assert batched_materials[-1] is shell_material
+        assert batched_underlying[-1] is default_material
 
     def test_grid_lookup_preserves_last_overlap_wins_and_tile_bounds(self):
         space = Cartesian(size=(4, 4, 4), resolution=2)
@@ -213,12 +216,8 @@ class BatchGeometryLookupTest(unittest.TestCase):
 
         materials, _ = tree.material_of_grid(*axes, 12, 15)
 
-        self.assertIs(materials[1], inner.material)
-        with self.assertRaisesRegex(IndexError, "grid tile is out of bounds"):
+        assert materials[1] is inner.material
+        with pytest.raises(IndexError, match="grid tile is out of bounds"):
             tree.material_of_grid(*axes, -1, 1)
-        with self.assertRaisesRegex(IndexError, "grid tile is out of bounds"):
+        with pytest.raises(IndexError, match="grid tile is out of bounds"):
             tree.material_of_grid(*axes, 0, 28)
-
-
-if __name__ == "__main__":
-    unittest.main()

@@ -95,7 +95,7 @@ stored in GitHub.
    uv run --no-sync python -m black --check gmes examples tests utils setup.py
    uv run --no-sync python -m mypy
    uv run --no-sync python -m pylint $(git ls-files 'gmes/*.py') setup.py
-   uv run --no-sync python -m unittest discover -v
+   uv run --no-sync python -m pytest -v
    uv lock --check
    uv build
    ```

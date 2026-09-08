@@ -11,7 +11,7 @@ Install [uv](https://docs.astral.sh/uv/), then use the locked CPU environment:
 ```sh
 uv python install 3.14
 uv sync --locked --extra torch-cpu --extra hdf5
-uv run --no-sync python -m unittest discover -v
+uv run --no-sync python -m pytest -v
 uv build
 ```
 
@@ -32,12 +32,12 @@ restore a native build dependency or cache key. `tests/test_packaging.py` and
 Run the narrowest relevant tests, then the complete supported CPU suite:
 
 ```sh
-uv run --no-sync python -m unittest tests.test_torch_fdtd -v
+uv run --no-sync python -m pytest -v tests/test_torch_fdtd.py
 uv run --no-sync python -m isort --check-only gmes examples tests benchmarks utils setup.py
 uv run --no-sync python -m black --check gmes examples tests benchmarks utils setup.py
 uv run --no-sync python -m mypy
 uv run --no-sync python -m pylint gmes setup.py
-uv run --no-sync python -m unittest discover -v
+uv run --no-sync python -m pytest -v
 uv build
 ```
 
@@ -46,6 +46,13 @@ dtype, CPU threads, and `compile_policy` explicitly; account for compilation
 warmup before reporting performance. Checkpoints, probes, host snapshots, and
 plotting are explicit observation/output boundaries. Do not use large examples
 as routine tests.
+
+New tests use pytest-native functions or plain `Test*` classes with direct
+assertions. Use `pytest.mark.parametrize` with stable semantic IDs for
+independent cases, but retain intentional stateful sequences. Focused fixtures
+and finalizers must restore patches, temporary resources, and runtime state on
+failure. Future Taflove reproduction tests follow these rules and must state
+their device, dtype, thread, and compile-policy requirements.
 
 The required protected status names remain `Python 3.14 / ubuntu-latest` and
 `Python 3.14 / macos-latest`; CodeQL must also complete. Trusted single- and

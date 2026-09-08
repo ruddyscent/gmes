@@ -5,9 +5,31 @@ Install the package in an isolated environment, then run all tests from
 the repository root:
 
 $ uv sync --locked --extra torch-cpu --extra hdf5
-$ uv run --no-sync python -m unittest discover -v
+$ uv run --no-sync python -m pytest -v
 
 The CPU extra is the normal complete-suite selection. CUDA and two-GPU
 evidence requires a trusted runner with the required resources and is not
 silently replaced by a skipped local test. HDF5 tests remain optional when
 PyTables is unavailable.
+
+Write new tests as pytest-native functions or plain `Test*` classes with
+direct assertions. Use `pytest.mark.parametrize` with stable semantic IDs for
+independent cases; retain intentional stateful sequences. Focused fixtures and
+finalizers must clean up patches, temporary resources, and runtime state after
+failures. Future Taflove reproduction tests follow the same rules and must
+state device, dtype, thread, and compile-policy requirements.
+
+## Pytest migration map
+
+[`pytest-migration-map.json`](pytest-migration-map.json) records the issue
+#179 migration from the pinned unittest baseline. Each old method maps to a
+current pytest node pattern and collection count; each former `subTest` is
+classified without storing every collected node instance.
+
+| Mapping kind | Meaning |
+| --- | --- |
+| `parametrized` | Independent old cases became pytest parameter cases; the pattern count records their collected nodes. |
+| `retained-sequential` | The cases deliberately remain in one test; the entry carries an audited source-backed reason such as shared evolving state, artifact lifetime, cross-case comparison, failure aggregation, or ordered control. |
+
+The validation test keeps the baseline counts, mappings, uniqueness, and zero
+gap policy current when migrations change.

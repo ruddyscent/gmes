@@ -2,10 +2,10 @@
 
 import inspect
 import os
-import unittest
 from unittest import mock
 
 import numpy as np
+import pytest
 import torch
 
 import gmes
@@ -19,40 +19,38 @@ from gmes.torch_distributed import (
     choose_two_gpu_decomposition,
     rank_local_space,
 )
+from tests.test_torch_fdtd import restore_torch_runtime as restore_torch_runtime
 
 
-class TwoGpuDecompositionTest(unittest.TestCase):
-    def test_all_axes_support_nondivisible_rank_local_geometry(self):
+class TestTwoGpuDecomposition:
+    @pytest.mark.parametrize("axis", range(3), ids=("x", "y", "z"))
+    def test_all_axes_support_nondivisible_rank_local_geometry(self, axis):
         global_space = gmes.Cartesian((3.5, 3.0, 2.5), 2)
         geometry = [gmes.DefaultMedium(gmes.Dielectric(eps_inf=1.7))]
-        for axis in range(3):
-            with self.subTest(axis=axis):
-                decomposition = choose_two_gpu_decomposition(
-                    global_space,
-                    geometry,
-                    split_axis=axis,
-                    device_weights=(3, 2),
-                )
-                rank0 = rank_local_space(global_space, decomposition, 0)
-                rank1 = rank_local_space(global_space, decomposition, 1)
-                self.assertEqual(
-                    rank0.my_field_size[axis] + rank1.my_field_size[axis],
-                    global_space.whole_field_size[axis],
-                )
-                self.assertEqual(rank0.global_field_offset[axis], 0)
-                self.assertEqual(rank1.global_field_offset[axis], decomposition.cut)
-                shape0 = list(global_space.whole_field_size)
-                shape1 = list(global_space.whole_field_size)
-                shape0[axis] = rank0.my_field_size[axis]
-                shape1[axis] = rank1.my_field_size[axis]
-                axes0 = rank0.component_coordinate_axes(gmes.Ex, tuple(shape0))
-                axes1 = rank1.component_coordinate_axes(gmes.Ex, tuple(shape1))
-                expected = global_space.component_coordinate_axes(
-                    gmes.Ex, tuple(global_space.whole_field_size)
-                )[axis]
-                np.testing.assert_allclose(
-                    np.concatenate((axes0[axis], axes1[axis])), expected
-                )
+        decomposition = choose_two_gpu_decomposition(
+            global_space,
+            geometry,
+            split_axis=axis,
+            device_weights=(3, 2),
+        )
+        rank0 = rank_local_space(global_space, decomposition, 0)
+        rank1 = rank_local_space(global_space, decomposition, 1)
+        assert (
+            rank0.my_field_size[axis] + rank1.my_field_size[axis]
+            == global_space.whole_field_size[axis]
+        )
+        assert rank0.global_field_offset[axis] == 0
+        assert rank1.global_field_offset[axis] == decomposition.cut
+        shape0 = list(global_space.whole_field_size)
+        shape1 = list(global_space.whole_field_size)
+        shape0[axis] = rank0.my_field_size[axis]
+        shape1[axis] = rank1.my_field_size[axis]
+        axes0 = rank0.component_coordinate_axes(gmes.Ex, tuple(shape0))
+        axes1 = rank1.component_coordinate_axes(gmes.Ex, tuple(shape1))
+        expected = global_space.component_coordinate_axes(
+            gmes.Ex, tuple(global_space.whole_field_size)
+        )[axis]
+        np.testing.assert_allclose(np.concatenate((axes0[axis], axes1[axis])), expected)
 
     def test_cost_and_device_weights_move_the_cut(self):
         space = gmes.Cartesian((8, 2, 2), 2)
@@ -75,8 +73,8 @@ class TwoGpuDecompositionTest(unittest.TestCase):
         rank0_faster = choose_two_gpu_decomposition(
             space, geometry, split_axis=0, device_weights=(3, 1)
         )
-        self.assertGreaterEqual(rank0_faster.cut, balanced.cut)
-        self.assertNotEqual(rank0_faster.rank_costs, rank0_faster.device_weights)
+        assert rank0_faster.cut >= balanced.cut
+        assert rank0_faster.rank_costs != rank0_faster.device_weights
 
     def test_surface_cost_prefers_contiguous_leading_axis(self):
         decomposition = choose_two_gpu_decomposition(
@@ -84,7 +82,7 @@ class TwoGpuDecompositionTest(unittest.TestCase):
             [gmes.DefaultMedium(gmes.Dielectric())],
             device_weights=(1, 1),
         )
-        self.assertEqual(decomposition.axis, 0)
+        assert decomposition.axis == 0
 
     def test_source_crossing_and_metadata_are_deterministic(self):
         space = gmes.Cartesian((4, 3, 2), 2)
@@ -105,13 +103,13 @@ class TwoGpuDecompositionTest(unittest.TestCase):
         }
         first = choose_two_gpu_decomposition(**kwargs)
         second = choose_two_gpu_decomposition(**kwargs)
-        self.assertEqual(first, second)
-        self.assertEqual(first.identity, second.identity)
-        self.assertEqual(first.source_crossings, 1)
-        self.assertEqual(first.metadata()["axis_name"], "x")
+        assert first == second
+        assert first.identity == second.identity
+        assert first.source_crossings == 1
+        assert first.metadata()["axis_name"] == "x"
 
 
-class DistributedLaunchContractTest(unittest.TestCase):
+class TestDistributedLaunchContract:
     def test_environment_launch_requires_every_torchrun_variable(self):
         environment = {
             "RANK": "1",
@@ -121,18 +119,15 @@ class DistributedLaunchContractTest(unittest.TestCase):
         }
         with mock.patch.dict(os.environ, environment, clear=True):
             launch = gmes.distributed_launch_from_environment()
-        self.assertEqual(
-            (
-                launch.rank,
-                launch.world_size,
-                launch.local_rank,
-                launch.local_world_size,
-            ),
-            (1, 2, 1, 2),
-        )
+        assert (
+            launch.rank,
+            launch.world_size,
+            launch.local_rank,
+            launch.local_world_size,
+        ) == (1, 2, 1, 2)
         with (
             mock.patch.dict(os.environ, {"RANK": "0"}, clear=True),
-            self.assertRaisesRegex(gmes.TorchConfigurationError, "torchrun.*missing"),
+            pytest.raises(gmes.TorchConfigurationError, match="torchrun.*missing"),
         ):
             gmes.distributed_launch_from_environment()
 
@@ -144,8 +139,8 @@ class DistributedLaunchContractTest(unittest.TestCase):
                 world_size=2, local_world_size=2, rank=0, local_rank=0
             ),
         )
-        with self.assertRaisesRegex(
-            gmes.TorchConfigurationError, "TorchDistributedSimulation"
+        with pytest.raises(
+            gmes.TorchConfigurationError, match="TorchDistributedSimulation"
         ):
             gmes.TorchSimulation(
                 space=gmes.Cartesian((2, 2, 2), 2),
@@ -164,10 +159,10 @@ class DistributedLaunchContractTest(unittest.TestCase):
             )
         )
         for marker in forbidden:
-            self.assertNotIn(marker, source)
-        self.assertIn("batch_isend_irecv", source)
-        self.assertIn("work.wait()", source)
-        self.assertNotIn("torch.cuda.synchronize", source)
+            assert marker not in source
+        assert "batch_isend_irecv" in source
+        assert "work.wait()" in source
+        assert "torch.cuda.synchronize" not in source
 
     def test_cuda_graph_capture_rejects_cpu_runtime(self):
         simulation = gmes.TorchSimulation(
@@ -175,30 +170,29 @@ class DistributedLaunchContractTest(unittest.TestCase):
             geometry=[gmes.DefaultMedium(gmes.Dielectric())],
             runtime=gmes.TorchRuntimeConfig(device="cpu", cpu_threads=1),
         )
-        with self.assertRaisesRegex(
-            gmes.TorchConfigurationError, "requires a CUDA runtime"
+        with pytest.raises(
+            gmes.TorchConfigurationError, match="requires a CUDA runtime"
         ):
             simulation.capture_cuda_graphs()
 
 
-class TwoGpuBenchmarkContractTest(unittest.TestCase):
+class TestTwoGpuBenchmarkContract:
     def test_fixed_strong_and_weak_cases_keep_expected_volume_contract(self):
         strong = CASES["strong-mixed"]
         weak = CASES["weak-mixed"]
-        self.assertEqual(strong["serial_size"], strong["distributed_size"])
-        self.assertEqual(
-            int(np.prod(weak["distributed_size"])),
-            2 * int(np.prod(weak["serial_size"])),
+        assert strong["serial_size"] == strong["distributed_size"]
+        assert int(np.prod(weak["distributed_size"])) == 2 * int(
+            np.prod(weak["serial_size"])
         )
 
     def test_trace_interval_math_separates_overlap_and_exposed_time(self):
         communication = [(0, 10), (8, 15), (20, 24)]
         compute = [(5, 12), (22, 30)]
-        self.assertEqual(_interval_duration(communication), 19)
-        self.assertEqual(_intersection_duration(communication, compute), 9)
+        assert _interval_duration(communication) == 19
+        assert _intersection_duration(communication, compute) == 9
 
 
-class RankLocalOwnershipTest(unittest.TestCase):
+class TestRankLocalOwnership:
     def test_point_sources_filter_nonlocal_targets_before_local_validation(self):
         global_space = gmes.Cartesian((5, 4, 4), 1)
         geometry = [gmes.DefaultMedium(gmes.Dielectric())]
@@ -240,14 +234,14 @@ class RankLocalOwnershipTest(unittest.TestCase):
                 {batch.component: batch for batch in simulation.sources.batches}
             )
 
-        self.assertEqual(decomposition.local_shape(0)[0], 2)
-        self.assertEqual(decomposition.local_shape(1)[0], 3)
-        self.assertEqual(set(batches[0]), {"Ex"})
-        self.assertEqual(set(batches[1]), {"Ex", "Ey"})
-        self.assertEqual(batches[0]["Ex"].overwrite_targets.numel(), 1)
-        self.assertEqual(batches[1]["Ex"].overwrite_targets.numel(), 1)
-        self.assertEqual(batches[1]["Ey"].overwrite_targets.numel(), 1)
-        self.assertEqual(batches[1]["Ex"].overwrite_amplitudes.tolist(), [4.0])
+        assert decomposition.local_shape(0)[0] == 2
+        assert decomposition.local_shape(1)[0] == 3
+        assert set(batches[0]) == {"Ex"}
+        assert set(batches[1]) == {"Ex", "Ey"}
+        assert batches[0]["Ex"].overwrite_targets.numel() == 1
+        assert batches[1]["Ex"].overwrite_targets.numel() == 1
+        assert batches[1]["Ey"].overwrite_targets.numel() == 1
+        assert batches[1]["Ex"].overwrite_amplitudes.tolist() == [4.0]
 
     def test_point_source_is_owned_by_exactly_one_rank(self):
         global_space = gmes.Cartesian((4, 3, 2), 2)
@@ -283,8 +277,4 @@ class RankLocalOwnershipTest(unittest.TestCase):
                 _distributed_partition=decomposition,
             )
             batch_counts.append(len(simulation.sources.batches))
-        self.assertEqual(sum(batch_counts), 1)
-
-
-if __name__ == "__main__":
-    unittest.main()
+        assert sum(batch_counts) == 1

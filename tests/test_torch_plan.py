@@ -1,14 +1,14 @@
 """Tests for occupancy-aware Torch material planning."""
 
-import unittest
-
 import numpy as np
+import pytest
 import torch
 
 import gmes
 from gmes.geometry import GeomBoxTree
 from gmes.torch_fdtd import _field_shapes
 from gmes.torch_plan import COMPONENT_TYPES, TorchExecutionPlanner
+from tests.test_torch_fdtd import restore_torch_runtime as restore_torch_runtime
 
 
 def _host_plans(
@@ -72,58 +72,52 @@ def _drude_region():
     ]
 
 
-class ComponentPlanTest(unittest.TestCase):
-    def test_exact_maps_unique_ownership_and_coefficient_sharing(self):
+class TestComponentPlan:
+    @pytest.mark.parametrize("name", tuple(COMPONENT_TYPES), ids=tuple(COMPONENT_TYPES))
+    def test_exact_maps_unique_ownership_and_coefficient_sharing(self, name):
         geometry = _dielectric_regions(count=2)
         space, tree, plans = _host_plans(geometry)
         expected_active = int(np.prod(space.my_field_size))
-        for name, plan in plans.items():
-            with self.subTest(component=name):
-                axes = space.component_coordinate_axes(
-                    COMPONENT_TYPES[name], plan.shape
-                )
-                expected = tree.lower_grid(
-                    *axes,
-                    0,
-                    int(np.prod(plan.shape)),
-                    component=COMPONENT_TYPES[name],
-                )
-                np.testing.assert_array_equal(
-                    plan.material_ids.reshape(-1), expected.material_ids
-                )
-                np.testing.assert_array_equal(
-                    plan.underlying_ids.reshape(-1), expected.underlying_ids
-                )
-                self.assertEqual(plan.active_count, expected_active)
-                self.assertEqual(np.count_nonzero(plan.ownership >= 0), expected_active)
-                self.assertEqual(plan.launch_count, 1)
-                self.assertEqual(len(plan.buckets), 1)
-                bucket = plan.buckets[0]
-                self.assertEqual(bucket.signature.model, "dielectric")
-                self.assertEqual(len(bucket.coefficient_table), 2)
-                self.assertEqual(
-                    len(bucket.region_keys), len(np.unique(expected.material_ids))
-                )
-                self.assertFalse(plan.material_ids.flags.writeable)
-                self.assertNotEqual(plan.material_ids.dtype, np.dtype(object))
+        plan = plans[name]
+        axes = space.component_coordinate_axes(COMPONENT_TYPES[name], plan.shape)
+        expected = tree.lower_grid(
+            *axes,
+            0,
+            int(np.prod(plan.shape)),
+            component=COMPONENT_TYPES[name],
+        )
+        np.testing.assert_array_equal(
+            plan.material_ids.reshape(-1), expected.material_ids
+        )
+        np.testing.assert_array_equal(
+            plan.underlying_ids.reshape(-1), expected.underlying_ids
+        )
+        assert plan.active_count == expected_active
+        assert np.count_nonzero(plan.ownership >= 0) == expected_active
+        assert plan.launch_count == 1
+        assert len(plan.buckets) == 1
+        bucket = plan.buckets[0]
+        assert bucket.signature.model == "dielectric"
+        assert len(bucket.coefficient_table) == 2
+        assert len(bucket.region_keys) == len(np.unique(expected.material_ids))
+        assert not plan.material_ids.flags.writeable
+        assert plan.material_ids.dtype != np.dtype(object)
 
     def test_auto_decision_records_static_cost_evidence(self):
         _, _, plans = _host_plans(_dielectric_regions(count=6))
         for plan in plans.values():
             record = plan.decision_record()
-            self.assertEqual(record["requested_policy"], "auto")
-            self.assertEqual(record["active_cells"], plan.active_count)
+            assert record["requested_policy"] == "auto"
+            assert record["active_cells"] == plan.active_count
             for bucket, bucket_record in zip(plan.buckets, record["buckets"]):
                 costs = dict(bucket.estimated_costs)
-                self.assertEqual(bucket.selected_policy, min(costs, key=costs.get))
-                self.assertIn("occupancy=", bucket.decision)
-                self.assertGreater(bucket.estimated_bytes, 0)
-                self.assertEqual(
-                    bucket_record["selected_policy"], bucket.selected_policy
-                )
-                self.assertEqual(
-                    bucket_record["execution_representation"],
-                    bucket.execution_representation,
+                assert bucket.selected_policy == min(costs, key=costs.get)
+                assert "occupancy=" in bucket.decision
+                assert bucket.estimated_bytes > 0
+                assert bucket_record["selected_policy"] == bucket.selected_policy
+                assert (
+                    bucket_record["execution_representation"]
+                    == bucket.execution_representation
                 )
 
     def test_compiled_cpu_auto_decision_uses_compact_without_full_field_writes(self):
@@ -137,13 +131,13 @@ class ComponentPlanTest(unittest.TestCase):
             for bucket in plan.buckets:
                 if bucket.signature.model == "drude":
                     indexed_buckets.append(bucket)
-                    self.assertEqual(bucket.selected_policy, "compact")
-                    self.assertIn("dense is excluded", bucket.decision)
-                    self.assertIn("tiled is excluded", bucket.decision)
+                    assert bucket.selected_policy == "compact"
+                    assert "dense is excluded" in bucket.decision
+                    assert "tiled is excluded" in bucket.decision
                 else:
                     costs = dict(bucket.estimated_costs)
-                    self.assertEqual(bucket.selected_policy, min(costs, key=costs.get))
-        self.assertTrue(indexed_buckets)
+                    assert bucket.selected_policy == min(costs, key=costs.get)
+        assert indexed_buckets
 
     def test_state_width_buckets_and_magnetic_normalization(self):
         drude_one_a = gmes.Drude(
@@ -172,27 +166,20 @@ class ComponentPlanTest(unittest.TestCase):
         drude = [
             bucket for bucket in electric.buckets if bucket.signature.model == "drude"
         ]
-        self.assertEqual(
-            {bucket.signature.state_shape for bucket in drude}, {(1,), (4,)}
-        )
+        assert {bucket.signature.state_shape for bucket in drude} == {(1,), (4,)}
         width_one = next(
             bucket for bucket in drude if bucket.signature.state_shape == (1,)
         )
-        self.assertGreaterEqual(len(width_one.region_keys), 2)
-        self.assertEqual(width_one.state_width, 2)
-        self.assertEqual(width_one.padded_state_width, 8)
-        self.assertGreater(width_one.padding_elements_avoided, 0)
-        self.assertIn("bounded max-width merge", width_one.width_decision)
-        self.assertTrue(
-            all(bucket.selected_policy == "tiled" for bucket in electric.buckets)
-        )
-        self.assertTrue(all(len(bucket.tile_origins) for bucket in electric.buckets))
+        assert len(width_one.region_keys) >= 2
+        assert width_one.state_width == 2
+        assert width_one.padded_state_width == 8
+        assert width_one.padding_elements_avoided > 0
+        assert "bounded max-width merge" in width_one.width_decision
+        assert all(bucket.selected_policy == "tiled" for bucket in electric.buckets)
+        assert all(len(bucket.tile_origins) for bucket in electric.buckets)
         magnetic = plans["Hx"]
-        self.assertEqual(
-            {bucket.signature.model for bucket in magnetic.buckets},
-            {"dielectric"},
-        )
-        self.assertEqual(len(magnetic.buckets), 1)
+        assert {bucket.signature.model for bucket in magnetic.buckets} == {"dielectric"}
+        assert len(magnetic.buckets) == 1
 
     def test_compound_underlying_ids_survive_bucket_indirection(self):
         geometry = [
@@ -204,7 +191,7 @@ class ComponentPlanTest(unittest.TestCase):
             cpml = next(
                 bucket for bucket in plan.buckets if bucket.signature.model == "cpml"
             )
-            self.assertTrue(np.any(cpml.region_keys[:, 1] >= 0))
+            assert np.any(cpml.region_keys[:, 1] >= 0)
             keys = np.column_stack(
                 (
                     plan.material_ids.reshape(-1)[cpml.targets],
@@ -214,75 +201,70 @@ class ComponentPlanTest(unittest.TestCase):
             np.testing.assert_array_equal(
                 keys, cpml.region_keys[cpml.target_region_indices]
             )
-            self.assertEqual(cpml.selected_policy, "compact")
-            self.assertEqual(len(cpml.tile_origins), 0)
+            assert cpml.selected_policy == "compact"
+            assert len(cpml.tile_origins) == 0
 
-    def test_cpml_sparse_residual_maps_dense_base_and_active_axes(self):
+    @pytest.mark.parametrize(
+        "component_name", tuple(COMPONENT_TYPES), ids=tuple(COMPONENT_TYPES)
+    )
+    def test_cpml_sparse_residual_maps_dense_base_and_active_axes(self, component_name):
         geometry = [
             gmes.DefaultMedium(gmes.Dielectric(eps_inf=2.5, mu_inf=1.2)),
             gmes.Shell(material=gmes.Cpml(kappa_max=3.0), thickness=0.5),
         ]
         _, _, plans = _host_plans(geometry, policy="compact", cpml_sparse_residual=True)
-        for component_name, plan in plans.items():
-            with self.subTest(component=component_name):
-                bucket = next(
-                    bucket
-                    for bucket in plan.buckets
-                    if bucket.signature.model == "cpml"
+        plan = plans[component_name]
+        bucket = next(
+            bucket for bucket in plan.buckets if bucket.signature.model == "cpml"
+        )
+        assert len(bucket.cpml_residual_axes) == 2
+        np.testing.assert_array_equal(
+            plan.dense_inverse.reshape(-1)[bucket.targets],
+            bucket.cell_coefficients[:, 0],
+        )
+        active_states = 0
+        for axis, residual in enumerate(bucket.cpml_residual_axes):
+            b_column, c_column, kappa_column = (1, 2, 3) if axis == 0 else (4, 5, 6)
+            expected_positions = np.flatnonzero(
+                np.logical_or(
+                    bucket.cell_coefficients[:, c_column] != 0.0,
+                    bucket.cell_coefficients[:, kappa_column] != 1.0,
                 )
-                self.assertEqual(len(bucket.cpml_residual_axes), 2)
-                np.testing.assert_array_equal(
-                    plan.dense_inverse.reshape(-1)[bucket.targets],
-                    bucket.cell_coefficients[:, 0],
-                )
-                active_states = 0
-                for axis, residual in enumerate(bucket.cpml_residual_axes):
-                    b_column, c_column, kappa_column = (
-                        (1, 2, 3) if axis == 0 else (4, 5, 6)
+            )
+            np.testing.assert_array_equal(residual.positions, expected_positions)
+            np.testing.assert_array_equal(
+                residual.targets, bucket.targets[expected_positions]
+            )
+            np.testing.assert_array_equal(
+                residual.stencil_indices,
+                bucket.stencil_indices[expected_positions, 2 * axis : 2 * axis + 2],
+            )
+            np.testing.assert_allclose(
+                residual.parameters,
+                np.column_stack(
+                    (
+                        bucket.cell_coefficients[expected_positions, 0],
+                        bucket.cell_coefficients[expected_positions, b_column],
+                        bucket.cell_coefficients[expected_positions, c_column],
+                        1.0 / bucket.cell_coefficients[expected_positions, kappa_column]
+                        - 1.0,
                     )
-                    expected_positions = np.flatnonzero(
-                        np.logical_or(
-                            bucket.cell_coefficients[:, c_column] != 0.0,
-                            bucket.cell_coefficients[:, kappa_column] != 1.0,
-                        )
-                    )
-                    np.testing.assert_array_equal(
-                        residual.positions, expected_positions
-                    )
-                    np.testing.assert_array_equal(
-                        residual.targets, bucket.targets[expected_positions]
-                    )
-                    np.testing.assert_array_equal(
-                        residual.stencil_indices,
-                        bucket.stencil_indices[
-                            expected_positions, 2 * axis : 2 * axis + 2
-                        ],
-                    )
-                    np.testing.assert_allclose(
-                        residual.parameters,
-                        np.column_stack(
-                            (
-                                bucket.cell_coefficients[expected_positions, 0],
-                                bucket.cell_coefficients[expected_positions, b_column],
-                                bucket.cell_coefficients[expected_positions, c_column],
-                                1.0
-                                / bucket.cell_coefficients[
-                                    expected_positions, kappa_column
-                                ]
-                                - 1.0,
-                            )
-                        ),
-                        rtol=0.0,
-                        atol=0.0,
-                    )
-                    active_states += len(residual.targets)
-                self.assertLess(active_states, 2 * bucket.target_count)
-                self.assertEqual(
-                    bucket.launch_count,
-                    sum(bool(len(axis.targets)) for axis in bucket.cpml_residual_axes),
-                )
+                ),
+                rtol=0.0,
+                atol=0.0,
+            )
+            active_states += len(residual.targets)
+        assert active_states < 2 * bucket.target_count
+        assert bucket.launch_count == sum(
+            bool(len(axis.targets)) for axis in bucket.cpml_residual_axes
+        )
 
-    def test_float32_cpml_falls_back_when_residual_cancellation_is_unstable(self):
+    @pytest.mark.parametrize(
+        "component_name", tuple(COMPONENT_TYPES), ids=tuple(COMPONENT_TYPES)
+    )
+    def test_float32_cpml_falls_back_when_residual_cancellation_is_unstable(
+        self, component_name
+    ):
         geometry = [
             gmes.DefaultMedium(gmes.Dielectric(eps_inf=2.5, mu_inf=1.2)),
             gmes.Shell(material=gmes.Cpml(kappa_max=1e8), thickness=0.5),
@@ -293,22 +275,19 @@ class ComponentPlanTest(unittest.TestCase):
             cpml_sparse_residual=True,
             precision="float32",
         )
-        for component_name, plan in plans.items():
-            with self.subTest(component=component_name):
-                bucket = next(
-                    bucket
-                    for bucket in plan.buckets
-                    if bucket.signature.model == "cpml"
-                )
-                self.assertEqual(bucket.cpml_residual_axes, ())
-                np.testing.assert_array_equal(
-                    plan.dense_inverse.reshape(-1)[bucket.targets],
-                    0.0,
-                )
-                self.assertEqual(bucket.launch_count, 1)
+        plan = plans[component_name]
+        bucket = next(
+            bucket for bucket in plan.buckets if bucket.signature.model == "cpml"
+        )
+        assert bucket.cpml_residual_axes == ()
+        np.testing.assert_array_equal(
+            plan.dense_inverse.reshape(-1)[bucket.targets],
+            0.0,
+        )
+        assert bucket.launch_count == 1
 
 
-class ExecutionPolicyTest(unittest.TestCase):
+class TestExecutionPolicy:
     def test_forced_policies_produce_identical_complete_fields(self):
         rng = np.random.default_rng(117)
         fields = None
@@ -333,10 +312,8 @@ class ExecutionPolicyTest(unittest.TestCase):
             simulation.advance(3)
             results[policy] = simulation.state.host_snapshot()
             for component in simulation.plan.components.values():
-                self.assertTrue(
-                    all(
-                        bucket.selected_policy == policy for bucket in component.buckets
-                    )
+                assert all(
+                    bucket.selected_policy == policy for bucket in component.buckets
                 )
         for name in gmes.torch_plan.COMPONENTS:
             np.testing.assert_array_equal(
@@ -385,10 +362,8 @@ class ExecutionPolicyTest(unittest.TestCase):
             actual = simulation.state.host_snapshot()
             results[policy] = actual
             for name, component in simulation.plan.components.items():
-                self.assertTrue(
-                    {"const", "dummy"}.issubset(
-                        {bucket.signature.model for bucket in component.buckets}
-                    )
+                assert {"const", "dummy"}.issubset(
+                    {bucket.signature.model for bucket in component.buckets}
                 )
                 initial = fields[name].reshape(-1)
                 updated = actual[name].reshape(-1)
@@ -400,7 +375,7 @@ class ExecutionPolicyTest(unittest.TestCase):
                             updated[bucket.targets], initial[bucket.targets]
                         )
             simulation.advance(4)
-            self.assertEqual(addresses, simulation.buffer_addresses())
+            assert addresses == simulation.buffer_addresses()
         for name in gmes.torch_plan.COMPONENTS:
             np.testing.assert_array_equal(
                 results["dense"][name], results["compact"][name]
@@ -420,16 +395,13 @@ class ExecutionPolicyTest(unittest.TestCase):
                 planner_tile_size=8,
             ),
         )
-        self.assertEqual(list(simulation.plan.parameters()), [])
-        self.assertTrue(
-            any(
-                "tile_region_indices" in name
-                for name, _ in simulation.plan.named_buffers()
-            )
+        assert list(simulation.plan.parameters()) == []
+        assert any(
+            "tile_region_indices" in name for name, _ in simulation.plan.named_buffers()
         )
         for _, value in simulation.plan.named_buffers():
-            self.assertFalse(value.requires_grad)
-            self.assertEqual(value.device.type, "cpu")
+            assert not value.requires_grad
+            assert value.device.type == "cpu"
         before = {
             name: value.data_ptr() for name, value in simulation.plan.named_buffers()
         }
@@ -437,8 +409,4 @@ class ExecutionPolicyTest(unittest.TestCase):
         after = {
             name: value.data_ptr() for name, value in simulation.plan.named_buffers()
         }
-        self.assertEqual(before, after)
-
-
-if __name__ == "__main__":
-    unittest.main()
+        assert before == after

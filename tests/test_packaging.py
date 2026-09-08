@@ -5,7 +5,6 @@ import subprocess
 import sys
 import tarfile
 import tempfile
-import unittest
 import venv
 from pathlib import Path, PurePosixPath
 
@@ -19,7 +18,7 @@ EXTERNAL_CPU_BASELINES = {
 FIXTURE_ROOT = Path("tests/fixtures/issue124")
 
 
-class SourceDistributionTest(unittest.TestCase):
+class TestSourceDistribution:
     def test_fixture_includes_required_pure_package_members(self):
         with tempfile.TemporaryDirectory() as output_directory:
             archive_path = Path(output_directory) / "gmes-0.10.0.tar.gz"
@@ -48,14 +47,12 @@ class SourceDistributionTest(unittest.TestCase):
                 }
                 packaged_paths = set(packaged_members)
 
-        self.assertIn(PurePosixPath("examples/VERIFICATION.md"), packaged_paths)
-        self.assertIn(PurePosixPath("gmes/py.typed"), packaged_paths)
-        self.assertIn(PurePosixPath("gmes/constant.pyi"), packaged_paths)
-        self.assertIn(PurePosixPath("gmes/constant.py"), packaged_paths)
-        self.assertNotIn(PurePosixPath("gmes/pw_material.pyi"), packaged_paths)
-        for path in EXTERNAL_CPU_BASELINES:
-            with self.subTest(path=path):
-                self.assertNotIn(path, packaged_paths)
+        assert PurePosixPath("examples/VERIFICATION.md") in packaged_paths
+        assert PurePosixPath("gmes/py.typed") in packaged_paths
+        assert PurePosixPath("gmes/constant.pyi") in packaged_paths
+        assert PurePosixPath("gmes/constant.py") in packaged_paths
+        assert PurePosixPath("gmes/pw_material.pyi") not in packaged_paths
+        assert EXTERNAL_CPU_BASELINES.isdisjoint(packaged_paths)
 
     def test_pep517_archives_install_and_run_from_clean_project_path(self):
         """Final candidates must prove the built, installed artifact is runnable."""
@@ -78,7 +75,7 @@ class SourceDistributionTest(unittest.TestCase):
                 capture_output=True,
                 text=True,
             )
-            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            assert result.returncode == 0, result.stdout + result.stderr
             verify_distribution_set(dist_directory, "0.10.0")
             wheel = next(dist_directory.glob("*.whl"))
             sdist = next(dist_directory.glob("*.tar.gz"))
@@ -98,11 +95,11 @@ class SourceDistributionTest(unittest.TestCase):
                     ):
                         continue
                     contents = archive.extractfile(member)
-                    self.assertIsNotNone(contents, member.name)
+                    assert contents is not None, member.name
                     archived_fixture_digests[
                         member.name.removeprefix(fixture_prefix)
                     ] = hashlib.sha256(contents.read()).hexdigest()
-            self.assertEqual(archived_fixture_digests, expected_fixture_digests)
+            assert archived_fixture_digests == expected_fixture_digests
 
             for archive in (wheel, sdist):
                 environment = output_directory / archive.stem
@@ -133,7 +130,7 @@ class SourceDistributionTest(unittest.TestCase):
                     text=True,
                     env=environment_variables,
                 )
-                self.assertEqual(sync.returncode, 0, sync.stdout + sync.stderr)
+                assert sync.returncode == 0, sync.stdout + sync.stderr
                 bootstrap = subprocess.run(
                     [str(python), "-m", "ensurepip"],
                     cwd=output_directory,
@@ -142,9 +139,7 @@ class SourceDistributionTest(unittest.TestCase):
                     text=True,
                     env=environment_variables,
                 )
-                self.assertEqual(
-                    bootstrap.returncode, 0, bootstrap.stdout + bootstrap.stderr
-                )
+                assert bootstrap.returncode == 0, bootstrap.stdout + bootstrap.stderr
                 build_tools = subprocess.run(
                     [
                         str(python),
@@ -163,8 +158,8 @@ class SourceDistributionTest(unittest.TestCase):
                     text=True,
                     env=environment_variables,
                 )
-                self.assertEqual(
-                    build_tools.returncode, 0, build_tools.stdout + build_tools.stderr
+                assert build_tools.returncode == 0, (
+                    build_tools.stdout + build_tools.stderr
                 )
                 archive_digest = hashlib.sha256(archive.read_bytes()).hexdigest()
                 installer = [
@@ -186,7 +181,7 @@ class SourceDistributionTest(unittest.TestCase):
                     text=True,
                     env=environment_variables,
                 )
-                self.assertEqual(install.returncode, 0, install.stdout + install.stderr)
+                assert install.returncode == 0, install.stdout + install.stderr
                 smoke = subprocess.run(
                     [
                         str(python),
@@ -213,8 +208,4 @@ class SourceDistributionTest(unittest.TestCase):
                     text=True,
                     env=environment_variables,
                 )
-                self.assertEqual(smoke.returncode, 0, smoke.stdout + smoke.stderr)
-
-
-if __name__ == "__main__":
-    unittest.main()
+                assert smoke.returncode == 0, smoke.stdout + smoke.stderr

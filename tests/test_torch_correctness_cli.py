@@ -2,11 +2,12 @@ import importlib.util
 import io
 import json
 import sys
-import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import mock
+
+import pytest
 
 _spec = importlib.util.spec_from_file_location(
     "torch_correctness", Path(__file__).parents[1] / "benchmarks/torch_correctness.py"
@@ -15,12 +16,10 @@ torch_correctness = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(torch_correctness)
 
 
-class TorchCorrectnessCliTests(unittest.TestCase):
-    def test_main_emits_fixed_token_for_each_command(self):
-        temporary_directory = TemporaryDirectory()
-        self.addCleanup(temporary_directory.cleanup)
-        output_path = Path(temporary_directory.name) / "out.json"
-        index_path = Path(temporary_directory.name) / "index.json"
+class TestTorchCorrectnessCli:
+    def test_main_emits_fixed_token_for_each_command(self, tmp_path):
+        output_path = tmp_path / "out.json"
+        index_path = tmp_path / "index.json"
         cases = {
             "capture": (
                 "torch-correctness-capture-ok",
@@ -64,7 +63,6 @@ class TorchCorrectnessCliTests(unittest.TestCase):
         }
         for command, (token, arguments) in cases.items():
             with (
-                self.subTest(command=command),
                 mock.patch.object(
                     sys, "argv", ["torch_correctness", command, *arguments]
                 ),
@@ -98,18 +96,14 @@ class TorchCorrectnessCliTests(unittest.TestCase):
                 ) as load,
                 redirect_stdout(io.StringIO()) as output,
             ):
-                self.assertEqual(0, torch_correctness.main())
-            self.assertEqual(token + "\n", output.getvalue())
-            self.assertNotIn("/private/secret", output.getvalue())
+                assert (0) == (torch_correctness.main())
+            assert (token + "\n") == (output.getvalue())
+            assert ("/private/secret") not in (output.getvalue())
             if command == "capture":
                 capture.assert_called_once()
             elif command == "index":
                 build.assert_called_once()
-                self.assertEqual(1, evidence.call_count)
+                assert (1) == (evidence.call_count)
             else:
                 load.assert_called_once()
-                self.assertEqual(1, evidence.call_count)
-
-
-if __name__ == "__main__":
-    unittest.main()
+                assert (1) == (evidence.call_count)

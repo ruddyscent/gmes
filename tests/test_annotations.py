@@ -3,9 +3,10 @@
 import annotationlib
 import importlib
 import inspect
-import unittest
 from pathlib import Path
 from typing import Any
+
+import pytest
 
 import gmes
 from gmes.pygeom import Material
@@ -67,77 +68,80 @@ def _callable_targets(label, value):
         elif inspect.isroutine(member):
             targets.append(member)
         for target in targets:
+            target_label = f"{label}.{name}"
+            if isinstance(member, property):
+                accessor = "get" if target is member.fget else "set"
+                target_label += f".{accessor}"
             target = inspect.unwrap(target)
             if _source_file(target) in SOURCE_FILES:
-                yield f"{label}.{name}", target
+                yield target_label, target
 
 
-class AnnotationCoverageTest(unittest.TestCase):
+def _annotation_cases():
+    exports = [(f"gmes.{name}", getattr(gmes, name)) for name in gmes.__all__]
+    for module_name in EXPORT_MODULES:
+        module = importlib.import_module(f"gmes.{module_name}")
+        exports.extend(
+            (f"gmes.{module_name}.{name}", getattr(module, name))
+            for name in module.__all__
+        )
+    exports.extend(
+        (f"{value.__module__}.{value.__qualname__}", value)
+        for value in (Material, Src, SrcTime)
+    )
+
+    checked = set()
+    for label, value in exports:
+        if _source_file(value) not in SOURCE_FILES:
+            continue
+        for target_label, target in _callable_targets(label, value):
+            identity = id(target)
+            if identity in checked:
+                continue
+            checked.add(identity)
+            yield target_label, target
+
+
+_ANNOTATION_CASES = tuple(_annotation_cases())
+
+
+class TestAnnotationCoverage:
     """Check completeness, resolvability, and Python 3.14 semantics."""
 
-    def test_public_annotations_are_complete_and_resolvable(self):
-        exports = [(f"gmes.{name}", getattr(gmes, name)) for name in gmes.__all__]
-        for module_name in EXPORT_MODULES:
-            module = importlib.import_module(f"gmes.{module_name}")
-            exports.extend(
-                (f"gmes.{module_name}.{name}", getattr(module, name))
-                for name in module.__all__
-            )
-        exports.extend(
-            (f"{value.__module__}.{value.__qualname__}", value)
-            for value in (Material, Src, SrcTime)
+    @pytest.mark.parametrize(
+        ("target_label", "target"),
+        _ANNOTATION_CASES,
+        ids=[label for label, _ in _ANNOTATION_CASES],
+    )
+    def test_public_annotations_are_complete_and_resolvable(self, target_label, target):
+        forward = annotationlib.get_annotations(
+            target, format=annotationlib.Format.FORWARDREF
         )
-
-        checked = set()
-        for label, value in exports:
-            if _source_file(value) not in SOURCE_FILES:
+        values = annotationlib.get_annotations(
+            target, format=annotationlib.Format.VALUE
+        )
+        assert set(forward) == set(values), target_label
+        signature = inspect.signature(target)
+        for parameter in signature.parameters.values():
+            if parameter.name in {"self", "cls"}:
                 continue
-            for target_label, target in _callable_targets(label, value):
-                identity = id(target)
-                if identity in checked:
-                    continue
-                checked.add(identity)
-                with self.subTest(callable=target_label):
-                    forward = annotationlib.get_annotations(
-                        target, format=annotationlib.Format.FORWARDREF
-                    )
-                    values = annotationlib.get_annotations(
-                        target, format=annotationlib.Format.VALUE
-                    )
-                    self.assertEqual(set(forward), set(values))
-                    signature = inspect.signature(target)
-                    for parameter in signature.parameters.values():
-                        if parameter.name in {"self", "cls"}:
-                            continue
-                        self.assertIsNot(
-                            parameter.annotation,
-                            inspect.Signature.empty,
-                            f"{target_label}.{parameter.name} is untyped",
-                        )
-                        self.assertIsNot(
-                            values[parameter.name],
-                            Any,
-                            f"{target_label}.{parameter.name} exposes Any",
-                        )
-                    self.assertIsNot(
-                        signature.return_annotation,
-                        inspect.Signature.empty,
-                        f"{target_label} has no return annotation",
-                    )
-                    self.assertIsNot(
-                        values["return"], Any, f"{target_label} returns Any"
-                    )
-        self.assertGreater(len(checked), 100)
+            assert (
+                parameter.annotation is not inspect.Signature.empty
+            ), f"{target_label}.{parameter.name} is untyped"
+            assert (
+                values[parameter.name] is not Any
+            ), f"{target_label}.{parameter.name} exposes Any"
+        assert (
+            signature.return_annotation is not inspect.Signature.empty
+        ), f"{target_label} has no return annotation"
+        assert values["return"] is not Any, f"{target_label} returns Any"
 
-    def test_source_modules_use_python_314_deferred_annotations(self):
-        for module_name in SOURCE_MODULES:
-            path = PACKAGE_ROOT / f"{module_name}.py"
-            with self.subTest(module=module_name):
-                self.assertNotIn(
-                    "from __future__ import annotations",
-                    path.read_text(encoding="utf-8"),
-                )
+    def test_public_annotation_inventory_is_complete(self):
+        assert len(_ANNOTATION_CASES) > 100
 
-
-if __name__ == "__main__":
-    unittest.main()
+    @pytest.mark.parametrize("module_name", SOURCE_MODULES, ids=SOURCE_MODULES)
+    def test_source_modules_use_python_314_deferred_annotations(self, module_name):
+        path = PACKAGE_ROOT / f"{module_name}.py"
+        assert "from __future__ import annotations" not in path.read_text(
+            encoding="utf-8"
+        )

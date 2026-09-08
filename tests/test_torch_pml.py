@@ -2,12 +2,12 @@
 
 import copy
 import json
-import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
 import numpy as np
+import pytest
 import torch
 
 import gmes
@@ -20,6 +20,7 @@ from gmes.torch_fdtd import (
     _uses_cpml_cuda_direct_views_for_plan,
     _view_mutation_representation,
 )
+from tests.test_torch_fdtd import restore_torch_runtime as restore_torch_runtime
 
 _COMPONENTS = ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")
 _MANIFEST = json.loads(
@@ -186,7 +187,7 @@ def _reference_and_torch(
     return reference, simulation
 
 
-def _assert_reference(test, reference, simulation, model, precision):
+def _assert_reference(reference, simulation, model, precision):
     expected_fields = reference.state.host_snapshot()
     complex_values = np.iscomplexobj(expected_fields["Ex"])
     tolerance_name = (
@@ -326,7 +327,7 @@ def _torch_dispersive_rows(simulation, descriptor):
     return state, width, set(names)
 
 
-class TorchPmlOracleTest(unittest.TestCase):
+class TestTorchPmlOracle:
     def test_one_cell_state_recurrences_match_explicit_scalar_equations(self):
         field = torch.tensor([0.25], dtype=torch.float64)
         source1 = torch.tensor([0.8, -0.2], dtype=torch.float64)
@@ -360,8 +361,8 @@ class TorchPmlOracleTest(unittest.TestCase):
             direction,
             False,
         )
-        self.assertAlmostEqual(float(field[0]), expected_field)
-        self.assertAlmostEqual(float(upml_state[0, 0]), new_memory)
+        assert round(abs(float(field[0]) - expected_field), 7) == 0
+        assert round(abs(float(upml_state[0, 0]) - new_memory), 7) == 0
 
         field.fill_(0.25)
         cpml_coefficients = np.asarray(
@@ -388,74 +389,78 @@ class TorchPmlOracleTest(unittest.TestCase):
             0.1,
             False,
         )
-        self.assertAlmostEqual(float(field[0]), expected_field)
+        assert round(abs(float(field[0]) - expected_field), 7) == 0
         np.testing.assert_allclose(
             cpml_state.numpy(), [[psi1, psi2]], rtol=0, atol=1e-15
         )
 
-    def test_nonzero_fields_and_state_match_at_reference_steps(self):
-        cases = (
-            (gmes.Upml, "eager"),
-            (gmes.Cpml, "eager"),
-            (gmes.Cpml, "compile"),
+    @pytest.mark.parametrize(
+        ("model", "compile_policy"),
+        ((gmes.Upml, "eager"), (gmes.Cpml, "eager"), (gmes.Cpml, "compile")),
+        ids=("upml-eager", "cpml-eager", "cpml-compiled"),
+    )
+    def test_nonzero_fields_and_state_match_at_reference_steps(
+        self, model, compile_policy
+    ):
+        if compile_policy == "compile":
+            torch._dynamo.reset()
+        reference, simulation = _reference_and_torch(
+            model,
+            compile_policy=compile_policy,
         )
-        for model, compile_policy in cases:
-            with self.subTest(model=model.__name__, compile_policy=compile_policy):
-                if compile_policy == "compile":
-                    torch._dynamo.reset()
-                reference, simulation = _reference_and_torch(
-                    model,
-                    compile_policy=compile_policy,
-                )
-                completed = 0
-                for target in (1, 2, 5, 20, 100):
-                    delta = target - completed
-                    simulation.advance(delta)
-                    for _ in range(delta):
-                        reference.step()
-                    _assert_reference(self, reference, simulation, model, "float64")
-                    completed = target
+        completed = 0
+        for target in (1, 2, 5, 20, 100):
+            delta = target - completed
+            simulation.advance(delta)
+            for _ in range(delta):
+                reference.step()
+            _assert_reference(reference, simulation, model, "float64")
+            completed = target
 
-    def test_float32_and_paired_real_bloch_use_model_tolerances(self):
-        cases = (
+    @pytest.mark.parametrize("model", (gmes.Upml, gmes.Cpml), ids=("upml", "cpml"))
+    @pytest.mark.parametrize(
+        ("precision", "bloch"),
+        (
             ("float32", None),
             ("float64", (0.07, 0.11, 0.13)),
             ("float32", (0.07, 0.11, 0.13)),
+        ),
+        ids=("float32-real", "float64-bloch", "float32-bloch"),
+    )
+    def test_float32_and_paired_real_bloch_use_model_tolerances(
+        self, model, precision, bloch
+    ):
+        reference, simulation = _reference_and_torch(
+            model,
+            precision=precision,
+            bloch=bloch,
+            compile_policy=(
+                "compile"
+                if model is gmes.Cpml or (precision == "float64" and bloch is not None)
+                else "eager"
+            ),
         )
-        for model in (gmes.Upml, gmes.Cpml):
-            for precision, bloch in cases:
-                with self.subTest(
-                    model=model.__name__, precision=precision, bloch=bool(bloch)
-                ):
-                    reference, simulation = _reference_and_torch(
-                        model,
-                        precision=precision,
-                        bloch=bloch,
-                        compile_policy=(
-                            "compile"
-                            if model is gmes.Cpml
-                            or (precision == "float64" and bloch is not None)
-                            else "eager"
-                        ),
-                    )
-                    simulation.advance(5)
-                    for _ in range(5):
-                        reference.step()
-                    _assert_reference(self, reference, simulation, model, precision)
+        simulation.advance(5)
+        for _ in range(5):
+            reference.step()
+        _assert_reference(reference, simulation, model, precision)
 
-    def test_collapsed_1d_2d_and_3d_modes_match_dense_reference(self):
-        for size in ((4, 0, 0), (4, 3, 0), (3, 3, 2)):
-            for model in (gmes.Upml, gmes.Cpml):
-                with self.subTest(size=size, model=model.__name__):
-                    reference, simulation = _reference_and_torch(
-                        model,
-                        size=size,
-                        compile_policy="compile" if model is gmes.Cpml else "eager",
-                    )
-                    simulation.advance(5)
-                    for _ in range(5):
-                        reference.step()
-                    _assert_reference(self, reference, simulation, model, "float64")
+    @pytest.mark.parametrize(
+        "size",
+        ((4, 0, 0), (4, 3, 0), (3, 3, 2)),
+        ids=("one-dimensional", "two-dimensional", "three-dimensional"),
+    )
+    @pytest.mark.parametrize("model", (gmes.Upml, gmes.Cpml), ids=("upml", "cpml"))
+    def test_collapsed_1d_2d_and_3d_modes_match_dense_reference(self, size, model):
+        reference, simulation = _reference_and_torch(
+            model,
+            size=size,
+            compile_policy="compile" if model is gmes.Cpml else "eager",
+        )
+        simulation.advance(5)
+        for _ in range(5):
+            reference.step()
+        _assert_reference(reference, simulation, model, "float64")
 
     def test_shell_corners_use_mixed_underlying_media(self):
         geometry = [
@@ -476,90 +481,86 @@ class TorchPmlOracleTest(unittest.TestCase):
         simulation.advance(5)
         for _ in range(5):
             reference.step()
-        _assert_reference(self, reference, simulation, gmes.Cpml, "float64")
+        _assert_reference(reference, simulation, gmes.Cpml, "float64")
         for component in simulation.plan.components.values():
             bucket = next(
                 bucket
                 for bucket in component.buckets
                 if bucket.signature.model == "cpml"
             )
-            self.assertEqual(set(bucket.region_keys[:, 1]), {0, 1})
-            self.assertEqual(len(np.unique(bucket.cell_coefficients[:, 0])), 2)
+            assert set(bucket.region_keys[:, 1]) == {0, 1}
+            assert len(np.unique(bucket.cell_coefficients[:, 0])) == 2
 
-    def test_forced_execution_policies_are_oracle_equivalent(self):
-        for policy in ("dense", "compact", "tiled"):
-            with self.subTest(policy=policy):
-                reference, simulation = _reference_and_torch(gmes.Cpml, policy=policy)
-                simulation.advance(5)
-                for _ in range(5):
-                    reference.step()
-                _assert_reference(self, reference, simulation, gmes.Cpml, "float64")
-                self.assertEqual(
-                    {
-                        bucket.selected_policy
-                        for component in simulation.plan.components.values()
-                        for bucket in component.buckets
-                    },
-                    {policy},
-                )
+    @pytest.mark.parametrize(
+        "policy", ("dense", "compact", "tiled"), ids=("dense", "compact", "tiled")
+    )
+    def test_forced_execution_policies_are_oracle_equivalent(self, policy):
+        reference, simulation = _reference_and_torch(gmes.Cpml, policy=policy)
+        simulation.advance(5)
+        for _ in range(5):
+            reference.step()
+        _assert_reference(reference, simulation, gmes.Cpml, "float64")
+        assert {
+            bucket.selected_policy
+            for component in simulation.plan.components.values()
+            for bucket in component.buckets
+        } == {policy}
 
-    def test_compiled_z_collapsed_specialization_matches_dense_reference(self):
-        for model in (gmes.Upml, gmes.Cpml):
-            with self.subTest(model=model.__name__):
-                torch._dynamo.reset()
-                reference, simulation = _reference_and_torch(
-                    model,
-                    size=(4, 4, 0),
-                    resolution=3,
-                    compile_policy="compile",
-                )
-                self.assertEqual(
-                    simulation.diagnostics()["phase_specialization"],
-                    "z-collapsed-v1",
-                )
-                simulation.advance(5)
-                for _ in range(5):
-                    reference.step()
-                _assert_reference(self, reference, simulation, model, "float64")
+    @pytest.mark.parametrize("model", (gmes.Upml, gmes.Cpml), ids=("upml", "cpml"))
+    def test_compiled_z_collapsed_specialization_matches_dense_reference(self, model):
+        torch._dynamo.reset()
+        reference, simulation = _reference_and_torch(
+            model,
+            size=(4, 4, 0),
+            resolution=3,
+            compile_policy="compile",
+        )
+        assert simulation.diagnostics()["phase_specialization"] == "z-collapsed-v1"
+        simulation.advance(5)
+        for _ in range(5):
+            reference.step()
+        _assert_reference(reference, simulation, model, "float64")
 
-    def test_compiled_custom_kappa_sparse_residual_matches_dense_reference(self):
-        for precision in ("float64", "float32"):
-            with self.subTest(precision=precision):
-                geometry = [
-                    gmes.DefaultMedium(gmes.Dielectric(eps_inf=2.5, mu_inf=1.2)),
-                    gmes.Block(
-                        gmes.Dielectric(eps_inf=3.2, mu_inf=1.15),
-                        center=(0, 0, 0),
-                        size=(1.2, 1.2, 1.2),
-                    ),
-                    gmes.Shell(gmes.Cpml(kappa_max=3.0), thickness=0.75),
-                ]
-                reference, simulation = _reference_and_torch(
-                    gmes.Cpml,
-                    size=(2, 2, 2),
-                    resolution=4,
-                    precision=precision,
-                    compile_policy="compile",
-                    geometry=geometry,
-                )
-                completed = 0
-                for target in (1, 2, 5, 20, 100):
-                    delta = target - completed
-                    simulation.advance(delta)
-                    for _ in range(delta):
-                        reference.step()
-                    _assert_reference(
-                        self,
-                        reference,
-                        simulation,
-                        gmes.Cpml,
-                        precision,
-                    )
-                    completed = target
-                self.assertEqual(
-                    simulation.diagnostics()["pml"]["execution_representation"],
-                    SPARSE_CPML_REPRESENTATION,
-                )
+    @pytest.mark.parametrize(
+        "precision", ("float64", "float32"), ids=("float64", "float32")
+    )
+    def test_compiled_custom_kappa_sparse_residual_matches_dense_reference(
+        self, precision
+    ):
+        geometry = [
+            gmes.DefaultMedium(gmes.Dielectric(eps_inf=2.5, mu_inf=1.2)),
+            gmes.Block(
+                gmes.Dielectric(eps_inf=3.2, mu_inf=1.15),
+                center=(0, 0, 0),
+                size=(1.2, 1.2, 1.2),
+            ),
+            gmes.Shell(gmes.Cpml(kappa_max=3.0), thickness=0.75),
+        ]
+        reference, simulation = _reference_and_torch(
+            gmes.Cpml,
+            size=(2, 2, 2),
+            resolution=4,
+            precision=precision,
+            compile_policy="compile",
+            geometry=geometry,
+        )
+        completed = 0
+        for target in (1, 2, 5, 20, 100):
+            delta = target - completed
+            simulation.advance(delta)
+            for _ in range(delta):
+                reference.step()
+            _assert_reference(
+                reference,
+                simulation,
+                gmes.Cpml,
+                precision,
+            )
+            completed = target
+        assert (
+            simulation.diagnostics()["pml"]["execution_representation"]
+            == SPARSE_CPML_REPRESENTATION
+        )
 
     def test_extreme_float32_kappa_uses_stable_compact_fallback(self):
         geometry = [
@@ -575,10 +576,10 @@ class TorchPmlOracleTest(unittest.TestCase):
         simulation.advance(5)
         for _ in range(5):
             reference.step()
-        _assert_reference(self, reference, simulation, gmes.Cpml, "float32")
-        self.assertEqual(
-            simulation.diagnostics()["pml"]["execution_representation"],
-            DEFAULT_CPML_REPRESENTATION,
+        _assert_reference(reference, simulation, gmes.Cpml, "float32")
+        assert (
+            simulation.diagnostics()["pml"]["execution_representation"]
+            == DEFAULT_CPML_REPRESENTATION
         )
 
     def test_compiled_cpu_crossover_manifest_matches_dense_reference_state(self):
@@ -630,29 +631,30 @@ class TorchPmlOracleTest(unittest.TestCase):
         reference_simulation.advance(5)
 
         for bucket_state in simulation.state.dm2_buckets:
-            self.assertGreater(
-                int(torch.count_nonzero(bucket_state.u)),
-                0,
-                bucket_state.metadata.component,
-            )
+            assert (
+                int(torch.count_nonzero(bucket_state.u)) > 0
+            ), bucket_state.metadata.component
 
         diagnostics = simulation.diagnostics()
-        self.assertEqual(diagnostics["phase_specialization"], "z-collapsed-v1")
-        self.assertEqual(diagnostics["sources"]["target_rows"], 1)
-        self.assertEqual(
-            set(diagnostics["dispersive"]["models"]),
-            {"drude", "lorentz", "dcp-ade", "dcp-plrc", "dcp-rc"},
-        )
-        self.assertEqual(len(diagnostics["dm2"]), 3)
+        assert diagnostics["phase_specialization"] == "z-collapsed-v1"
+        assert diagnostics["sources"]["target_rows"] == 1
+        assert set(diagnostics["dispersive"]["models"]) == {
+            "drude",
+            "lorentz",
+            "dcp-ade",
+            "dcp-plrc",
+            "dcp-rc",
+        }
+        assert len(diagnostics["dm2"]) == 3
 
         tolerance = _MANIFEST["tolerances"]["torch"]["mixed"]["float64"]
         persistent = simulation.state.checkpoint()
         compared_dm2 = set()
         actual_dm2 = simulation.dm2_state_snapshot()
         reference_dm2 = reference_simulation.dm2_state_snapshot()
-        self.assertEqual(len(actual_dm2), len(reference_dm2))
+        assert len(actual_dm2) == len(reference_dm2)
         for index, (actual, expected) in enumerate(zip(actual_dm2, reference_dm2)):
-            self.assertEqual(actual["component"], expected["component"])
+            assert actual["component"] == expected["component"]
             np.testing.assert_array_equal(actual["targets"], expected["targets"])
             np.testing.assert_allclose(
                 actual["u"],
@@ -663,10 +665,10 @@ class TorchPmlOracleTest(unittest.TestCase):
             )
             compared_dm2.add(f"dm2_buckets.{index}.u")
         expected_dm2 = {name for name in persistent if name.startswith("dm2_buckets.")}
-        self.assertEqual(compared_dm2, expected_dm2)
+        assert compared_dm2 == expected_dm2
         pml_state = simulation.state.pml_state_snapshot()
         reference_pml = reference_simulation.state.pml_state_snapshot()
-        self.assertEqual(set(pml_state), set(reference_pml))
+        assert set(pml_state) == set(reference_pml)
         for state_name, actual in pml_state.items():
             np.testing.assert_allclose(
                 actual,
@@ -677,13 +679,11 @@ class TorchPmlOracleTest(unittest.TestCase):
             )
         compared_pml = set(pml_state)
         expected_pml = {name for name in persistent if name.startswith("pml_")}
-        self.assertEqual(compared_pml, expected_pml)
+        assert compared_pml == expected_pml
 
         compared_dispersive = set()
         reference_descriptors = reference_simulation.plan.dispersive_buckets
-        self.assertEqual(
-            len(simulation.plan.dispersive_buckets), len(reference_descriptors)
-        )
+        assert len(simulation.plan.dispersive_buckets) == len(reference_descriptors)
         for descriptor, reference_descriptor in zip(
             simulation.plan.dispersive_buckets, reference_descriptors
         ):
@@ -700,10 +700,10 @@ class TorchPmlOracleTest(unittest.TestCase):
                     f"{reference_descriptor.prefix}_targets",
                 )
             )
-            self.assertEqual(descriptor.component, reference_descriptor.component)
-            self.assertEqual(descriptor.model, reference_descriptor.model)
-            self.assertEqual(width, reference_width)
-            self.assertEqual(names, reference_names)
+            assert descriptor.component == reference_descriptor.component
+            assert descriptor.model == reference_descriptor.model
+            assert width == reference_width
+            assert names == reference_names
             np.testing.assert_array_equal(torch_targets, reference_targets)
             np.testing.assert_allclose(
                 actual,
@@ -716,7 +716,7 @@ class TorchPmlOracleTest(unittest.TestCase):
         expected_dispersive = {
             name for name in persistent if name.startswith("bucket_")
         }
-        self.assertEqual(compared_dispersive, expected_dispersive)
+        assert compared_dispersive == expected_dispersive
 
         actual_fields = simulation.state.host_snapshot()
         reference_fields = reference_simulation.state.host_snapshot()
@@ -730,15 +730,18 @@ class TorchPmlOracleTest(unittest.TestCase):
             )
 
         for names in (expected_pml, expected_dispersive, expected_dm2):
-            self.assertTrue(names)
-            self.assertTrue(
-                any(np.any(_host_array(persistent[name])) for name in names)
+            assert names
+            assert any(np.any(_host_array(persistent[name])) for name in names)
+        assert int(simulation.state.step_count) == 5
+        assert (
+            round(
+                abs(
+                    float(simulation.state.source_time)
+                    - float(reference_simulation.state.source_time)
+                ),
+                14,
             )
-        self.assertEqual(int(simulation.state.step_count), 5)
-        self.assertAlmostEqual(
-            float(simulation.state.source_time),
-            float(reference_simulation.state.source_time),
-            places=14,
+            == 0
         )
 
     def test_long_run_absorbs_seeded_energy_like_dense_reference(self):
@@ -755,15 +758,15 @@ class TorchPmlOracleTest(unittest.TestCase):
         simulation.advance(200)
         for _ in range(200):
             reference.step()
-        _assert_reference(self, reference, simulation, gmes.Cpml, "float64")
+        _assert_reference(reference, simulation, gmes.Cpml, "float64")
         final_energy = sum(
             float(np.square(np.abs(values)).sum())
             for values in simulation.state.host_snapshot().values()
         )
-        self.assertLess(final_energy, initial_energy)
+        assert final_energy < initial_energy
 
 
-class TorchPmlStorageTest(unittest.TestCase):
+class TestTorchPmlStorage:
     @staticmethod
     def _pml_execution_arguments(
         *, device_type, fused_local_phases, direct_view_mutations, model
@@ -812,100 +815,104 @@ class TorchPmlStorageTest(unittest.TestCase):
         executions = simulation._pml_executions(("Ex",), {model: object()})
         return state, fields, executions[0][1]
 
-    def test_cpml_cuda_direct_view_metadata_uses_actual_plan_buckets(self):
-        self.assertTrue(
-            _uses_cpml_cuda_direct_views(
-                fused_local_phases=True,
-                device_type="cuda",
-                model="cpml",
-            )
+    @pytest.mark.parametrize(
+        "case_index", range(3), ids=("no-pml", "upml-only", "cpml")
+    )
+    def test_cpml_cuda_direct_view_metadata_uses_actual_plan_buckets(self, case_index):
+        assert _uses_cpml_cuda_direct_views(
+            fused_local_phases=True,
+            device_type="cuda",
+            model="cpml",
         )
         geometries = (
             ("no-pml", [gmes.DefaultMedium(gmes.Dielectric())]),
             ("upml-only", _geometry(gmes.Upml)),
             ("cpml", _geometry(gmes.Cpml)),
         )
-        for label, geometry in geometries:
-            simulation = gmes.TorchSimulation(
-                space=gmes.Cartesian((2, 2, 2), 2),
-                geometry=geometry,
-                runtime=gmes.TorchRuntimeConfig(device="cpu", cpu_threads=1),
-            )
-            component_plans = simulation.plan.components.values()
-            with self.subTest(label=label):
-                enabled = _uses_cpml_cuda_direct_views_for_plan(
-                    fused_local_phases=True,
-                    device_type="cuda",
-                    component_plans=component_plans,
-                )
-                self.assertIs(enabled, label == "cpml")
-                self.assertEqual(
-                    _view_mutation_representation(
-                        direct_view_mutations=False,
-                        fused_local_phases=True,
-                        device_type="cuda",
-                        component_plans=component_plans,
-                    ),
-                    (
-                        CPML_CUDA_VIEW_MUTATION_REPRESENTATION
-                        if label == "cpml"
-                        else DEFAULT_VIEW_MUTATION_REPRESENTATION
-                    ),
-                )
-        for fused_local_phases, device_type, model in (
-            (False, "cuda", "cpml"),
-            (True, "cpu", "cpml"),
-            (True, "cuda", "upml"),
-        ):
-            with self.subTest(
-                fused_local_phases=fused_local_phases,
-                device_type=device_type,
-                model=model,
-            ):
-                self.assertFalse(
-                    _uses_cpml_cuda_direct_views(
-                        fused_local_phases=fused_local_phases,
-                        device_type=device_type,
-                        model=model,
-                    )
-                )
+        label, geometry = geometries[case_index]
+        simulation = gmes.TorchSimulation(
+            space=gmes.Cartesian((2, 2, 2), 2),
+            geometry=geometry,
+            runtime=gmes.TorchRuntimeConfig(device="cpu", cpu_threads=1),
+        )
+        component_plans = simulation.plan.components.values()
+        enabled = _uses_cpml_cuda_direct_views_for_plan(
+            fused_local_phases=True,
+            device_type="cuda",
+            component_plans=component_plans,
+        )
+        assert enabled is (label == "cpml")
+        assert _view_mutation_representation(
+            direct_view_mutations=False,
+            fused_local_phases=True,
+            device_type="cuda",
+            component_plans=component_plans,
+        ) == (
+            CPML_CUDA_VIEW_MUTATION_REPRESENTATION
+            if label == "cpml"
+            else DEFAULT_VIEW_MUTATION_REPRESENTATION
+        )
 
-    def test_cpml_direct_view_arguments_preserve_registered_tensor_identity(self):
-        scenarios = (
+    @pytest.mark.parametrize(
+        ("fused_local_phases", "device_type", "model"),
+        ((False, "cuda", "cpml"), (True, "cpu", "cpml"), (True, "cuda", "upml")),
+        ids=("unfused", "cpu", "upml"),
+    )
+    def test_cpml_cuda_direct_views_reject_unsupported_execution(
+        self, fused_local_phases, device_type, model
+    ):
+        assert not _uses_cpml_cuda_direct_views(
+            fused_local_phases=fused_local_phases,
+            device_type=device_type,
+            model=model,
+        )
+
+    @pytest.mark.parametrize(
+        "scenario, device_type, fused_local_phases, direct_view_mutations, model, expected_original_views",
+        (
             ("local-compiled-cuda", "cuda", True, False, "cpml", True),
             ("eager-cuda", "cuda", False, False, "cpml", False),
             ("local-compiled-cpu", "cpu", True, True, "cpml", True),
             ("eager-cpu", "cpu", False, False, "cpml", False),
             ("local-compiled-cuda-upml", "cuda", True, False, "upml", False),
             ("distributed-cuda", "cuda", False, False, "cpml", False),
+        ),
+        ids=[
+            "local-compiled-cuda",
+            "eager-cuda",
+            "local-compiled-cpu",
+            "eager-cpu",
+            "local-compiled-cuda-upml",
+            "distributed-cuda",
+        ],
+    )
+    def test_cpml_direct_view_arguments_preserve_registered_tensor_identity(
+        self,
+        scenario,
+        device_type,
+        fused_local_phases,
+        direct_view_mutations,
+        model,
+        expected_original_views,
+    ):
+        state, fields, arguments = self._pml_execution_arguments(
+            device_type=device_type,
+            fused_local_phases=fused_local_phases,
+            direct_view_mutations=direct_view_mutations,
+            model=model,
         )
-        for (
-            scenario,
-            device_type,
-            fused_local_phases,
-            direct_view_mutations,
-            model,
-            expected_original_views,
-        ) in scenarios:
-            with self.subTest(scenario=scenario):
-                state, fields, arguments = self._pml_execution_arguments(
-                    device_type=device_type,
-                    fused_local_phases=fused_local_phases,
-                    direct_view_mutations=direct_view_mutations,
-                    model=model,
-                )
-                if expected_original_views:
-                    self.assertIs(arguments[0], state.ex)
-                    self.assertIs(arguments[1], state.hz)
-                    self.assertIs(arguments[2], state.hy)
-                    self.assertIs(arguments[0], fields["Ex"])
-                    self.assertIs(arguments[1], fields["Hz"])
-                    self.assertIs(arguments[2], fields["Hy"])
-                else:
-                    self.assertIsNot(arguments[0], fields["Ex"])
-                    self.assertIsNot(arguments[1], fields["Hz"])
-                    self.assertIsNot(arguments[2], fields["Hy"])
-                self.assertIs(arguments[-1], expected_original_views)
+        if expected_original_views:
+            assert arguments[0] is state.ex
+            assert arguments[1] is state.hz
+            assert arguments[2] is state.hy
+            assert arguments[0] is fields["Ex"]
+            assert arguments[1] is fields["Hz"]
+            assert arguments[2] is fields["Hy"]
+        else:
+            assert arguments[0] is not fields["Ex"]
+            assert arguments[1] is not fields["Hz"]
+            assert arguments[2] is not fields["Hy"]
+        assert arguments[-1] is expected_original_views
 
     def test_cuda_constructor_keeps_cpu_sparse_cpml_disabled(self):
         captured = {}
@@ -929,7 +936,7 @@ class TorchPmlStorageTest(unittest.TestCase):
                 "TorchExecutionPlanner",
                 CapturingPlanner,
             ),
-            self.assertRaises(StopAtPlanner),
+            pytest.raises(StopAtPlanner),
         ):
             gmes.TorchSimulation(
                 space=gmes.Cartesian((2, 2, 2), 2),
@@ -941,7 +948,7 @@ class TorchPmlStorageTest(unittest.TestCase):
                     device="cuda:0", compile_policy="compile", cpu_threads=1
                 ),
             )
-        self.assertIs(captured["cpml_sparse_residual"], False)
+        assert captured["cpml_sparse_residual"] is False
 
     def test_state_is_active_only_contiguous_and_uses_underlying_medium(self):
         simulation = gmes.TorchSimulation(
@@ -961,22 +968,23 @@ class TorchPmlStorageTest(unittest.TestCase):
                     simulation.state,
                     f"pml_{component_name.lower()}_{index}_state",
                 )
-                self.assertTrue(state.is_contiguous())
-                self.assertEqual(state.numel(), bucket.target_count * 2)
-                self.assertTrue(np.all(bucket.region_keys[:, 1] >= 0))
+                assert state.is_contiguous()
+                assert state.numel() == bucket.target_count * 2
+                assert np.all(bucket.region_keys[:, 1] >= 0)
                 np.testing.assert_allclose(
                     bucket.cell_coefficients[:, 0],
                     1.0 / (2.5 if component_name in ("Ex", "Ey", "Ez") else 1.2),
                 )
         diagnostics = simulation.diagnostics()["pml"]
-        self.assertEqual(
-            diagnostics["state_bytes"],
-            expected_values * simulation.state.ex.element_size(),
+        assert (
+            diagnostics["state_bytes"]
+            == expected_values * simulation.state.ex.element_size()
         )
-        self.assertLess(expected_values, full_grid_values)
-        self.assertEqual(diagnostics["launches_per_step"], 6)
+        assert expected_values < full_grid_values
+        assert diagnostics["launches_per_step"] == 6
 
-    def test_coordinate_coefficients_match_material_contract(self):
+    @pytest.mark.parametrize("model", (gmes.Upml, gmes.Cpml), ids=("upml", "cpml"))
+    def test_coordinate_coefficients_match_material_contract(self, model):
         component_types = {name: getattr(gmes, name) for name in _COMPONENTS}
         axes_by_component = {
             "Ex": (1, 2, 0),
@@ -986,85 +994,84 @@ class TorchPmlStorageTest(unittest.TestCase):
             "Hy": (2, 0, 1),
             "Hz": (0, 1, 2),
         }
-        for model in (gmes.Upml, gmes.Cpml):
-            simulation = gmes.TorchSimulation(
-                space=gmes.Cartesian((2, 2, 2), 2),
-                geometry=_geometry(model),
-                runtime=gmes.TorchRuntimeConfig(device="cpu", cpu_threads=2),
+        simulation = gmes.TorchSimulation(
+            space=gmes.Cartesian((2, 2, 2), 2),
+            geometry=_geometry(model),
+            runtime=gmes.TorchRuntimeConfig(device="cpu", cpu_threads=2),
+        )
+        material = simulation.geometry[1].material
+        for component_name, component in simulation.plan.components.items():
+            bucket = next(
+                bucket
+                for bucket in component.buckets
+                if bucket.signature.model == model.__name__.lower()
             )
-            material = simulation.geometry[1].material
-            for component_name, component in simulation.plan.components.items():
-                bucket = next(
-                    bucket
-                    for bucket in component.buckets
-                    if bucket.signature.model == model.__name__.lower()
-                )
-                indices = np.unravel_index(bucket.targets, component.shape)
-                coordinate_axes = simulation.space.component_coordinate_axes(
-                    component_types[component_name], component.shape
-                )
-                coordinates = np.column_stack(
-                    [coordinate_axes[axis][indices[axis]] for axis in range(3)]
-                )
-                first, second, field = axes_by_component[component_name]
-                base = bucket.cell_coefficients[:, 0]
-                if model is gmes.Upml:
-                    first_coefficients = [
-                        _upml_coefficients_formula(material, value, first)
-                        for value in coordinates[:, first]
-                    ]
-                    second_coefficients = [
-                        _upml_coefficients_formula(material, value, second)
-                        for value in coordinates[:, second]
-                    ]
-                    field_profiles = [
-                        _pml_profile_formula(material, value, field)
-                        for value in coordinates[:, field]
-                    ]
-                    expected = np.column_stack(
-                        (
-                            base,
-                            [value[0] for value in first_coefficients],
-                            [value[1] for value in first_coefficients],
-                            [value[0] for value in second_coefficients],
-                            [value[2] for value in second_coefficients],
-                            [
-                                2.0 * kappa + sigma * material.dt
-                                for sigma, kappa, _ in field_profiles
-                            ],
-                            [
-                                2.0 * kappa - sigma * material.dt
-                                for sigma, kappa, _ in field_profiles
-                            ],
-                        )
+            indices = np.unravel_index(bucket.targets, component.shape)
+            coordinate_axes = simulation.space.component_coordinate_axes(
+                component_types[component_name], component.shape
+            )
+            coordinates = np.column_stack(
+                [coordinate_axes[axis][indices[axis]] for axis in range(3)]
+            )
+            first, second, field = axes_by_component[component_name]
+            base = bucket.cell_coefficients[:, 0]
+            if model is gmes.Upml:
+                first_coefficients = [
+                    _upml_coefficients_formula(material, value, first)
+                    for value in coordinates[:, first]
+                ]
+                second_coefficients = [
+                    _upml_coefficients_formula(material, value, second)
+                    for value in coordinates[:, second]
+                ]
+                field_profiles = [
+                    _pml_profile_formula(material, value, field)
+                    for value in coordinates[:, field]
+                ]
+                expected = np.column_stack(
+                    (
+                        base,
+                        [value[0] for value in first_coefficients],
+                        [value[1] for value in first_coefficients],
+                        [value[0] for value in second_coefficients],
+                        [value[2] for value in second_coefficients],
+                        [
+                            2.0 * kappa + sigma * material.dt
+                            for sigma, kappa, _ in field_profiles
+                        ],
+                        [
+                            2.0 * kappa - sigma * material.dt
+                            for sigma, kappa, _ in field_profiles
+                        ],
                     )
-                else:
-                    first_coefficients = [
-                        _cpml_coefficients_formula(material, value, first)
-                        for value in coordinates[:, first]
-                    ]
-                    second_coefficients = [
-                        _cpml_coefficients_formula(material, value, second)
-                        for value in coordinates[:, second]
-                    ]
-                    expected = np.column_stack(
-                        (
-                            base,
-                            [value[0] for value in first_coefficients],
-                            [value[1] for value in first_coefficients],
-                            [value[2] for value in first_coefficients],
-                            [value[0] for value in second_coefficients],
-                            [value[1] for value in second_coefficients],
-                            [value[2] for value in second_coefficients],
-                        )
-                    )
-                np.testing.assert_allclose(
-                    bucket.cell_coefficients,
-                    expected,
-                    rtol=2e-15,
-                    atol=2e-15,
-                    err_msg=f"{model.__name__} {component_name}",
                 )
+            else:
+                first_coefficients = [
+                    _cpml_coefficients_formula(material, value, first)
+                    for value in coordinates[:, first]
+                ]
+                second_coefficients = [
+                    _cpml_coefficients_formula(material, value, second)
+                    for value in coordinates[:, second]
+                ]
+                expected = np.column_stack(
+                    (
+                        base,
+                        [value[0] for value in first_coefficients],
+                        [value[1] for value in first_coefficients],
+                        [value[2] for value in first_coefficients],
+                        [value[0] for value in second_coefficients],
+                        [value[1] for value in second_coefficients],
+                        [value[2] for value in second_coefficients],
+                    )
+                )
+            np.testing.assert_allclose(
+                bucket.cell_coefficients,
+                expected,
+                rtol=2e-15,
+                atol=2e-15,
+                err_msg=f"{model.__name__} {component_name}",
+            )
 
     def test_compiled_cpml_uses_sparse_state_with_canonical_checkpoint(self):
         simulation = gmes.TorchSimulation(
@@ -1083,7 +1090,7 @@ class TorchPmlStorageTest(unittest.TestCase):
             for axis in metadata.axes:
                 physical_states += axis.target_count
                 state = getattr(simulation.state, f"{axis.state_prefix}_state")
-                self.assertTrue(state.is_contiguous())
+                assert state.is_contiguous()
                 if state.numel():
                     state.copy_(
                         torch.linspace(
@@ -1094,53 +1101,51 @@ class TorchPmlStorageTest(unittest.TestCase):
                             device=state.device,
                         ).reshape_as(state)
                     )
-        self.assertLess(physical_states, logical_states)
+        assert physical_states < logical_states
         diagnostics = simulation.diagnostics()["pml"]
-        self.assertEqual(
-            diagnostics["state_bytes"],
-            physical_states * simulation.state.ex.element_size(),
+        assert (
+            diagnostics["state_bytes"]
+            == physical_states * simulation.state.ex.element_size()
         )
-        self.assertEqual(diagnostics["active_axis_states"], physical_states)
-        self.assertEqual(
-            diagnostics["execution_representation"], SPARSE_CPML_REPRESENTATION
-        )
+        assert diagnostics["active_axis_states"] == physical_states
+        assert diagnostics["execution_representation"] == SPARSE_CPML_REPRESENTATION
 
         addresses = simulation.buffer_addresses()
         state_dict = {
             name: value.clone() for name, value in simulation.state.state_dict().items()
         }
-        self.assertFalse(any(name.startswith("_pml_") for name in state_dict))
+        assert not any(name.startswith("_pml_") for name in state_dict)
         before_state_dict = simulation.state.pml_state_snapshot(numpy=False)
         for metadata in simulation.plan.cpml_residual_axes:
             getattr(simulation.state, f"{metadata.state_prefix}_state").zero_()
         incompatible = simulation.state.load_state_dict(state_dict)
-        self.assertEqual(incompatible.missing_keys, [])
-        self.assertEqual(incompatible.unexpected_keys, [])
-        self.assertEqual(addresses, simulation.buffer_addresses())
+        assert incompatible.missing_keys == []
+        assert incompatible.unexpected_keys == []
+        assert addresses == simulation.buffer_addresses()
         after_state_dict = simulation.state.pml_state_snapshot(numpy=False)
         for name in before_state_dict:
-            self.assertIn(name, state_dict)
+            assert name in state_dict
             torch.testing.assert_close(before_state_dict[name], after_state_dict[name])
 
         checkpoint = simulation.checkpoint()
-        self.assertEqual(checkpoint["format"], "gmes.torch.simulation")
-        self.assertEqual(checkpoint["version"], 1)
+        assert checkpoint["format"] == "gmes.torch.simulation"
+        assert checkpoint["version"] == 1
         state_checkpoint = checkpoint["state"]
         before = simulation.state.pml_state_snapshot(numpy=False)
         for metadata in simulation.plan.cpml_residual_buckets:
-            self.assertEqual(
-                state_checkpoint[metadata.state_name].shape,
-                (metadata.target_count, 2),
+            assert state_checkpoint[metadata.state_name].shape == (
+                metadata.target_count,
+                2,
             )
         for metadata in simulation.plan.cpml_residual_axes:
             getattr(simulation.state, f"{metadata.state_prefix}_state").zero_()
         simulation.load_checkpoint(checkpoint)
-        self.assertEqual(addresses, simulation.buffer_addresses())
+        assert addresses == simulation.buffer_addresses()
         after = simulation.state.pml_state_snapshot(numpy=False)
-        self.assertEqual(set(before), set(after))
+        assert set(before) == set(after)
         for name in before:
-            self.assertIn(name, state_checkpoint)
-            self.assertEqual(state_checkpoint[name].shape[1], 2)
+            assert name in state_checkpoint
+            assert state_checkpoint[name].shape[1] == 2
             torch.testing.assert_close(before[name], after[name])
 
         metadata = simulation.plan.cpml_residual_buckets[0]
@@ -1154,7 +1159,7 @@ class TorchPmlStorageTest(unittest.TestCase):
         }
         invalid_state[metadata.state_name][inactive_row, axis.axis] = 1.0
         invalid = {**checkpoint, "state": invalid_state}
-        with self.assertRaisesRegex(ValueError, "nonzero inactive CPML"):
+        with pytest.raises(ValueError, match="nonzero inactive CPML"):
             simulation.load_checkpoint(invalid)
 
     def test_warm_execution_and_checkpoint_keep_fixed_device_storage(self):
@@ -1164,9 +1169,9 @@ class TorchPmlStorageTest(unittest.TestCase):
         checkpoint = simulation.state.checkpoint()
         before = simulation.state.pml_state_snapshot(numpy=False)
         simulation.advance(8)
-        self.assertEqual(addresses, simulation.buffer_addresses())
+        assert addresses == simulation.buffer_addresses()
         simulation.state.load_checkpoint(checkpoint)
-        self.assertEqual(addresses, simulation.buffer_addresses())
+        assert addresses == simulation.buffer_addresses()
         after = simulation.state.pml_state_snapshot(numpy=False)
         for name in before:
             torch.testing.assert_close(before[name], after[name])
@@ -1179,38 +1184,32 @@ class TorchPmlStorageTest(unittest.TestCase):
         simulation.advance(2)
         for _ in range(2):
             reference.step()
-        _assert_reference(self, reference, simulation, gmes.Cpml, "float64")
-        self.assertEqual(torch._dynamo.utils.counters["graph_break"], {})
+        _assert_reference(reference, simulation, gmes.Cpml, "float64")
+        assert torch._dynamo.utils.counters["graph_break"] == {}
         addresses = simulation.buffer_addresses()
         simulation.advance(3)
-        self.assertEqual(addresses, simulation.buffer_addresses())
+        assert addresses == simulation.buffer_addresses()
 
-    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is unavailable")
-    def test_cuda_eager_and_fullgraph_have_stable_memory(self):
-        for compile_policy in ("eager", "compile"):
-            for model in (gmes.Upml, gmes.Cpml):
-                with self.subTest(compile_policy=compile_policy, model=model.__name__):
-                    reference, simulation = _reference_and_torch(
-                        model,
-                        precision="float32",
-                        compile_policy=compile_policy,
-                        device="cuda:0",
-                    )
-                    simulation.advance(2)
-                    torch.cuda.synchronize(simulation.device)
-                    allocated = torch.cuda.memory_allocated(simulation.device)
-                    addresses = simulation.buffer_addresses()
-                    simulation.advance(5)
-                    for _ in range(7):
-                        reference.step()
-                    torch.cuda.synchronize(simulation.device)
-                    _assert_reference(self, reference, simulation, model, "float32")
-                    self.assertEqual(addresses, simulation.buffer_addresses())
-                    self.assertEqual(
-                        allocated,
-                        torch.cuda.memory_allocated(simulation.device),
-                    )
-
-
-if __name__ == "__main__":
-    unittest.main()
+    @pytest.mark.skipif(not (torch.cuda.is_available()), reason="CUDA is unavailable")
+    @pytest.mark.parametrize(
+        "compile_policy", ("eager", "compile"), ids=("eager", "compile")
+    )
+    @pytest.mark.parametrize("model", (gmes.Upml, gmes.Cpml), ids=("upml", "cpml"))
+    def test_cuda_eager_and_fullgraph_have_stable_memory(self, compile_policy, model):
+        reference, simulation = _reference_and_torch(
+            model,
+            precision="float32",
+            compile_policy=compile_policy,
+            device="cuda:0",
+        )
+        simulation.advance(2)
+        torch.cuda.synchronize(simulation.device)
+        allocated = torch.cuda.memory_allocated(simulation.device)
+        addresses = simulation.buffer_addresses()
+        simulation.advance(5)
+        for _ in range(7):
+            reference.step()
+        torch.cuda.synchronize(simulation.device)
+        _assert_reference(reference, simulation, model, "float32")
+        assert addresses == simulation.buffer_addresses()
+        assert allocated == torch.cuda.memory_allocated(simulation.device)

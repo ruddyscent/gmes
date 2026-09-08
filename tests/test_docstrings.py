@@ -4,8 +4,9 @@ import ast
 import importlib
 import inspect
 import pydoc
-import unittest
 from pathlib import Path
+
+import pytest
 
 import gmes
 from gmes.pygeom import Material
@@ -58,79 +59,79 @@ def _member_target(member):
     return member
 
 
-class DocstringCoverageTest(unittest.TestCase):
+def _documented_targets(label, value):
+    yield label, value
+    if not inspect.isclass(value):
+        return
+    for name, member in inspect.getmembers_static(value):
+        if name.startswith("_") and name != "__init__":
+            continue
+        target = _member_target(member)
+        if not (inspect.isroutine(target) or isinstance(member, property)):
+            continue
+        if _source_file(target) in SOURCE_FILES:
+            yield f"{label}.{name}", member
+
+
+def _export_cases():
+    exports = [(f"gmes.{name}", getattr(gmes, name)) for name in gmes.__all__]
+    for module_name in EXPORT_MODULES:
+        module = importlib.import_module(f"gmes.{module_name}")
+        exports.extend(
+            (f"gmes.{module_name}.{name}", getattr(module, name))
+            for name in module.__all__
+        )
+    for label, value in exports:
+        if _source_file(value) in SOURCE_FILES:
+            yield from _documented_targets(label, value)
+
+
+_EXPORT_CASES = tuple(_export_cases())
+_HOOK_CASES = tuple(
+    case
+    for value in (Material, Src, SrcTime)
+    for case in _documented_targets(f"{value.__module__}.{value.__qualname__}", value)
+)
+
+
+class TestDocstringCoverage:
     """Check tracked modules and the supported public API boundary."""
 
-    def assert_documented(self, label, value):
-        """Assert that inspect resolves a nonempty docstring for a value."""
-        self.assertIsNotNone(inspect.getdoc(value), f"{label} has no docstring")
-
-    def test_source_modules_have_docstrings(self):
+    @pytest.mark.parametrize("module", SOURCE_MODULES, ids=SOURCE_MODULES)
+    def test_source_modules_have_docstrings(self, module):
         """Require a module docstring in every tracked Python source module."""
-        for module in SOURCE_MODULES:
-            path = PACKAGE_ROOT / f"{module}.py"
-            with self.subTest(module=module):
-                tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-                self.assertIsNotNone(
-                    ast.get_docstring(tree),
-                    f"gmes.{module} has no module docstring",
-                )
+        path = PACKAGE_ROOT / f"{module}.py"
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        assert (
+            ast.get_docstring(tree) is not None
+        ), f"gmes.{module} has no module docstring"
 
-    def test_public_exports_have_docstrings(self):
-        """Require docs for package exports and module-level __all__ exports."""
-        exports = [(f"gmes.{name}", getattr(gmes, name)) for name in gmes.__all__]
-        for module_name in EXPORT_MODULES:
-            module = importlib.import_module(f"gmes.{module_name}")
-            exports.extend(
-                (f"gmes.{module_name}.{name}", getattr(module, name))
-                for name in module.__all__
-            )
+    @pytest.mark.parametrize(
+        ("label", "value"), _EXPORT_CASES, ids=[label for label, _ in _EXPORT_CASES]
+    )
+    def test_public_exports_have_docstrings(self, label, value):
+        """Require docs for package exports, members, and module-level exports."""
+        assert inspect.getdoc(value) is not None, f"{label} has no docstring"
 
-        for label, value in exports:
-            if _source_file(value) not in SOURCE_FILES:
-                # Third-party objects are outside the Python-owned
-                # documentation boundary.  Canonical constants are covered by
-                # the tracked module-docstring check above.
-                continue
-            with self.subTest(export=label):
-                self.assert_documented(label, value)
-            if inspect.isclass(value):
-                self._assert_public_members_documented(label, value)
-
-    def test_supported_extension_hooks_have_docstrings(self):
+    @pytest.mark.parametrize(
+        ("label", "value"), _HOOK_CASES, ids=[label for label, _ in _HOOK_CASES]
+    )
+    def test_supported_extension_hooks_have_docstrings(self, label, value):
         """Require docs for legacy subclass hooks used by custom extensions."""
-        for value in (Material, Src, SrcTime):
-            label = f"{value.__module__}.{value.__qualname__}"
-            with self.subTest(hook=label):
-                self.assert_documented(label, value)
-                self._assert_public_members_documented(label, value)
+        assert inspect.getdoc(value) is not None, f"{label} has no docstring"
 
-    def test_pydoc_smoke(self):
-        """Render representative modules and primary entry points with pydoc."""
-        values = (
+    @pytest.mark.parametrize(
+        "value",
+        (
             gmes,
             gmes.constant,
             importlib.import_module("gmes.torch_fdtd"),
             gmes.TorchSimulation,
-        )
-        for value in values:
-            with self.subTest(value=value):
-                rendered = pydoc.render_doc(value, renderer=pydoc.plaintext)
-                summary = inspect.getdoc(value).splitlines()[0]
-                self.assertIn(summary, rendered)
-
-    def _assert_public_members_documented(self, label, cls):
-        for name, member in inspect.getmembers_static(cls):
-            if name.startswith("_") and name != "__init__":
-                continue
-            target = _member_target(member)
-            if not (inspect.isroutine(target) or isinstance(member, property)):
-                continue
-            if _source_file(target) not in SOURCE_FILES:
-                continue
-            with self.subTest(member=f"{label}.{name}"):
-                self.assert_documented(f"{label}.{name}", member)
-
-
-if __name__ == "__main__":
-    unittest.main()
+        ),
+        ids=("package", "constants", "torch-fdtd", "simulation"),
+    )
+    def test_pydoc_smoke(self, value):
+        """Render representative modules and primary entry points with pydoc."""
+        rendered = pydoc.render_doc(value, renderer=pydoc.plaintext)
+        summary = inspect.getdoc(value).splitlines()[0]
+        assert summary in rendered

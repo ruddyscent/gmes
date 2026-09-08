@@ -5,8 +5,9 @@ import hashlib
 import json
 import re
 import tomllib
-import unittest
 from pathlib import Path
+
+import pytest
 
 from benchmarks import historical_probes
 
@@ -78,33 +79,26 @@ COMPLETE_CLOSURE = MANIFEST_CLOSURE | {
 }
 
 
-class HistoricalFixtureIntegrityTest(unittest.TestCase):
+class TestHistoricalFixtureIntegrity:
     @staticmethod
     def _identity(path):
         data = path.read_bytes()
         return len(data), hashlib.sha256(data).hexdigest()
 
     def test_literal_v54_fixture_and_manifest_anchors(self):
-        self.assertEqual(
-            self._identity(FIXTURE_ROOT / "BUNDLE-MANIFEST.json"),
-            (
-                V5_4_TRUST["expected_manifest_bytes"],
-                V5_4_TRUST["expected_manifest_sha256"],
-            ),
+        assert self._identity(FIXTURE_ROOT / "BUNDLE-MANIFEST.json") == (
+            V5_4_TRUST["expected_manifest_bytes"],
+            V5_4_TRUST["expected_manifest_sha256"],
         )
-        self.assertEqual(
-            self._identity(
-                FIXTURE_ROOT / "pre-cutover-native-numeric-probes-v5-4.json.gz"
-            ),
-            (
-                V5_4_TRUST["expected_fixture_bytes"],
-                V5_4_TRUST["expected_fixture_sha256"],
-            ),
+        assert self._identity(
+            FIXTURE_ROOT / "pre-cutover-native-numeric-probes-v5-4.json.gz"
+        ) == (
+            V5_4_TRUST["expected_fixture_bytes"],
+            V5_4_TRUST["expected_fixture_sha256"],
         )
-        self.assertEqual(
-            (FIXTURE_ROOT / "BUNDLE-MANIFEST.sha256").read_text(),
-            f"{V5_4_TRUST['expected_manifest_sha256']}  BUNDLE-MANIFEST.json\n",
-        )
+        assert (
+            FIXTURE_ROOT / "BUNDLE-MANIFEST.sha256"
+        ).read_text() == f"{V5_4_TRUST['expected_manifest_sha256']}  BUNDLE-MANIFEST.json\n"
 
     def test_torch_correctness_retains_the_same_literal_trust_anchor(self):
         module = ast.parse((ROOT / "tests" / "test_torch_correctness.py").read_text())
@@ -117,7 +111,7 @@ class HistoricalFixtureIntegrityTest(unittest.TestCase):
                 for target in node.targets
             )
         )
-        self.assertEqual(ast.literal_eval(anchor.value), V5_4_TRUST)
+        assert ast.literal_eval(anchor.value) == V5_4_TRUST
 
     def test_loader_validates_the_complete_immutable_closure(self):
         side = json.loads((FIXTURE_ROOT / "BUNDLE-MANIFEST.json").read_text())
@@ -129,53 +123,52 @@ class HistoricalFixtureIntegrityTest(unittest.TestCase):
             *(item["file"] for item in side["support"].values()),
             *(item["file"] for item in side["profiles"].values()),
         }
-        self.assertEqual(referenced, MANIFEST_CLOSURE)
+        assert referenced == MANIFEST_CLOSURE
         files = {
             path.relative_to(FIXTURE_ROOT).as_posix()
             for path in FIXTURE_ROOT.rglob("*")
             if path.is_file()
         }
-        self.assertEqual(files, COMPLETE_CLOSURE)
+        assert files == COMPLETE_CLOSURE
         bundle = historical_probes.load_bundle(FIXTURE_ROOT, **V5_4_TRUST)
-        self.assertEqual(
-            bundle.side["generator"]["loader_sha256"],
-            STYLE_EXEMPT_IDENTITIES["benchmarks/historical_probes.py"][1],
+        assert (
+            bundle.side["generator"]["loader_sha256"]
+            == STYLE_EXEMPT_IDENTITIES["benchmarks/historical_probes.py"][1]
         )
-        self.assertEqual(
-            set(bundle.profiles),
-            {
-                path.removeprefix("profiles/").removesuffix(".json")
-                for path in PROFILE_FILES
-            },
-        )
+        assert set(bundle.profiles) == {
+            path.removeprefix("profiles/").removesuffix(".json")
+            for path in PROFILE_FILES
+        }
 
-    def test_frozen_style_exempt_files_and_loader_mirror_are_original_bytes(self):
-        for relative, expected in STYLE_EXEMPT_IDENTITIES.items():
-            with self.subTest(relative=relative):
-                self.assertEqual(self._identity(ROOT / relative), expected)
-        self.assertEqual(
-            (ROOT / "benchmarks" / "historical_probes.py").read_bytes(),
-            (FIXTURE_ROOT / "historical_probe_loader.py").read_bytes(),
-        )
-        self.assertNotIn(
-            "self_test.py",
-            json.loads((FIXTURE_ROOT / "BUNDLE-MANIFEST.json").read_text())["support"],
+    @pytest.mark.parametrize(
+        "relative, expected",
+        STYLE_EXEMPT_IDENTITIES.items(),
+        ids=list(STYLE_EXEMPT_IDENTITIES),
+    )
+    def test_frozen_style_exempt_files_and_loader_mirror_are_original_bytes(
+        self, relative, expected
+    ):
+        assert self._identity(ROOT / relative) == expected
+        assert (ROOT / "benchmarks" / "historical_probes.py").read_bytes() == (
+            FIXTURE_ROOT / "historical_probe_loader.py"
+        ).read_bytes()
+        assert (
+            "self_test.py"
+            not in json.loads((FIXTURE_ROOT / "BUNDLE-MANIFEST.json").read_text())[
+                "support"
+            ]
         )
 
     def test_formatter_exemption_matches_only_the_five_pinned_paths(self):
         config = tomllib.loads((ROOT / "pyproject.toml").read_text())
         expected = set(STYLE_EXEMPT_IDENTITIES)
         black = re.compile(config["tool"]["black"]["force-exclude"], re.VERBOSE)
-        self.assertEqual(set(config["tool"]["isort"]["extend_skip"]), expected)
+        assert set(config["tool"]["isort"]["extend_skip"]) == expected
         for path in expected:
-            self.assertIsNotNone(black.search(f"/{path}"), path)
+            assert black.search(f"/{path}") is not None, path
         for path in (
             "tests/fixtures/issue124/README.md",
             "tests/fixtures/issue124/unpinned.py",
             "benchmarks/torch_correctness.py",
         ):
-            self.assertIsNone(black.search(f"/{path}"), path)
-
-
-if __name__ == "__main__":
-    unittest.main()
+            assert black.search(f"/{path}") is None, path

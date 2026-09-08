@@ -11,7 +11,6 @@ import os
 import stat
 import tarfile
 import tempfile
-import unittest
 import zipfile
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
@@ -19,6 +18,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 import numpy as np
+import pytest
 
 import gmes
 from benchmarks import issue123_completion as completion
@@ -68,14 +68,13 @@ def _synthetic_baseline_identity_fixture():
     return environment, thread_environment
 
 
-class Issue123CompletionTest(unittest.TestCase):
-    def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temporary.cleanup)
-        self.directory = Path(self.temporary.name)
-        self.external_temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self.external_temporary.cleanup)
-        self.external_directory = Path(self.external_temporary.name)
+class _Issue123CompletionFixture:
+    def initialize(self, stack):
+        self.directory = Path(stack.enter_context(tempfile.TemporaryDirectory()))
+        self.external_directory = Path(
+            stack.enter_context(tempfile.TemporaryDirectory())
+        )
+        self._cleanup_stack = stack
         manifest_raw = completion.DEFAULT_MANIFEST.read_bytes()
         self.manifest = json.loads(manifest_raw)
         self.candidate = {
@@ -284,20 +283,16 @@ class Issue123CompletionTest(unittest.TestCase):
         return path
 
     def differential_fixture(self):
-        from tests.test_issue123_differential import (
-            Issue123DifferentialEvidenceTest,
-        )
+        from tests.test_issue123_differential import issue123_differential_fixture
 
-        fixture = Issue123DifferentialEvidenceTest(methodName="runTest")
-        fixture.setUp()
-        self.addCleanup(fixture.doCleanups)
-        geometry_patch = mock.patch.object(
-            completion,
-            "FROZEN_DIFFERENTIAL_PERSISTENT_GEOMETRY_SHA256_BY_CASE",
-            fixture.frozen_geometry,
+        fixture = self._cleanup_stack.enter_context(issue123_differential_fixture())
+        self._cleanup_stack.enter_context(
+            mock.patch.object(
+                completion,
+                "FROZEN_DIFFERENTIAL_PERSISTENT_GEOMETRY_SHA256_BY_CASE",
+                fixture.frozen_geometry,
+            )
         )
-        geometry_patch.start()
-        self.addCleanup(geometry_patch.stop)
         return fixture
 
     @staticmethod
@@ -313,7 +308,7 @@ class Issue123CompletionTest(unittest.TestCase):
             for name, value in group.items():
                 previous = arrays.get(name)
                 if previous is not None:
-                    self.assertTrue(np.array_equal(previous, value), name)
+                    assert np.array_equal(previous, value), name
                 else:
                     arrays[name] = value
         return arrays
@@ -1021,18 +1016,23 @@ class Issue123CompletionTest(unittest.TestCase):
             )
         return result, offline, index, inputs, evaluate, prepare, verify
 
+
+class TestIssue123Completion(_Issue123CompletionFixture):
+    @pytest.fixture(autouse=True)
+    def _initialize_fixture(self):
+        with issue123_completion_fixture(self):
+            yield
+
     def test_all_offline_scopes_are_structural_and_never_complete_the_issue(self):
         result = self.evaluate_with_patches(self.patched_validators())
-        self.assertTrue(result["structural_validation_satisfied"])
-        self.assertFalse(result["issue_completion_satisfied"])
-        self.assertFalse(result["final_acceptance"])
-        self.assertFalse(result["receipt_replay_authority"])
-        self.assertEqual(result["evaluation_mode"], completion.OFFLINE_EVALUATION_MODE)
-        self.assertEqual(
-            result["final_acceptance_authority"], completion.OFFLINE_AUTHORITY
-        )
-        self.assertFalse(result["live_verification"]["invocation_attempted"])
-        self.assertTrue(all(scope["satisfied"] for scope in result["scopes"].values()))
+        assert result["structural_validation_satisfied"]
+        assert not (result["issue_completion_satisfied"])
+        assert not (result["final_acceptance"])
+        assert not (result["receipt_replay_authority"])
+        assert result["evaluation_mode"] == completion.OFFLINE_EVALUATION_MODE
+        assert result["final_acceptance_authority"] == completion.OFFLINE_AUTHORITY
+        assert not (result["live_verification"]["invocation_attempted"])
+        assert all(scope["satisfied"] for scope in result["scopes"].values())
 
         values = self.patched_validators()
         index = self.write_top_index()
@@ -1051,33 +1051,19 @@ class Issue123CompletionTest(unittest.TestCase):
                 else:
                     patched.return_value = value
             failed = completion.evaluate_completion(index)
-        self.assertFalse(failed["issue_completion_satisfied"])
-        self.assertEqual(
-            failed["scopes"]["macos"]["errors"],
-            [
-                {
-                    "code": "invalid-evidence",
-                    "phase": "scope-validation",
-                    "scope": "macos",
-                    "message": "evidence validation failed closed",
-                }
-            ],
-        )
-
-    def test_global_correctness_archives_require_exact_shared_136_topology(self):
-        valid = self.evaluate_with_patches(self.patched_validators())
-        self.assertTrue(valid["structural_validation_satisfied"])
-        self.assertEqual(
-            valid["cross_scope_details"]["correctness_archive_topology"],
+        assert not (failed["issue_completion_satisfied"])
+        assert failed["scopes"]["macos"]["errors"] == [
             {
-                "case_count": 34,
-                "shared_reference_archive_count": 34,
-                "candidate_archive_count": 102,
-                "unique_archive_count": 136,
-            },
-        )
+                "code": "invalid-evidence",
+                "phase": "scope-validation",
+                "scope": "macos",
+                "message": "evidence validation failed closed",
+            }
+        ]
 
-        attacks = (
+    @pytest.mark.parametrize(
+        "attack",
+        (
             "reference-path",
             "reference-sha256",
             "reference-size",
@@ -1085,42 +1071,51 @@ class Issue123CompletionTest(unittest.TestCase):
             "candidate-path-overlap",
             "candidate-sha256-overlap",
             "candidate-payload-identity-overlap",
-        )
-        for attack in attacks:
-            with self.subTest(attack=attack):
-                values = self.patched_validators()
-                cpu = values["_validate_cpu_scope"]
-                single = values["_validate_single_gpu_scope"]
-                cpu_reference = cpu["_correctness_archive_bindings"]["reference"][0]
-                graph_candidate = single["_correctness_archive_bindings_by_mode"][
-                    "graph"
-                ]["candidate"][0]
-                cpu_candidate = cpu["_correctness_archive_bindings"]["candidate"][0]
-                if attack == "reference-path":
-                    cpu_reference["path"] = "correctness/separate-reference/0.npz"
-                elif attack == "reference-sha256":
-                    cpu_reference["sha256"] = hashlib.sha256(
-                        b"separate-reference"
-                    ).hexdigest()
-                elif attack == "reference-size":
-                    cpu_reference["size_bytes"] += 1
-                elif attack == "reference-payload-identity":
-                    cpu_reference["payload_identity"] = (9, 9000, 1, 1)
-                else:
-                    field = {
-                        "candidate-path-overlap": "path",
-                        "candidate-sha256-overlap": "sha256",
-                        "candidate-payload-identity-overlap": "payload_identity",
-                    }[attack]
-                    graph_candidate[field] = copy.deepcopy(cpu_candidate[field])
-                result = self.evaluate_with_patches(values)
-                self.assertFalse(result["structural_validation_satisfied"])
-                self.assertFalse(result["scopes"]["cpu"]["satisfied"])
-                self.assertFalse(result["scopes"]["single_gpu"]["satisfied"])
-                self.assertIn(
-                    "correctness-archive-topology",
-                    [error["phase"] for error in result["cross_scope_errors"]],
-                )
+        ),
+        ids=str,
+    )
+    def test_global_correctness_archives_require_exact_shared_136_topology(
+        self, attack
+    ):
+        valid = self.evaluate_with_patches(self.patched_validators())
+        assert valid["structural_validation_satisfied"]
+        assert valid["cross_scope_details"]["correctness_archive_topology"] == {
+            "case_count": 34,
+            "shared_reference_archive_count": 34,
+            "candidate_archive_count": 102,
+            "unique_archive_count": 136,
+        }
+
+        values = self.patched_validators()
+        cpu = values["_validate_cpu_scope"]
+        single = values["_validate_single_gpu_scope"]
+        cpu_reference = cpu["_correctness_archive_bindings"]["reference"][0]
+        graph_candidate = single["_correctness_archive_bindings_by_mode"]["graph"][
+            "candidate"
+        ][0]
+        cpu_candidate = cpu["_correctness_archive_bindings"]["candidate"][0]
+        if attack == "reference-path":
+            cpu_reference["path"] = "correctness/separate-reference/0.npz"
+        elif attack == "reference-sha256":
+            cpu_reference["sha256"] = hashlib.sha256(b"separate-reference").hexdigest()
+        elif attack == "reference-size":
+            cpu_reference["size_bytes"] += 1
+        elif attack == "reference-payload-identity":
+            cpu_reference["payload_identity"] = (9, 9000, 1, 1)
+        else:
+            field = {
+                "candidate-path-overlap": "path",
+                "candidate-sha256-overlap": "sha256",
+                "candidate-payload-identity-overlap": "payload_identity",
+            }[attack]
+            graph_candidate[field] = copy.deepcopy(cpu_candidate[field])
+        result = self.evaluate_with_patches(values)
+        assert not result["structural_validation_satisfied"]
+        assert not result["scopes"]["cpu"]["satisfied"]
+        assert not result["scopes"]["single_gpu"]["satisfied"]
+        assert "correctness-archive-topology" in [
+            error["phase"] for error in result["cross_scope_errors"]
+        ]
 
     def test_offline_cli_distinguishes_structural_from_final_enforcement(self):
         result = {
@@ -1136,6 +1131,8 @@ class Issue123CompletionTest(unittest.TestCase):
             "output": None,
         }
         statuses = []
+        # Preserve the ordered final-vs-structural enforcement sequence because
+        # the combined status vector is the asserted CLI contract.
         for enforce, enforce_structural in ((True, False), (False, True)):
             args = SimpleNamespace(
                 **base,
@@ -1152,14 +1149,11 @@ class Issue123CompletionTest(unittest.TestCase):
                 mock.patch("builtins.print"),
             ):
                 statuses.append(completion.main())
-        self.assertEqual(statuses, [2, 0])
+        assert statuses == [2, 0]
 
-    def test_operations_scope_requires_an_explicit_offline_authority_marker(self):
-        artifact = completion.LoadedArtifact({}, Path("operations.json"), b"{}", {})
-        responses = {
-            "fixture": completion.LoadedArtifact({}, Path("raw.json"), b"{}", {})
-        }
-        attacks = (
+    @pytest.mark.parametrize(
+        "operations_result",
+        (
             {
                 "final_acceptance": True,
                 "final_acceptance_authority": completion.OFFLINE_AUTHORITY,
@@ -1169,26 +1163,31 @@ class Issue123CompletionTest(unittest.TestCase):
                 "final_acceptance": False,
                 "final_acceptance_authority": completion.LIVE_AUTHORITY,
             },
-        )
-        for attack in attacks:
-            with (
-                self.subTest(attack=attack),
-                mock.patch.object(
-                    completion,
-                    "_load_operations_scope_artifacts",
-                    return_value=(artifact, responses),
-                ),
-                mock.patch.object(
-                    operations,
-                    "evaluate_operations",
-                    return_value=attack,
-                ),
-                self.assertRaisesRegex(
-                    completion.EvidenceError,
-                    "non-authoritative structural result",
-                ),
-            ):
-                completion._validate_operations_scope({}, object(), self.candidate)
+        ),
+        ids=("claims-final-acceptance", "missing-authority", "live-authority"),
+    )
+    def test_operations_scope_requires_an_explicit_offline_authority_marker(
+        self, operations_result
+    ):
+        artifact = completion.LoadedArtifact({}, Path("operations.json"), b"{}", {})
+        responses = {
+            "fixture": completion.LoadedArtifact({}, Path("raw.json"), b"{}", {})
+        }
+        with (
+            mock.patch.object(
+                completion,
+                "_load_operations_scope_artifacts",
+                return_value=(artifact, responses),
+            ),
+            mock.patch.object(
+                operations, "evaluate_operations", return_value=operations_result
+            ),
+            pytest.raises(
+                completion.EvidenceError,
+                match="non-authoritative structural result",
+            ),
+        ):
+            completion._validate_operations_scope({}, object(), self.candidate)
 
     def test_nested_operations_capture_is_staged_with_exact_relative_bytes(self):
         manifest_raw = completion.DEFAULT_MANIFEST.read_bytes()
@@ -1283,28 +1282,23 @@ class Issue123CompletionTest(unittest.TestCase):
                 destination,
                 (self.directory.resolve(),),
             )
-        self.assertEqual(staged.read_bytes(), operations_raw)
+        assert staged.read_bytes() == operations_raw
         for role, response_descriptor in response_descriptors.items():
-            self.assertEqual(
-                (staged.parent / response_descriptor["path"]).read_bytes(),
-                response_raw_by_role[role],
-            )
-        self.assertFalse((staged.parent / "nested").exists())
-        self.assertEqual(
-            [role for role, _snapshot in snapshots.responses],
-            sorted(operations.RESPONSE_ROLE_ORDER),
+            assert (
+                staged.parent / response_descriptor["path"]
+            ).read_bytes() == response_raw_by_role[role]
+        assert not ((staged.parent / "nested").exists())
+        assert [role for role, _snapshot in snapshots.responses] == sorted(
+            operations.RESPONSE_ROLE_ORDER
         )
-        self.assertEqual(len(snapshots.responses), 22)
-        self.assertEqual(snapshots.index.path, staged)
-        self.assertEqual(
-            descriptor,
-            {
-                "size_bytes": len(operations_raw),
-                "sha256": hashlib.sha256(operations_raw).hexdigest(),
-            },
-        )
-        self.assertEqual(stat.S_IMODE(staged.parent.stat().st_mode), 0o700)
-        self.assertEqual(stat.S_IMODE(staged.stat().st_mode), 0o600)
+        assert len(snapshots.responses) == 22
+        assert snapshots.index.path == staged
+        assert descriptor == {
+            "size_bytes": len(operations_raw),
+            "sha256": hashlib.sha256(operations_raw).hexdigest(),
+        }
+        assert stat.S_IMODE(staged.parent.stat().st_mode) == 0o700
+        assert stat.S_IMODE(staged.stat().st_mode) == 0o600
 
     def test_live_output_preflight_rejects_both_b1_roots_and_aliases(self):
         source = self.directory / "protected-source-b1"
@@ -1320,38 +1314,33 @@ class Issue123CompletionTest(unittest.TestCase):
             source / ".." / source.name / "dot-output",
         )
         for ordinal, candidate in enumerate(candidates):
-            with (
-                self.subTest(candidate=ordinal),
-                self.assertRaises(completion.EvidenceError),
-            ):
+            with (pytest.raises(completion.EvidenceError),):
                 completion._create_private_live_directory(candidate, roots)
             if candidate.resolve() not in roots:
-                self.assertFalse(candidate.exists())
+                assert not (candidate.exists())
         alias = self.directory / "protected-source-alias"
         alias.symlink_to(source, target_is_directory=True)
-        with self.assertRaises(completion.EvidenceError):
+        with pytest.raises(completion.EvidenceError):
             completion._create_private_live_directory(
                 alias / "symlink-output",
                 roots,
             )
-        self.assertFalse((source / "symlink-output").exists())
+        assert not ((source / "symlink-output").exists())
 
     def test_live_completion_passes_exact_inputs_and_is_the_only_final_authority(self):
         result, offline, index, inputs, evaluate, prepare, verify = (
             self.invoke_live_fixture("success", self.successful_live_verifier)
         )
-        self.assertTrue(offline["structural_validation_satisfied"])
-        self.assertFalse(offline["issue_completion_satisfied"])
-        self.assertTrue(result["structural_validation_satisfied"])
-        self.assertTrue(result["issue_completion_satisfied"])
-        self.assertTrue(result["final_acceptance"])
-        self.assertFalse(result["receipt_replay_authority"])
-        self.assertEqual(result["evaluation_mode"], completion.LIVE_EVALUATION_MODE)
-        self.assertEqual(
-            result["final_acceptance_authority"], completion.LIVE_AUTHORITY
-        )
-        self.assertTrue(result["live_verification"]["invocation_attempted"])
-        self.assertTrue(result["live_verification"]["invocation_succeeded"])
+        assert offline["structural_validation_satisfied"]
+        assert not (offline["issue_completion_satisfied"])
+        assert result["structural_validation_satisfied"]
+        assert result["issue_completion_satisfied"]
+        assert result["final_acceptance"]
+        assert not (result["receipt_replay_authority"])
+        assert result["evaluation_mode"] == completion.LIVE_EVALUATION_MODE
+        assert result["final_acceptance_authority"] == completion.LIVE_AUTHORITY
+        assert result["live_verification"]["invocation_attempted"]
+        assert result["live_verification"]["invocation_succeeded"]
         evaluate.assert_called_once_with(
             index,
             completion.DEFAULT_MANIFEST,
@@ -1359,54 +1348,40 @@ class Issue123CompletionTest(unittest.TestCase):
         )
         prepare.assert_called_once()
         call = verify.call_args.kwargs
-        self.assertEqual(
-            set(call),
-            {
-                "index_path",
-                "manifest",
-                "publication_policy",
-                "publication_policy_sha256",
-                "publication_assets",
-                "receipt_output",
-                "post_bundle_lease",
-                "baseline_authority",
-            },
-        )
+        assert set(call) == {
+            "index_path",
+            "manifest",
+            "publication_policy",
+            "publication_policy_sha256",
+            "publication_assets",
+            "receipt_output",
+            "post_bundle_lease",
+            "baseline_authority",
+        }
         output = inputs["output_directory"].resolve()
-        self.assertEqual(
-            call["index_path"],
-            output / completion.LIVE_OPERATIONS_DIRECTORY / "operations-index.json",
+        assert (
+            call["index_path"]
+            == output / completion.LIVE_OPERATIONS_DIRECTORY / "operations-index.json"
         )
-        self.assertEqual(call["manifest"], completion.DEFAULT_MANIFEST.resolve())
-        self.assertEqual(
-            call["publication_policy"], inputs["publication_policy"].resolve()
+        assert call["manifest"] == completion.DEFAULT_MANIFEST.resolve()
+        assert call["publication_policy"] == inputs["publication_policy"].resolve()
+        assert call["publication_policy_sha256"] == inputs["publication_policy_sha256"]
+        assert call["publication_assets"] == {
+            role: path.resolve() for role, path in inputs["publication_assets"].items()
+        }
+        assert call["receipt_output"] == output / completion.LIVE_RECEIPT_NAME
+        assert (
+            call["post_bundle_lease"].expectation
+            == self.authority_gate_fixture()["post_bundle_expectation"]
         )
-        self.assertEqual(
-            call["publication_policy_sha256"],
-            inputs["publication_policy_sha256"],
-        )
-        self.assertEqual(
-            call["publication_assets"],
-            {
-                role: path.resolve()
-                for role, path in inputs["publication_assets"].items()
-            },
-        )
-        self.assertEqual(call["receipt_output"], output / completion.LIVE_RECEIPT_NAME)
-        self.assertEqual(
-            call["post_bundle_lease"].expectation,
-            self.authority_gate_fixture()["post_bundle_expectation"],
-        )
-        self.assertEqual(call["baseline_authority"], "live-release")
-        self.assertTrue(result["candidate_bundle_binding"]["satisfied"])
-        self.assertTrue(result["post_bundle"]["satisfied"])
-        self.assertTrue(result["baseline_authority"]["satisfied"])
-        self.assertEqual(stat.S_IMODE(output.stat().st_mode), 0o700)
+        assert call["baseline_authority"] == "live-release"
+        assert result["candidate_bundle_binding"]["satisfied"]
+        assert result["post_bundle"]["satisfied"]
+        assert result["baseline_authority"]["satisfied"]
+        assert stat.S_IMODE(output.stat().st_mode) == 0o700
         result_path = output / completion.LIVE_RESULT_NAME
-        self.assertEqual(stat.S_IMODE(result_path.stat().st_mode), 0o600)
-        self.assertEqual(
-            result_path.read_bytes(), completion._canonical_json_bytes(result)
-        )
+        assert stat.S_IMODE(result_path.stat().st_mode) == 0o600
+        assert result_path.read_bytes() == completion._canonical_json_bytes(result)
 
     def test_late_b1_mutation_cannot_publish_authoritative_v3_result(self):
         real_writer = privacy.write_private_authority_file
@@ -1429,9 +1404,9 @@ class Issue123CompletionTest(unittest.TestCase):
                 "write_private_authority_file",
                 side_effect=mutate_at_result_commit,
             ),
-            self.assertRaisesRegex(
+            pytest.raises(
                 completion.EvidenceError,
-                "completion live result could not be emitted",
+                match="completion live result could not be emitted",
             ),
         ):
             self.invoke_live_fixture(
@@ -1439,14 +1414,11 @@ class Issue123CompletionTest(unittest.TestCase):
                 self.successful_live_verifier,
             )
         destination = self.external_directory / "late-b1-mutation-output"
-        self.assertFalse((destination / completion.LIVE_RESULT_NAME).exists())
-        self.assertEqual(
-            list(destination.glob(f".{completion.LIVE_RESULT_NAME}.tmp-*")),
-            [],
-        )
+        assert not ((destination / completion.LIVE_RESULT_NAME).exists())
+        assert list(destination.glob(f".{completion.LIVE_RESULT_NAME}.tmp-*")) == []
 
     def test_post_link_outer_lease_failure_reports_committed_authority(self):
-        with self.assertRaises(completion.CommittedAuthorityError) as caught:
+        with pytest.raises(completion.CommittedAuthorityError) as caught:
             self.invoke_live_fixture(
                 "post-link-lease-close",
                 self.successful_live_verifier,
@@ -1454,120 +1426,114 @@ class Issue123CompletionTest(unittest.TestCase):
                     "synthetic-retained-close-canary"
                 ),
             )
-        self.assertTrue(caught.exception.committed)
-        self.assertEqual(
-            str(caught.exception),
-            "completion authority was committed but custody cleanup failed",
+        assert caught.value.committed
+        assert (
+            str(caught.value)
+            == "completion authority was committed but custody cleanup failed"
         )
-        self.assertIsNone(caught.exception.__cause__)
-        self.assertIsNone(caught.exception.__context__)
+        assert caught.value.__cause__ is None
+        assert caught.value.__context__ is None
         result_path = (
             self.external_directory
             / "post-link-lease-close-output"
             / completion.LIVE_RESULT_NAME
         )
         result = json.loads(result_path.read_bytes())
-        self.assertTrue(result["final_acceptance"])
-        self.assertTrue(result["issue_completion_satisfied"])
+        assert result["final_acceptance"]
+        assert result["issue_completion_satisfied"]
 
-    def test_reopen_binding_and_baseline_gates_block_before_live_authority(self):
-        for gate in ("reopen-chain", "private-a-public-b", "baseline-descriptors"):
-            suffix = f"authority-gate-{gate}"
-            offline = self.evaluate_with_patches(self.patched_validators())
-            index = self.directory / "index.json"
-            inputs = self.live_test_inputs(suffix)
-            chain = mock.Mock(return_value=self.authority_gate_fixture())
-            binding = mock.Mock(
-                return_value={
-                    "technical_input_root": "9" * 64,
-                    "public_projection_sha256": "a" * 64,
-                    "public_asset_ledger_sha256": "b" * 64,
-                    "source_count": 5,
-                    "runtime_receipt_count": 5,
-                    "first_five_scopes_validated": True,
-                }
+    @pytest.mark.parametrize(
+        "gate",
+        ("reopen-chain", "private-a-public-b", "baseline-descriptors"),
+        ids=str,
+    )
+    def test_reopen_binding_and_baseline_gates_block_before_live_authority(self, gate):
+        suffix = f"authority-gate-{gate}"
+        offline = self.evaluate_with_patches(self.patched_validators())
+        index = self.directory / "index.json"
+        inputs = self.live_test_inputs(suffix)
+        chain = mock.Mock(return_value=self.authority_gate_fixture())
+        binding = mock.Mock(
+            return_value={
+                "technical_input_root": "9" * 64,
+                "public_projection_sha256": "a" * 64,
+                "public_asset_ledger_sha256": "b" * 64,
+                "source_count": 5,
+                "runtime_receipt_count": 5,
+                "first_five_scopes_validated": True,
+            }
+        )
+        baseline = mock.Mock(return_value=self.baseline_descriptors_fixture())
+        if gate == "reopen-chain":
+            chain.side_effect = completion.EvidenceError(
+                "protected opening or reopen receipt differs"
             )
-            baseline = mock.Mock(return_value=self.baseline_descriptors_fixture())
-            if gate == "reopen-chain":
-                chain.side_effect = completion.EvidenceError(
-                    "protected opening or reopen receipt differs"
-                )
-            elif gate == "private-a-public-b":
-                binding.side_effect = privacy.PrivacyError(
-                    "published public bytes differ from final B1 projection"
-                )
+        elif gate == "private-a-public-b":
+            binding.side_effect = privacy.PrivacyError(
+                "published public bytes differ from final B1 projection"
+            )
+        else:
+            baseline.side_effect = completion.EvidenceError(
+                "final B1 baseline descriptor differs"
+            )
+        with (
+            mock.patch.object(completion, "evaluate_completion", return_value=offline),
+            mock.patch.object(
+                completion, "_validate_final_bundle_reopen_chain", side_effect=chain
+            ),
+            mock.patch.object(
+                privacy, "verify_publication_bundle_binding", side_effect=binding
+            ),
+            mock.patch.object(
+                completion,
+                "_validate_final_b1_baseline_descriptors",
+                side_effect=baseline,
+            ),
+            mock.patch.object(completion, "_prepare_operations_live_input") as prepare,
+            mock.patch.object(operations, "open_verified_operations_live") as verify,
+        ):
+            result = completion.verify_completion_live(
+                index_path=index,
+                manifest_path=completion.DEFAULT_MANIFEST,
+                **inputs,
+            )
+        assert not result["final_acceptance"]
+        assert not result["issue_completion_satisfied"]
+        assert not result["candidate_bundle_binding"]["satisfied"]
+        assert not result["post_bundle"]["satisfied"]
+        assert not result["baseline_authority"]["satisfied"]
+        prepare.assert_not_called()
+        verify.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "attack",
+        ("legacy-schema", "missing-baseline", "mutated-baseline"),
+        ids=str,
+    )
+    def test_legacy_missing_or_mutated_live_authority_receipt_is_rejected(self, attack):
+
+        def emit_attacked_receipt(**kwargs):
+            receipt = self.live_receipt_for_call(kwargs)
+            if attack == "legacy-schema":
+                receipt["schema_version"] = 2
+            elif attack == "missing-baseline":
+                del receipt["baseline_validation"]
             else:
-                baseline.side_effect = completion.EvidenceError(
-                    "final B1 baseline descriptor differs"
-                )
-            with (
-                self.subTest(gate=gate),
-                mock.patch.object(
-                    completion, "evaluate_completion", return_value=offline
-                ),
-                mock.patch.object(
-                    completion,
-                    "_validate_final_bundle_reopen_chain",
-                    side_effect=chain,
-                ),
-                mock.patch.object(
-                    privacy,
-                    "verify_publication_bundle_binding",
-                    side_effect=binding,
-                ),
-                mock.patch.object(
-                    completion,
-                    "_validate_final_b1_baseline_descriptors",
-                    side_effect=baseline,
-                ),
-                mock.patch.object(
-                    completion, "_prepare_operations_live_input"
-                ) as prepare,
-                mock.patch.object(
-                    operations, "open_verified_operations_live"
-                ) as verify,
-            ):
-                result = completion.verify_completion_live(
-                    index_path=index,
-                    manifest_path=completion.DEFAULT_MANIFEST,
-                    **inputs,
-                )
-            self.assertFalse(result["final_acceptance"])
-            self.assertFalse(result["issue_completion_satisfied"])
-            self.assertFalse(result["candidate_bundle_binding"]["satisfied"])
-            self.assertFalse(result["post_bundle"]["satisfied"])
-            self.assertFalse(result["baseline_authority"]["satisfied"])
-            prepare.assert_not_called()
-            verify.assert_not_called()
+                receipt["baseline_validation"]["asset_ledger"][0]["sha256"] = "0" * 64
+            operations._write_private_receipt(
+                kwargs["receipt_output"],
+                operations._canonical_json_bytes(receipt),
+            )
+            return receipt
 
-    def test_legacy_missing_or_mutated_live_authority_receipt_is_rejected(self):
-        for attack in ("legacy-schema", "missing-baseline", "mutated-baseline"):
-
-            def emit_attacked_receipt(*, _attack=attack, **kwargs):
-                receipt = self.live_receipt_for_call(kwargs)
-                if _attack == "legacy-schema":
-                    receipt["schema_version"] = 2
-                elif _attack == "missing-baseline":
-                    del receipt["baseline_validation"]
-                else:
-                    receipt["baseline_validation"]["asset_ledger"][0]["sha256"] = (
-                        "0" * 64
-                    )
-                operations._write_private_receipt(
-                    kwargs["receipt_output"],
-                    operations._canonical_json_bytes(receipt),
-                )
-                return receipt
-
-            with self.subTest(attack=attack):
-                result, _offline, _index, _inputs, _evaluate, _prepare, verify = (
-                    self.invoke_live_fixture(attack, emit_attacked_receipt)
-                )
-                verify.assert_called_once()
-                self.assertFalse(result["final_acceptance"])
-                self.assertFalse(result["issue_completion_satisfied"])
-                self.assertFalse(result["live_verification"]["invocation_succeeded"])
-                self.assertFalse(result["baseline_authority"]["satisfied"])
+        result, _offline, _index, _inputs, _evaluate, _prepare, verify = (
+            self.invoke_live_fixture(attack, emit_attacked_receipt)
+        )
+        verify.assert_called_once()
+        assert not result["final_acceptance"]
+        assert not result["issue_completion_satisfied"]
+        assert not result["live_verification"]["invocation_succeeded"]
+        assert not result["baseline_authority"]["satisfied"]
 
     def test_completion_cli_requires_and_forwards_all_private_authority_inputs(self):
         runtime = [
@@ -1605,6 +1571,8 @@ class Issue123CompletionTest(unittest.TestCase):
             str(self.directory / "output"),
             "--enforce",
         ]
+        # Check every missing private input before the same argument vector's
+        # positive forwarding control; this is one staged CLI contract sequence.
         for required in (
             "--reopened-index",
             "--private-openings",
@@ -1615,9 +1583,8 @@ class Issue123CompletionTest(unittest.TestCase):
             location = changed.index(required)
             del changed[location : location + 2]
             with (
-                self.subTest(missing=required),
                 mock.patch("sys.stderr", new=io.StringIO()),
-                self.assertRaises(completion._CliUsageError),
+                pytest.raises(completion._CliUsageError),
             ):
                 completion._arguments(changed)
 
@@ -1631,48 +1598,61 @@ class Issue123CompletionTest(unittest.TestCase):
             mock.patch("sys.stdout", new=output),
         ):
             status = completion.main(arguments)
-        self.assertEqual(status, 0)
+        assert status == 0
         call = verify.call_args.kwargs
-        self.assertEqual(
-            call["reopened_index"],
-            Path(arguments[arguments.index("--reopened-index") + 1]),
+        assert call["reopened_index"] == Path(
+            arguments[arguments.index("--reopened-index") + 1]
         )
-        self.assertEqual(
-            call["protected_openings"],
-            Path(arguments[arguments.index("--private-openings") + 1]),
+        assert call["protected_openings"] == Path(
+            arguments[arguments.index("--private-openings") + 1]
         )
-        self.assertEqual(
-            call["pre_ack_bundle_reopen_receipt"],
-            Path(arguments[arguments.index("--pre-ack-bundle-reopen-receipt") + 1]),
+        assert call["pre_ack_bundle_reopen_receipt"] == Path(
+            arguments[arguments.index("--pre-ack-bundle-reopen-receipt") + 1]
         )
-        self.assertEqual(
-            call["final_bundle_reopen_receipt"],
-            Path(arguments[arguments.index("--final-bundle-reopen-receipt") + 1]),
+        assert call["final_bundle_reopen_receipt"] == Path(
+            arguments[arguments.index("--final-bundle-reopen-receipt") + 1]
         )
 
-    def test_structured_errors_never_serialize_exception_text(self):
+    @pytest.mark.parametrize(
+        "error_type",
+        (completion.EvidenceError, OSError, RuntimeError),
+        ids=("evidence-error", "os-error", "runtime-error"),
+    )
+    def test_structured_errors_never_serialize_exception_text(self, error_type):
         hostile = (
             "/Users/fixture-person-invalid/private "
             + "github_pat_"
             + "syntheticinvalid" * 2
         )
-        for error in (
-            completion.EvidenceError(hostile),
-            OSError(hostile),
-            RuntimeError(hostile),
-        ):
-            rendered = json.dumps(
-                completion._structured_evidence_error(
-                    error,
-                    phase="synthetic-phase",
-                    scope="synthetic-scope",
-                )
+        rendered = json.dumps(
+            completion._structured_evidence_error(
+                error_type(hostile),
+                phase="synthetic-phase",
+                scope="synthetic-scope",
             )
-            self.assertNotIn("fixture-person-invalid", rendered)
-            self.assertNotIn("github_pat_", rendered)
-            self.assertIn("evidence", rendered)
+        )
+        assert "fixture-person-invalid" not in rendered
+        assert "github_pat_" not in rendered
+        assert "evidence" in rendered
 
-    def test_completion_cli_failure_tokens_never_render_private_text(self):
+    @pytest.mark.parametrize(
+        ("command", "boundary"),
+        (
+            ("record-reopen", completion.main),
+            ("record-reopen", completion._cli),
+            ("verify-live", completion.main),
+            ("verify-live", completion._cli),
+        ),
+        ids=(
+            "record-reopen-main",
+            "record-reopen-cli",
+            "verify-live-main",
+            "verify-live-cli",
+        ),
+    )
+    def test_completion_cli_failure_tokens_never_render_private_text(
+        self, command, boundary
+    ):
         marker = (
             "/tmp/synthetic-private.invalid/identity "
             + "salt="
@@ -1681,30 +1661,24 @@ class Issue123CompletionTest(unittest.TestCase):
             + "cd" * 32
             + " raw-body=fixture-private-value"
         )
-        for command in ("record-reopen", "verify-live"):
-            for boundary in (completion.main, completion._cli):
-                stdout = io.StringIO()
-                stderr = io.StringIO()
-                with (
-                    self.subTest(command=command, boundary=boundary.__name__),
-                    mock.patch.object(
-                        completion,
-                        "_main",
-                        side_effect=completion.EvidenceError(marker),
-                    ),
-                    mock.patch("sys.stdout", new=stdout),
-                    mock.patch("sys.stderr", new=stderr),
-                ):
-                    status = boundary([command])
-                self.assertEqual(status, 2)
-                self.assertEqual(stdout.getvalue(), "")
-                self.assertEqual(
-                    stderr.getvalue(),
-                    f"issue123-completion-{command}-failed\n",
-                )
-                rendered = stdout.getvalue() + stderr.getvalue()
-                self.assertNotIn("Traceback", rendered)
-                self.assertNotIn(marker, rendered)
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(
+                completion,
+                "_main",
+                side_effect=completion.EvidenceError(marker),
+            ),
+            mock.patch("sys.stdout", new=stdout),
+            mock.patch("sys.stderr", new=stderr),
+        ):
+            status = boundary([command])
+        assert status == 2
+        assert stdout.getvalue() == ""
+        assert stderr.getvalue() == f"issue123-completion-{command}-failed\n"
+        rendered = stdout.getvalue() + stderr.getvalue()
+        assert "Traceback" not in rendered
+        assert marker not in rendered
 
     def test_live_verifier_failure_stays_structural_only(self):
         def fail(**_kwargs):
@@ -1714,19 +1688,17 @@ class Issue123CompletionTest(unittest.TestCase):
             self.invoke_live_fixture("failure", fail)
         )
         verify.assert_called_once()
-        self.assertTrue(result["structural_validation_satisfied"])
-        self.assertFalse(result["final_acceptance"])
-        self.assertFalse(result["issue_completion_satisfied"])
-        self.assertTrue(result["live_verification"]["invocation_attempted"])
-        self.assertFalse(result["live_verification"]["invocation_succeeded"])
-        self.assertEqual(
-            result["live_verification"]["errors"][0]["message"],
-            "evidence validation failed closed",
+        assert result["structural_validation_satisfied"]
+        assert not (result["final_acceptance"])
+        assert not (result["issue_completion_satisfied"])
+        assert result["live_verification"]["invocation_attempted"]
+        assert not (result["live_verification"]["invocation_succeeded"])
+        assert (
+            result["live_verification"]["errors"][0]["message"]
+            == "evidence validation failed closed"
         )
         result_path = inputs["output_directory"] / completion.LIVE_RESULT_NAME
-        self.assertEqual(
-            result_path.read_bytes(), completion._canonical_json_bytes(result)
-        )
+        assert result_path.read_bytes() == completion._canonical_json_bytes(result)
 
     def test_returned_or_replayed_receipt_cannot_authorize_completion(self):
         def return_without_emitting(**kwargs):
@@ -1736,12 +1708,12 @@ class Issue123CompletionTest(unittest.TestCase):
             self.invoke_live_fixture("offline-receipt", return_without_emitting)
         )
         verify.assert_called_once()
-        self.assertFalse(result["final_acceptance"])
-        self.assertFalse(result["issue_completion_satisfied"])
-        self.assertFalse(result["live_verification"]["invocation_succeeded"])
-        self.assertEqual(
-            result["live_verification"]["errors"][0]["message"],
-            "evidence validation failed closed",
+        assert not (result["final_acceptance"])
+        assert not (result["issue_completion_satisfied"])
+        assert not (result["live_verification"]["invocation_succeeded"])
+        assert (
+            result["live_verification"]["errors"][0]["message"]
+            == "evidence validation failed closed"
         )
 
         previous = inputs["output_directory"]
@@ -1759,15 +1731,15 @@ class Issue123CompletionTest(unittest.TestCase):
                 manifest_path=completion.DEFAULT_MANIFEST,
                 **inputs,
             )
-        self.assertFalse(replayed["final_acceptance"])
-        self.assertFalse(replayed["issue_completion_satisfied"])
-        self.assertEqual(
-            replayed["live_verification"]["errors"][0]["message"],
-            "evidence validation failed closed",
+        assert not (replayed["final_acceptance"])
+        assert not (replayed["issue_completion_satisfied"])
+        assert (
+            replayed["live_verification"]["errors"][0]["message"]
+            == "evidence validation failed closed"
         )
         prepare.assert_not_called()
         replay.assert_not_called()
-        self.assertEqual(previous, inputs["output_directory"])
+        assert previous == inputs["output_directory"]
 
     def test_mocked_offline_receipt_cannot_grant_live_authority(self):
         def emit_offline_receipt(**kwargs):
@@ -1788,174 +1760,165 @@ class Issue123CompletionTest(unittest.TestCase):
             self.invoke_live_fixture("mocked-offline", emit_offline_receipt)
         )
         verify.assert_called_once()
-        self.assertTrue(result["structural_validation_satisfied"])
-        self.assertFalse(result["final_acceptance"])
-        self.assertFalse(result["issue_completion_satisfied"])
-        self.assertFalse(result["live_verification"]["invocation_succeeded"])
-        self.assertEqual(
-            result["live_verification"]["errors"][0]["message"],
-            "evidence validation failed closed",
+        assert result["structural_validation_satisfied"]
+        assert not (result["final_acceptance"])
+        assert not (result["issue_completion_satisfied"])
+        assert not (result["live_verification"]["invocation_succeeded"])
+        assert (
+            result["live_verification"]["errors"][0]["message"]
+            == "evidence validation failed closed"
         )
 
-    def test_index_and_runtime_receipt_substitution_during_live_check_fail_closed(self):
-        for target in ("index", "runtime"):
-            suffix = f"substitute-{target}"
-
-            def substitute_then_succeed(**kwargs):
-                if target == "index":
-                    path = self.directory / "index.json"
-                else:
-                    path = self.external_directory / suffix / "runtime-0-cpu.json"
-                path.write_bytes(path.read_bytes() + b" ")
-                return self.successful_live_verifier(**kwargs)
-
-            with self.subTest(target=target):
-                result, _offline, _index, _inputs, _evaluate, _prepare, verify = (
-                    self.invoke_live_fixture(suffix, substitute_then_succeed)
-                )
-                verify.assert_called_once()
-                self.assertTrue(result["structural_validation_satisfied"])
-                self.assertFalse(result["final_acceptance"])
-                self.assertFalse(result["issue_completion_satisfied"])
-                self.assertEqual(
-                    result["live_verification"]["errors"][0]["message"],
-                    "evidence validation failed closed",
-                )
-
-    def test_policy_and_asset_substitution_during_live_check_fail_closed(self):
-        for target in ("policy", "asset"):
-            suffix = f"substitute-{target}"
-
-            def substitute_then_succeed(**kwargs):
-                if target == "policy":
-                    path = kwargs["publication_policy"]
-                else:
-                    path = kwargs["publication_assets"]["technical_summary"]
-                path.write_bytes(path.read_bytes() + b"substituted")
-                return self.successful_live_verifier(**kwargs)
-
-            with self.subTest(target=target):
-                result, _offline, _index, _inputs, _evaluate, _prepare, verify = (
-                    self.invoke_live_fixture(suffix, substitute_then_succeed)
-                )
-                verify.assert_called_once()
-                self.assertTrue(result["structural_validation_satisfied"])
-                self.assertFalse(result["final_acceptance"])
-                self.assertFalse(result["issue_completion_satisfied"])
-                self.assertEqual(
-                    result["live_verification"]["errors"][0]["message"],
-                    "evidence validation failed closed",
-                )
-
-    def test_derived_operations_index_and_responses_are_immutable_through_live_call(
-        self,
+    @pytest.mark.parametrize("target", ("index", "runtime"), ids=str)
+    def test_index_and_runtime_receipt_substitution_during_live_check_fail_closed(
+        self, target
     ):
-        attacks = (
-            (target, mutation)
-            for target in ("index", "response")
-            for mutation in ("append", "same-size", "replace")
-        )
-        for target, mutation in attacks:
-            suffix = f"substitute-staged-{target}-{mutation}"
+        suffix = f"substitute-{target}"
 
-            def mutate_staged_then_succeed(**kwargs):
-                receipt = self.live_receipt_for_call(kwargs)
-                if target == "index":
-                    path = kwargs["index_path"]
-                else:
-                    path = next(
-                        candidate
-                        for candidate in kwargs["index_path"].parent.iterdir()
-                        if candidate.name.startswith("response-")
-                    )
-                raw = path.read_bytes()
-                if mutation == "append":
-                    path.write_bytes(raw + b"post-read-substitution")
-                elif mutation == "same-size":
-                    changed = bytearray(raw)
-                    changed[0] ^= 1
-                    path.write_bytes(changed)
-                else:
-                    replacement = path.with_name(f"{path.name}.replacement")
-                    replacement.write_bytes(raw)
-                    replacement.replace(path)
-                kwargs["receipt_output"].write_bytes(
-                    operations._canonical_json_bytes(receipt)
-                )
-                return receipt
-
-            with self.subTest(target=target, mutation=mutation):
-                result, _offline, _index, _inputs, _evaluate, _prepare, verify = (
-                    self.invoke_live_fixture(suffix, mutate_staged_then_succeed)
-                )
-                verify.assert_called_once()
-                self.assertTrue(result["structural_validation_satisfied"])
-                self.assertFalse(result["final_acceptance"])
-                self.assertFalse(result["issue_completion_satisfied"])
-                self.assertFalse(result["live_verification"]["invocation_succeeded"])
-                self.assertEqual(
-                    result["live_verification"]["errors"][0]["message"],
-                    "evidence validation failed closed",
-                )
-
-    def test_stale_policy_and_missing_or_swapped_assets_never_reach_live_verifier(self):
-        for attack in ("stale-policy", "noncanonical-policy", "missing", "swapped"):
-            suffix = f"preflight-{attack}"
-            offline = self.evaluate_with_patches(self.patched_validators())
-            index = self.directory / "index.json"
-            inputs = self.live_test_inputs(suffix)
-            if attack == "stale-policy":
-                inputs["publication_policy_sha256"] = "0" * 64
-            elif attack == "noncanonical-policy":
-                document = json.loads(inputs["publication_policy"].read_bytes())
-                inputs["publication_policy"].write_text(
-                    json.dumps(document, indent=2) + "\n",
-                    encoding="utf-8",
-                )
-                inputs["publication_policy_sha256"] = hashlib.sha256(
-                    inputs["publication_policy"].read_bytes()
-                ).hexdigest()
-            elif attack == "missing":
-                del inputs["publication_assets"]["event_profiler"]
+        def substitute_then_succeed(**kwargs):
+            if target == "index":
+                path = self.directory / "index.json"
             else:
-                assets = inputs["publication_assets"]
-                assets["technical_evidence"], assets["technical_summary"] = (
-                    assets["technical_summary"],
-                    assets["technical_evidence"],
+                path = self.external_directory / suffix / "runtime-0-cpu.json"
+            path.write_bytes(path.read_bytes() + b" ")
+            return self.successful_live_verifier(**kwargs)
+
+        result, _offline, _index, _inputs, _evaluate, _prepare, verify = (
+            self.invoke_live_fixture(suffix, substitute_then_succeed)
+        )
+        verify.assert_called_once()
+        assert result["structural_validation_satisfied"]
+        assert not result["final_acceptance"]
+        assert not result["issue_completion_satisfied"]
+        assert (
+            result["live_verification"]["errors"][0]["message"]
+            == "evidence validation failed closed"
+        )
+
+    @pytest.mark.parametrize("target", ("policy", "asset"), ids=str)
+    def test_policy_and_asset_substitution_during_live_check_fail_closed(self, target):
+        suffix = f"substitute-{target}"
+
+        def substitute_then_succeed(**kwargs):
+            if target == "policy":
+                path = kwargs["publication_policy"]
+            else:
+                path = kwargs["publication_assets"]["technical_summary"]
+            path.write_bytes(path.read_bytes() + b"substituted")
+            return self.successful_live_verifier(**kwargs)
+
+        result, _offline, _index, _inputs, _evaluate, _prepare, verify = (
+            self.invoke_live_fixture(suffix, substitute_then_succeed)
+        )
+        verify.assert_called_once()
+        assert result["structural_validation_satisfied"]
+        assert not result["final_acceptance"]
+        assert not result["issue_completion_satisfied"]
+        assert (
+            result["live_verification"]["errors"][0]["message"]
+            == "evidence validation failed closed"
+        )
+
+    @pytest.mark.parametrize("target", ("index", "response"), ids=str)
+    @pytest.mark.parametrize("mutation", ("append", "same-size", "replace"), ids=str)
+    def test_derived_operations_index_and_responses_are_immutable_through_live_call(
+        self, target, mutation
+    ):
+        suffix = f"substitute-staged-{target}-{mutation}"
+
+        def mutate_staged_then_succeed(**kwargs):
+            receipt = self.live_receipt_for_call(kwargs)
+            if target == "index":
+                path = kwargs["index_path"]
+            else:
+                path = next(
+                    candidate
+                    for candidate in kwargs["index_path"].parent.iterdir()
+                    if candidate.name.startswith("response-")
                 )
-            with (
-                self.subTest(attack=attack),
-                mock.patch.object(
-                    completion,
-                    "evaluate_completion",
-                    return_value=offline,
-                ),
-                mock.patch.object(
-                    completion,
-                    "_prepare_operations_live_input",
-                ) as prepare,
-                mock.patch.object(
-                    operations, "open_verified_operations_live"
-                ) as verify,
-            ):
-                result = completion.verify_completion_live(
-                    index_path=index,
-                    manifest_path=completion.DEFAULT_MANIFEST,
-                    **inputs,
-                )
-            self.assertFalse(result["final_acceptance"])
-            self.assertFalse(result["issue_completion_satisfied"])
-            prepare.assert_not_called()
-            verify.assert_not_called()
+            raw = path.read_bytes()
+            if mutation == "append":
+                path.write_bytes(raw + b"post-read-substitution")
+            elif mutation == "same-size":
+                changed = bytearray(raw)
+                changed[0] ^= 1
+                path.write_bytes(changed)
+            else:
+                replacement = path.with_name(f"{path.name}.replacement")
+                replacement.write_bytes(raw)
+                replacement.replace(path)
+            kwargs["receipt_output"].write_bytes(
+                operations._canonical_json_bytes(receipt)
+            )
+            return receipt
+
+        result, _offline, _index, _inputs, _evaluate, _prepare, verify = (
+            self.invoke_live_fixture(suffix, mutate_staged_then_succeed)
+        )
+        verify.assert_called_once()
+        assert result["structural_validation_satisfied"]
+        assert not result["final_acceptance"]
+        assert not result["issue_completion_satisfied"]
+        assert not result["live_verification"]["invocation_succeeded"]
+        assert (
+            result["live_verification"]["errors"][0]["message"]
+            == "evidence validation failed closed"
+        )
+
+    @pytest.mark.parametrize(
+        "attack",
+        ("stale-policy", "noncanonical-policy", "missing", "swapped"),
+        ids=str,
+    )
+    def test_stale_policy_and_missing_or_swapped_assets_never_reach_live_verifier(
+        self, attack
+    ):
+        suffix = f"preflight-{attack}"
+        offline = self.evaluate_with_patches(self.patched_validators())
+        index = self.directory / "index.json"
+        inputs = self.live_test_inputs(suffix)
+        if attack == "stale-policy":
+            inputs["publication_policy_sha256"] = "0" * 64
+        elif attack == "noncanonical-policy":
+            document = json.loads(inputs["publication_policy"].read_bytes())
+            inputs["publication_policy"].write_text(
+                json.dumps(document, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            inputs["publication_policy_sha256"] = hashlib.sha256(
+                inputs["publication_policy"].read_bytes()
+            ).hexdigest()
+        elif attack == "missing":
+            del inputs["publication_assets"]["event_profiler"]
+        else:
+            assets = inputs["publication_assets"]
+            assets["technical_evidence"], assets["technical_summary"] = (
+                assets["technical_summary"],
+                assets["technical_evidence"],
+            )
+        with (
+            mock.patch.object(completion, "evaluate_completion", return_value=offline),
+            mock.patch.object(completion, "_prepare_operations_live_input") as prepare,
+            mock.patch.object(operations, "open_verified_operations_live") as verify,
+        ):
+            result = completion.verify_completion_live(
+                index_path=index,
+                manifest_path=completion.DEFAULT_MANIFEST,
+                **inputs,
+            )
+        assert not result["final_acceptance"]
+        assert not result["issue_completion_satisfied"]
+        prepare.assert_not_called()
+        verify.assert_not_called()
 
     def test_cross_gpu_environment_mismatch_fails_closed(self):
         result = self.evaluate_with_patches(
             self.patched_validators(different_gpu_environment=True)
         )
-        self.assertFalse(result["issue_completion_satisfied"])
-        self.assertFalse(result["scopes"]["single_gpu"]["satisfied"])
-        self.assertFalse(result["scopes"]["two_gpu"]["satisfied"])
-        self.assertTrue(result["cross_scope_errors"])
+        assert not (result["issue_completion_satisfied"])
+        assert not (result["scopes"]["single_gpu"]["satisfied"])
+        assert not (result["scopes"]["two_gpu"]["satisfied"])
+        assert result["cross_scope_errors"]
 
     def test_all_differential_sources_bind_external_runtime_receipts(self):
         values = self.patched_validators()
@@ -1967,7 +1930,7 @@ class Issue123CompletionTest(unittest.TestCase):
             self.manifest,
             trusted_single_receipts,
         )
-        self.assertEqual(valid["bound_source_count"], 18)
+        assert valid["bound_source_count"] == 18
 
         refreshed = copy.deepcopy(values)
         source = refreshed["_validate_policy_scope"]["differential_source_bindings"][0][
@@ -1975,8 +1938,8 @@ class Issue123CompletionTest(unittest.TestCase):
         ]
         source["sha256"] = hashlib.sha256(b"coherently-refreshed").hexdigest()
         source["size_bytes"] += 1
-        with self.assertRaisesRegex(
-            completion.EvidenceError, "externally attested runtime archive"
+        with pytest.raises(
+            completion.EvidenceError, match="externally attested runtime archive"
         ):
             completion._validate_differential_correctness_source_bindings(
                 refreshed["_validate_cpu_scope"],
@@ -1994,8 +1957,8 @@ class Issue123CompletionTest(unittest.TestCase):
             b"coherently-refreshed-single"
         ).hexdigest()
         single_source["size_bytes"] += 1
-        with self.assertRaisesRegex(
-            completion.EvidenceError, "externally attested runtime archive"
+        with pytest.raises(
+            completion.EvidenceError, match="externally attested runtime archive"
         ):
             completion._validate_differential_correctness_source_bindings(
                 refreshed_single["_validate_cpu_scope"],
@@ -2066,11 +2029,11 @@ class Issue123CompletionTest(unittest.TestCase):
             self.candidate,
             self.directory.resolve(),
         )
-        self.assertEqual(len(loaded), 5)
+        assert len(loaded) == 5
         swapped = list(external_paths)
         swapped[3], swapped[4] = swapped[4], swapped[3]
-        with self.assertRaisesRegex(
-            completion.EvidenceError, "identity or runtime binding differs"
+        with pytest.raises(
+            completion.EvidenceError, match="identity or runtime binding differs"
         ):
             completion._load_trusted_runtime_receipts(
                 swapped,
@@ -2078,7 +2041,7 @@ class Issue123CompletionTest(unittest.TestCase):
                 self.candidate,
                 self.directory.resolve(),
             )
-        with self.assertRaisesRegex(completion.EvidenceError, "outside the evidence"):
+        with pytest.raises(completion.EvidenceError, match="outside the evidence"):
             completion._load_trusted_runtime_receipts(
                 bundled_paths,
                 self.manifest,
@@ -2094,23 +2057,23 @@ class Issue123CompletionTest(unittest.TestCase):
         ):
             first = completion.evaluate_completion(self.write_top_index())
             second = completion.evaluate_completion(self.write_top_index())
-        self.assertFalse(first["issue_completion_satisfied"])
-        self.assertEqual(first, second)
-        self.assertTrue(all(scope["errors"] for scope in first["scopes"].values()))
+        assert not (first["issue_completion_satisfied"])
+        assert first == second
+        assert all(scope["errors"] for scope in first["scopes"].values())
 
     def test_strict_json_rejects_duplicate_keys_and_nan(self):
-        with self.assertRaises(completion.EvidenceError):
+        with pytest.raises(completion.EvidenceError):
             completion._strict_json_bytes(b'{"x": 1, "x": 2}', "duplicate")
-        with self.assertRaises(completion.EvidenceError):
+        with pytest.raises(completion.EvidenceError):
             completion._strict_json_bytes(b'{"x": NaN}', "nan")
-        with self.assertRaises(completion.EvidenceError):
+        with pytest.raises(completion.EvidenceError):
             completion._strict_json_bytes(b'{"x": 1e999}', "overflow")
 
     def test_exact_integer_contracts_reject_json_booleans(self):
-        self.assertFalse(completion._is_exact_int(True, 1))
+        assert not (completion._is_exact_int(True, 1))
         host = copy.deepcopy(self.host_contract)
         host["schema_version"] = True
-        with self.assertRaises(completion.EvidenceError):
+        with pytest.raises(completion.EvidenceError):
             completion._validate_host_contract(host, "host")
 
     def test_frozen_baseline_host_is_recomputed_from_raw_environments(self):
@@ -2134,7 +2097,7 @@ class Issue123CompletionTest(unittest.TestCase):
         completion._require_frozen_baseline_host(
             environment, baseline, thread, "CPU one"
         )
-        self.assertEqual(environment["hostname"], "fixture-candidate-host.invalid")
+        assert environment["hostname"] == "fixture-candidate-host.invalid"
         environment["torch"] = "2.13.0+cu130"
         environment["cuda_runtime"] = "13.0"
         environment["devices"] = [
@@ -2142,7 +2105,7 @@ class Issue123CompletionTest(unittest.TestCase):
             {"index": 1, "name": "fixture-device-one.invalid"},
         ]
         environment["gpu_topology"] = "fixture-device-topology.invalid"
-        with self.assertRaises(completion.EvidenceError):
+        with pytest.raises(completion.EvidenceError):
             completion._require_frozen_baseline_host(
                 environment, baseline, thread, "CPU one"
             )
@@ -2152,42 +2115,41 @@ class Issue123CompletionTest(unittest.TestCase):
             environment, baseline, thread, "CPU one"
         )
         environment["torch"] = "2.13.1+cu130"
-        with self.assertRaises(completion.EvidenceError):
+        with pytest.raises(completion.EvidenceError):
             completion._require_frozen_baseline_host(
                 environment, baseline, thread, "CPU one"
             )
         environment["torch"] = "2.13.0+cpu"
         environment["cpu_model"] = "different"
-        with self.assertRaises(completion.EvidenceError):
+        with pytest.raises(completion.EvidenceError):
             completion._require_frozen_baseline_host(
                 environment, baseline, thread, "CPU one"
             )
         environment["cpu_model"] = "fixture-cpu-model.invalid"
         environment["thread_environment"] = {"OMP_NUM_THREADS": True}
-        with self.assertRaises(completion.EvidenceError):
+        with pytest.raises(completion.EvidenceError):
             completion._require_frozen_baseline_host(
                 environment, baseline, thread, "CPU one"
             )
         environment["thread_environment"] = thread
         malformed = copy.deepcopy(baseline)
         malformed["timing_runtime_identity"]["schema_version"] = True
-        with self.assertRaises(completion.EvidenceError):
+        with pytest.raises(completion.EvidenceError):
             completion._require_frozen_baseline_host(
                 environment, malformed, thread, "CPU one"
             )
 
-    def test_native_summary_torch_comparison_uses_strict_public_version(self):
-        self.assertTrue(
-            completion._public_torch_versions_match("2.13.0+cu130", "2.13.0+cpu")
-        )
-        self.assertFalse(
+    @pytest.mark.parametrize(
+        "value",
+        (None, "", "2.13.0+", "2.13.0+cu130+other"),
+        ids=("none", "empty", "missing-local-version", "extra-local-segment"),
+    )
+    def test_native_summary_torch_comparison_uses_strict_public_version(self, value):
+        assert completion._public_torch_versions_match("2.13.0+cu130", "2.13.0+cpu")
+        assert not (
             completion._public_torch_versions_match("2.13.1+cu130", "2.13.0+cpu")
         )
-        for value in (None, "", "2.13.0+", "2.13.0+cu130+other"):
-            with self.subTest(value=value):
-                self.assertFalse(
-                    completion._public_torch_versions_match(value, "2.13.0+cpu")
-                )
+        assert not completion._public_torch_versions_match(value, "2.13.0+cpu")
 
     def test_pinned_release_baseline_artifacts_are_bundle_bound(self):
         manifest = copy.deepcopy(self.manifest)
@@ -2249,14 +2211,12 @@ class Issue123CompletionTest(unittest.TestCase):
                 reader,
                 descriptors,
             )
-        self.assertEqual(set(loaded[0]), {"one", "physical"})
-        self.assertEqual(
-            loaded[-1]["one"]["publication_url"], pins[0]["publication_url"]
-        )
+        assert set(loaded[0]) == {"one", "physical"}
+        assert loaded[-1]["one"]["publication_url"] == pins[0]["publication_url"]
         load.assert_called_once()
 
         pins[0]["sha256"] = "0" * 64
-        with self.assertRaisesRegex(completion.EvidenceError, "artifact 0 differs"):
+        with pytest.raises(completion.EvidenceError, match="artifact 0 differs"):
             completion._load_pinned_torch_baseline(manifest, reader, descriptors)
 
     def test_cpu_scope_enforce_accepts_bound_correctness_without_global_completion(
@@ -2293,7 +2253,7 @@ class Issue123CompletionTest(unittest.TestCase):
             mock.patch("builtins.print"),
         ):
             status = torch_tuning.main()
-        self.assertEqual(status, 0)
+        assert status == 0
 
     def test_region_launches_are_recomputed_from_the_raw_effective_plan(self):
         plan = [
@@ -2321,11 +2281,9 @@ class Issue123CompletionTest(unittest.TestCase):
             }
             for component in completion.FIELD_ARRAYS
         ]
-        self.assertEqual(
-            completion._validate_effective_material_plan(plan, "plan"), (6, 12)
-        )
+        assert completion._validate_effective_material_plan(plan, "plan") == (6, 12)
         plan[0]["buckets"][0]["targets"] = [2]
-        with self.assertRaises(completion.EvidenceError):
+        with pytest.raises(completion.EvidenceError):
             completion._validate_effective_material_plan(plan, "plan")
 
     def test_descriptor_binds_exact_bytes_and_candidate(self):
@@ -2335,7 +2293,7 @@ class Issue123CompletionTest(unittest.TestCase):
         )
         reader = completion.ArtifactReader(self.directory, self.candidate)
         loaded = reader.load(descriptor, "payload")
-        self.assertEqual(loaded.descriptor["sha256"], descriptor["sha256"])
+        assert loaded.descriptor["sha256"] == descriptor["sha256"]
 
         for key in (
             "path",
@@ -2344,22 +2302,21 @@ class Issue123CompletionTest(unittest.TestCase):
             "media_type",
             "candidate_evidence",
         ):
-            with self.subTest(missing=key):
-                mutated = dict(descriptor)
-                del mutated[key]
-                with self.assertRaises(completion.EvidenceError):
-                    reader.load(mutated, "payload")
+            mutated = dict(descriptor)
+            del mutated[key]
+            with pytest.raises(completion.EvidenceError):
+                reader.load(mutated, "payload")
         mutated = dict(descriptor)
         mutated["extra"] = True
-        with self.assertRaises(completion.EvidenceError):
+        with pytest.raises(completion.EvidenceError):
             reader.load(mutated, "payload")
         mutated = copy.deepcopy(descriptor)
         mutated["candidate_evidence"]["candidate_git_commit"] = "b" * 40
-        with self.assertRaises(completion.EvidenceError):
+        with pytest.raises(completion.EvidenceError):
             reader.load(mutated, "payload")
 
         (self.directory / "payload.json").write_bytes(loaded.raw + b" ")
-        with self.assertRaises(completion.EvidenceError):
+        with pytest.raises(completion.EvidenceError):
             reader.load(descriptor, "payload")
 
     def test_macos_sdist_uses_one_retained_raw_first_snapshot(self):
@@ -2400,33 +2357,27 @@ class Issue123CompletionTest(unittest.TestCase):
             artifact, inventory = reader.load_private_sdist(descriptor, "sdist")
         retain_mock.assert_called_once()
         validate_mock.assert_called_once()
-        self.assertEqual(validate_mock.call_args.args[1], ())
-        self.assertEqual(
-            validate_mock.call_args.kwargs["limits"],
-            privacy._default_private_sdist_validation_limits(),
+        assert validate_mock.call_args.args[1] == ()
+        assert (
+            validate_mock.call_args.kwargs["limits"]
+            == privacy._default_private_sdist_validation_limits()
         )
-        self.assertEqual(artifact.raw, raw)
-        self.assertEqual(artifact.descriptor, descriptor)
-        self.assertEqual(
-            inventory,
-            completion._ValidatedSdistInventory(
-                hashlib.sha256(raw).hexdigest(),
-                len(raw),
-                1,
-                member.size,
-                (member.name,),
-            ),
+        assert artifact.raw == raw
+        assert artifact.descriptor == descriptor
+        assert inventory == completion._ValidatedSdistInventory(
+            hashlib.sha256(raw).hexdigest(),
+            len(raw),
+            1,
+            member.size,
+            (member.name,),
         )
-        self.assertEqual(
-            (
-                observed["completion_identity"].st_dev,
-                observed["completion_identity"].st_ino,
-            ),
-            (observed["privacy_identity"].st_dev, observed["privacy_identity"].st_ino),
-        )
-        with self.assertRaises(OSError):
+        assert (
+            observed["completion_identity"].st_dev,
+            observed["completion_identity"].st_ino,
+        ) == (observed["privacy_identity"].st_dev, observed["privacy_identity"].st_ino)
+        with pytest.raises(OSError):
             os.fstat(observed["completion_fd"])
-        with self.assertRaises(OSError):
+        with pytest.raises(OSError):
             os.fstat(observed["privacy_fd"])
 
         tree = ast.parse(Path(completion.__file__).read_text(encoding="utf-8"))
@@ -2434,21 +2385,19 @@ class Issue123CompletionTest(unittest.TestCase):
             node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)
         ]
         names = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
-        self.assertNotIn("tarfile", names)
-        self.assertNotIn("getmembers", attributes)
-        self.assertNotIn("extract", attributes)
+        assert "tarfile" not in names
+        assert "getmembers" not in attributes
+        assert "extract" not in attributes
 
     def test_macos_sdist_positive_unmocked_private_validation(self):
         descriptor = self.write_private_sdist()
         reader = completion.ArtifactReader(self.directory, self.candidate)
         artifact, inventory = reader.load_private_sdist(descriptor, "unmocked sdist")
-        self.assertEqual(
-            artifact.raw, (self.directory / descriptor["path"]).read_bytes()
-        )
-        self.assertEqual(inventory.archive_sha256, descriptor["sha256"])
-        self.assertEqual(inventory.archive_size, descriptor["size_bytes"])
-        self.assertGreaterEqual(inventory.member_count, 1)
-        self.assertEqual(inventory.member_count, len(inventory.member_names))
+        assert artifact.raw == (self.directory / descriptor["path"]).read_bytes()
+        assert inventory.archive_sha256 == descriptor["sha256"]
+        assert inventory.archive_size == descriptor["size_bytes"]
+        assert inventory.member_count >= 1
+        assert inventory.member_count == len(inventory.member_names)
 
     def test_macos_sdist_rejects_symlink_and_path_replacement(self):
         symlink_descriptor = self.write_private_sdist(
@@ -2460,8 +2409,8 @@ class Issue123CompletionTest(unittest.TestCase):
             "_validate_private_sdist_raw_first",
             side_effect=privacy.PrivacyError("synthetic-symlink-rejection"),
         ):
-            with self.assertRaisesRegex(
-                completion.EvidenceError, "macOS sdist privacy validation failed"
+            with pytest.raises(
+                completion.EvidenceError, match="macOS sdist privacy validation failed"
             ):
                 reader.load_private_sdist(symlink_descriptor, "unsafe sdist")
 
@@ -2485,17 +2434,17 @@ class Issue123CompletionTest(unittest.TestCase):
             "_validate_private_sdist_raw_first",
             side_effect=reject_retained_source,
         ):
-            with self.assertRaisesRegex(
-                completion.EvidenceError, "macOS sdist privacy validation failed"
+            with pytest.raises(
+                completion.EvidenceError, match="macOS sdist privacy validation failed"
             ) as caught:
                 completion.ArtifactReader(
                     self.directory, self.candidate
                 ).load_private_sdist(descriptor, "replaced sdist")
-        self.assertEqual(observed["raw"], original)
-        self.assertNotEqual(target.read_bytes(), original)
-        self.assertIsNone(caught.exception.__cause__)
-        self.assertIsNone(caught.exception.__context__)
-        self.assertNotIn("synthetic-private-sdist-marker", repr(caught.exception))
+        assert observed["raw"] == original
+        assert target.read_bytes() != original
+        assert caught.value.__cause__ is None
+        assert caught.value.__context__ is None
+        assert "synthetic-private-sdist-marker" not in repr(caught.value)
 
     def test_macos_sdist_retained_mutation_and_descriptor_mismatch_fail_closed(self):
         descriptor = self.write_private_sdist("packages/mutable.tar.gz")
@@ -2518,14 +2467,16 @@ class Issue123CompletionTest(unittest.TestCase):
             "_validate_private_sdist_raw_first",
             side_effect=truncate_retained_source,
         ):
-            with self.assertRaisesRegex(
-                completion.EvidenceError, "macOS sdist source changed during validation"
+            with pytest.raises(
+                completion.EvidenceError,
+                match="macOS sdist source changed during validation",
             ):
                 completion.ArtifactReader(
                     self.directory, self.candidate
                 ).load_private_sdist(descriptor, "mutable sdist")
-        with self.assertRaisesRegex(
-            completion.EvidenceError, "macOS sdist bytes differ from their descriptor"
+        with pytest.raises(
+            completion.EvidenceError,
+            match="macOS sdist bytes differ from their descriptor",
         ):
             completion.ArtifactReader(
                 self.directory, self.candidate
@@ -2533,16 +2484,18 @@ class Issue123CompletionTest(unittest.TestCase):
 
         mismatch = self.write_private_sdist("packages/digest-mismatch.tar.gz")
         mismatch["sha256"] = "0" * 64
-        with self.assertRaisesRegex(
-            completion.EvidenceError, "macOS sdist bytes differ from their descriptor"
+        with pytest.raises(
+            completion.EvidenceError,
+            match="macOS sdist bytes differ from their descriptor",
         ):
             completion.ArtifactReader(
                 self.directory, self.candidate
             ).load_private_sdist(mismatch, "digest mismatch")
         mismatch = self.write_private_sdist("packages/size-mismatch.tar.gz")
         mismatch["size_bytes"] += 1
-        with self.assertRaisesRegex(
-            completion.EvidenceError, "macOS sdist bytes differ from their descriptor"
+        with pytest.raises(
+            completion.EvidenceError,
+            match="macOS sdist bytes differ from their descriptor",
         ):
             completion.ArtifactReader(
                 self.directory, self.candidate
@@ -2564,14 +2517,15 @@ class Issue123CompletionTest(unittest.TestCase):
             "_validate_private_sdist_raw_first",
             return_value=result,
         ):
-            with self.assertRaisesRegex(
-                completion.EvidenceError, "macOS sdist structural inventory differs"
+            with pytest.raises(
+                completion.EvidenceError,
+                match="macOS sdist structural inventory differs",
             ) as caught:
                 completion.ArtifactReader(
                     self.directory, self.candidate
                 ).load_private_sdist(descriptor, "invalid inventory")
-        self.assertIsNone(caught.exception.__cause__)
-        self.assertIsNone(caught.exception.__context__)
+        assert caught.value.__cause__ is None
+        assert caught.value.__context__ is None
 
         path = self.directory / descriptor["path"]
         metadata = path.stat()
@@ -2589,15 +2543,16 @@ class Issue123CompletionTest(unittest.TestCase):
             raise OSError("synthetic-close-marker")
 
         with mock.patch.object(completion.os, "close", side_effect=fail_close):
-            with self.assertRaisesRegex(
-                completion.EvidenceError, "macOS sdist descriptor could not be closed"
+            with pytest.raises(
+                completion.EvidenceError,
+                match="macOS sdist descriptor could not be closed",
             ) as caught:
                 with lease:
                     pass
         original_close(captured["fd"])
-        self.assertIsNone(caught.exception.__cause__)
-        self.assertIsNone(caught.exception.__context__)
-        self.assertNotIn("synthetic-close-marker", repr(caught.exception))
+        assert caught.value.__cause__ is None
+        assert caught.value.__context__ is None
+        assert "synthetic-close-marker" not in repr(caught.value)
 
     def test_macos_scope_has_one_authoritative_v2_definition(self):
         source_path = (
@@ -2605,7 +2560,7 @@ class Issue123CompletionTest(unittest.TestCase):
             / "benchmarks"
             / "issue123_completion.py"
         )
-        self.assertEqual(source_path.resolve(), Path(completion.__file__).resolve())
+        assert source_path.resolve() == Path(completion.__file__).resolve()
         source = source_path.read_text(encoding="utf-8")
         tree = ast.parse(source)
         definitions = [
@@ -2614,8 +2569,8 @@ class Issue123CompletionTest(unittest.TestCase):
             if isinstance(node, ast.FunctionDef)
             and node.name == "_validate_macos_scope"
         ]
-        self.assertEqual(len(definitions), 1)
-        self.assertEqual(definitions[0].name, completion._validate_macos_scope.__name__)
+        assert len(definitions) == 1
+        assert definitions[0].name == completion._validate_macos_scope.__name__
 
         archive_buffer = io.BytesIO()
         with zipfile.ZipFile(archive_buffer, "w") as archive:
@@ -2637,14 +2592,22 @@ class Issue123CompletionTest(unittest.TestCase):
                 "passed": True,
             },
         )
-        with self.assertRaises(completion.EvidenceError):
+        with pytest.raises(completion.EvidenceError):
             completion._validate_macos_scope(
                 {"index": index, "actions_archive": archive},
                 completion.ArtifactReader(self.directory, self.candidate),
                 self.candidate,
             )
 
-    def test_npz_npy_headers_are_bounded_before_numpy_load(self):
+    @pytest.mark.parametrize(
+        ("shape", "message"),
+        (
+            ((2**31 - 1,), "declared payload exceeds"),
+            ((4,), "header and payload size differ"),
+        ),
+        ids=("huge-declaration", "truncated-payload"),
+    )
+    def test_npz_npy_headers_are_bounded_before_numpy_load(self, shape, message):
         def truncated_npz(shape):
             member = io.BytesIO()
             np.lib.format.write_array_header_1_0(
@@ -2658,27 +2621,21 @@ class Issue123CompletionTest(unittest.TestCase):
                 archive.writestr("value.npy", member.getvalue())
             return payload.getvalue()
 
-        cases = (
-            ((2**31 - 1,), "declared payload exceeds"),
-            ((4,), "header and payload size differ"),
+        raw = truncated_npz(shape)
+        artifact = completion.LoadedArtifact(
+            descriptor={},
+            path=self.directory / "truncated.npz",
+            raw=raw,
+            document=None,
         )
-        for shape, message in cases:
-            with self.subTest(shape=shape):
-                raw = truncated_npz(shape)
-                artifact = completion.LoadedArtifact(
-                    descriptor={},
-                    path=self.directory / "truncated.npz",
-                    raw=raw,
-                    document=None,
-                )
-                with (
-                    mock.patch.object(
-                        np, "load", side_effect=AssertionError("unsafe allocation")
-                    ) as load,
-                    self.assertRaisesRegex(completion.EvidenceError, message),
-                ):
-                    completion._npz_arrays(artifact, ["value"], "truncated")
-                load.assert_not_called()
+        with (
+            mock.patch.object(
+                np, "load", side_effect=AssertionError("unsafe allocation")
+            ) as load,
+            pytest.raises(completion.EvidenceError, match=message),
+        ):
+            completion._npz_arrays(artifact, ["value"], "truncated")
+        load.assert_not_called()
 
     def test_differential_npz_requires_deflate_and_npy_v1_before_load(self):
         comment = b"differential-group-binding"
@@ -2748,7 +2705,7 @@ class Issue123CompletionTest(unittest.TestCase):
             first_member = archive.infolist()[0]
         encrypted[first_member.header_offset + 6] |= 0x01
         central = encrypted.find(b"PK\x01\x02")
-        self.assertGreaterEqual(central, 0)
+        assert central >= 0
         encrypted[central + 8] |= 0x01
         malformed["encrypted"] = bytes(encrypted)
         local_encrypted = bytearray(valid)
@@ -2774,27 +2731,28 @@ class Issue123CompletionTest(unittest.TestCase):
         ) | 0x07
         malformed["invalid-deflate"] = bytes(invalid_deflate)
 
+        # All malformed members are derived from the same canonical ZIP and its
+        # discovered offsets; keep this preflight matrix in one archive sequence.
         for mutation, raw in malformed.items():
-            with self.subTest(mutation=mutation):
-                artifact = completion.LoadedArtifact(
-                    descriptor={},
-                    path=self.directory / "group.npz",
-                    raw=raw,
-                    document=None,
+            artifact = completion.LoadedArtifact(
+                descriptor={},
+                path=self.directory / "group.npz",
+                raw=raw,
+                document=None,
+            )
+            with (
+                mock.patch.object(
+                    np, "load", side_effect=AssertionError("unsafe allocation")
+                ) as load,
+                pytest.raises(completion.EvidenceError),
+            ):
+                completion._npz_arrays(
+                    artifact,
+                    ["value"],
+                    "group",
+                    expected_comment=comment,
                 )
-                with (
-                    mock.patch.object(
-                        np, "load", side_effect=AssertionError("unsafe allocation")
-                    ) as load,
-                    self.assertRaises(completion.EvidenceError),
-                ):
-                    completion._npz_arrays(
-                        artifact,
-                        ["value"],
-                        "group",
-                        expected_comment=comment,
-                    )
-                load.assert_not_called()
+            load.assert_not_called()
 
         artifact = completion.LoadedArtifact(
             descriptor={},
@@ -2816,7 +2774,7 @@ class Issue123CompletionTest(unittest.TestCase):
             mock.patch.object(
                 np, "load", side_effect=AssertionError("unsafe allocation")
             ) as load,
-            self.assertRaisesRegex(completion.EvidenceError, "archive exceeds"),
+            pytest.raises(completion.EvidenceError, match="archive exceeds"),
         ):
             completion._npz_arrays(
                 bounded,
@@ -2863,31 +2821,29 @@ class Issue123CompletionTest(unittest.TestCase):
                 archive.writestr(f"{string_name}.npy", npy_member(version, metadata))
             return output.getvalue()
 
+        # Compatibility acceptance precedes malformed metadata and size-cap
+        # rejection using the same local NPZ factory, forming one staged contract.
         for version in ((1, 0), (2, 0), (3, 0)):
-            with self.subTest(version=version):
-                raw = generic_npz(version)
-                with mock.patch.object(
-                    np, "load", side_effect=AssertionError("unexpected NumPy load")
-                ) as load:
-                    completion._validate_media_payload(
-                        raw, completion.MEDIA_TYPE_NPZ, "generic correctness"
-                    )
-                load.assert_not_called()
+            raw = generic_npz(version)
+            with mock.patch.object(
+                np, "load", side_effect=AssertionError("unexpected NumPy load")
+            ) as load:
+                completion._validate_media_payload(
+                    raw, completion.MEDIA_TYPE_NPZ, "generic correctness"
+                )
+            load.assert_not_called()
 
         for mutation, raw in (
             ("renamed", generic_npz((1, 0), string_name="invented")),
             ("shaped", generic_npz((1, 0), string_shape=(1,))),
         ):
-            with (
-                self.subTest(mutation=mutation),
-                self.assertRaisesRegex(completion.EvidenceError, "plain numeric type"),
-            ):
+            with (pytest.raises(completion.EvidenceError, match="plain numeric type"),):
                 completion._validate_media_payload(
                     raw, completion.MEDIA_TYPE_NPZ, "generic correctness"
                 )
         with (
             mock.patch.object(completion, "MAX_CORRECTNESS_NPZ_METADATA_BYTES", 4),
-            self.assertRaisesRegex(completion.EvidenceError, "plain numeric type"),
+            pytest.raises(completion.EvidenceError, match="plain numeric type"),
         ):
             completion._validate_media_payload(
                 generic_npz((1, 0)),
@@ -2908,23 +2864,20 @@ class Issue123CompletionTest(unittest.TestCase):
                 },
             )
         }
-        self.assertTrue(completion._all_traces_have_zero_allocations(traces))
+        assert completion._all_traces_have_zero_allocations(traces)
         scope = {"allocation_sidecars": [], "generated_sources": []}
         aggregate = {"allocation_provenance_artifact": None}
         reader = completion.ArtifactReader(self.directory, self.candidate)
-        self.assertEqual(
-            completion._load_cpu_allocation_evidence(
-                scope,
-                reader,
-                aggregate,
-                all_zero=True,
-            ),
-            (None, {}),
-        )
+        assert completion._load_cpu_allocation_evidence(
+            scope,
+            reader,
+            aggregate,
+            all_zero=True,
+        ) == (None, {})
 
         traces["a" * 64][1]["allocated_bytes"] = 8
-        self.assertFalse(completion._all_traces_have_zero_allocations(traces))
-        with self.assertRaisesRegex(completion.EvidenceError, "sidecars"):
+        assert not (completion._all_traces_have_zero_allocations(traces))
+        with pytest.raises(completion.EvidenceError, match="sidecars"):
             completion._load_cpu_allocation_evidence(
                 scope,
                 reader,
@@ -2932,7 +2885,7 @@ class Issue123CompletionTest(unittest.TestCase):
                 all_zero=False,
             )
         aggregate["allocation_provenance_artifact"] = {"path": "sidecar.json"}
-        with self.assertRaisesRegex(completion.EvidenceError, "must not carry"):
+        with pytest.raises(completion.EvidenceError, match="must not carry"):
             completion._load_cpu_allocation_evidence(
                 scope,
                 reader,
@@ -2952,21 +2905,22 @@ class Issue123CompletionTest(unittest.TestCase):
             }
         }
         completion._validate_cuda_memory(single_gpu, "single GPU")
+        # Mutate both samples of the same valid single-GPU memory record before
+        # moving to the corresponding two-GPU record below.
         for field, value in (
             ("cuda_allocated_before_bytes", 121),
             ("cuda_allocated_after_bytes", 121),
         ):
-            with self.subTest(scope="single", field=field):
-                malformed = copy.deepcopy(single_gpu)
-                malformed["memory"][field] = value
-                malformed["memory"]["cuda_allocated_growth_bytes"] = (
-                    malformed["memory"]["cuda_allocated_after_bytes"]
-                    - malformed["memory"]["cuda_allocated_before_bytes"]
-                )
-                with self.assertRaisesRegex(
-                    completion.EvidenceError, "CUDA memory gate failed"
-                ):
-                    completion._validate_cuda_memory(malformed, "single GPU")
+            malformed = copy.deepcopy(single_gpu)
+            malformed["memory"][field] = value
+            malformed["memory"]["cuda_allocated_growth_bytes"] = (
+                malformed["memory"]["cuda_allocated_after_bytes"]
+                - malformed["memory"]["cuda_allocated_before_bytes"]
+            )
+            with pytest.raises(
+                completion.EvidenceError, match="CUDA memory gate failed"
+            ):
+                completion._validate_cuda_memory(malformed, "single GPU")
 
         two_gpu = {
             "allocated_before_bytes": 100,
@@ -2981,20 +2935,16 @@ class Issue123CompletionTest(unittest.TestCase):
             ("allocated_before_bytes", 121),
             ("allocated_after_bytes", 121),
         ):
-            with self.subTest(scope="two", field=field):
-                malformed = copy.deepcopy(two_gpu)
-                malformed[field] = value
-                malformed["allocated_growth_bytes"] = (
-                    malformed["allocated_after_bytes"]
-                    - malformed["allocated_before_bytes"]
-                )
-                with self.assertRaisesRegex(
-                    completion.EvidenceError, "independently bounded"
-                ):
-                    completion._validate_two_gpu_memory(malformed, "rank memory")
+            malformed = copy.deepcopy(two_gpu)
+            malformed[field] = value
+            malformed["allocated_growth_bytes"] = (
+                malformed["allocated_after_bytes"] - malformed["allocated_before_bytes"]
+            )
+            with pytest.raises(completion.EvidenceError, match="independently bounded"):
+                completion._validate_two_gpu_memory(malformed, "rank memory")
 
     def test_primary_artifact_requires_embedded_candidate(self):
-        with self.assertRaisesRegex(completion.EvidenceError, "no embedded candidate"):
+        with pytest.raises(completion.EvidenceError, match="no embedded candidate"):
             completion._document_candidate_matches(
                 {},
                 self.candidate,
@@ -3017,9 +2967,8 @@ class Issue123CompletionTest(unittest.TestCase):
             "individual_ratio_limit": 1.05,
             "within_five_percent": True,
         }
-        with self.assertRaisesRegex(
-            completion.EvidenceError,
-            "exceeds the individual ratio",
+        with pytest.raises(
+            completion.EvidenceError, match="exceeds the individual ratio"
         ):
             completion._validate_cpu_gate(
                 gate,
@@ -3050,7 +2999,7 @@ class Issue123CompletionTest(unittest.TestCase):
             b"",
             document,
         )
-        with self.assertRaisesRegex(completion.EvidenceError, "exact bytes"):
+        with pytest.raises(completion.EvidenceError, match="exact bytes"):
             completion._validate_native_summary(
                 artifact,
                 self.manifest,
@@ -3063,7 +3012,7 @@ class Issue123CompletionTest(unittest.TestCase):
         cpu = values["_validate_cpu_scope"]
         single = values["_validate_single_gpu_scope"]
         cpu["native_raw_seconds_per_step"]["physical"]["cpu-large-3d"] = [1.9] * 15
-        with self.assertRaisesRegex(completion.EvidenceError, "speedup gate failed"):
+        with pytest.raises(completion.EvidenceError, match="speedup gate failed"):
             completion._validate_cpu_gpu_contract(
                 cpu,
                 single,
@@ -3075,9 +3024,8 @@ class Issue123CompletionTest(unittest.TestCase):
         cpu = values["_validate_cpu_scope"]
         single = values["_validate_single_gpu_scope"]
         single["cuda_raw_seconds_per_step"]["cpu-large-2d"] = [2.1] * 15
-        with self.assertRaisesRegex(
-            completion.EvidenceError,
-            "does not beat the best same-host CPU",
+        with pytest.raises(
+            completion.EvidenceError, match="does not beat the best same-host CPU"
         ):
             completion._validate_cpu_gpu_contract(
                 cpu,
@@ -3115,8 +3063,8 @@ class Issue123CompletionTest(unittest.TestCase):
         reader = completion.ArtifactReader(self.directory, self.candidate)
         artifact = reader.load(descriptor, "trace", json_document=False)
         summary = completion._trace_summary(artifact.raw, "trace")
-        self.assertEqual(summary["host_to_device_events"], 1)
-        self.assertEqual(summary["device_to_host_events"], 1)
+        assert summary["host_to_device_events"] == 1
+        assert summary["device_to_host_events"] == 1
         traces = {descriptor["sha256"]: (artifact, summary)}
         profiler = {
             "chrome_trace_sha256": descriptor["sha256"],
@@ -3125,10 +3073,7 @@ class Issue123CompletionTest(unittest.TestCase):
         }
         completion._bind_tuning_traces({"profiler": profiler}, traces, "test")
         profiler["kernel_launches"] = 2
-        with self.assertRaisesRegex(
-            completion.EvidenceError,
-            "differs from trace bytes",
-        ):
+        with pytest.raises(completion.EvidenceError, match="differs from trace bytes"):
             completion._bind_tuning_traces(
                 {"profiler": profiler},
                 traces,
@@ -3166,9 +3111,8 @@ class Issue123CompletionTest(unittest.TestCase):
         completion._validate_tuning_acceptance(result, "test")
         for malformed in (None, []):
             with (
-                self.subTest(diagnostics=malformed),
-                self.assertRaisesRegex(
-                    completion.EvidenceError, "boundary execution diagnostics"
+                pytest.raises(
+                    completion.EvidenceError, match="boundary execution diagnostics"
                 ),
             ):
                 invalid = copy.deepcopy(result)
@@ -3176,12 +3120,12 @@ class Issue123CompletionTest(unittest.TestCase):
                 completion._validate_tuning_acceptance(invalid, "test")
         extra = copy.deepcopy(result)
         extra["diagnostics"]["boundaries"]["extra"] = True
-        with self.assertRaisesRegex(
-            completion.EvidenceError, "boundary execution diagnostics"
+        with pytest.raises(
+            completion.EvidenceError, match="boundary execution diagnostics"
         ):
             completion._validate_tuning_acceptance(extra, "test")
         result["diagnostics"]["boundaries"]["execution_representation"] = "tampered"
-        with self.assertRaisesRegex(completion.EvidenceError, "boundary execution"):
+        with pytest.raises(completion.EvidenceError, match="boundary execution"):
             completion._validate_tuning_acceptance(result, "test")
 
     def test_cuda_state_finiteness_is_recomputed_fail_closed(self):
@@ -3272,32 +3216,23 @@ class Issue123CompletionTest(unittest.TestCase):
         )
         for record in result["state_finiteness"]["stages"].values():
             record["floating_or_complex_element_count"] = expected_elements
-        self.assertEqual(len(material_inventory), 45)
-        self.assertEqual(material_inventory["pml_ex_0_state"], ("pml", 2, 179168))
-        self.assertEqual(
-            material_inventory["bucket_ex_1_field_old"],
-            ("dispersive", 1, 18240),
-        )
-        self.assertEqual(
-            material_inventory["bucket_ex_2_point_state"],
-            ("dispersive", 4, 16416),
-        )
-        self.assertEqual(
-            material_inventory["bucket_ex_5_previous"],
-            ("dispersive", 1, 18240),
-        )
+        assert len(material_inventory) == 45
+        assert material_inventory["pml_ex_0_state"] == ("pml", 2, 179168)
+        assert material_inventory["bucket_ex_1_field_old"] == ("dispersive", 1, 18240)
+        assert material_inventory["bucket_ex_2_point_state"] == ("dispersive", 4, 16416)
+        assert material_inventory["bucket_ex_5_previous"] == ("dispersive", 1, 18240)
         completion._validate_cuda_state_finiteness(result, reference, "test")
 
         missing_changed = copy.deepcopy(result)
         missing_changed["state_finiteness"]["tracked_buffers"].remove(material_names[0])
-        with self.assertRaisesRegex(completion.EvidenceError, "inventory closure"):
+        with pytest.raises(completion.EvidenceError, match="inventory closure"):
             completion._validate_cuda_state_finiteness(
                 missing_changed, reference, "test"
             )
 
         invalid_checksum = copy.deepcopy(result)
         invalid_checksum["state_progress"]["final_checksum"] = float("nan")
-        with self.assertRaisesRegex(completion.EvidenceError, "non-finite"):
+        with pytest.raises(completion.EvidenceError, match="non-finite"):
             completion._validate_cuda_state_finiteness(
                 invalid_checksum, reference, "test"
             )
@@ -3306,25 +3241,25 @@ class Issue123CompletionTest(unittest.TestCase):
         invalid_state["state_finiteness"]["stages"]["post_timed"][
             "nonfinite_element_count"
         ] = 1
-        with self.assertRaisesRegex(completion.EvidenceError, "finiteness"):
+        with pytest.raises(completion.EvidenceError, match="finiteness"):
             completion._validate_cuda_state_finiteness(invalid_state, reference, "test")
 
         undersized = copy.deepcopy(result)
         for record in undersized["state_finiteness"]["stages"].values():
             record["floating_or_complex_buffer_count"] = 1
             record["floating_or_complex_element_count"] = 1
-        with self.assertRaisesRegex(completion.EvidenceError, "finiteness"):
+        with pytest.raises(completion.EvidenceError, match="finiteness"):
             completion._validate_cuda_state_finiteness(undersized, reference, "test")
 
         oversized = copy.deepcopy(result)
         for record in oversized["state_finiteness"]["stages"].values():
             record["floating_or_complex_element_count"] += 1
-        with self.assertRaisesRegex(completion.EvidenceError, "finiteness"):
+        with pytest.raises(completion.EvidenceError, match="finiteness"):
             completion._validate_cuda_state_finiteness(oversized, reference, "test")
 
         contradictory_flag = copy.deepcopy(result)
         contradictory_flag["state_progress"]["dispersive_state_changed"] = False
-        with self.assertRaisesRegex(completion.EvidenceError, "dynamic-state"):
+        with pytest.raises(completion.EvidenceError, match="dynamic-state"):
             completion._validate_cuda_state_finiteness(
                 contradictory_flag, reference, "test"
             )
@@ -3341,7 +3276,7 @@ class Issue123CompletionTest(unittest.TestCase):
             "dm2_state_changed",
         ):
             missing_material_progress["state_progress"][name] = False
-        with self.assertRaisesRegex(completion.EvidenceError, "dynamic-state"):
+        with pytest.raises(completion.EvidenceError, match="dynamic-state"):
             completion._validate_cuda_state_finiteness(
                 missing_material_progress, reference, "test"
             )
@@ -3370,7 +3305,7 @@ class Issue123CompletionTest(unittest.TestCase):
             "dm2_state_changed",
         ):
             fabricated_prefixes["state_progress"][name] = True
-        with self.assertRaisesRegex(completion.EvidenceError, "dynamic-state"):
+        with pytest.raises(completion.EvidenceError, match="dynamic-state"):
             completion._validate_cuda_state_finiteness(
                 fabricated_prefixes, reference, "test"
             )
@@ -3379,7 +3314,7 @@ class Issue123CompletionTest(unittest.TestCase):
         fabricated_targets["diagnostics"]["material_plan"][0]["buckets"][0][
             "targets"
         ] += 1
-        with self.assertRaisesRegex(completion.EvidenceError, "material-plan"):
+        with pytest.raises(completion.EvidenceError, match="material-plan"):
             completion._validate_cuda_state_finiteness(
                 fabricated_targets, reference, "test"
             )
@@ -3389,28 +3324,22 @@ class Issue123CompletionTest(unittest.TestCase):
             **{f"state.{component}": 8 for component in completion.FIELD_ARRAYS},
             "aggregate.all-fields": 48,
         }
-        with self.assertRaisesRegex(completion.EvidenceError, "field-size inventory"):
+        with pytest.raises(completion.EvidenceError, match="field-size inventory"):
             completion._validate_cuda_state_finiteness(
                 tiny_field_sizes, reference, "test"
             )
 
         mixed_names = copy.deepcopy(result)
         mixed_names["state_progress"]["changed_buffers"] = ["ex", 1]
-        with self.assertRaisesRegex(completion.EvidenceError, "dynamic-state"):
+        with pytest.raises(completion.EvidenceError, match="dynamic-state"):
             completion._validate_cuda_state_finiteness(mixed_names, reference, "test")
 
     def test_frozen_material_inventory_covers_every_required_lowered_case(self):
         required = set(completion.POLICY_CASES) | set(completion.PAIRED_REAL_CASES)
         required |= set(completion.CUDA_CASES) | set(completion.REGION_INVARIANCE_CASES)
-        self.assertEqual(
-            set(completion._FROZEN_CUDA_MATERIAL_TOPOLOGY_BY_CASE), required
-        )
-        self.assertEqual(
-            set(completion._FROZEN_CUDA_MATERIAL_TARGETS_BY_CASE), required
-        )
-        self.assertEqual(
-            set(completion._FROZEN_CUDA_MATERIAL_PLAN_SHA256_BY_CASE), required
-        )
+        assert set(completion._FROZEN_CUDA_MATERIAL_TOPOLOGY_BY_CASE) == required
+        assert set(completion._FROZEN_CUDA_MATERIAL_TARGETS_BY_CASE) == required
+        assert set(completion._FROZEN_CUDA_MATERIAL_PLAN_SHA256_BY_CASE) == required
         expected_tracked_counts = {
             "coverage-1-fragmented": 15,
             "cpu-crossover-3d": 44,
@@ -3419,28 +3348,25 @@ class Issue123CompletionTest(unittest.TestCase):
             "equivalent-region-1": 15,
         }
         for name in sorted(required):
-            with self.subTest(case=name):
-                workload = {"name": name}
-                inventory = completion._expected_cuda_persistent_material_inventory(
-                    workload, "test"
+            workload = {"name": name}
+            inventory = completion._expected_cuda_persistent_material_inventory(
+                workload, "test"
+            )
+            if name in expected_tracked_counts:
+                assert (
+                    len(completion.FIELD_ARRAYS) + len(inventory) + 3
+                    == expected_tracked_counts[name]
                 )
-                if name in expected_tracked_counts:
-                    self.assertEqual(
-                        len(completion.FIELD_ARRAYS) + len(inventory) + 3,
-                        expected_tracked_counts[name],
-                    )
-                completion._validate_frozen_cuda_material_plan(
-                    {
-                        "workload": workload,
-                        "runtime": {"precision": "float32"},
-                        "diagnostics": {
-                            "material_plan": self.frozen_material_plan(
-                                workload, "float32"
-                            )
-                        },
+            completion._validate_frozen_cuda_material_plan(
+                {
+                    "workload": workload,
+                    "runtime": {"precision": "float32"},
+                    "diagnostics": {
+                        "material_plan": self.frozen_material_plan(workload, "float32")
                     },
-                    "test",
-                )
+                },
+                "test",
+            )
 
     def test_bloch_3d_real_cpu_eager_inventory_matches_frozen_contract(self):
         workload, space, geometry, sources, bloch = torch_tuning._build_case(
@@ -3471,17 +3397,15 @@ class Issue123CompletionTest(unittest.TestCase):
             "step_count",
             *inventory,
         }
-        self.assertEqual(
-            torch_tuning._simulation_dynamic_tensor_names(simulation),
-            sorted(expected_names),
+        assert torch_tuning._simulation_dynamic_tensor_names(simulation) == sorted(
+            expected_names
         )
-        self.assertIn("bucket_ex_0_previous", inventory)
-        self.assertIn("bucket_ex_0_current", inventory)
-        self.assertFalse(any(name.startswith("bucket_ex_1_") for name in inventory))
+        assert "bucket_ex_0_previous" in inventory
+        assert "bucket_ex_0_current" in inventory
+        assert not (any(name.startswith("bucket_ex_1_") for name in inventory))
         state = simulation.state.state_dict()
         for name, (_family, width, targets) in inventory.items():
-            with self.subTest(buffer=name):
-                self.assertEqual(state[name].numel(), width * targets * 2)
+            assert state[name].numel() == width * targets * 2
         diagnostics = json.loads(json.dumps(simulation.diagnostics()))
         completion._validate_frozen_cuda_material_plan(
             {
@@ -3568,7 +3492,7 @@ class Issue123CompletionTest(unittest.TestCase):
 
             missing = copy.deepcopy(records)
             missing[0].pop("source_artifact")
-            with self.assertRaisesRegex(completion.EvidenceError, "invalid schema"):
+            with pytest.raises(completion.EvidenceError, match="invalid schema"):
                 completion._validate_cuda_correctness_indexes(
                     missing,
                     completion.ArtifactReader(self.directory, self.candidate),
@@ -3579,7 +3503,7 @@ class Issue123CompletionTest(unittest.TestCase):
 
             reused = copy.deepcopy(records)
             reused[1]["source_artifact"] = copy.deepcopy(reused[0]["source_artifact"])
-            with self.assertRaisesRegex(completion.EvidenceError, "reuse"):
+            with pytest.raises(completion.EvidenceError, match="reuse"):
                 completion._validate_cuda_correctness_indexes(
                     reused,
                     completion.ArtifactReader(self.directory, self.candidate),
@@ -3589,9 +3513,7 @@ class Issue123CompletionTest(unittest.TestCase):
                 )
 
             reordered = list(reversed(copy.deepcopy(records)))
-            with self.assertRaisesRegex(
-                completion.EvidenceError, "runtime mode differs"
-            ):
+            with pytest.raises(completion.EvidenceError, match="runtime mode differs"):
                 completion._validate_cuda_correctness_indexes(
                     reordered,
                     completion.ArtifactReader(self.directory, self.candidate),
@@ -3608,8 +3530,8 @@ class Issue123CompletionTest(unittest.TestCase):
                 swapped_descriptors[1]["source_artifact"],
                 swapped_descriptors[0]["source_artifact"],
             )
-            with self.assertRaisesRegex(
-                completion.EvidenceError, "loaded runtime mode differs"
+            with pytest.raises(
+                completion.EvidenceError, match="loaded runtime mode differs"
             ):
                 completion._validate_cuda_correctness_indexes(
                     swapped_descriptors,
@@ -3621,7 +3543,7 @@ class Issue123CompletionTest(unittest.TestCase):
 
             fake_digest = copy.deepcopy(records)
             fake_digest[0]["source_artifact"]["sha256"] = "0" * 64
-            with self.assertRaisesRegex(completion.EvidenceError, "digest differs"):
+            with pytest.raises(completion.EvidenceError, match="digest differs"):
                 completion._validate_cuda_correctness_indexes(
                     fake_digest,
                     completion.ArtifactReader(self.directory, self.candidate),
@@ -3635,8 +3557,8 @@ class Issue123CompletionTest(unittest.TestCase):
                 bindings_by_path[graph_path]["reference"]
             )
             bindings_by_path[graph_path]["reference"][0]["sha256"] = "f" * 64
-            with self.assertRaisesRegex(
-                completion.EvidenceError, "native reference archives differ"
+            with pytest.raises(
+                completion.EvidenceError, match="native reference archives differ"
             ):
                 completion._validate_cuda_correctness_indexes(
                     records,
@@ -3653,8 +3575,8 @@ class Issue123CompletionTest(unittest.TestCase):
             bindings_by_path[graph_path]["candidate"][0] = copy.deepcopy(
                 bindings_by_path[records[0]["source_artifact"]["path"]]["candidate"][0]
             )
-            with self.assertRaisesRegex(
-                completion.EvidenceError, "candidate archives overlap"
+            with pytest.raises(
+                completion.EvidenceError, match="candidate archives overlap"
             ):
                 completion._validate_cuda_correctness_indexes(
                     records,
@@ -3693,9 +3615,7 @@ class Issue123CompletionTest(unittest.TestCase):
                 "_validate_correctness_index",
                 side_effect=fake_rebuilt,
             ),
-            self.assertRaisesRegex(
-                completion.EvidenceError, "recomputed source artifact"
-            ),
+            pytest.raises(completion.EvidenceError, match="recomputed source artifact"),
         ):
             completion._validate_cuda_correctness_indexes(
                 records,
@@ -3818,8 +3738,8 @@ class Issue123CompletionTest(unittest.TestCase):
                 substituted_raw,
                 substituted_receipt,
             )
-            with self.assertRaisesRegex(
-                completion.EvidenceError, "bytes differ from the external receipt"
+            with pytest.raises(
+                completion.EvidenceError, match="bytes differ from the external receipt"
             ):
                 completion._validate_correctness_index(
                     index_artifact(document),
@@ -3832,8 +3752,9 @@ class Issue123CompletionTest(unittest.TestCase):
 
             wrong_scope_runtime = copy.deepcopy(document)
             wrong_scope_runtime["runtime_mode"]["device"] = "cuda:0"
-            with self.assertRaisesRegex(
-                completion.EvidenceError, "runtime mode differs from the required scope"
+            with pytest.raises(
+                completion.EvidenceError,
+                match="runtime mode differs from the required scope",
             ):
                 completion._validate_correctness_index(
                     index_artifact(wrong_scope_runtime),
@@ -3848,7 +3769,7 @@ class Issue123CompletionTest(unittest.TestCase):
             duplicate["artifacts"][1]["reference"] = copy.deepcopy(
                 duplicate["artifacts"][0]["reference"]
             )
-            with self.assertRaisesRegex(completion.EvidenceError, "reuse"):
+            with pytest.raises(completion.EvidenceError, match="reuse"):
                 completion._validate_correctness_index(
                     index_artifact(duplicate),
                     self.manifest,
@@ -3859,7 +3780,7 @@ class Issue123CompletionTest(unittest.TestCase):
 
             relabeled = copy.deepcopy(document)
             relabeled["artifacts"][0]["case"] = required_pairs[1][1]
-            with self.assertRaisesRegex(completion.EvidenceError, "identity differs"):
+            with pytest.raises(completion.EvidenceError, match="identity differs"):
                 completion._validate_correctness_index(
                     index_artifact(relabeled),
                     self.manifest,
@@ -3870,7 +3791,7 @@ class Issue123CompletionTest(unittest.TestCase):
 
             extra = copy.deepcopy(document)
             extra["artifacts"][0]["unexpected"] = True
-            with self.assertRaisesRegex(completion.EvidenceError, "invalid schema"):
+            with pytest.raises(completion.EvidenceError, match="invalid schema"):
                 completion._validate_correctness_index(
                     index_artifact(extra),
                     self.manifest,
@@ -3881,7 +3802,7 @@ class Issue123CompletionTest(unittest.TestCase):
 
             extra_top = copy.deepcopy(document)
             extra_top["unexpected"] = True
-            with self.assertRaisesRegex(completion.EvidenceError, "invalid schema"):
+            with pytest.raises(completion.EvidenceError, match="invalid schema"):
                 completion._validate_correctness_index(
                     index_artifact(extra_top),
                     self.manifest,
@@ -3892,8 +3813,8 @@ class Issue123CompletionTest(unittest.TestCase):
 
             wrong_runtime = copy.deepcopy(document)
             wrong_runtime["runtime_mode"]["compile_policy"] = "compile"
-            with self.assertRaisesRegex(
-                completion.EvidenceError, "frozen execution contract"
+            with pytest.raises(
+                completion.EvidenceError, match="frozen execution contract"
             ):
                 completion._validate_correctness_index(
                     index_artifact(wrong_runtime),
@@ -3985,104 +3906,103 @@ class Issue123CompletionTest(unittest.TestCase):
             "huge": malformed_npz((2**31 - 1,), 0),
             "truncated": malformed_npz((2,), 8),
         }
+        # Both roles share one correctness index and trusted receipt; validate the
+        # full nested archive closure before permitting any producer loader.
         for role in ("reference", "candidate"):
             for mutation, raw in malformed.items():
-                with self.subTest(role=role, mutation=mutation):
-                    document = copy.deepcopy(base_document)
-                    document["artifacts"][0][role] = self.write_bytes(
-                        f"nested/{role}-{mutation}.npz",
-                        raw,
-                        media_type=completion.MEDIA_TYPE_NPZ,
+                document = copy.deepcopy(base_document)
+                document["artifacts"][0][role] = self.write_bytes(
+                    f"nested/{role}-{mutation}.npz",
+                    raw,
+                    media_type=completion.MEDIA_TYPE_NPZ,
+                )
+                artifact = completion.LoadedArtifact(
+                    descriptor={"sha256": "a" * 64},
+                    path=self.directory / "correctness-index.json",
+                    raw=b"",
+                    document=document,
+                )
+                with (
+                    mock.patch(
+                        "benchmarks.torch_correctness.load_correctness_evidence_index",
+                        side_effect=AssertionError("producer loader reached"),
+                    ) as correctness_load,
+                    mock.patch.object(
+                        np, "load", side_effect=AssertionError("NumPy load reached")
+                    ) as numpy_load,
+                    pytest.raises(completion.EvidenceError),
+                ):
+                    completion._validate_correctness_index(
+                        artifact,
+                        self.manifest,
+                        self.candidate,
+                        completion.ArtifactReader(self.directory, self.candidate),
+                        trusted_runtime_receipt=trusted_receipt,
                     )
-                    artifact = completion.LoadedArtifact(
-                        descriptor={"sha256": "a" * 64},
-                        path=self.directory / "correctness-index.json",
-                        raw=b"",
-                        document=document,
-                    )
-                    with (
-                        mock.patch(
-                            "benchmarks.torch_correctness.load_correctness_evidence_index",
-                            side_effect=AssertionError("producer loader reached"),
-                        ) as correctness_load,
-                        mock.patch.object(
-                            np, "load", side_effect=AssertionError("NumPy load reached")
-                        ) as numpy_load,
-                        self.assertRaises(completion.EvidenceError),
-                    ):
-                        completion._validate_correctness_index(
-                            artifact,
-                            self.manifest,
-                            self.candidate,
-                            completion.ArtifactReader(self.directory, self.candidate),
-                            trusted_runtime_receipt=trusted_receipt,
-                        )
-                    correctness_load.assert_not_called()
-                    numpy_load.assert_not_called()
+                correctness_load.assert_not_called()
+                numpy_load.assert_not_called()
 
-    def test_correctness_full_candidate_evidence_is_independently_frozen(self):
+    @pytest.mark.parametrize(
+        "field",
+        (
+            "evidence_contract_id",
+            "cpu_contract_id",
+            "runner_sha256",
+            "solver_sha256",
+            "solver_abi",
+        ),
+        ids=str,
+    )
+    def test_correctness_full_candidate_evidence_is_independently_frozen(self, field):
         expected = completion._expected_correctness_candidate_evidence(
             self.manifest, self.candidate
         )
-        self.assertEqual(set(expected), completion.CORRECTNESS_EVIDENCE_KEYS)
+        assert set(expected) == completion.CORRECTNESS_EVIDENCE_KEYS
         artifact = completion.LoadedArtifact(
             descriptor={"sha256": "f" * 64},
             path=self.directory / "correctness.json",
             raw=b"",
             document=None,
         )
-        protected = (
-            "evidence_contract_id",
-            "cpu_contract_id",
-            "runner_sha256",
-            "solver_sha256",
-            "solver_abi",
+        evidence = copy.deepcopy(expected)
+        evidence.pop(field)
+        malformed = completion.LoadedArtifact(
+            descriptor=artifact.descriptor,
+            path=artifact.path,
+            raw=artifact.raw,
+            document={"candidate_evidence": evidence},
         )
-        for field in protected:
-            with self.subTest(field=field, mutation="omitted"):
-                evidence = copy.deepcopy(expected)
-                evidence.pop(field)
-                malformed = completion.LoadedArtifact(
-                    descriptor=artifact.descriptor,
-                    path=artifact.path,
-                    raw=artifact.raw,
-                    document={"candidate_evidence": evidence},
-                )
-                with self.assertRaisesRegex(
-                    completion.EvidenceError, "candidate evidence"
-                ):
-                    completion._validate_correctness_index(
-                        malformed,
-                        self.manifest,
-                        self.candidate,
-                        mock.Mock(),
-                    )
-            with self.subTest(field=field, mutation="changed"):
-                evidence = copy.deepcopy(expected)
-                evidence[field] = "0" * 64
-                malformed = completion.LoadedArtifact(
-                    descriptor=artifact.descriptor,
-                    path=artifact.path,
-                    raw=artifact.raw,
-                    document={"candidate_evidence": evidence},
-                )
-                with self.assertRaisesRegex(
-                    completion.EvidenceError, "candidate evidence"
-                ):
-                    completion._validate_correctness_index(
-                        malformed,
-                        self.manifest,
-                        self.candidate,
-                        mock.Mock(),
-                    )
+        with pytest.raises(completion.EvidenceError, match="candidate evidence"):
+            completion._validate_correctness_index(
+                malformed,
+                self.manifest,
+                self.candidate,
+                mock.Mock(),
+            )
+        evidence = copy.deepcopy(expected)
+        evidence[field] = "0" * 64
+        malformed = completion.LoadedArtifact(
+            descriptor=artifact.descriptor,
+            path=artifact.path,
+            raw=artifact.raw,
+            document={"candidate_evidence": evidence},
+        )
+        with pytest.raises(completion.EvidenceError, match="candidate evidence"):
+            completion._validate_correctness_index(
+                malformed,
+                self.manifest,
+                self.candidate,
+                mock.Mock(),
+            )
 
     def test_differential_comparison_is_manifest_derived_in_completion(self):
         fixture = self.differential_fixture()
         document = fixture.document()
         document["cases"][0]["comparison"]["rtol"] = 1.0
         document["cases"][0]["comparison"]["atol"] = 1.0
-        with self.assertRaisesRegex(
-            completion.EvidenceError, "comparison contract differs from the manifest"
+        with pytest.raises(
+            completion.EvidenceError,
+            match="comparison contract differs from the manifest",
         ):
             fixture.validate_completion_mirror(document)
 
@@ -4093,32 +4013,43 @@ class Issue123CompletionTest(unittest.TestCase):
         single = completion._expected_completion_differential_records(
             self.manifest, "single-gpu-cuda"
         )
-        self.assertEqual(len(paired) + len(single), 18)
+        assert len(paired) + len(single) == 18
 
         relabeled = copy.deepcopy(self.manifest)
         next(case for case in relabeled["correctness"] if case.get("complex") is True)[
             "complex"
         ] = False
-        with self.assertRaisesRegex(completion.EvidenceError, "frozen closure"):
+        with pytest.raises(completion.EvidenceError, match="frozen closure"):
             completion._expected_completion_differential_records(
                 relabeled, "paired-real"
             )
 
         shortened = copy.deepcopy(self.manifest)
         shortened["reference"]["capture_steps"] = [100]
-        with self.assertRaisesRegex(completion.EvidenceError, "frozen contract"):
+        with pytest.raises(completion.EvidenceError, match="frozen contract"):
             completion._expected_differential_projection_steps(
                 shortened, "single-gpu-cuda", single[0]
             )
 
         relaxed = copy.deepcopy(self.manifest)
         relaxed["tolerances"]["torch"]["dielectric"]["complex128"]["rtol"] = 1.0
-        with self.assertRaisesRegex(completion.EvidenceError, "frozen contract"):
+        with pytest.raises(completion.EvidenceError, match="frozen contract"):
             completion._expected_differential_comparison(
                 relaxed, "paired-real", paired[0]
             )
 
-    def test_differential_group_descriptor_lists_are_exact_and_unique(self):
+    @pytest.mark.parametrize(
+        ("mutation", "message"),
+        (
+            ("missing", "descriptor group closure"),
+            ("reordered", "ZIP comment binding"),
+            ("duplicate", "reused"),
+        ),
+        ids=("missing", "reordered", "duplicate"),
+    )
+    def test_differential_group_descriptor_lists_are_exact_and_unique(
+        self, mutation, message
+    ):
         fixture = self.differential_fixture()
         document = fixture.document()
         descriptors = [
@@ -4127,97 +4058,73 @@ class Issue123CompletionTest(unittest.TestCase):
             for role in ("reference", "candidate")
             for descriptor in record[role]
         ]
-        self.assertEqual(len(descriptors), 8)
-        self.assertEqual(len({item["path"] for item in descriptors}), 8)
-        self.assertEqual(len({item["sha256"] for item in descriptors}), 8)
-        mutations = (
-            (
-                "missing",
-                lambda record: record["reference"].pop(),
-                "descriptor group closure",
-            ),
-            (
-                "reordered",
-                lambda record: record["reference"].__setitem__(
-                    slice(0, 2), reversed(record["reference"][:2])
-                ),
-                "ZIP comment binding",
-            ),
-            (
-                "duplicate",
-                lambda record: record["candidate"].__setitem__(
-                    1, copy.deepcopy(record["candidate"][0])
-                ),
-                "reused",
-            ),
-        )
-        for name, mutate, message in mutations:
-            with self.subTest(name=name):
-                fixture = self.differential_fixture()
-                document = fixture.document()
-                mutate(document["cases"][1])
-                with self.assertRaisesRegex(completion.EvidenceError, message):
-                    fixture.validate_completion_mirror(document)
+        assert len(descriptors) == 8
+        assert len({item["path"] for item in descriptors}) == 8
+        assert len({item["sha256"] for item in descriptors}) == 8
+        fixture = self.differential_fixture()
+        document = fixture.document()
+        record = document["cases"][1]
+        if mutation == "missing":
+            record["reference"].pop()
+        elif mutation == "reordered":
+            record["reference"][:2] = reversed(record["reference"][:2])
+        else:
+            record["candidate"][1] = copy.deepcopy(record["candidate"][0])
+        with pytest.raises(completion.EvidenceError, match=message):
+            fixture.validate_completion_mirror(document)
 
     def test_differential_early_steps_cannot_use_normalized_acceptance(self):
+        # Keep the early-kind sweep before the late-step positive control: together
+        # they prove the step-dependent transition within one contract sequence.
         for target_kind in ("field", "persistent-state"):
-            with self.subTest(target_kind=target_kind):
-                fixture = self.differential_fixture()
-                document = fixture.document()
-                record = document["cases"][1]
-                reference = self.differential_group_arrays(
-                    fixture, record, "reference", 0
+            fixture = self.differential_fixture()
+            document = fixture.document()
+            record = document["cases"][1]
+            reference = self.differential_group_arrays(fixture, record, "reference", 0)
+            candidate = self.differential_group_arrays(fixture, record, "candidate", 0)
+            if target_kind == "field":
+                target = "step/0/field/Ex"
+            else:
+                target = next(
+                    name
+                    for name in candidate
+                    if name.startswith("step/0/state/Ex/")
+                    and name.endswith("/0-Cpml/values")
+                    and candidate[name].size
                 )
-                candidate = self.differential_group_arrays(
-                    fixture, record, "candidate", 0
-                )
-                if target_kind == "field":
-                    target = "step/0/field/Ex"
-                else:
-                    target = next(
-                        name
-                        for name in candidate
-                        if name.startswith("step/0/state/Ex/")
-                        and name.endswith("/0-Cpml/values")
-                        and candidate[name].size
-                    )
-                comparisons = completion._expected_differential_array_comparisons(
-                    fixture.manifest,
-                    document["scope"],
-                    {
-                        "case": record["case"],
-                        "device": record["device"],
-                        "precision": record["precision"],
-                    },
-                    list(reference),
-                )
-                self.assertEqual(
-                    comparisons[target]["mode"],
-                    completion.DIFFERENTIAL_ELEMENTWISE_MODE,
-                )
-                if target_kind == "persistent-state":
-                    self.assertEqual(
-                        comparisons[target],
-                        {
-                            "mode": completion.DIFFERENTIAL_ELEMENTWISE_MODE,
-                            **fixture.manifest["tolerances"]["torch"]["pml"]["float64"],
-                        },
-                    )
-                candidate[target].flat[0] += 1.0e-7
-                metrics, normalized_passed = completion._recompute_differential_metrics(
-                    reference,
-                    candidate,
-                    record["comparison"],
-                    "record-level normalized comparison",
-                )
-                self.assertTrue(normalized_passed)
-                record["metrics"] = metrics
-                fixture.rewrite_group(document, 1, "candidate", 0, candidate)
-                with self.assertRaisesRegex(
-                    completion.EvidenceError,
-                    "differs from the projected fields|differential failed",
-                ):
-                    fixture.validate_completion_mirror(document)
+            comparisons = completion._expected_differential_array_comparisons(
+                fixture.manifest,
+                document["scope"],
+                {
+                    "case": record["case"],
+                    "device": record["device"],
+                    "precision": record["precision"],
+                },
+                list(reference),
+            )
+            assert (
+                comparisons[target]["mode"] == completion.DIFFERENTIAL_ELEMENTWISE_MODE
+            )
+            if target_kind == "persistent-state":
+                assert comparisons[target] == {
+                    "mode": completion.DIFFERENTIAL_ELEMENTWISE_MODE,
+                    **fixture.manifest["tolerances"]["torch"]["pml"]["float64"],
+                }
+            candidate[target].flat[0] += 1.0e-7
+            metrics, normalized_passed = completion._recompute_differential_metrics(
+                reference,
+                candidate,
+                record["comparison"],
+                "record-level normalized comparison",
+            )
+            assert normalized_passed
+            record["metrics"] = metrics
+            fixture.rewrite_group(document, 1, "candidate", 0, candidate)
+            with pytest.raises(
+                completion.EvidenceError,
+                match="differs from the projected fields|differential failed",
+            ):
+                fixture.validate_completion_mirror(document)
 
         fixture = self.differential_fixture()
         document = fixture.document()
@@ -4233,9 +4140,9 @@ class Issue123CompletionTest(unittest.TestCase):
             },
             list(late),
         )
-        self.assertEqual(
-            comparisons["step/20/field/Ex"]["mode"],
-            completion.DIFFERENTIAL_NORMALIZED_MODE,
+        assert (
+            comparisons["step/20/field/Ex"]["mode"]
+            == completion.DIFFERENTIAL_NORMALIZED_MODE
         )
 
     def test_single_gpu_3d_early_tolerance_uses_only_active_updaters(self):
@@ -4250,18 +4157,15 @@ class Issue123CompletionTest(unittest.TestCase):
         active_models = completion._differential_active_model_names(
             record["case"], "test"
         )
-        self.assertNotIn("dm2", active_models)
-        self.assertEqual(
-            completion._differential_model_tolerance(
-                fixture.manifest, active_models, "float64"
-            ),
-            {"rtol": 5e-12, "atol": 5e-13},
-        )
-        self.assertEqual(
+        assert "dm2" not in active_models
+        assert completion._differential_model_tolerance(
+            fixture.manifest, active_models, "float64"
+        ) == {"rtol": 5e-12, "atol": 5e-13}
+        assert (
             completion._expected_differential_comparison(
                 fixture.manifest, document["scope"], expected_record
-            )["absolute_scale_floor"],
-            completion.DIFFERENTIAL_NORMALIZED_ABSOLUTE_SCALE_FLOOR,
+            )["absolute_scale_floor"]
+            == completion.DIFFERENTIAL_NORMALIZED_ABSOLUTE_SCALE_FLOOR
         )
 
         reference = self.differential_group_arrays(fixture, record, "reference", 0)
@@ -4273,14 +4177,11 @@ class Issue123CompletionTest(unittest.TestCase):
             expected_record,
             list(reference),
         )
-        self.assertEqual(
-            comparisons[target],
-            {
-                "mode": completion.DIFFERENTIAL_ELEMENTWISE_MODE,
-                "rtol": 5e-12,
-                "atol": 5e-13,
-            },
-        )
+        assert comparisons[target] == {
+            "mode": completion.DIFFERENTIAL_ELEMENTWISE_MODE,
+            "rtol": 5e-12,
+            "atol": 5e-13,
+        }
         candidate[target].flat[0] += 1e-11
         candidate.update(
             completion._recompute_differential_physical_arrays(candidate, 0)
@@ -4293,7 +4194,7 @@ class Issue123CompletionTest(unittest.TestCase):
                 "suite normalized comparison",
             )
         )
-        self.assertTrue(normalized_passed)
+        assert normalized_passed
         metrics, active_passed = completion._recompute_differential_metrics(
             reference,
             candidate,
@@ -4301,31 +4202,38 @@ class Issue123CompletionTest(unittest.TestCase):
             "active updater comparison",
             array_comparisons=comparisons,
         )
-        self.assertFalse(active_passed)
+        assert not (active_passed)
         record["metrics"] = metrics
         fixture.rewrite_group(document, 1, "candidate", 0, candidate)
-        with self.assertRaisesRegex(completion.EvidenceError, "differential failed"):
+        with pytest.raises(completion.EvidenceError, match="differential failed"):
             fixture.validate_completion_mirror(document)
 
-    def test_differential_physical_arrays_are_recomputed_from_each_role_fields(self):
-        for suffix in ("physical/spectrum/Ex", "physical/summary"):
-            with self.subTest(suffix=suffix):
-                fixture = self.differential_fixture()
-                document = fixture.document()
-                record = document["cases"][1]
-                step = record["projection_groups"][0][0]
-                name = f"step/{step}/{suffix}"
-                for role in ("reference", "candidate"):
-                    arrays = self.differential_group_arrays(fixture, record, role, 0)
-                    arrays[name].flat[0] += 1.0
-                    fixture.rewrite_group(document, 1, role, 0, arrays)
-                with self.assertRaisesRegex(
-                    completion.EvidenceError, "differs from the projected fields"
-                ):
-                    fixture.validate_completion_mirror(document)
+    @pytest.mark.parametrize(
+        "suffix",
+        ("physical/spectrum/Ex", "physical/summary"),
+        ids=("spectrum", "summary"),
+    )
+    def test_differential_physical_arrays_are_recomputed_from_each_role_fields(
+        self, suffix
+    ):
+        fixture = self.differential_fixture()
+        document = fixture.document()
+        record = document["cases"][1]
+        step = record["projection_groups"][0][0]
+        name = f"step/{step}/{suffix}"
+        # Change both roles in one archive pair to defeat equality-only checks.
+        for role in ("reference", "candidate"):
+            arrays = self.differential_group_arrays(fixture, record, role, 0)
+            arrays[name].flat[0] += 1.0
+            fixture.rewrite_group(document, 1, role, 0, arrays)
+        with pytest.raises(
+            completion.EvidenceError, match="differs from the projected fields"
+        ):
+            fixture.validate_completion_mirror(document)
 
-    def test_differential_zero_and_integer_arrays_remain_exact(self):
-        comparisons = (
+    @pytest.mark.parametrize(
+        "comparison",
+        (
             {
                 "mode": completion.DIFFERENTIAL_ELEMENTWISE_MODE,
                 "rtol": 1.0,
@@ -4338,8 +4246,12 @@ class Issue123CompletionTest(unittest.TestCase):
                 "absolute_scale_floor": 1.0,
                 "all_zero_reference": "exact",
             },
-        )
-        mutations = (
+        ),
+        ids=("elementwise", "normalized"),
+    )
+    @pytest.mark.parametrize(
+        ("reference", "candidate"),
+        (
             (
                 np.zeros(2, dtype=np.float64),
                 np.asarray([0.0, 1.0e-12], dtype=np.float64),
@@ -4348,17 +4260,19 @@ class Issue123CompletionTest(unittest.TestCase):
                 np.asarray([1, 2], dtype=np.int64),
                 np.asarray([1, 3], dtype=np.int64),
             ),
+        ),
+        ids=("zero-reference", "integer-array"),
+    )
+    def test_differential_zero_and_integer_arrays_remain_exact(
+        self, comparison, reference, candidate
+    ):
+        _metrics, passed = completion._recompute_differential_metrics(
+            {"array": reference},
+            {"array": candidate},
+            comparison,
+            "exact array",
         )
-        for comparison in comparisons:
-            for reference, candidate in mutations:
-                with self.subTest(mode=comparison["mode"], dtype=reference.dtype.str):
-                    _metrics, passed = completion._recompute_differential_metrics(
-                        {"array": reference},
-                        {"array": candidate},
-                        comparison,
-                        "exact array",
-                    )
-                    self.assertFalse(passed)
+        assert not passed
 
     def test_differential_persistent_indices_are_bound_across_groups(self):
         fixture = self.differential_fixture()
@@ -4383,8 +4297,9 @@ class Issue123CompletionTest(unittest.TestCase):
                 indices[[0, 1]] = indices[[1, 0]]
         for role, arrays in rewritten.items():
             fixture.rewrite_group(document, 1, role, 1, arrays)
-        with self.assertRaisesRegex(
-            completion.EvidenceError, "persistent indices change across capture groups"
+        with pytest.raises(
+            completion.EvidenceError,
+            match="persistent indices change across capture groups",
         ):
             fixture.validate_completion_mirror(document)
 
@@ -4402,8 +4317,9 @@ class Issue123CompletionTest(unittest.TestCase):
                     arrays[cpml][0] = arrays[dielectric][0]
                     arrays[dielectric][0] = cpml_coordinate
                 fixture.rewrite_group(document, 1, role, ordinal, arrays)
-        with self.assertRaisesRegex(
-            completion.EvidenceError, "persistent geometry differs from the frozen case"
+        with pytest.raises(
+            completion.EvidenceError,
+            match="persistent geometry differs from the frozen case",
         ):
             fixture.validate_completion_mirror(document)
 
@@ -4433,8 +4349,8 @@ class Issue123CompletionTest(unittest.TestCase):
                 if name not in omitted
             }
             rewrite(document, 1, arrays)
-        with self.assertRaisesRegex(
-            completion.EvidenceError, "persistent array closure differs"
+        with pytest.raises(
+            completion.EvidenceError, match="persistent array closure differs"
         ):
             fixture.validate_completion_mirror(document)
 
@@ -4454,8 +4370,8 @@ class Issue123CompletionTest(unittest.TestCase):
             rewritten[role] = arrays
         fixture.rewrite_reference(document, 0, rewritten["reference"])
         fixture.rewrite_candidate(document, 0, rewritten["candidate"])
-        with self.assertRaisesRegex(
-            completion.EvidenceError, "persistent index shape or dtype differs"
+        with pytest.raises(
+            completion.EvidenceError, match="persistent index shape or dtype differs"
         ):
             fixture.validate_completion_mirror(document)
 
@@ -4477,10 +4393,10 @@ class Issue123CompletionTest(unittest.TestCase):
             record["comparison"],
             "legacy suite-wide comparison",
         )
-        self.assertTrue(suite_passed)
+        assert suite_passed
         record["metrics"] = metrics
         fixture.rewrite_candidate(document, 0, candidate_arrays)
-        with self.assertRaisesRegex(completion.EvidenceError, "differential failed"):
+        with pytest.raises(completion.EvidenceError, match="differential failed"):
             fixture.validate_completion_mirror(document)
 
     def test_differential_source_proof_is_required_and_semantically_checked(self):
@@ -4501,8 +4417,8 @@ class Issue123CompletionTest(unittest.TestCase):
                 if name != omitted
             }
             rewrite(document, 0, arrays)
-        with self.assertRaisesRegex(
-            completion.EvidenceError, "source contract array closure differs"
+        with pytest.raises(
+            completion.EvidenceError, match="source contract array closure differs"
         ):
             fixture.validate_completion_mirror(document)
 
@@ -4545,8 +4461,8 @@ class Issue123CompletionTest(unittest.TestCase):
         )
         fixture.rewrite_reference(document, 0, reference_arrays)
         fixture.rewrite_candidate(document, 0, candidate_arrays)
-        with self.assertRaisesRegex(
-            completion.EvidenceError, "candidate overwrite semantics differ"
+        with pytest.raises(
+            completion.EvidenceError, match="candidate overwrite semantics differ"
         ):
             fixture.validate_completion_mirror(document)
 
@@ -4576,8 +4492,8 @@ class Issue123CompletionTest(unittest.TestCase):
             arrays[completion.DIFFERENTIAL_SOURCE_PROOF_ARRAY] = proof_array.copy()
         fixture.rewrite_reference(document, 0, rewritten["reference"])
         fixture.rewrite_candidate(document, 0, rewritten["candidate"])
-        with self.assertRaisesRegex(
-            completion.EvidenceError, "raw proof identity differs"
+        with pytest.raises(
+            completion.EvidenceError, match="raw proof identity differs"
         ):
             fixture.validate_completion_mirror(document)
 
@@ -4608,8 +4524,8 @@ class Issue123CompletionTest(unittest.TestCase):
             arrays[completion.DIFFERENTIAL_SOURCE_PROOF_ARRAY] = proof_array.copy()
         fixture.rewrite_reference(document, 0, rewritten["reference"])
         fixture.rewrite_candidate(document, 0, rewritten["candidate"])
-        with self.assertRaisesRegex(
-            completion.EvidenceError, "raw preimage digest differs"
+        with pytest.raises(
+            completion.EvidenceError, match="raw preimage digest differs"
         ):
             fixture.validate_completion_mirror(document)
 
@@ -4663,8 +4579,8 @@ class Issue123CompletionTest(unittest.TestCase):
             arrays[completion.DIFFERENTIAL_SOURCE_PROOF_ARRAY] = proof_array.copy()
         fixture.rewrite_reference(document, 0, rewritten["reference"])
         fixture.rewrite_candidate(document, 0, rewritten["candidate"])
-        with self.assertRaisesRegex(
-            completion.EvidenceError, "differs from the relative capture clock"
+        with pytest.raises(
+            completion.EvidenceError, match="differs from the relative capture clock"
         ):
             fixture.validate_completion_mirror(document)
 
@@ -4711,8 +4627,8 @@ class Issue123CompletionTest(unittest.TestCase):
             arrays[completion.DIFFERENTIAL_SOURCE_PROOF_ARRAY] = proof_array.copy()
         fixture.rewrite_reference(document, 0, rewritten["reference"])
         fixture.rewrite_candidate(document, 0, rewritten["candidate"])
-        with self.assertRaisesRegex(
-            completion.EvidenceError, "native semantics differ from the workload"
+        with pytest.raises(
+            completion.EvidenceError, match="native semantics differ from the workload"
         ):
             fixture.validate_completion_mirror(document)
 
@@ -4875,24 +4791,24 @@ class Issue123CompletionTest(unittest.TestCase):
         self.validate_policy_run(valid)
 
         metadata_swap = self.policy_run("compact", trace_policy="dense")
-        with self.assertRaisesRegex(completion.EvidenceError, "raw trace"):
+        with pytest.raises(completion.EvidenceError, match="raw trace"):
             self.validate_policy_run(metadata_swap)
 
         op_tamper = self.policy_run("dense", extra_trace_op="tiled")
-        with self.assertRaisesRegex(completion.EvidenceError, "raw trace"):
+        with pytest.raises(completion.EvidenceError, match="raw trace"):
             self.validate_policy_run(op_tamper)
 
         used_digests = set()
         reused = self.policy_run("dense")
         self.validate_policy_run(reused, used_digests)
-        with self.assertRaisesRegex(completion.EvidenceError, "reuses"):
+        with pytest.raises(completion.EvidenceError, match="reuses"):
             self.validate_policy_run(reused, used_digests)
 
         preimage_tamper = self.policy_run("dense")
         preimage_tamper["compile_cache_key_evidence"]["runtime_preimage"][
             5
         ] = "max-autotune"
-        with self.assertRaisesRegex(completion.EvidenceError, "cache key"):
+        with pytest.raises(completion.EvidenceError, match="cache key"):
             self.validate_policy_run(preimage_tamper)
 
         rehashed_preimage_tamper = self.policy_run("dense")
@@ -4907,7 +4823,7 @@ class Issue123CompletionTest(unittest.TestCase):
                 )
             ).encode()
         ).hexdigest()
-        with self.assertRaisesRegex(completion.EvidenceError, "configuration"):
+        with pytest.raises(completion.EvidenceError, match="configuration"):
             self.validate_policy_run(rehashed_preimage_tamper)
 
         abi_tamper = self.policy_run("dense")
@@ -4921,7 +4837,7 @@ class Issue123CompletionTest(unittest.TestCase):
                 )
             ).encode()
         ).hexdigest()
-        with self.assertRaisesRegex(completion.EvidenceError, "configuration"):
+        with pytest.raises(completion.EvidenceError, match="configuration"):
             self.validate_policy_run(abi_tamper)
 
         graph_preimage_tamper = self.policy_run("dense")
@@ -4936,20 +4852,20 @@ class Issue123CompletionTest(unittest.TestCase):
                 )
             ).encode()
         ).hexdigest()
-        with self.assertRaisesRegex(completion.EvidenceError, "CUDA graph"):
+        with pytest.raises(completion.EvidenceError, match="CUDA graph"):
             self.validate_policy_run(graph_preimage_tamper)
 
         graph_diagnostic_tamper = self.policy_run("dense")
         graph_diagnostic_tamper["diagnostics"][
             "cuda_graph_execution_representation"
         ] = "external-standard-regions+tampered"
-        with self.assertRaisesRegex(completion.EvidenceError, "configuration"):
+        with pytest.raises(completion.EvidenceError, match="configuration"):
             self.validate_policy_run(graph_diagnostic_tamper)
 
     def test_failure_reason_contract_matches_producer(self):
-        self.assertEqual(
-            completion.FAILURE_REASON_CONTRACTS,
-            failure_evidence.FAILURE_REASON_CONTRACTS,
+        assert (
+            completion.FAILURE_REASON_CONTRACTS
+            == failure_evidence.FAILURE_REASON_CONTRACTS
         )
         mode = "checkpoint-mismatch"
         record = {
@@ -4961,10 +4877,10 @@ class Issue123CompletionTest(unittest.TestCase):
             ),
         }
         stdout = (json.dumps(record, sort_keys=True) + "\n").encode()
-        self.assertTrue(failure_evidence._observed_failure(mode, 0, stdout, b""))
+        assert failure_evidence._observed_failure(mode, 0, stdout, b"")
         record["rank0_error"] = "different failure"
         tampered = (json.dumps(record, sort_keys=True) + "\n").encode()
-        self.assertFalse(failure_evidence._observed_failure(mode, 0, tampered, b""))
+        assert not (failure_evidence._observed_failure(mode, 0, tampered, b""))
 
     def test_failure_wrapper_binds_host_and_raw_reason(self):
         mode = "dtype-mismatch"
@@ -5016,15 +4932,13 @@ class Issue123CompletionTest(unittest.TestCase):
         }
         reader = completion.ArtifactReader(self.directory, self.candidate)
         artifact = completion.LoadedArtifact({}, Path("failure.json"), b"", document)
-        self.assertEqual(
-            completion._validate_failure_run(artifact, reader, self.candidate),
-            (mode, self.host_contract),
+        assert completion._validate_failure_run(artifact, reader, self.candidate) == (
+            mode,
+            self.host_contract,
         )
 
         document["expected_failure"]["reason_id"] = "tampered"
-        with self.assertRaisesRegex(
-            completion.EvidenceError, "reason contract differs"
-        ):
+        with pytest.raises(completion.EvidenceError, match="reason contract differs"):
             completion._validate_failure_run(artifact, reader, self.candidate)
 
     def two_gpu_document(self, distributed_seconds):
@@ -5101,12 +5015,9 @@ class Issue123CompletionTest(unittest.TestCase):
 
     def two_gpu_v2_artifact(self):
         from benchmarks import torch_two_gpu
-        from tests.test_torch_gpu_closure import TwoGpuEvidenceContractTest
+        from tests.test_torch_gpu_closure import two_gpu_evidence_fixture
 
-        helper = TwoGpuEvidenceContractTest(
-            "test_combiner_requires_complete_both_rank_and_raw_profile_evidence"
-        )
-        helper.setUp()
+        helper = two_gpu_evidence_fixture()
         reference = self.manifest["reference"]
         helper.args.warmup = reference["performance_warmup_steps"]
         helper.args.steps = reference["performance_steps_per_repeat"]
@@ -5120,7 +5031,7 @@ class Issue123CompletionTest(unittest.TestCase):
             subprocesses,
             helper.args,
         )
-        self.assertTrue(result["acceptance"]["passed"])
+        assert result["acceptance"]["passed"]
 
         for rank in range(2):
             events = [
@@ -5206,9 +5117,7 @@ class Issue123CompletionTest(unittest.TestCase):
     def test_two_gpu_embedded_pass_cannot_hide_raw_scaling_failure(self):
         artifact, reader = self.two_gpu_v2_artifact()
         artifact.document["acceptance"]["ratio"] = 999.0
-        with self.assertRaisesRegex(
-            completion.EvidenceError, "differs from raw evidence"
-        ):
+        with pytest.raises(completion.EvidenceError, match="differs from raw evidence"):
             completion._validate_two_gpu_performance(
                 artifact,
                 reader,
@@ -5219,7 +5128,7 @@ class Issue123CompletionTest(unittest.TestCase):
     def test_two_gpu_fixed_workload_size_cannot_be_tampered(self):
         artifact, reader = self.two_gpu_v2_artifact()
         artifact.document["sizes"]["serial"] = [2, 2, 2]
-        with self.assertRaisesRegex(completion.EvidenceError, "fixed size"):
+        with pytest.raises(completion.EvidenceError, match="fixed size"):
             completion._validate_two_gpu_performance(
                 artifact,
                 reader,
@@ -5242,12 +5151,12 @@ class Issue123CompletionTest(unittest.TestCase):
             "started_at": "2026-01-01T00:00:00Z",
             "completed_at": "2026-01-01T00:01:00Z",
         }
-        self.assertEqual(
-            completion._validate_job(job, self.candidate, "job"),
-            completion.REQUIRED_JOBS[0],
+        assert (
+            completion._validate_job(job, self.candidate, "job")
+            == completion.REQUIRED_JOBS[0]
         )
         job["head_sha"] = "b" * 40
-        with self.assertRaises(completion.EvidenceError):
+        with pytest.raises(completion.EvidenceError):
             completion._validate_job(job, self.candidate, "job")
 
     def test_codeql_analysis_binds_the_pr_synthetic_merge(self):
@@ -5280,19 +5189,19 @@ class Issue123CompletionTest(unittest.TestCase):
             "sarif_id": "sarif-1",
             "tool": {"name": "CodeQL", "version": "2.23.0"},
         }
-        self.assertEqual(
+        assert (
             completion._validate_code_scanning_analysis(
                 analysis,
                 self.candidate,
                 pull_request,
                 job,
                 "analysis",
-            ),
-            "python",
+            )
+            == "python"
         )
 
         analysis["commit_sha"] = self.candidate["candidate_git_commit"]
-        with self.assertRaisesRegex(completion.EvidenceError, "cross-run"):
+        with pytest.raises(completion.EvidenceError, match="cross-run"):
             completion._validate_code_scanning_analysis(
                 analysis,
                 self.candidate,
@@ -5302,5 +5211,12 @@ class Issue123CompletionTest(unittest.TestCase):
             )
 
 
-if __name__ == "__main__":
-    unittest.main()
+@contextmanager
+def issue123_completion_fixture(fixture=None):
+    """Yield a completion fixture with LIFO nested-fixture and temp cleanup."""
+
+    with ExitStack() as stack:
+        if fixture is None:
+            fixture = _Issue123CompletionFixture()
+        fixture.initialize(stack)
+        yield fixture

@@ -2,18 +2,18 @@
 
 import copy
 import sys
-import unittest
 from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
+import pytest
 
 from benchmarks import full_state_qualification as qualification
 
 
-class FullArrayComparatorTest(unittest.TestCase):
-    def setUp(self):
+class TestFullArrayComparator:
+    def setup_method(self):
         self.expected = {}
         for step in qualification.CAPTURES:
             for name in qualification.COMPONENTS:
@@ -34,52 +34,48 @@ class FullArrayComparatorTest(unittest.TestCase):
         result = qualification.compare_arrays(
             self.expected, copy.deepcopy(self.expected), self.tolerances
         )
-        self.assertTrue(result["passed"])
-        self.assertEqual(
-            sum(r["elements"] for r in result["arrays"]),
-            sum(a.size for a in self.expected.values()),
+        assert result["passed"]
+        assert (sum(r["elements"] for r in result["arrays"])) == (
+            sum(a.size for a in self.expected.values())
         )
 
     def test_single_interior_field_mutation_is_detected(self):
         actual = copy.deepcopy(self.expected)
         actual["step/20/field/Ey"][1, 2, 3] += 1e-3
         result = qualification.compare_arrays(self.expected, actual, self.tolerances)
-        self.assertEqual(
-            result["failures"], [{"key": "step/20/field/Ey", "reason": "values"}]
+        assert (result["failures"]) == (
+            [{"key": "step/20/field/Ey", "reason": "values"}]
         )
 
     def test_single_material_state_mutation_is_detected(self):
         actual = copy.deepcopy(self.expected)
         key = "step/100/state/Ex/0-Drude/values"
         actual[key][37] += 1e-3
-        self.assertEqual(
+        assert (
             qualification.compare_arrays(self.expected, actual, self.tolerances)[
                 "failures"
-            ],
-            [{"key": key, "reason": "values"}],
-        )
+            ]
+        ) == ([{"key": key, "reason": "values"}])
 
     def test_single_source_state_mutation_is_detected(self):
         actual = copy.deepcopy(self.expected)
         key = "step/100/source/Ex/0-PointSourceEx/values"
         actual[key][2] += 1e-3
-        self.assertEqual(
+        assert (
             qualification.compare_arrays(self.expected, actual, self.tolerances)[
                 "failures"
-            ],
-            [{"key": key, "reason": "values"}],
-        )
+            ]
+        ) == ([{"key": key, "reason": "values"}])
 
     def test_single_source_auxiliary_state_mutation_is_detected(self):
         actual = copy.deepcopy(self.expected)
         key = "step/100/source_aux/0-GaussianBeam/field/Ex"
         actual[key][1, 2, 3] += 1e-3
-        self.assertEqual(
+        assert (
             qualification.compare_arrays(self.expected, actual, self.tolerances)[
                 "failures"
-            ],
-            [{"key": key, "reason": "values"}],
-        )
+            ]
+        ) == ([{"key": key, "reason": "values"}])
 
     def test_replay_aggregation_rejects_nested_source_auxiliary_clock_mutation(self):
         state = {
@@ -98,7 +94,7 @@ class FullArrayComparatorTest(unittest.TestCase):
         actual = copy.deepcopy(expected)
         key = "source_auxiliary/rank-0/source_aux/0-TFSF/live_clock/time"
         actual[key][0] += 0.125
-        self.assertFalse(
+        assert not (
             qualification.compare_arrays(
                 expected,
                 actual,
@@ -109,7 +105,7 @@ class FullArrayComparatorTest(unittest.TestCase):
         )
         actual = copy.deepcopy(expected)
         actual[key][0] = np.nextafter(actual[key][0], np.inf)
-        self.assertFalse(
+        assert not (
             qualification.compare_arrays(
                 expected,
                 actual,
@@ -126,26 +122,25 @@ class FullArrayComparatorTest(unittest.TestCase):
             (lambda a: a.update({key: a[key][None, :]}), "shape"),
             (lambda a: a.update({"unexpected": np.zeros(1)}), "unexpected"),
         ):
-            with self.subTest(reason=reason):
-                actual = copy.deepcopy(self.expected)
-                mutation(actual)
-                result = qualification.compare_arrays(
-                    self.expected, actual, self.tolerances
-                )
-                self.assertFalse(result["passed"])
-                self.assertIn(reason, [r["reason"] for r in result["failures"]])
+            actual = copy.deepcopy(self.expected)
+            mutation(actual)
+            result = qualification.compare_arrays(
+                self.expected, actual, self.tolerances
+            )
+            assert not (result["passed"])
+            assert (reason) in ([r["reason"] for r in result["failures"]])
 
     def test_nonfinite_and_unpinned_tolerance_are_rejected(self):
         key = "step/2/field/Ex"
         for value in (float("nan"), float("inf")):
             actual = copy.deepcopy(self.expected)
             actual[key][1, 1, 1] = value
-            self.assertFalse(
+            assert not (
                 qualification.compare_arrays(self.expected, actual, self.tolerances)[
                     "passed"
                 ]
             )
-        self.assertFalse(
+        assert not (
             qualification.compare_arrays(self.expected, self.expected, {})["passed"]
         )
 
@@ -157,13 +152,13 @@ class FullArrayComparatorTest(unittest.TestCase):
         actual = {
             k: v for k, v in self.expected.items() if not k.startswith("step/20/")
         }
-        with self.assertRaisesRegex(ValueError, "capture provenance"):
+        with pytest.raises(ValueError, match="capture provenance"):
             qualification.validate_capture_contract(
                 actual, qualification.CAPTURES, shapes
             )
         actual = copy.deepcopy(self.expected)
         actual["step/100/time"][0] += 1
-        with self.assertRaisesRegex(ValueError, "capture clock"):
+        with pytest.raises(ValueError, match="capture clock"):
             qualification.validate_capture_contract(
                 actual, qualification.CAPTURES, shapes
             )
@@ -187,7 +182,7 @@ class FullArrayComparatorTest(unittest.TestCase):
         actual[key][1] = float(
             np.nextafter(np.float32(actual[key][1]), np.float32(np.inf))
         )
-        with self.assertRaisesRegex(ValueError, "capture clock"):
+        with pytest.raises(ValueError, match="capture clock"):
             qualification.validate_capture_contract(
                 actual, qualification.CAPTURES, shapes, precision="float32"
             )
@@ -210,7 +205,7 @@ class FullArrayComparatorTest(unittest.TestCase):
         np.testing.assert_array_equal(
             rows["source/Ex/overwrite/indices"], [[1, 0, 0], [2, 0, 0]]
         )
-        with self.assertRaisesRegex(ValueError, "duplicate global ownership"):
+        with pytest.raises(ValueError, match="duplicate global ownership"):
             qualification._canonical_rows(
                 (
                     (
@@ -268,9 +263,9 @@ class FullArrayComparatorTest(unittest.TestCase):
                 name="Public GPU model", uuid="GPU-private-stable-identifier"
             ),
         )
-        self.assertEqual(metadata, {"logical": 1, "name": "Public GPU model"})
-        self.assertNotIn("uuid", metadata)
-        self.assertNotIn("GPU-private-stable-identifier", repr(metadata))
+        assert (metadata) == ({"logical": 1, "name": "Public GPU model"})
+        assert ("uuid") not in (metadata)
+        assert ("GPU-private-stable-identifier") not in (repr(metadata))
 
     def test_two_gpu_report_failures_propagate_to_a_nonzero_exit_code(self):
         passing_capture = {
@@ -295,8 +290,8 @@ class FullArrayComparatorTest(unittest.TestCase):
             [1, 1],
             1,
         )
-        self.assertTrue(qualification._two_gpu_report_passed(*arguments))
-        self.assertEqual(qualification._two_gpu_report_exit_code({"passed": True}), 0)
+        assert qualification._two_gpu_report_passed(*arguments)
+        assert (qualification._two_gpu_report_exit_code({"passed": True})) == (0)
         failures = []
         for name in (
             "field_comparison",
@@ -327,18 +322,14 @@ class FullArrayComparatorTest(unittest.TestCase):
             values[index] = value
             failures.append(tuple(values))
         for values in failures:
-            with self.subTest(values=values):
-                self.assertFalse(qualification._two_gpu_report_passed(*values))
-                self.assertEqual(
-                    qualification._two_gpu_report_exit_code({"passed": False}), 1
-                )
-        with self.assertRaisesRegex(ValueError, "boolean passed"):
+            assert not (qualification._two_gpu_report_passed(*values))
+            assert (qualification._two_gpu_report_exit_code({"passed": False})) == (1)
+        with pytest.raises(ValueError, match="boolean passed"):
             qualification._two_gpu_report_exit_code({})
 
     def test_two_gpu_cli_returns_the_rank_zero_report_exit_code(self):
         for exit_code in (0, 1):
             with (
-                self.subTest(exit_code=exit_code),
                 patch.object(
                     qualification, "run_two_gpu_partition_case", return_value=exit_code
                 ) as runner,
@@ -354,8 +345,8 @@ class FullArrayComparatorTest(unittest.TestCase):
                     ],
                 ),
             ):
-                self.assertEqual(qualification.main(), exit_code)
-                self.assertEqual(runner.call_args.kwargs["compile_policy"], "eager")
+                assert (qualification.main()) == (exit_code)
+                assert (runner.call_args.kwargs["compile_policy"]) == ("eager")
 
     def test_two_gpu_compile_policy_records_and_propagates_to_both_runtimes(self):
         launch = SimpleNamespace(rank=0)
@@ -363,17 +354,16 @@ class FullArrayComparatorTest(unittest.TestCase):
             "compile", launch=launch
         )
         serial_options = qualification._two_gpu_runtime_options("compile")
-        self.assertEqual(distributed_options["compile_policy"], "compile")
-        self.assertEqual(serial_options["compile_policy"], "compile")
-        self.assertIs(distributed_options["launch"], launch)
-        self.assertNotIn("launch", serial_options)
-        self.assertEqual(
-            qualification._two_gpu_execution_record("compile"),
+        assert (distributed_options["compile_policy"]) == ("compile")
+        assert (serial_options["compile_policy"]) == ("compile")
+        assert (distributed_options["launch"]) is (launch)
+        assert ("launch") not in (serial_options)
+        assert (qualification._two_gpu_execution_record("compile")) == (
             {
                 "scope": "compiled-two-gpu-full-state-serial-torch-comparison",
                 "compile_policy": "compile",
                 "execution_mode": "graph",
-            },
+            }
         )
 
     def test_two_gpu_capture_is_disabled_by_default_and_ordered_for_compile(self):
@@ -391,11 +381,11 @@ class FullArrayComparatorTest(unittest.TestCase):
         qualification._capture_two_gpu_compute_regions(
             distributed, serial, rank=0, compile_policy="eager"
         )
-        self.assertEqual(calls, [])
+        assert (calls) == ([])
         qualification._capture_two_gpu_compute_regions(
             distributed, serial, rank=0, compile_policy="compile"
         )
-        self.assertEqual(calls, ["distributed", "serial"])
+        assert (calls) == (["distributed", "serial"])
 
     def test_two_gpu_cli_accepts_compile_and_rejects_other_modes(self):
         with (
@@ -416,8 +406,8 @@ class FullArrayComparatorTest(unittest.TestCase):
                 ],
             ),
         ):
-            self.assertEqual(qualification.main(), 0)
-            self.assertEqual(runner.call_args.kwargs["compile_policy"], "compile")
+            assert (qualification.main()) == (0)
+            assert (runner.call_args.kwargs["compile_policy"]) == ("compile")
         with (
             patch.object(
                 sys,
@@ -432,19 +422,19 @@ class FullArrayComparatorTest(unittest.TestCase):
                     "unused-private-output",
                 ],
             ),
-            self.assertRaisesRegex(SystemExit, "2") as error,
+            pytest.raises(SystemExit, match="2") as error,
         ):
             qualification.main()
-        self.assertEqual(error.exception.code, 2)
+        assert (error.value.code) == (2)
 
     def test_two_gpu_rejects_unknown_compile_policy_before_hardware_import(self):
-        with self.assertRaisesRegex(ValueError, "compile policy"):
+        with pytest.raises(ValueError, match="compile policy"):
             qualification.run_two_gpu_partition_case(
                 "unused-private-output", compile_policy="automatic"
             )
 
 
-class DistributedSourceCrossingTest(unittest.TestCase):
+class TestDistributedSourceCrossing:
     def test_rank_local_tfsf_crossing_matches_serial_source_and_auxiliary_state(self):
         import gmes
         from gmes.torch_distributed import TwoGpuDecomposition, rank_local_space
@@ -501,19 +491,16 @@ class DistributedSourceCrossingTest(unittest.TestCase):
             qualification._source_rows(simulation, offset=decomposition.offset(rank))
             for rank, simulation in enumerate(locals_)
         )
-        self.assertTrue(
-            all(
-                qualification._transparent_source_ownership(rows) for rows in local_rows
-            )
+        assert all(
+            qualification._transparent_source_ownership(rows) for rows in local_rows
         )
         for rows in local_rows:
             total = sum(
                 len(value) for key, value in rows.items() if key.endswith("/indices")
             )
-            self.assertEqual(
-                total,
+            assert (total) == (
                 qualification._point_source_ownership(rows)
-                + qualification._transparent_source_ownership(rows),
+                + qualification._transparent_source_ownership(rows)
             )
         distributed_rows = qualification._canonical_rows(
             (
@@ -528,36 +515,32 @@ class DistributedSourceCrossingTest(unittest.TestCase):
             )
         )
         serial_rows = qualification._source_rows(serial)
-        self.assertTrue(
-            qualification.compare_arrays(
-                serial_rows,
-                distributed_rows,
-                dict.fromkeys(serial_rows, {"rtol": 0.0, "atol": 0.0}),
-            )["passed"]
-        )
+        assert qualification.compare_arrays(
+            serial_rows,
+            distributed_rows,
+            dict.fromkeys(serial_rows, {"rtol": 0.0, "atol": 0.0}),
+        )["passed"]
         for simulation in (serial, *locals_):
             simulation.sources.auxiliaries[0].advance(3)
         serial_auxiliary = qualification._source_auxiliary_arrays(serial)
         for simulation in locals_:
-            self.assertTrue(
-                qualification.compare_arrays(
-                    serial_auxiliary,
-                    qualification._source_auxiliary_arrays(simulation),
-                    qualification._comparison_tolerances(
-                        serial_auxiliary, {"rtol": 1e-12, "atol": 1e-14}
-                    ),
-                )["passed"]
-            )
+            assert qualification.compare_arrays(
+                serial_auxiliary,
+                qualification._source_auxiliary_arrays(simulation),
+                qualification._comparison_tolerances(
+                    serial_auxiliary, {"rtol": 1e-12, "atol": 1e-14}
+                ),
+            )["passed"]
         baseline = qualification._source_auxiliary_arrays(serial)
         auxiliary = serial.sources.auxiliaries[0]
-        self.assertFalse(np.any(auxiliary.host_snapshot()["Ey"]))
+        assert not (np.any(auxiliary.host_snapshot()["Ey"]))
         checkpoint_key = next(
             key for key in baseline if key.endswith("/checkpoint/state/pml_ey_0_state")
         )
         pml_ey_before = auxiliary.state.pml_ey_0_state.clone()
         auxiliary.state.pml_ey_0_state[0, 0].add_(0.125)
         try:
-            self.assertFalse(
+            assert not (
                 qualification.compare_arrays(
                     baseline,
                     qualification._source_auxiliary_arrays(serial),
@@ -568,10 +551,10 @@ class DistributedSourceCrossingTest(unittest.TestCase):
             )
         finally:
             auxiliary.state.pml_ey_0_state.copy_(pml_ey_before)
-        self.assertIn(checkpoint_key, baseline)
+        assert (checkpoint_key) in (baseline)
         auxiliary.state.source_time.add_(0.125)
         auxiliary.state.time_step.mul_(2)
-        self.assertFalse(
+        assert not (
             qualification.compare_arrays(
                 baseline,
                 qualification._source_auxiliary_arrays(serial),
@@ -584,7 +567,7 @@ class DistributedSourceCrossingTest(unittest.TestCase):
         one_ulp_clock = copy.deepcopy(live_clock)
         clock_key = next(key for key in live_clock if key.endswith("/live_clock/time"))
         one_ulp_clock[clock_key][0] = np.nextafter(one_ulp_clock[clock_key][0], np.inf)
-        self.assertFalse(
+        assert not (
             qualification.compare_arrays(
                 live_clock,
                 one_ulp_clock,
@@ -596,7 +579,7 @@ class DistributedSourceCrossingTest(unittest.TestCase):
         )
 
 
-class NativeCaptureCompatibilityTest(unittest.TestCase):
+class TestNativeCaptureCompatibility:
     def test_eager_execution_record_is_not_compiled_scope(self):
         import gmes
 
@@ -605,13 +588,12 @@ class NativeCaptureCompatibilityTest(unittest.TestCase):
             geometry=[gmes.DefaultMedium(gmes.Dielectric())],
             runtime=gmes.TorchRuntimeConfig(device="cpu", cpu_threads=1),
         )
-        self.assertEqual(
-            qualification._native_execution_record(simulation),
+        assert (qualification._native_execution_record(simulation)) == (
             {
                 "scope": "eager-full-state-native-correctness",
                 "compile_policy": "eager",
                 "execution_policy": "auto",
-            },
+            }
         )
 
     def test_point_projection_contains_candidate_material_parameters(self):
@@ -631,9 +613,9 @@ class NativeCaptureCompatibilityTest(unittest.TestCase):
         arrays = {"step/0/time": np.asarray([0, 0.0, 0.025])}
         qualification._point_observables(simulation, 0, arrays)
         row = arrays["step/0/source/Ex/0-PointSourceEx/values"].reshape(-1, 4)
-        self.assertEqual(row.shape, (1, 4))
+        assert (row.shape) == ((1, 4))
         np.testing.assert_allclose(row[0, :3], (0.001, 1.7, 1.05), rtol=0, atol=0)
-        self.assertTrue(np.isfinite(row[0, 3]))
+        assert np.isfinite(row[0, 3])
 
     def test_tfsf_capture_validation_rejects_batch_mutations(self):
         import torch
@@ -659,11 +641,11 @@ class NativeCaptureCompatibilityTest(unittest.TestCase):
         captured = {}
         qualification.torch_correctness._independent_snapshot(simulation, 1, captured)
         baseline = qualification._native_tfsf_capture_state(simulation, captured, 1)
-        self.assertTrue(baseline)
+        assert baseline
         duplicate_targets = copy.deepcopy(captured)
         duplicate_key = "torch/step/1/sources/batches/0/targets"
         duplicate_targets[duplicate_key][1] = duplicate_targets[duplicate_key][0]
-        with self.assertRaisesRegex(ValueError, "batch layout"):
+        with pytest.raises(ValueError, match="batch layout"):
             qualification._native_tfsf_capture_state(simulation, duplicate_targets, 1)
         batch = next(
             batch
@@ -677,7 +659,7 @@ class NativeCaptureCompatibilityTest(unittest.TestCase):
             simulation, 1, invalid_indices
         )
         batch.samples = original_samples
-        with self.assertRaisesRegex(ValueError, "batch layout"):
+        with pytest.raises(ValueError, match="batch layout"):
             qualification._native_tfsf_capture_state(simulation, invalid_indices, 1)
         auxiliary = next(
             item
@@ -693,7 +675,7 @@ class NativeCaptureCompatibilityTest(unittest.TestCase):
         )
         with torch.no_grad():
             auxiliary.overwrite_amplitudes[0] = original_amplitude
-        with self.assertRaisesRegex(ValueError, "auxiliary drive"):
+        with pytest.raises(ValueError, match="auxiliary drive"):
             qualification._native_tfsf_capture_state(simulation, invalid_auxiliary, 1)
         original_weight = batch.weights[0, 0].detach().clone()
         with torch.no_grad():
@@ -707,7 +689,7 @@ class NativeCaptureCompatibilityTest(unittest.TestCase):
         )
         with torch.no_grad():
             batch.weights[0, 0] = original_weight
-        with self.assertRaisesRegex(ValueError, "source state changed"):
+        with pytest.raises(ValueError, match="source state changed"):
             qualification._validate_native_tfsf_capture_stability(
                 baseline,
                 qualification._native_tfsf_capture_state(simulation, before_capture, 1),
@@ -731,65 +713,51 @@ class NativeCaptureCompatibilityTest(unittest.TestCase):
             "historical": "legacy-schema-only"
         }
         compatibility = qualification._compatibility_payload(current, legacy)
-        self.assertEqual(
-            qualification._non_performance_manifest(compatibility),
-            qualification._non_performance_manifest(current),
+        assert (qualification._non_performance_manifest(compatibility)) == (
+            qualification._non_performance_manifest(current)
         )
-        self.assertEqual(
-            compatibility["reference"]["observer_tag"],
-            current["reference"]["observer_tag"],
+        assert (compatibility["reference"]["observer_tag"]) == (
+            current["reference"]["observer_tag"]
         )
-        self.assertEqual(
-            compatibility["reference"]["observer_commit"],
-            current["reference"]["observer_commit"],
+        assert (compatibility["reference"]["observer_commit"]) == (
+            current["reference"]["observer_commit"]
         )
-        self.assertNotIn("performance_observer_tag", compatibility["reference"])
-        self.assertNotIn("performance_observer_commit", compatibility["reference"])
-        self.assertEqual(
-            compatibility["performance_gates"]["cpu_acceptance"],
-            legacy["performance_gates"]["cpu_acceptance"],
+        assert ("performance_observer_tag") not in (compatibility["reference"])
+        assert ("performance_observer_commit") not in (compatibility["reference"])
+        assert (compatibility["performance_gates"]["cpu_acceptance"]) == (
+            legacy["performance_gates"]["cpu_acceptance"]
         )
 
     def test_compatibility_rejects_legacy_scientific_delta(self):
         current = qualification.native_oracle.load_manifest()
         legacy = copy.deepcopy(current)
         legacy["correctness"][0]["size"][0] += 1
-        with self.assertRaisesRegex(ValueError, "non-performance capture input"):
+        with pytest.raises(ValueError, match="non-performance capture input"):
             qualification._compatibility_payload(current, legacy)
 
 
-class IndependentCpuQualificationTest(unittest.TestCase):
+class TestIndependentCpuQualification:
     def test_dm2_nonzero_state_closed_form_through_100_steps(self):
         for precision in ("float64", "float32"):
-            with self.subTest(precision=precision):
-                result = qualification.run_dm2_invariant(
-                    precision=precision, output=None, final_step=100
-                )
-                self.assertEqual(
-                    result["status"], "passed", result["comparison"]["failures"]
-                )
-                self.assertFalse(result["native_qualification"])
-                self.assertEqual(result["capture_steps"][-1], 100)
+            result = qualification.run_dm2_invariant(
+                precision=precision, output=None, final_step=100
+            )
+            assert (result["status"]) == ("passed")
+            assert not (result["native_qualification"])
+            assert (result["capture_steps"][-1]) == (100)
 
     def test_numpy_yee_full_fields_at_five_capture_steps(self):
         for precision in ("float64", "float32"):
             for size in ((2, 0, 0), (2, 2, 0), (2, 2, 2)):
                 for paired in (False, True):
-                    with self.subTest(precision=precision, size=size, paired=paired):
-                        result = qualification.run_analytic_case(
-                            size=size,
-                            precision=precision,
-                            paired_real=paired,
-                            output=None,
-                        )
-                        self.assertEqual(
-                            result["status"], "passed", result["comparison"]["failures"]
-                        )
-                        self.assertFalse(result["native_qualification"])
-                        self.assertEqual(
-                            result["reference"]["kind"], "independent-numpy-equations"
-                        )
-
-
-if __name__ == "__main__":
-    unittest.main()
+                    result = qualification.run_analytic_case(
+                        size=size,
+                        precision=precision,
+                        paired_real=paired,
+                        output=None,
+                    )
+                    assert (result["status"]) == ("passed")
+                    assert not (result["native_qualification"])
+                    assert (result["reference"]["kind"]) == (
+                        "independent-numpy-equations"
+                    )

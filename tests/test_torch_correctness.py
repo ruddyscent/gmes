@@ -1,14 +1,15 @@
 import copy
+import inspect
 import json
 import os
 import struct
 import tempfile
-import unittest
 import zlib
 from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
+import pytest
 import torch
 
 import gmes
@@ -54,9 +55,9 @@ PROBE_CONSUMER_LINES = {
 }
 
 
-class TorchCorrectnessTest(unittest.TestCase):
+class TestTorchCorrectness:
     @classmethod
-    def setUpClass(cls):
+    def setup_class(cls):
         cls.manifest = native_oracle.load_manifest()
         cls.probe_bundle = historical_probes.load_bundle(
             Path(__file__).parent / "fixtures" / "issue124", **PROBE_TRUST
@@ -124,7 +125,11 @@ class TorchCorrectnessTest(unittest.TestCase):
         if runtime:
             raise ValueError("unexpected probe runtime arguments")
         runtime = requested_runtime
-        line = consumer_line or PROBE_CONSUMER_LINES[self._testMethodName]
+        if consumer_line is not None:
+            line = consumer_line
+        else:
+            evidence_key = inspect.currentframe().f_back.f_code.co_name
+            line = PROBE_CONSUMER_LINES[evidence_key]
         matches = [
             binding
             for binding in self.probe_bundle.side["runtime_bindings"]
@@ -345,21 +350,19 @@ class TorchCorrectnessTest(unittest.TestCase):
         manifest = self._small_manifest(cases)
         with tempfile.TemporaryDirectory() as directory:
             for name in cases:
-                with self.subTest(case=name):
-                    reference, candidate = self._capture_probe_candidate(
-                        directory, manifest, name
-                    )
-                    result = self._compare_candidate(reference, candidate, manifest)
-                    self.assertEqual(result, {"passed": True, "failures": []})
-                    with np.load(candidate, allow_pickle=False) as archive:
-                        metadata = native_oracle.read_metadata(archive)
-                    self.assertEqual(metadata["backend"], "torch")
-                    backend = metadata["backend_metadata"]
-                    self.assertEqual(
-                        backend["historical_probe_input"]["authority"],
-                        "sampled-test-only; not full-array native authority",
-                    )
-                    self.assertNotIn("input_archive", backend)
+                reference, candidate = self._capture_probe_candidate(
+                    directory, manifest, name
+                )
+                result = self._compare_candidate(reference, candidate, manifest)
+                assert (result) == ({"passed": True, "failures": []})
+                with np.load(candidate, allow_pickle=False) as archive:
+                    metadata = native_oracle.read_metadata(archive)
+                assert (metadata["backend"]) == ("torch")
+                backend = metadata["backend_metadata"]
+                assert (backend["historical_probe_input"]["authority"]) == (
+                    "sampled-test-only; not full-array native authority"
+                )
+                assert ("input_archive") not in (backend)
 
     def test_float32_tfsf_long_capture_uses_strict_float64_auxiliary(self):
         capture_steps = [1, 2, 5, 20, 100]
@@ -379,74 +382,68 @@ class TorchCorrectnessTest(unittest.TestCase):
                 manifest,
                 include_tolerances=True,
             )
-            self.assertTrue(result["passed"], result["failures"])
+            assert result["passed"]
             with np.load(candidate, allow_pickle=False) as archive:
                 metadata = native_oracle.read_metadata(archive)
-                self.assertEqual(
-                    metadata["backend_metadata"]["auxiliary_precisions"],
-                    ["float64"],
+                assert (metadata["backend_metadata"]["auxiliary_precisions"]) == (
+                    ["float64"]
                 )
                 for step in ("0", *(str(value) for value in capture_steps)):
-                    with self.subTest(step=step):
-                        auxiliary = metadata["steps"][step]["sources"]["auxiliary"][0]
-                        self.assertEqual(
-                            auxiliary["backend_metadata"]["precision"], "float64"
+                    auxiliary = metadata["steps"][step]["sources"]["auxiliary"][0]
+                    assert (auxiliary["backend_metadata"]["precision"]) == ("float64")
+                    main_prefix = f"torch/step/{step}/state"
+                    auxiliary_prefix = f"torch/step/{step}/auxiliary/0/state"
+                    assert (archive[f"{main_prefix}/source_time"].dtype) == (
+                        np.dtype("float32")
+                    )
+                    assert (archive[f"{auxiliary_prefix}/source_time"].dtype) == (
+                        np.dtype("float64")
+                    )
+                    for prefix in (main_prefix, auxiliary_prefix):
+                        count = archive[f"{prefix}/step_count"]
+                        source_time = archive[f"{prefix}/source_time"]
+                        time_step = archive[f"{prefix}/time_step"]
+                        expected_time = np.multiply(
+                            count.astype(source_time.dtype),
+                            time_step,
+                            dtype=source_time.dtype,
                         )
-                        main_prefix = f"torch/step/{step}/state"
-                        auxiliary_prefix = f"torch/step/{step}/auxiliary/0/state"
-                        self.assertEqual(
-                            archive[f"{main_prefix}/source_time"].dtype,
-                            np.dtype("float32"),
+                        assert np.array_equal(source_time, expected_time)
+                    for component in ("Ex", "Hy"):
+                        key = (
+                            f"step/{step}/source_aux/"
+                            f"0-TotalFieldScatteredField/field/{component}"
                         )
-                        self.assertEqual(
-                            archive[f"{auxiliary_prefix}/source_time"].dtype,
-                            np.dtype("float64"),
-                        )
-                        for prefix in (main_prefix, auxiliary_prefix):
-                            count = archive[f"{prefix}/step_count"]
-                            source_time = archive[f"{prefix}/source_time"]
-                            time_step = archive[f"{prefix}/time_step"]
-                            expected_time = np.multiply(
-                                count.astype(source_time.dtype),
-                                time_step,
-                                dtype=source_time.dtype,
-                            )
-                            self.assertTrue(
-                                np.array_equal(source_time, expected_time), prefix
-                            )
-                        for component in ("Ex", "Hy"):
-                            key = (
-                                f"step/{step}/source_aux/"
-                                f"0-TotalFieldScatteredField/field/{component}"
-                            )
-                            self.assertEqual(archive[key].dtype, np.dtype("float64"))
+                        assert (archive[key].dtype) == (np.dtype("float64"))
 
             tolerances = {
                 record["key"]: record for record in result["tolerance_results"]
             }
-            self.assertEqual(
+            assert (
                 {
                     name: tolerances[
                         "step/100/source_aux/" "0-TotalFieldScatteredField/field/Hy"
                     ][name]
                     for name in ("rtol", "atol", "scope")
-                },
+                }
+            ) == (
                 {
                     "rtol": 2e-12,
                     "atol": 2e-13,
                     "scope": "strategies/dielectric,pml/float64",
-                },
+                }
             )
-            self.assertEqual(
+            assert (
                 {
                     name: tolerances["step/100/field/Hy"][name]
                     for name in ("rtol", "atol", "scope")
-                },
+                }
+            ) == (
                 {
                     "rtol": 5e-5,
                     "atol": 5e-6,
                     "scope": "strategies/dielectric,pml/float32",
-                },
+                }
             )
 
     def test_auxiliary_precision_metadata_corruption_fails_closed(self):
@@ -473,12 +470,10 @@ class TorchCorrectnessTest(unittest.TestCase):
                 )
                 np.savez_compressed(corrupted, **arrays)
                 result = self._compare_candidate(reference, corrupted, manifest)
-                self.assertFalse(result["passed"])
-                self.assertEqual(
-                    result["failures"][0]["key"], "candidate/archive-contract"
-                )
+                assert not (result["passed"])
+                assert (result["failures"][0]["key"]) == ("candidate/archive-contract")
                 if expected_error is not None:
-                    self.assertIn(expected_error, result["failures"][0]["error"])
+                    assert (expected_error) in (result["failures"][0]["error"])
 
             arrays = {name: value.copy() for name, value in base_arrays.items()}
             metadata = copy.deepcopy(base_metadata)
@@ -582,19 +577,18 @@ class TorchCorrectnessTest(unittest.TestCase):
                 manifest,
                 include_tolerances=True,
             )
-            self.assertTrue(result["passed"], result["failures"])
+            assert result["passed"]
             with np.load(candidate, allow_pickle=False) as archive:
                 metadata = native_oracle.read_metadata(archive)
-                self.assertEqual(
-                    metadata["backend_metadata"]["auxiliary_precisions"],
-                    ["float64"],
+                assert (metadata["backend_metadata"]["auxiliary_precisions"]) == (
+                    ["float64"]
                 )
                 for step in ("0", *(str(value) for value in capture_steps)):
                     main_time = archive[f"torch/step/{step}/state/source_time"]
                     auxiliary_prefix = f"torch/step/{step}/auxiliary/0/state"
                     auxiliary_time = archive[f"{auxiliary_prefix}/source_time"]
-                    self.assertEqual(main_time.dtype, np.dtype("float32"))
-                    self.assertEqual(auxiliary_time.dtype, np.dtype("float64"))
+                    assert (main_time.dtype) == (np.dtype("float32"))
+                    assert (auxiliary_time.dtype) == (np.dtype("float64"))
                     expected_auxiliary_time = np.multiply(
                         archive[f"{auxiliary_prefix}/step_count"].astype(
                             auxiliary_time.dtype
@@ -602,24 +596,23 @@ class TorchCorrectnessTest(unittest.TestCase):
                         archive[f"{auxiliary_prefix}/time_step"],
                         dtype=auxiliary_time.dtype,
                     )
-                    self.assertTrue(
-                        np.array_equal(auxiliary_time, expected_auxiliary_time)
-                    )
+                    assert np.array_equal(auxiliary_time, expected_auxiliary_time)
             tolerances = {
                 record["key"]: record for record in result["tolerance_results"]
             }
-            self.assertEqual(
+            assert (
                 {
                     name: tolerances["step/100/source_aux/0-GaussianBeam/field/Hy"][
                         name
                     ]
                     for name in ("rtol", "atol", "scope")
-                },
+                }
+            ) == (
                 {
                     "rtol": 2e-12,
                     "atol": 1e-12,
                     "scope": "source_auxiliary/gaussian-auxiliary/float64",
-                },
+                }
             )
 
     def test_gaussian_envelope_raw_state_removal_fails_closed(self):
@@ -659,11 +652,10 @@ class TorchCorrectnessTest(unittest.TestCase):
             corrupted = Path(directory) / "gaussian-envelope-removed.npz"
             np.savez_compressed(corrupted, **arrays)
             result = self._compare_candidate(reference, corrupted, manifest)
-            self.assertFalse(result["passed"])
-            self.assertEqual(result["failures"][0]["key"], "candidate/archive-contract")
-            self.assertIn(
-                "Torch transparent live buffer closure differs",
-                result["failures"][0]["error"],
+            assert not (result["passed"])
+            assert (result["failures"][0]["key"]) == ("candidate/archive-contract")
+            assert ("Torch transparent live buffer closure differs") in (
+                result["failures"][0]["error"]
             )
 
     def test_compiled_dummy_long_capture_covers_topology_and_tolerance(self):
@@ -686,22 +678,20 @@ class TorchCorrectnessTest(unittest.TestCase):
                 manifest,
                 include_tolerances=True,
             )
-            self.assertTrue(result["passed"])
-            self.assertEqual(result["failures"], [])
+            assert result["passed"]
+            assert (result["failures"]) == ([])
             with np.load(candidate, allow_pickle=False) as archive:
                 metadata = native_oracle.read_metadata(archive)
             records = {
                 record["component"]: record
                 for record in metadata["steps"]["0"]["materials"]
             }
-            self.assertEqual(set(records), set(native_oracle.COMPONENT_NAMES))
+            assert (set(records)) == (set(native_oracle.COMPONENT_NAMES))
             for component in native_oracle.COMPONENT_NAMES:
-                with self.subTest(component=component):
-                    self.assertEqual(records[component]["strategies"], ["Dummy"])
-                    self.assertEqual(
-                        records[component]["cells"],
-                        int(np.prod(metadata["maps"][component]["shape"])),
-                    )
+                assert (records[component]["strategies"]) == (["Dummy"])
+                assert (records[component]["cells"]) == (
+                    int(np.prod(metadata["maps"][component]["shape"]))
+                )
             tolerances = {
                 record["key"]: record for record in result["tolerance_results"]
             }
@@ -710,21 +700,18 @@ class TorchCorrectnessTest(unittest.TestCase):
                 "step/100/field/Ex",
                 "step/100/physical/spectrum/Ex",
             ):
-                with self.subTest(key=key):
-                    self.assertEqual(
-                        {
-                            name: tolerances[key][name]
-                            for name in ("rtol", "atol", "scope")
-                        },
-                        {
-                            **expected,
-                            "scope": "dummy-source-numerics/dielectric/float64",
-                        },
-                    )
+                assert (
+                    {name: tolerances[key][name] for name in ("rtol", "atol", "scope")}
+                ) == (
+                    {
+                        **expected,
+                        "scope": "dummy-source-numerics/dielectric/float64",
+                    }
+                )
 
     def test_candidate_capture_is_independent_of_legacy_native_state(self):
         manifest = self._small_manifest(("dcp-plrc-bloch",))
-        self.assertFalse(hasattr(gmes, "FDTD"))
+        assert not (hasattr(gmes, "FDTD"))
         with tempfile.TemporaryDirectory() as directory:
             reference, candidate = self._capture_probe_candidate(
                 directory, manifest, "dcp-plrc-bloch"
@@ -753,17 +740,16 @@ class TorchCorrectnessTest(unittest.TestCase):
                     candidate,
                     trust=PROBE_TRUST,
                 )
-            self.assertEqual(
-                self._compare_candidate(reference, candidate, manifest),
-                {"passed": True, "failures": []},
+            assert (self._compare_candidate(reference, candidate, manifest)) == (
+                {"passed": True, "failures": []}
             )
             with np.load(candidate, allow_pickle=False) as archive:
                 metadata = native_oracle.read_metadata(archive)
             backend = metadata["backend_metadata"]
-            self.assertEqual(backend["logical_map_source"], "live-torch-plan")
-            self.assertNotIn("path", backend["historical_probe_input"])
-            self.assertNotIn("input_archive", backend)
-            self.assertTrue(backend["torch_arrays"])
+            assert (backend["logical_map_source"]) == ("live-torch-plan")
+            assert ("path") not in (backend["historical_probe_input"])
+            assert ("input_archive") not in (backend)
+            assert backend["torch_arrays"]
 
     def test_probe_fixture_is_not_a_torch_candidate(self):
         manifest = self._small_manifest(("dcp-plrc-bloch",))
@@ -778,8 +764,8 @@ class TorchCorrectnessTest(unittest.TestCase):
                 / self.probe_bundle.side["fixture"]["file"]
             )
             result = self._compare_candidate(reference, fixture, manifest)
-        self.assertFalse(result["passed"])
-        self.assertEqual(result["failures"][0]["key"], "archive/container")
+        assert not (result["passed"])
+        assert (result["failures"][0]["key"]) == ("archive/container")
 
     def test_cuda_graph_execution_representation_corruption_fails_closed(self):
         manifest = self._small_manifest(("dcp-plrc-bloch",))
@@ -791,19 +777,18 @@ class TorchCorrectnessTest(unittest.TestCase):
             with np.load(candidate, allow_pickle=False) as archive:
                 arrays = {name: archive[name].copy() for name in archive.files}
                 metadata = native_oracle.read_metadata(archive)
-            self.assertEqual(
-                metadata["backend_metadata"]["cuda_graph_execution_representation"],
-                gmes.torch_fdtd.CUDA_GRAPH_EXECUTION_REPRESENTATION,
-            )
+            assert (
+                metadata["backend_metadata"]["cuda_graph_execution_representation"]
+            ) == (gmes.torch_fdtd.CUDA_GRAPH_EXECUTION_REPRESENTATION)
             metadata["backend_metadata"][
                 "cuda_graph_execution_representation"
             ] = "external-standard-regions+tampered"
             arrays["metadata.json"] = np.asarray(json.dumps(metadata, sort_keys=True))
             np.savez_compressed(corrupted, **arrays)
             result = self._compare_candidate(reference, corrupted, manifest)
-        self.assertFalse(result["passed"])
-        self.assertEqual(result["failures"][0]["key"], "candidate/archive-contract")
-        self.assertIn("backend identity is invalid", result["failures"][0]["error"])
+        assert not (result["passed"])
+        assert (result["failures"][0]["key"]) == ("candidate/archive-contract")
+        assert ("backend identity is invalid") in (result["failures"][0]["error"])
 
     def test_raw_planner_corruption_fails_closed(self):
         manifest = self._small_manifest(("dcp-plrc-bloch",))
@@ -815,8 +800,8 @@ class TorchCorrectnessTest(unittest.TestCase):
                 directory, candidate, "torch/planner/Ex/material_ids"
             )
             result = self._compare_candidate(reference, corrupted, manifest)
-        self.assertFalse(result["passed"])
-        self.assertEqual(result["failures"][0]["key"], "candidate/archive-contract")
+        assert not (result["passed"])
+        assert (result["failures"][0]["key"]) == ("candidate/archive-contract")
 
     def test_rehashed_logical_map_and_planner_tamper_fails_probe_candidate_validation(
         self,
@@ -827,65 +812,58 @@ class TorchCorrectnessTest(unittest.TestCase):
                 directory, manifest, "mixed-2d"
             )
             for suffix in ("material_ids", "underlying_ids"):
-                with self.subTest(map=suffix):
 
-                    def mutate(arrays, _metadata, suffix=suffix):
-                        canonical_key = f"map/Ex/{suffix}"
-                        planner_key = f"torch/planner/Ex/{suffix}"
-                        canonical = arrays[canonical_key].copy()
-                        planner = arrays[planner_key].copy()
-                        canonical_flat = canonical.reshape(-1)
-                        planner_flat = planner.reshape(-1)
-                        values = sorted(set(int(value) for value in planner_flat))
-                        location = next(
-                            (
-                                index
-                                for index, value in enumerate(planner_flat)
-                                if any(other != int(value) for other in values)
-                            ),
-                            None,
-                        )
-                        if location is None:
-                            raise AssertionError(
-                                f"mixed map has no mutable {suffix} entry"
-                            )
-                        replacement = next(
-                            value
-                            for value in values
-                            if value != int(planner_flat[location])
-                        )
-                        canonical_flat[location] = replacement
-                        planner_flat[location] = replacement
-                        arrays[canonical_key] = canonical
-                        arrays[planner_key] = planner
-                        mirror_keys = {
-                            f"torch/plan/{suffix}_ex",
-                            "torch/step/0/state/plan/" f"{suffix}_ex",
-                            "torch/step/1/state/plan/" f"{suffix}_ex",
-                        }
-                        for mirror_key in mirror_keys:
-                            mirror = arrays[mirror_key].copy()
-                            mirror.reshape(-1)[location] = replacement
-                            arrays[mirror_key] = mirror
-
-                    rewritten = self._rewrite_candidate(
-                        directory,
-                        candidate,
-                        f"rehashed-map-{suffix}",
-                        mutate,
-                    )
-                    result = self._compare_candidate(reference, rewritten, manifest)
-                    self.assertFalse(result["passed"])
-                    self.assertIn(
-                        "candidate/archive-contract",
-                        [failure["key"] for failure in result["failures"]],
-                    )
-                    self.assertIn(
-                        "immutable workload plan",
-                        " ".join(
-                            failure.get("error", "") for failure in result["failures"]
+                def mutate(arrays, _metadata, suffix=suffix):
+                    canonical_key = f"map/Ex/{suffix}"
+                    planner_key = f"torch/planner/Ex/{suffix}"
+                    canonical = arrays[canonical_key].copy()
+                    planner = arrays[planner_key].copy()
+                    canonical_flat = canonical.reshape(-1)
+                    planner_flat = planner.reshape(-1)
+                    values = sorted(set(int(value) for value in planner_flat))
+                    location = next(
+                        (
+                            index
+                            for index, value in enumerate(planner_flat)
+                            if any(other != int(value) for other in values)
                         ),
+                        None,
                     )
+                    if location is None:
+                        raise AssertionError(f"mixed map has no mutable {suffix} entry")
+                    replacement = next(
+                        value
+                        for value in values
+                        if value != int(planner_flat[location])
+                    )
+                    canonical_flat[location] = replacement
+                    planner_flat[location] = replacement
+                    arrays[canonical_key] = canonical
+                    arrays[planner_key] = planner
+                    mirror_keys = {
+                        f"torch/plan/{suffix}_ex",
+                        "torch/step/0/state/plan/" f"{suffix}_ex",
+                        "torch/step/1/state/plan/" f"{suffix}_ex",
+                    }
+                    for mirror_key in mirror_keys:
+                        mirror = arrays[mirror_key].copy()
+                        mirror.reshape(-1)[location] = replacement
+                        arrays[mirror_key] = mirror
+
+                rewritten = self._rewrite_candidate(
+                    directory,
+                    candidate,
+                    f"rehashed-map-{suffix}",
+                    mutate,
+                )
+                result = self._compare_candidate(reference, rewritten, manifest)
+                assert not (result["passed"])
+                assert ("candidate/archive-contract") in (
+                    [failure["key"] for failure in result["failures"]]
+                )
+                assert ("immutable workload plan") in (
+                    " ".join(failure.get("error", "") for failure in result["failures"])
+                )
 
     def test_rehashed_raw_planner_maps_fail_region_indirection(self):
         manifest = self._small_manifest(("dcp-plrc-bloch",))
@@ -895,59 +873,50 @@ class TorchCorrectnessTest(unittest.TestCase):
             )
 
             for suffix in ("material_ids", "underlying_ids"):
-                with self.subTest(planner_map=suffix):
 
-                    def mutate(arrays, metadata, suffix=suffix):
-                        planner_key = f"torch/planner/Ex/{suffix}"
-                        planner = arrays[planner_key].copy()
-                        ownership = arrays["torch/planner/Ex/ownership"].reshape(-1)
-                        location = int(np.flatnonzero(ownership >= 0)[0])
-                        flat = planner.reshape(-1)
-                        geometry_count = len(
-                            metadata["backend_metadata"][
-                                "actual_geometry_and_coefficients"
-                            ]
-                        )
-                        candidates = (
-                            range(geometry_count)
-                            if suffix == "material_ids"
-                            else (-1, *range(geometry_count))
-                        )
-                        replacement = next(
-                            value
-                            for value in candidates
-                            if value != int(flat[location])
-                        )
-                        flat[location] = replacement
-                        arrays[planner_key] = planner
-                        for step in ("0", "1"):
-                            mirror_key = f"torch/step/{step}/state/plan/{suffix}_ex"
-                            mirror = arrays[mirror_key].copy()
-                            mirror.reshape(-1)[location] = replacement
-                            arrays[mirror_key] = mirror
-                        mirror_key = f"torch/plan/{suffix}_ex"
+                def mutate(arrays, metadata, suffix=suffix):
+                    planner_key = f"torch/planner/Ex/{suffix}"
+                    planner = arrays[planner_key].copy()
+                    ownership = arrays["torch/planner/Ex/ownership"].reshape(-1)
+                    location = int(np.flatnonzero(ownership >= 0)[0])
+                    flat = planner.reshape(-1)
+                    geometry_count = len(
+                        metadata["backend_metadata"]["actual_geometry_and_coefficients"]
+                    )
+                    candidates = (
+                        range(geometry_count)
+                        if suffix == "material_ids"
+                        else (-1, *range(geometry_count))
+                    )
+                    replacement = next(
+                        value for value in candidates if value != int(flat[location])
+                    )
+                    flat[location] = replacement
+                    arrays[planner_key] = planner
+                    for step in ("0", "1"):
+                        mirror_key = f"torch/step/{step}/state/plan/{suffix}_ex"
                         mirror = arrays[mirror_key].copy()
                         mirror.reshape(-1)[location] = replacement
                         arrays[mirror_key] = mirror
+                    mirror_key = f"torch/plan/{suffix}_ex"
+                    mirror = arrays[mirror_key].copy()
+                    mirror.reshape(-1)[location] = replacement
+                    arrays[mirror_key] = mirror
 
-                    rewritten = self._rewrite_candidate(
-                        directory,
-                        candidate,
-                        f"rehashed-raw-planner-{suffix}",
-                        mutate,
-                    )
-                    result = self._compare_candidate(reference, rewritten, manifest)
-                    self.assertFalse(result["passed"])
-                    self.assertIn(
-                        "candidate/archive-contract",
-                        [failure["key"] for failure in result["failures"]],
-                    )
-                    self.assertIn(
-                        "immutable workload plan",
-                        " ".join(
-                            failure.get("error", "") for failure in result["failures"]
-                        ),
-                    )
+                rewritten = self._rewrite_candidate(
+                    directory,
+                    candidate,
+                    f"rehashed-raw-planner-{suffix}",
+                    mutate,
+                )
+                result = self._compare_candidate(reference, rewritten, manifest)
+                assert not (result["passed"])
+                assert ("candidate/archive-contract") in (
+                    [failure["key"] for failure in result["failures"]]
+                )
+                assert ("immutable workload plan") in (
+                    " ".join(failure.get("error", "") for failure in result["failures"])
+                )
 
     def test_rehashed_planner_material_identity_and_coefficients_are_derived(self):
         manifest = self._small_manifest(("drude-1",))
@@ -956,7 +925,7 @@ class TorchCorrectnessTest(unittest.TestCase):
                 directory, manifest, "drude-1"
             )
             baseline = self._compare_candidate(reference, candidate, manifest)
-            self.assertTrue(baseline["passed"], baseline["failures"])
+            assert baseline["passed"]
             with np.load(candidate, allow_pickle=False) as archive:
                 coefficient_key = next(
                     key
@@ -1013,18 +982,14 @@ class TorchCorrectnessTest(unittest.TestCase):
                 ("coherent-material-relabel", coherently_relabel_material),
                 ("live-plan-coefficient", mutate_live_coefficient),
             ):
-                with self.subTest(attack=label):
-                    rewritten = self._rewrite_candidate(
-                        directory, candidate, f"rehashed-{label}", mutate
-                    )
-                    result = self._compare_candidate(reference, rewritten, manifest)
-                    self.assertFalse(result["passed"])
-                    self.assertIn(
-                        "immutable workload plan",
-                        " ".join(
-                            failure.get("error", "") for failure in result["failures"]
-                        ),
-                    )
+                rewritten = self._rewrite_candidate(
+                    directory, candidate, f"rehashed-{label}", mutate
+                )
+                result = self._compare_candidate(reference, rewritten, manifest)
+                assert not (result["passed"])
+                assert ("immutable workload plan") in (
+                    " ".join(failure.get("error", "") for failure in result["failures"])
+                )
 
     def test_transparent_source_values_shapes_and_finiteness_are_derived(self):
         manifest = self._small_manifest(("tfsf-transparent",))
@@ -1033,7 +998,7 @@ class TorchCorrectnessTest(unittest.TestCase):
                 directory, manifest, "tfsf-transparent"
             )
             baseline = self._compare_candidate(reference, candidate, manifest)
-            self.assertTrue(baseline["passed"], baseline["failures"])
+            assert baseline["passed"]
             with np.load(candidate, allow_pickle=False) as archive:
                 batch_root = next(
                     key.removesuffix("/weights")
@@ -1097,16 +1062,12 @@ class TorchCorrectnessTest(unittest.TestCase):
                 ("nan-weight", nonfinite_weight),
                 ("inf-sample-values", nonfinite_sample_values),
             ):
-                with self.subTest(attack=label):
-                    rewritten = self._rewrite_candidate(
-                        directory, candidate, f"rehashed-transparent-{label}", mutate
-                    )
-                    result = self._compare_candidate(reference, rewritten, manifest)
-                    self.assertFalse(result["passed"])
-                    self.assertEqual(
-                        result["failures"][0]["key"],
-                        "candidate/archive-contract",
-                    )
+                rewritten = self._rewrite_candidate(
+                    directory, candidate, f"rehashed-transparent-{label}", mutate
+                )
+                result = self._compare_candidate(reference, rewritten, manifest)
+                assert not (result["passed"])
+                assert (result["failures"][0]["key"]) == ("candidate/archive-contract")
 
     def test_probe_transparent_values_are_rederived_from_workload(self):
         manifest = self._small_manifest(("tfsf-transparent",))
@@ -1127,7 +1088,7 @@ class TorchCorrectnessTest(unittest.TestCase):
                 values = arrays[source_key].copy()
                 original = values.copy()
                 values.flat[0] ^= np.uint64(1)
-                self.assertFalse(np.array_equal(values, original))
+                assert not (np.array_equal(values, original))
                 arrays[source_key] = values
 
             rebound_candidate = self._rewrite_candidate(
@@ -1137,8 +1098,8 @@ class TorchCorrectnessTest(unittest.TestCase):
                 corrupt_source,
             )
             result = self._compare_candidate(reference, rebound_candidate, manifest)
-            self.assertFalse(result["passed"])
-            self.assertEqual(result["failures"][0]["key"], "candidate/archive-contract")
+            assert not (result["passed"])
+            assert (result["failures"][0]["key"]) == ("candidate/archive-contract")
 
     def test_rehashed_point_source_arrays_require_values_and_exact_closure(self):
         manifest = self._small_manifest(("dcp-plrc-bloch",))
@@ -1164,12 +1125,11 @@ class TorchCorrectnessTest(unittest.TestCase):
                 ("missing-values", remove_values),
                 ("unexpected-key", add_unexpected_key),
             ):
-                with self.subTest(source_tamper=label):
-                    rewritten = self._rewrite_candidate(
-                        directory, candidate, f"rehashed-{label}", mutate
-                    )
-                    result = self._compare_candidate(reference, rewritten, manifest)
-                    self.assertFalse(result["passed"])
+                rewritten = self._rewrite_candidate(
+                    directory, candidate, f"rehashed-{label}", mutate
+                )
+                result = self._compare_candidate(reference, rewritten, manifest)
+                assert not (result["passed"])
 
     def test_rehashed_point_source_live_buffers_are_closed_and_semantic(self):
         manifest = self._small_manifest(("dcp-plrc-bloch",))
@@ -1256,12 +1216,11 @@ class TorchCorrectnessTest(unittest.TestCase):
                 ("time", mutate_time),
             )
             for label, mutate in mutations:
-                with self.subTest(live_source_tamper=label):
-                    rewritten = self._rewrite_candidate(
-                        directory, candidate, f"rehashed-live-source-{label}", mutate
-                    )
-                    result = self._compare_candidate(reference, rewritten, manifest)
-                    self.assertFalse(result["passed"])
+                rewritten = self._rewrite_candidate(
+                    directory, candidate, f"rehashed-live-source-{label}", mutate
+                )
+                result = self._compare_candidate(reference, rewritten, manifest)
+                assert not (result["passed"])
 
     def test_rehashed_coherent_point_source_rewrite_fails_workload_binding(self):
         manifest = self._small_manifest(("dcp-plrc-bloch",))
@@ -1303,10 +1262,9 @@ class TorchCorrectnessTest(unittest.TestCase):
                 mutate,
             )
             result = self._compare_candidate(reference, rewritten, manifest)
-            self.assertFalse(result["passed"])
-            self.assertIn(
-                "semantics differ from expected source",
-                " ".join(failure.get("error", "") for failure in result["failures"]),
+            assert not (result["passed"])
+            assert ("semantics differ from expected source") in (
+                " ".join(failure.get("error", "") for failure in result["failures"])
             )
 
     def test_rehashed_auxiliary_live_state_has_exact_closure_and_shape(self):
@@ -1354,67 +1312,63 @@ class TorchCorrectnessTest(unittest.TestCase):
                 ("inactive-material-state", mutate_inactive_material_state),
             )
             for label, mutate in mutations:
-                with self.subTest(auxiliary_tamper=label):
-                    rewritten = self._rewrite_candidate(
-                        directory,
-                        candidate,
-                        f"rehashed-{label}",
-                        mutate,
-                    )
-                    result = self._compare_candidate(reference, rewritten, manifest)
-                    self.assertFalse(result["passed"])
+                rewritten = self._rewrite_candidate(
+                    directory,
+                    candidate,
+                    f"rehashed-{label}",
+                    mutate,
+                )
+                result = self._compare_candidate(reference, rewritten, manifest)
+                assert not (result["passed"])
 
     def test_rehashed_live_main_fields_bind_real_and_paired_representations(self):
         cases = (
             ("stability-energy-dielectric", 0),
             ("dcp-plrc-bloch", 1),
         )
-        consumer_line = PROBE_CONSUMER_LINES[self._testMethodName]
+        consumer_line = PROBE_CONSUMER_LINES[
+            "test_rehashed_live_main_fields_bind_real_and_paired_representations"
+        ]
         bindings = [
             binding
             for binding in self.probe_bundle.side["runtime_bindings"]
             if binding["test_line"] == consumer_line
         ]
         profile_ids = {binding["profile"] for binding in bindings}
-        self.assertEqual(len(profile_ids), 1)
-        self.assertEqual(
-            {binding["case"] for binding in bindings},
-            {name for name, _channel in cases},
+        assert (len(profile_ids)) == (1)
+        assert ({binding["case"] for binding in bindings}) == (
+            {name for name, _channel in cases}
         )
         reviewed_manifest = self.probe_bundle.profiles[profile_ids.pop()]
         with tempfile.TemporaryDirectory() as directory:
             for ordinal, (name, channel) in enumerate(cases):
-                with self.subTest(case=name, channel=channel):
-                    case_directory = Path(directory) / str(ordinal)
-                    case_directory.mkdir()
-                    manifest = copy.deepcopy(reviewed_manifest)
-                    reference, candidate = self._capture_probe_candidate(
-                        case_directory, manifest, name
-                    )
+                case_directory = Path(directory) / str(ordinal)
+                case_directory.mkdir()
+                manifest = copy.deepcopy(reviewed_manifest)
+                reference, candidate = self._capture_probe_candidate(
+                    case_directory, manifest, name
+                )
 
-                    def mutate(arrays, _metadata, channel=channel):
-                        key = "torch/step/1/state/ex"
-                        values = arrays[key].copy()
-                        if values.ndim == arrays["step/1/field/Ex"].ndim:
-                            values.flat[0] += 1
-                        else:
-                            values[..., channel].flat[0] += 1
-                        arrays[key] = values
+                def mutate(arrays, _metadata, channel=channel):
+                    key = "torch/step/1/state/ex"
+                    values = arrays[key].copy()
+                    if values.ndim == arrays["step/1/field/Ex"].ndim:
+                        values.flat[0] += 1
+                    else:
+                        values[..., channel].flat[0] += 1
+                    arrays[key] = values
 
-                    rewritten = self._rewrite_candidate(
-                        case_directory,
-                        candidate,
-                        f"rehashed-live-field-{ordinal}",
-                        mutate,
-                    )
-                    result = self._compare_candidate(reference, rewritten, manifest)
-                    self.assertFalse(result["passed"])
-                    self.assertIn(
-                        "live field differs from canonical field",
-                        " ".join(
-                            failure.get("error", "") for failure in result["failures"]
-                        ),
-                    )
+                rewritten = self._rewrite_candidate(
+                    case_directory,
+                    candidate,
+                    f"rehashed-live-field-{ordinal}",
+                    mutate,
+                )
+                result = self._compare_candidate(reference, rewritten, manifest)
+                assert not (result["passed"])
+                assert ("live field differs from canonical field") in (
+                    " ".join(failure.get("error", "") for failure in result["failures"])
+                )
 
     def test_rehashed_live_main_and_auxiliary_material_state_fail_closed(self):
         cases = (
@@ -1459,60 +1413,57 @@ class TorchCorrectnessTest(unittest.TestCase):
                 "pml_",
             ),
         )
-        consumer_line = PROBE_CONSUMER_LINES[self._testMethodName]
+        consumer_line = PROBE_CONSUMER_LINES[
+            "test_rehashed_live_main_and_auxiliary_material_state_fail_closed"
+        ]
         bindings = [
             binding
             for binding in self.probe_bundle.side["runtime_bindings"]
             if binding["test_line"] == consumer_line
         ]
         profile_ids = {binding["profile"] for binding in bindings}
-        self.assertEqual(len(profile_ids), 1)
-        self.assertEqual(
-            {binding["case"] for binding in bindings},
-            {name for name, _prefix, _token in cases},
+        assert (len(profile_ids)) == (1)
+        assert ({binding["case"] for binding in bindings}) == (
+            {name for name, _prefix, _token in cases}
         )
         reviewed_manifest = self.probe_bundle.profiles[profile_ids.pop()]
         with tempfile.TemporaryDirectory() as directory:
             for ordinal, (name, prefix, token) in enumerate(cases):
-                with self.subTest(case=name):
-                    case_directory = Path(directory) / str(ordinal)
-                    case_directory.mkdir()
-                    manifest = copy.deepcopy(reviewed_manifest)
-                    reference, candidate = self._capture_probe_candidate(
-                        case_directory, manifest, name
-                    )
+                case_directory = Path(directory) / str(ordinal)
+                case_directory.mkdir()
+                manifest = copy.deepcopy(reviewed_manifest)
+                reference, candidate = self._capture_probe_candidate(
+                    case_directory, manifest, name
+                )
 
-                    def mutate(arrays, _metadata, prefix=prefix, token=token):
-                        key = next(
-                            key
-                            for key in arrays
-                            if key.startswith(prefix)
-                            and token in key
-                            and not any(
-                                scratch in key
-                                for scratch in ("scratch", "work", "previous")
-                            )
+                def mutate(arrays, _metadata, prefix=prefix, token=token):
+                    key = next(
+                        key
+                        for key in arrays
+                        if key.startswith(prefix)
+                        and token in key
+                        and not any(
+                            scratch in key
+                            for scratch in ("scratch", "work", "previous")
                         )
-                        values = arrays[key].copy()
-                        if not values.size:
-                            raise AssertionError(f"material state is empty: {key}")
-                        values.flat[0] += 1
-                        arrays[key] = values
+                    )
+                    values = arrays[key].copy()
+                    if not values.size:
+                        raise AssertionError(f"material state is empty: {key}")
+                    values.flat[0] += 1
+                    arrays[key] = values
 
-                    rewritten = self._rewrite_candidate(
-                        case_directory,
-                        candidate,
-                        f"rehashed-material-state-{ordinal}",
-                        mutate,
-                    )
-                    result = self._compare_candidate(reference, rewritten, manifest)
-                    self.assertFalse(result["passed"])
-                    self.assertIn(
-                        "live material state differs from canonical state",
-                        " ".join(
-                            failure.get("error", "") for failure in result["failures"]
-                        ),
-                    )
+                rewritten = self._rewrite_candidate(
+                    case_directory,
+                    candidate,
+                    f"rehashed-material-state-{ordinal}",
+                    mutate,
+                )
+                result = self._compare_candidate(reference, rewritten, manifest)
+                assert not (result["passed"])
+                assert ("live material state differs from canonical state") in (
+                    " ".join(failure.get("error", "") for failure in result["failures"])
+                )
 
     def test_source_plan_corruption_fails_closed(self):
         manifest = self._small_manifest(("dcp-plrc-bloch",))
@@ -1523,8 +1474,8 @@ class TorchCorrectnessTest(unittest.TestCase):
             source_key = "step/0/source/Ex/0-PointSourceEx/values"
             corrupted = self._corrupt_archive(directory, candidate, source_key)
             result = self._compare_candidate(reference, corrupted, manifest)
-        self.assertFalse(result["passed"])
-        self.assertEqual(result["failures"][0]["key"], "candidate/archive-contract")
+        assert not (result["passed"])
+        assert (result["failures"][0]["key"]) == ("candidate/archive-contract")
 
     def test_live_source_clock_corruption_fails_closed(self):
         manifest = self._small_manifest(("gaussian-auxiliary",))
@@ -1537,25 +1488,21 @@ class TorchCorrectnessTest(unittest.TestCase):
                 "torch/step/1/auxiliary/0/state/source_time",
             )
             for ordinal, key in enumerate(keys):
-                with self.subTest(key=key):
-                    output = Path(directory) / f"corrupted-clock-{ordinal}.npz"
-                    with np.load(candidate, allow_pickle=False) as archive:
-                        arrays = {name: archive[name].copy() for name in archive.files}
-                        metadata = native_oracle.read_metadata(archive)
-                    arrays[key] = arrays[key] + np.asarray(1, dtype=arrays[key].dtype)
-                    metadata["backend_metadata"]["torch_arrays"][key] = (
-                        torch_correctness._array_descriptor(arrays[key])
-                    )
-                    arrays["metadata.json"] = np.asarray(
-                        json.dumps(metadata, sort_keys=True)
-                    )
-                    np.savez_compressed(output, **arrays)
-                    result = self._compare_candidate(reference, output, manifest)
-                    self.assertFalse(result["passed"])
-                    self.assertEqual(
-                        result["failures"][0]["key"],
-                        "candidate/archive-contract",
-                    )
+                output = Path(directory) / f"corrupted-clock-{ordinal}.npz"
+                with np.load(candidate, allow_pickle=False) as archive:
+                    arrays = {name: archive[name].copy() for name in archive.files}
+                    metadata = native_oracle.read_metadata(archive)
+                arrays[key] = arrays[key] + np.asarray(1, dtype=arrays[key].dtype)
+                metadata["backend_metadata"]["torch_arrays"][key] = (
+                    torch_correctness._array_descriptor(arrays[key])
+                )
+                arrays["metadata.json"] = np.asarray(
+                    json.dumps(metadata, sort_keys=True)
+                )
+                np.savez_compressed(output, **arrays)
+                result = self._compare_candidate(reference, output, manifest)
+                assert not (result["passed"])
+                assert (result["failures"][0]["key"]) == ("candidate/archive-contract")
 
             output = Path(directory) / "corrupted-consistent-clock.npz"
             with np.load(candidate, allow_pickle=False) as archive:
@@ -1578,8 +1525,8 @@ class TorchCorrectnessTest(unittest.TestCase):
             arrays["metadata.json"] = np.asarray(json.dumps(metadata, sort_keys=True))
             np.savez_compressed(output, **arrays)
             result = self._compare_candidate(reference, output, manifest)
-            self.assertFalse(result["passed"])
-            self.assertEqual(result["failures"][0]["key"], "candidate/archive-contract")
+            assert not (result["passed"])
+            assert (result["failures"][0]["key"]) == ("candidate/archive-contract")
 
     def test_historical_probe_descriptor_corruption_fails_closed(self):
         manifest = self._small_manifest(("dcp-plrc-bloch",))
@@ -1597,8 +1544,8 @@ class TorchCorrectnessTest(unittest.TestCase):
             arrays["metadata.json"] = np.asarray(json.dumps(metadata, sort_keys=True))
             np.savez_compressed(corrupted, **arrays)
             result = self._compare_candidate(reference, corrupted, manifest)
-        self.assertFalse(result["passed"])
-        self.assertEqual(result["failures"][0]["key"], "candidate/archive-contract")
+        assert not (result["passed"])
+        assert (result["failures"][0]["key"]) == ("candidate/archive-contract")
 
     def test_probe_comparison_uses_immutable_snapshot_after_path_replacement(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1611,7 +1558,7 @@ class TorchCorrectnessTest(unittest.TestCase):
             expected_input = {"binding": "expected"}
 
             def validate(_archive, _manifest, *, allow_probe):
-                self.assertTrue(allow_probe)
+                assert allow_probe
                 os.replace(replacement_path, candidate_path)
                 return {
                     "backend_metadata": {
@@ -1620,8 +1567,8 @@ class TorchCorrectnessTest(unittest.TestCase):
                 }
 
             def compare_bytes(candidate_bytes, _resolved):
-                self.assertIs(type(candidate_bytes), bytes)
-                self.assertEqual(candidate_bytes, original_bytes)
+                assert (type(candidate_bytes)) is (bytes)
+                assert (candidate_bytes) == (original_bytes)
                 return {
                     "passed": True,
                     "failures": [],
@@ -1655,8 +1602,8 @@ class TorchCorrectnessTest(unittest.TestCase):
                     object(), object(), candidate_path, {}, trust={}
                 )
 
-            self.assertEqual(result, {"passed": True, "failures": []})
-            self.assertEqual(candidate_path.read_bytes(), replacement_bytes)
+            assert (result) == ({"passed": True, "failures": []})
+            assert (candidate_path.read_bytes()) == (replacement_bytes)
 
     def test_probe_comparison_fails_closed_without_bytes_api(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1691,8 +1638,8 @@ class TorchCorrectnessTest(unittest.TestCase):
                     object(), object(), candidate_path, {}, trust={}
                 )
 
-        self.assertFalse(result["passed"])
-        self.assertEqual(result["failures"][0]["key"], "candidate/archive-contract")
+        assert not (result["passed"])
+        assert (result["failures"][0]["key"]) == ("candidate/archive-contract")
 
     def test_probe_snapshot_cap_rejects_before_open_and_accepts_boundary(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1708,8 +1655,8 @@ class TorchCorrectnessTest(unittest.TestCase):
                     object(), object(), oversized, {}, trust={}
                 )
             opener.assert_not_called()
-            self.assertFalse(result["passed"])
-            self.assertEqual(result["failures"][0]["key"], "archive/container")
+            assert not (result["passed"])
+            assert (result["failures"][0]["key"]) == ("archive/container")
 
             boundary = Path(directory) / "boundary.npz"
             with boundary.open("wb") as handle:
@@ -1719,8 +1666,8 @@ class TorchCorrectnessTest(unittest.TestCase):
                 "_preflight_npz_file",
                 side_effect=ValueError("boundary reached archive preflight"),
             ) as preflight:
-                with self.assertRaisesRegex(
-                    ValueError, "boundary reached archive preflight"
+                with pytest.raises(
+                    ValueError, match="boundary reached archive preflight"
                 ):
                     torch_correctness._read_bounded_npz_snapshot(boundary)
             preflight.assert_called_once()
@@ -1743,7 +1690,7 @@ class TorchCorrectnessTest(unittest.TestCase):
         selected = torch_correctness._resolved_probe_workload(
             self.probe_bundle, resolved, manifest
         )
-        self.assertEqual(selected["name"], resolved.case)
+        assert (selected["name"]) == (resolved.case)
 
         duplicate_manifest = copy.deepcopy(manifest)
         source_group = next(
@@ -1763,7 +1710,7 @@ class TorchCorrectnessTest(unittest.TestCase):
             resolved.consumer_line,
             resolved.capture,
         )
-        with self.assertRaisesRegex(ValueError, "workload is missing or ambiguous"):
+        with pytest.raises(ValueError, match="workload is missing or ambiguous"):
             torch_correctness._resolved_probe_workload(
                 self.probe_bundle, duplicate_resolved, duplicate_manifest
             )
@@ -1776,7 +1723,7 @@ class TorchCorrectnessTest(unittest.TestCase):
             resolved.consumer_line + 1,
             resolved.capture,
         )
-        with self.assertRaisesRegex(ValueError, "binding is missing or ambiguous"):
+        with pytest.raises(ValueError, match="binding is missing or ambiguous"):
             torch_correctness._resolved_probe_workload(
                 self.probe_bundle, missing_resolved, manifest
             )
@@ -1790,8 +1737,8 @@ class TorchCorrectnessTest(unittest.TestCase):
             invalid = Path(directory) / "invalid.npz"
             invalid.write_bytes(b"not an NPZ archive")
             result = self._compare_candidate(reference, invalid, manifest)
-        self.assertFalse(result["passed"])
-        self.assertEqual(result["failures"][0]["key"], "archive/container")
+        assert not (result["passed"])
+        assert (result["failures"][0]["key"]) == ("archive/container")
 
     def test_runtime_modes_bind_precision_and_graph_execution(self):
         manifest = self._small_manifest(("stability-energy-dielectric",))
@@ -1802,35 +1749,34 @@ class TorchCorrectnessTest(unittest.TestCase):
                 "stability-energy-dielectric",
                 precision="float32",
             )
-            self.assertEqual(
-                self._compare_candidate(reference, candidate, manifest),
-                {"passed": True, "failures": []},
+            assert (self._compare_candidate(reference, candidate, manifest)) == (
+                {"passed": True, "failures": []}
             )
             with np.load(candidate, allow_pickle=False) as archive:
                 metadata = native_oracle.read_metadata(archive)
-            self.assertEqual(
-                torch_correctness._runtime_mode(metadata),
+            assert (torch_correctness._runtime_mode(metadata)) == (
                 {
                     "device": "cpu",
                     "precision": "float32",
                     "graph_mode": "eager",
                     "compile_policy": "eager",
                     "compile_mode": "default",
-                },
+                }
             )
-        self.assertEqual(
+        assert (
             torch_correctness._runtime_contract(
                 "cuda:0", "float32", "graph", "reduce-overhead"
-            ),
+            )
+        ) == (
             {
                 "device": "cuda:0",
                 "precision": "float32",
                 "graph_mode": "graph",
                 "compile_policy": "compile",
                 "compile_mode": "reduce-overhead",
-            },
+            }
         )
-        with self.assertRaisesRegex(ValueError, "non-default compile mode"):
+        with pytest.raises(ValueError, match="non-default compile mode"):
             torch_correctness._runtime_contract(
                 "cuda:0", "float32", "eager", "reduce-overhead"
             )
@@ -1876,18 +1822,16 @@ class TorchCorrectnessTest(unittest.TestCase):
             "runtime_mode": runtime_mode,
             "candidate_archives": candidate_archives,
         }
-        self.assertTrue(
-            torch_correctness.runtime_publication_receipt_complete(
-                receipt,
-                self.manifest,
-                evidence,
-                runtime_mode,
-                candidate_archives,
-            )
+        assert torch_correctness.runtime_publication_receipt_complete(
+            receipt,
+            self.manifest,
+            evidence,
+            runtime_mode,
+            candidate_archives,
         )
         mismatched_archives = copy.deepcopy(candidate_archives)
         mismatched_archives[0]["sha256"] = "e" * 64
-        self.assertFalse(
+        assert not (
             torch_correctness.runtime_publication_receipt_complete(
                 receipt,
                 self.manifest,
@@ -1897,8 +1841,8 @@ class TorchCorrectnessTest(unittest.TestCase):
             )
         )
 
-    @unittest.skip(
-        "#169 quarantine: production full-reference index/receipt authority is out "
+    @pytest.mark.skip(
+        reason="#169 quarantine: production full-reference index/receipt authority is out "
         "of scope for C1"
     )
     def test_cpu_binding_rejects_rehashed_noncontract_runtime_archives(self):
@@ -1930,7 +1874,7 @@ class TorchCorrectnessTest(unittest.TestCase):
             )
             index_path = Path(directory) / f"{label}-index.json"
             index_path.write_text(json.dumps(index, sort_keys=True) + "\n")
-            with self.assertRaisesRegex(ValueError, "outside descriptor root"):
+            with pytest.raises(ValueError, match="outside descriptor root"):
                 torch_correctness.load_correctness_evidence_index(
                     index_path,
                     manifest,
@@ -1940,7 +1884,7 @@ class TorchCorrectnessTest(unittest.TestCase):
                 )
             hardlink_receipt = Path(trusted_directory) / f"{label}-hardlink.json"
             os.link(receipt, hardlink_receipt)
-            with self.assertRaisesRegex(ValueError, "distinct external file"):
+            with pytest.raises(ValueError, match="distinct external file"):
                 torch_correctness.load_correctness_evidence_index(
                     index_path,
                     manifest,
@@ -1960,24 +1904,20 @@ class TorchCorrectnessTest(unittest.TestCase):
             receipt_document = torch_correctness._load_bounded_json(
                 receipt, "test runtime receipt", require_canonical=True
             )
-            self.assertEqual(
-                loaded["artifacts"][0]["candidate"]["sha256"],
-                torch_correctness._sha256(candidate),
+            assert (loaded["artifacts"][0]["candidate"]["sha256"]) == (
+                torch_correctness._sha256(candidate)
             )
-            self.assertEqual(
-                loaded["source_artifact"]["sha256"],
-                torch_correctness._sha256(index_path),
+            assert (loaded["source_artifact"]["sha256"]) == (
+                torch_correctness._sha256(index_path)
             )
-            self.assertTrue(
-                torch_correctness.correctness_binding_complete(
-                    loaded,
-                    manifest,
-                    evidence,
-                    runtime_receipt=receipt_document,
-                    require_source_artifact=True,
-                )
+            assert torch_correctness.correctness_binding_complete(
+                loaded,
+                manifest,
+                evidence,
+                runtime_receipt=receipt_document,
+                require_source_artifact=True,
             )
-            self.assertFalse(
+            assert not (
                 torch_correctness.correctness_binding_complete(
                     loaded,
                     manifest,
@@ -2006,8 +1946,8 @@ class TorchCorrectnessTest(unittest.TestCase):
             index_path.write_text(
                 json.dumps(refreshed_index, indent=2, sort_keys=True) + "\n"
             )
-            with self.assertRaisesRegex(
-                ValueError, "trusted runtime publication receipt bytes differ"
+            with pytest.raises(
+                ValueError, match="trusted runtime publication receipt bytes differ"
             ):
                 torch_correctness.load_correctness_evidence_index(
                     index_path,
@@ -2016,7 +1956,7 @@ class TorchCorrectnessTest(unittest.TestCase):
                     descriptor_root=directory,
                     runtime_receipt=external_receipt,
                 )
-            self.assertEqual(externally_loaded, loaded)
+            assert (externally_loaded) == (loaded)
             receipt.write_text(
                 json.dumps(receipt_document, indent=2, sort_keys=True) + "\n"
             )
@@ -2038,10 +1978,8 @@ class TorchCorrectnessTest(unittest.TestCase):
                 candidate,
                 "cpu-float64-eager",
             )
-            self.assertTrue(
-                torch_tuning._cpu_correctness_binding_complete(
-                    loaded, manifest, evidence, loaded_receipt
-                )
+            assert torch_tuning._cpu_correctness_binding_complete(
+                loaded, manifest, evidence, loaded_receipt
             )
 
             runtime_mutations = {
@@ -2063,27 +2001,26 @@ class TorchCorrectnessTest(unittest.TestCase):
                 },
             }
             for label, replacement in runtime_mutations.items():
-                with self.subTest(runtime=label):
-                    rewritten = self._rewrite_candidate(
-                        directory,
-                        candidate,
-                        label,
-                        lambda _arrays, metadata, values=replacement: metadata[
-                            "backend_metadata"
-                        ].update(values),
+                rewritten = self._rewrite_candidate(
+                    directory,
+                    candidate,
+                    label,
+                    lambda _arrays, metadata, values=replacement: metadata[
+                        "backend_metadata"
+                    ].update(values),
+                )
+                wrong_mode, wrong_receipt = load_rebuilt_index(
+                    directory,
+                    trusted_directory,
+                    reference,
+                    rewritten,
+                    label,
+                )
+                assert not (
+                    torch_tuning._cpu_correctness_binding_complete(
+                        wrong_mode, manifest, evidence, wrong_receipt
                     )
-                    wrong_mode, wrong_receipt = load_rebuilt_index(
-                        directory,
-                        trusted_directory,
-                        reference,
-                        rewritten,
-                        label,
-                    )
-                    self.assertFalse(
-                        torch_tuning._cpu_correctness_binding_complete(
-                            wrong_mode, manifest, evidence, wrong_receipt
-                        )
-                    )
+                )
 
             float32_directory = Path(directory) / "float32"
             float32_directory.mkdir()
@@ -2100,14 +2037,14 @@ class TorchCorrectnessTest(unittest.TestCase):
                 float32_candidate,
                 "cpu-float32-eager",
             )
-            self.assertFalse(
+            assert not (
                 torch_tuning._cpu_correctness_binding_complete(
                     float32_index, manifest, evidence, float32_receipt
                 )
             )
 
-    @unittest.skip(
-        "#169 quarantine: production full-reference index/receipt authority is out "
+    @pytest.mark.skip(
+        reason="#169 quarantine: production full-reference index/receipt authority is out "
         "of scope for C1"
     )
     def test_index_revalidates_full_correctness_and_physical_matrix(self):
@@ -2149,13 +2086,11 @@ class TorchCorrectnessTest(unittest.TestCase):
             receipt_document = torch_correctness._load_bounded_json(
                 receipt, "test runtime receipt", require_canonical=True
             )
-            self.assertTrue(
-                torch_correctness.correctness_binding_complete(
-                    index,
-                    manifest,
-                    evidence,
-                    runtime_receipt=receipt_document,
-                )
+            assert torch_correctness.correctness_binding_complete(
+                index,
+                manifest,
+                evidence,
+                runtime_receipt=receipt_document,
             )
             index_path = Path(directory) / "correctness-index.json"
             index_path.write_text(json.dumps(index, indent=2, sort_keys=True) + "\n")
@@ -2168,19 +2103,17 @@ class TorchCorrectnessTest(unittest.TestCase):
                 descriptor_root=directory,
                 runtime_receipt=external_receipt,
             )
-            self.assertTrue(
-                torch_correctness.correctness_binding_complete(
-                    loaded,
-                    manifest,
-                    evidence,
-                    runtime_receipt=receipt_document,
-                )
+            assert torch_correctness.correctness_binding_complete(
+                loaded,
+                manifest,
+                evidence,
+                runtime_receipt=receipt_document,
             )
             escaped = copy.deepcopy(index)
             escaped["artifacts"][0]["reference"]["path"] = "../outside.npz"
             index_path.write_text(json.dumps(escaped))
-            with self.assertRaisesRegex(
-                ValueError, "differs from recomputed|dot or empty segment"
+            with pytest.raises(
+                ValueError, match="differs from recomputed|dot or empty segment"
             ):
                 torch_correctness.load_correctness_evidence_index(
                     index_path,
@@ -2191,7 +2124,7 @@ class TorchCorrectnessTest(unittest.TestCase):
                 )
             index["suite_acceptance"]["passed"] = False
             index_path.write_text(json.dumps(index))
-            with self.assertRaisesRegex(ValueError, "differs from recomputed"):
+            with pytest.raises(ValueError, match="differs from recomputed"):
                 torch_correctness.load_correctness_evidence_index(
                     index_path,
                     manifest,
@@ -2200,8 +2133,8 @@ class TorchCorrectnessTest(unittest.TestCase):
                     runtime_receipt=external_receipt,
                 )
 
-    @unittest.skip(
-        "#169 quarantine: production full-reference index/receipt authority is out "
+    @pytest.mark.skip(
+        reason="#169 quarantine: production full-reference index/receipt authority is out "
         "of scope for C1"
     )
     def test_runtime_receipt_prevents_coherent_runtime_relabel(self):
@@ -2234,26 +2167,25 @@ class TorchCorrectnessTest(unittest.TestCase):
                 },
             }
             for label, replacement in replacements.items():
-                with self.subTest(label=label):
-                    relabeled = self._rewrite_candidate(
-                        directory,
-                        candidate,
-                        label,
-                        lambda _arrays, metadata, value=replacement: metadata[
-                            "backend_metadata"
-                        ].update(value),
+                relabeled = self._rewrite_candidate(
+                    directory,
+                    candidate,
+                    label,
+                    lambda _arrays, metadata, value=replacement: metadata[
+                        "backend_metadata"
+                    ].update(value),
+                )
+                with pytest.raises(
+                    ValueError, match="runtime publication receipt differs"
+                ):
+                    torch_correctness.build_correctness_evidence_index(
+                        [reference],
+                        [relabeled],
+                        manifest,
+                        evidence,
+                        descriptor_root=directory,
+                        runtime_receipt=receipt,
                     )
-                    with self.assertRaisesRegex(
-                        ValueError, "runtime publication receipt differs"
-                    ):
-                        torch_correctness.build_correctness_evidence_index(
-                            [reference],
-                            [relabeled],
-                            manifest,
-                            evidence,
-                            descriptor_root=directory,
-                            runtime_receipt=receipt,
-                        )
 
     def test_npz_preflight_rejects_hidden_records_and_allocation_failures(self):
         manifest = self._small_manifest(("stability-energy-dielectric",))
@@ -2264,10 +2196,10 @@ class TorchCorrectnessTest(unittest.TestCase):
             original_digest = torch_correctness._sha256(candidate)
             self._insert_unindexed_local_record(candidate)
             refreshed_digest = torch_correctness._sha256(candidate)
-            self.assertNotEqual(refreshed_digest, original_digest)
+            assert (refreshed_digest) != (original_digest)
             hidden = self._compare_candidate(reference, candidate, manifest)
-            self.assertFalse(hidden["passed"])
-            self.assertIn("indexed local records", hidden["failures"][0]["error"])
+            assert not (hidden["passed"])
+            assert ("indexed local records") in (hidden["failures"][0]["error"])
 
             clean_directory = Path(directory) / "clean"
             clean_directory.mkdir()
@@ -2288,8 +2220,8 @@ class TorchCorrectnessTest(unittest.TestCase):
                 allocation = self._compare_candidate(
                     clean_reference, clean_candidate, manifest
                 )
-            self.assertFalse(allocation["passed"])
-            self.assertEqual(allocation["failures"][0]["key"], "archive/container")
+            assert not (allocation["passed"])
+            assert (allocation["failures"][0]["key"]) == ("archive/container")
 
     def test_npz_preflight_enforces_each_resource_bound_before_numpy_load(self):
         manifest = self._small_manifest(("stability-energy-dielectric",))
@@ -2306,14 +2238,13 @@ class TorchCorrectnessTest(unittest.TestCase):
             )
             for name in limits:
                 with (
-                    self.subTest(limit=name),
                     patch.object(torch_correctness, name, 1),
                     patch.object(
                         torch_correctness.np,
                         "load",
                         side_effect=AssertionError("np.load must not be reached"),
                     ) as loader,
-                    self.assertRaises(ValueError),
+                    pytest.raises(ValueError),
                 ):
                     with torch_correctness._open_bounded_npz(candidate):
                         pass
@@ -2324,9 +2255,9 @@ class TorchCorrectnessTest(unittest.TestCase):
             path = Path(directory) / "candidate.json"
             path.write_text('{"candidate_git_commit":"' + "a" * 40 + '"}')
             with patch.object(torch_correctness, "MAX_CORRECTNESS_JSON_BYTES", 8):
-                with self.assertRaisesRegex(ValueError, "JSON byte bound"):
+                with pytest.raises(ValueError, match="JSON byte bound"):
                     torch_correctness._load_candidate_evidence(path)
-                with self.assertRaisesRegex(ValueError, "JSON byte bound"):
+                with pytest.raises(ValueError, match="JSON byte bound"):
                     torch_correctness.load_correctness_evidence_index(
                         path,
                         {},
@@ -2334,7 +2265,7 @@ class TorchCorrectnessTest(unittest.TestCase):
                         descriptor_root=directory,
                         runtime_receipt=path,
                     )
-                with self.assertRaisesRegex(ValueError, "JSON byte bound"):
+                with pytest.raises(ValueError, match="JSON byte bound"):
                     torch_correctness._load_trusted_manifest(
                         torch_correctness.DEFAULT_MANIFEST
                     )
@@ -2344,13 +2275,13 @@ class TorchCorrectnessTest(unittest.TestCase):
             trusted_copy = Path(directory) / "native_oracle_workloads.json"
             trusted_copy.write_bytes(torch_correctness.DEFAULT_MANIFEST.read_bytes())
             manifest, digest = torch_correctness._load_trusted_manifest(trusted_copy)
-            self.assertEqual(manifest, self.manifest)
-            self.assertEqual(digest, torch_correctness.TRUSTED_MANIFEST_SHA256)
+            assert (manifest) == (self.manifest)
+            assert (digest) == (torch_correctness.TRUSTED_MANIFEST_SHA256)
 
             altered = json.loads(trusted_copy.read_text())
             altered["schema_version"] += 1
             trusted_copy.write_text(json.dumps(altered, indent=2) + "\n")
-            with self.assertRaisesRegex(ValueError, "digest differs"):
+            with pytest.raises(ValueError, match="digest differs"):
                 torch_correctness._load_trusted_manifest(trusted_copy)
 
     def test_dm2_complex_container_uses_float64_state_tolerance(self):
@@ -2360,7 +2291,7 @@ class TorchCorrectnessTest(unittest.TestCase):
             "step/1/state/Ex/0-Dm2/values",
             "complex128",
         )
-        self.assertEqual(actual, self.manifest["tolerances"]["torch"]["dm2"]["float64"])
+        assert (actual) == (self.manifest["tolerances"]["torch"]["dm2"]["float64"])
 
     def test_dm2_float32_500_step_tolerance_is_exact_and_fails_outside_bound(self):
         key = "step/500/state/Ex/0-Dm2/values"
@@ -2371,13 +2302,12 @@ class TorchCorrectnessTest(unittest.TestCase):
             {"Dm2"},
             "ziolkowski-dm2",
         )
-        self.assertEqual(
-            tolerance,
+        assert (tolerance) == (
             {
                 "rtol": 6e-4,
                 "atol": 3e-6,
                 "scope": "strategies/dm2/float32",
-            },
+            }
         )
 
         with tempfile.TemporaryDirectory() as directory:
@@ -2441,21 +2371,19 @@ class TorchCorrectnessTest(unittest.TestCase):
                     include_tolerances=True,
                 )
 
-        self.assertFalse(result["passed"])
+        assert not (result["passed"])
         failure = next(item for item in result["failures"] if item["key"] == key)
-        self.assertEqual(
-            {name: failure[name] for name in ("rtol", "atol", "scope")},
-            tolerance,
+        assert ({name: failure[name] for name in ("rtol", "atol", "scope")}) == (
+            tolerance
         )
         tolerance_result = next(
             item for item in result["tolerance_results"] if item["key"] == key
         )
-        self.assertEqual(
-            {name: tolerance_result[name] for name in ("rtol", "atol", "scope")},
-            tolerance,
-        )
+        assert (
+            {name: tolerance_result[name] for name in ("rtol", "atol", "scope")}
+        ) == (tolerance)
 
-    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is unavailable")
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
     def test_cuda_float32_ziolkowski_500_step_eager_and_graph_archives(self):
         key = "step/500/state/Ex/0-Dm2/values"
         expected_tolerance = {
@@ -2466,68 +2394,57 @@ class TorchCorrectnessTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             modes = (("eager", "default"), ("graph", "reduce-overhead"))
             for graph_mode, compile_mode in modes:
-                with self.subTest(
-                    graph_mode=graph_mode,
-                    compile_mode=compile_mode,
+                torch._dynamo.reset()
+                candidate = (
+                    Path(directory) / f"ziolkowski-dm2-cuda-float32-{graph_mode}.npz"
+                )
+                runtime = {
+                    "device": "cuda:0",
+                    "precision": "float32",
+                    "graph_mode": graph_mode,
+                    "compile_mode": compile_mode,
+                }
+                resolved = historical_probes.resolve_case(
+                    self.probe_bundle,
+                    profile_id="canonical-dm2-0766dbf93288",
+                    case="ziolkowski-dm2",
+                    manifest=self.manifest,
+                    runtime=runtime,
+                    consumer_line=2190,
+                )
+                with patch.object(
+                    native_oracle,
+                    "_checkout_provenance",
+                    side_effect=self._provenance("b" * 40),
                 ):
-                    torch._dynamo.reset()
-                    candidate = (
-                        Path(directory)
-                        / f"ziolkowski-dm2-cuda-float32-{graph_mode}.npz"
-                    )
-                    runtime = {
-                        "device": "cuda:0",
-                        "precision": "float32",
-                        "graph_mode": graph_mode,
-                        "compile_mode": compile_mode,
-                    }
-                    resolved = historical_probes.resolve_case(
-                        self.probe_bundle,
-                        profile_id="canonical-dm2-0766dbf93288",
-                        case="ziolkowski-dm2",
-                        manifest=self.manifest,
-                        runtime=runtime,
-                        consumer_line=2190,
-                    )
-                    with patch.object(
-                        native_oracle,
-                        "_checkout_provenance",
-                        side_effect=self._provenance("b" * 40),
-                    ):
-                        torch_correctness.capture_torch_candidate_from_probe(
-                            resolved,
-                            self.probe_bundle,
-                            self.manifest,
-                            candidate,
-                            trust=PROBE_TRUST,
-                        )
-                    result = self._compare_probe_candidate(
+                    torch_correctness.capture_torch_candidate_from_probe(
                         resolved,
-                        candidate,
+                        self.probe_bundle,
                         self.manifest,
-                        include_tolerances=True,
+                        candidate,
+                        trust=PROBE_TRUST,
                     )
-                    self.assertTrue(result["passed"], result["failures"])
-                    self.assertEqual(result["failures"], [])
-                    records = {
-                        item["key"]: item for item in result["tolerance_results"]
-                    }
-                    self.assertEqual(
-                        {
-                            name: records[key][name]
-                            for name in ("rtol", "atol", "scope")
-                        },
-                        expected_tolerance,
-                    )
-                    with np.load(candidate, allow_pickle=False) as archive:
-                        metadata = native_oracle.read_metadata(archive)
-                        self.assertIn(key, archive.files)
-                    backend = metadata["backend_metadata"]
-                    self.assertEqual(metadata["capture_steps"], [100, 500])
-                    self.assertEqual(backend["device"], "cuda:0")
-                    self.assertEqual(backend["precision"], "float32")
-                    self.assertEqual(backend["graph_mode"], graph_mode)
-                    self.assertEqual(backend["compile_mode"], compile_mode)
+                result = self._compare_probe_candidate(
+                    resolved,
+                    candidate,
+                    self.manifest,
+                    include_tolerances=True,
+                )
+                assert result["passed"]
+                assert (result["failures"]) == ([])
+                records = {item["key"]: item for item in result["tolerance_results"]}
+                assert (
+                    {name: records[key][name] for name in ("rtol", "atol", "scope")}
+                ) == (expected_tolerance)
+                with np.load(candidate, allow_pickle=False) as archive:
+                    metadata = native_oracle.read_metadata(archive)
+                    assert (key) in (archive.files)
+                backend = metadata["backend_metadata"]
+                assert (metadata["capture_steps"]) == ([100, 500])
+                assert (backend["device"]) == ("cuda:0")
+                assert (backend["precision"]) == ("float32")
+                assert (backend["graph_mode"]) == (graph_mode)
+                assert (backend["compile_mode"]) == (compile_mode)
 
     def test_dummy_source_numerics_reuse_nondispersive_tolerance(self):
         for dtype, expected in self.manifest["tolerances"]["torch"][
@@ -2537,48 +2454,39 @@ class TorchCorrectnessTest(unittest.TestCase):
                 "step/100/field/Ex",
                 "step/100/physical/spectrum/Ex",
             ):
-                with self.subTest(dtype=dtype, key=key):
-                    actual = torch_correctness._manifest_tolerance(
-                        self.manifest,
-                        key,
-                        dtype,
-                        {"Dummy"},
-                        "dummy",
-                    )
-                    self.assertEqual(
-                        actual,
-                        {
-                            **expected,
-                            "scope": (f"dummy-source-numerics/dielectric/{dtype}"),
-                        },
-                    )
+                actual = torch_correctness._manifest_tolerance(
+                    self.manifest,
+                    key,
+                    dtype,
+                    {"Dummy"},
+                    "dummy",
+                )
+                assert (actual) == (
+                    {
+                        **expected,
+                        "scope": (f"dummy-source-numerics/dielectric/{dtype}"),
+                    }
+                )
         exact = {"rtol": 0.0, "atol": 0.0, "scope": "exact/dummy"}
         for key in (
             "step/100/time",
             "step/100/state/Ex/0-Dummy/values",
         ):
-            with self.subTest(key=key):
-                self.assertEqual(
-                    torch_correctness._manifest_tolerance(
-                        self.manifest,
-                        key,
-                        "float64",
-                        {"Dummy"},
-                        "dummy",
-                    ),
-                    exact,
+            assert (
+                torch_correctness._manifest_tolerance(
+                    self.manifest,
+                    key,
+                    "float64",
+                    {"Dummy"},
+                    "dummy",
                 )
-        self.assertEqual(
+            ) == (exact)
+        assert (
             torch_correctness._manifest_tolerance(
                 self.manifest,
                 "step/100/field/Ex",
                 "float64",
                 set(),
                 "dummy",
-            ),
-            exact,
-        )
-
-
-if __name__ == "__main__":
-    unittest.main()
+            )
+        ) == (exact)

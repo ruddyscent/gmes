@@ -5,13 +5,13 @@ import json
 import math
 import sys
 import tempfile
-import unittest
 import zipfile
-from contextlib import redirect_stdout
+from contextlib import ExitStack, contextmanager, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
 import numpy as np
+import pytest
 
 from benchmarks import issue123_completion as completion
 from benchmarks import issue123_differential as differential
@@ -24,11 +24,9 @@ class _Archive(dict):
         return list(self)
 
 
-class Issue123DifferentialEvidenceTest(unittest.TestCase):
-    def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
+class _Issue123DifferentialFixture:
+    def initialize(self, stack):
+        self.root = Path(stack.enter_context(tempfile.TemporaryDirectory()))
         self.manifest = native_oracle.load_manifest(differential.DEFAULT_MANIFEST)
         for workload in self.manifest["correctness"]:
             if workload.get("complex") is not True:
@@ -52,20 +50,20 @@ class Issue123DifferentialEvidenceTest(unittest.TestCase):
         self.frozen_geometry = dict(
             differential.FROZEN_PERSISTENT_GEOMETRY_SHA256_BY_CASE
         )
-        geometry_patch = mock.patch.object(
-            differential,
-            "FROZEN_PERSISTENT_GEOMETRY_SHA256_BY_CASE",
-            self.frozen_geometry,
+        stack.enter_context(
+            mock.patch.object(
+                differential,
+                "FROZEN_PERSISTENT_GEOMETRY_SHA256_BY_CASE",
+                self.frozen_geometry,
+            )
         )
-        geometry_patch.start()
-        self.addCleanup(geometry_patch.stop)
-        completion_geometry_patch = mock.patch.object(
-            completion,
-            "FROZEN_DIFFERENTIAL_PERSISTENT_GEOMETRY_SHA256_BY_CASE",
-            self.frozen_geometry,
+        stack.enter_context(
+            mock.patch.object(
+                completion,
+                "FROZEN_DIFFERENTIAL_PERSISTENT_GEOMETRY_SHA256_BY_CASE",
+                self.frozen_geometry,
+            )
         )
-        completion_geometry_patch.start()
-        self.addCleanup(completion_geometry_patch.stop)
 
     def descriptor(self, path):
         raw = path.read_bytes()
@@ -437,22 +435,22 @@ class Issue123DifferentialEvidenceTest(unittest.TestCase):
                 artifact_loader,
                 source=True,
             )
-            self.assertEqual(path.read_bytes(), raw)
+            assert path.read_bytes() == raw
             differential._preflight_source_npz(path, f"fixture {role} source")
             sources.append((path, descriptor))
-        self.assertNotEqual(sources[0][0], sources[1][0])
+        assert sources[0][0] != sources[1][0]
         reference_identity = tuple(
             sources[0][1][name] for name in ("path", "sha256", "size_bytes")
         )
         prior = reference_sources.setdefault(expected["case"], reference_identity)
-        self.assertEqual(prior, reference_identity)
+        assert prior == reference_identity
         if sources[0][1]["path"] not in used_paths:
-            self.assertNotIn(sources[0][1]["sha256"], used_digests)
+            assert sources[0][1]["sha256"] not in used_digests
             used_paths.add(sources[0][1]["path"])
             used_digests.add(sources[0][1]["sha256"])
         candidate_descriptor = sources[1][1]
-        self.assertNotIn(candidate_descriptor["path"], used_paths)
-        self.assertNotIn(candidate_descriptor["sha256"], used_digests)
+        assert candidate_descriptor["path"] not in used_paths
+        assert candidate_descriptor["sha256"] not in used_digests
         used_paths.add(candidate_descriptor["path"])
         used_digests.add(candidate_descriptor["sha256"])
 
@@ -685,58 +683,59 @@ class Issue123DifferentialEvidenceTest(unittest.TestCase):
         }
         return arrays, metadata, workload, expected
 
+
+class TestIssue123DifferentialEvidence(_Issue123DifferentialFixture):
+    @pytest.fixture(autouse=True)
+    def _initialize_fixture(self):
+        with issue123_differential_fixture(self):
+            yield
+
     def test_valid_index_recomputes_every_raw_projection(self):
         document = self.document()
         result = self.load(document)
-        self.assertTrue(result["passed"])
-        self.assertEqual(len(result["cases"]), 2)
+        assert result["passed"]
+        assert len(result["cases"]) == 2
 
         self.validate_completion(document)
         self.validate_completion_mirror(document)
 
     def test_manifest_record_capture_and_tolerance_contracts_are_literal(self):
-        self.assertEqual(
-            self.candidate["manifest_sha256"],
-            differential.TRUSTED_MANIFEST_SHA256,
-        )
+        assert self.candidate["manifest_sha256"] == differential.TRUSTED_MANIFEST_SHA256
         paired = differential.expected_records(self.manifest, "paired-real")
-        self.assertEqual(len(paired), 16)
-        self.assertEqual(
-            [(record["case"], record["device"]) for record in paired],
-            [
-                (case, device)
-                for case in differential.PAIRED_CASES
-                for device in ("cpu", "cuda:0")
-            ],
-        )
-        self.assertEqual(
+        assert len(paired) == 16
+        assert [(record["case"], record["device"]) for record in paired] == [
+            (case, device)
+            for case in differential.PAIRED_CASES
+            for device in ("cpu", "cuda:0")
+        ]
+        assert (
             len(
                 paired + differential.expected_records(self.manifest, "single-gpu-cuda")
-            ),
-            18,
+            )
+            == 18
         )
 
         changed = copy.deepcopy(self.manifest)
         changed["correctness"][0]["complex"] = not changed["correctness"][0].get(
             "complex", False
         )
-        with self.assertRaisesRegex(ValueError, "frozen case closure"):
+        with pytest.raises(ValueError, match="frozen case closure"):
             differential.expected_records(changed, "paired-real")
 
         changed = copy.deepcopy(self.manifest)
         differential._workload(changed, "single-gpu-2d")["capture_steps"] = [100]
-        with self.assertRaisesRegex(ValueError, "frozen contract"):
+        with pytest.raises(ValueError, match="frozen contract"):
             differential.frozen_projection_steps(
                 changed, "single-gpu-cuda", "single-gpu-2d", "cuda:0"
             )
 
         changed = copy.deepcopy(self.manifest)
         changed["tolerances"]["torch"]["dm2"]["float32"]["rtol"] = 1.0
-        with self.assertRaisesRegex(ValueError, "frozen values"):
+        with pytest.raises(ValueError, match="frozen values"):
             differential.expected_records(changed, "single-gpu-cuda")
 
         changed_candidate = dict(self.candidate, manifest_sha256="f" * 64)
-        with self.assertRaisesRegex(ValueError, "trusted repository manifest"):
+        with pytest.raises(ValueError, match="trusted repository manifest"):
             differential._candidate_projection(changed_candidate)
 
     def test_full_sources_reproduce_every_compact_group_exactly(self):
@@ -763,7 +762,7 @@ class Issue123DifferentialEvidenceTest(unittest.TestCase):
             group_consumer=None,
             source_bindings=None,
         ):
-            self.assertIsNotNone(source_bindings)
+            assert source_bindings is not None
             reference = {
                 name: value.copy() for name, value in baseline_reference.items()
             }
@@ -780,6 +779,8 @@ class Issue123DifferentialEvidenceTest(unittest.TestCase):
                 expected_record["case"],
                 expected_record["device"],
             )
+            # Groups are consumed in order into one candidate document; changing
+            # that sequence would change the archive ledger being verified.
             for ordinal, group in enumerate(groups):
                 group_consumer(
                     ordinal,
@@ -825,7 +826,7 @@ class Issue123DifferentialEvidenceTest(unittest.TestCase):
             differential, "_projection_arrays", side_effect=regenerate
         ):
             artifacts, _names = validate_record(record)
-            self.assertEqual(len(artifacts), 1)
+            assert len(artifacts) == 1
 
             changed = copy.deepcopy(document)["cases"][0]
             substituted = {
@@ -846,7 +847,7 @@ class Issue123DifferentialEvidenceTest(unittest.TestCase):
                 0,
                 substituted,
             )
-            with self.assertRaisesRegex(ValueError, "complete source archive"):
+            with pytest.raises(ValueError, match="complete source archive"):
                 validate_record(changed)
 
             fresh_document = self.document()
@@ -855,35 +856,34 @@ class Issue123DifferentialEvidenceTest(unittest.TestCase):
             source_path.unlink()
             np.savez_compressed(source_path, marker=np.asarray([9999], dtype=np.int64))
             changed["candidate_source"] = self.descriptor(source_path)
-            with self.assertRaisesRegex(ValueError, "complete source archive"):
+            with pytest.raises(ValueError, match="complete source archive"):
                 validate_record(changed)
 
-    def test_unindexed_local_records_fail_after_descriptor_refresh(self):
-        for target in ("projection", "source"):
-            with self.subTest(target=target):
-                document = self.document()
-                record = document["cases"][0]
-                descriptor = (
-                    record["candidate"][0]
-                    if target == "projection"
-                    else record["candidate_source"]
-                )
-                path = self.root / descriptor["path"]
-                path.write_bytes(self.insert_unindexed_local_record(path.read_bytes()))
-                refreshed = self.descriptor(path)
-                if target == "projection":
-                    record["candidate"][0] = refreshed
-                else:
-                    record["candidate_source"] = refreshed
-                with self.assertRaisesRegex(ValueError, "unindexed|gap|canonical"):
-                    self.load(document)
+    @pytest.mark.parametrize("target", ("projection", "source"), ids=str)
+    def test_unindexed_local_records_fail_after_descriptor_refresh(self, target):
+        document = self.document()
+        record = document["cases"][0]
+        descriptor = (
+            record["candidate"][0]
+            if target == "projection"
+            else record["candidate_source"]
+        )
+        path = self.root / descriptor["path"]
+        path.write_bytes(self.insert_unindexed_local_record(path.read_bytes()))
+        refreshed = self.descriptor(path)
+        if target == "projection":
+            record["candidate"][0] = refreshed
+        else:
+            record["candidate_source"] = refreshed
+        with pytest.raises(ValueError, match="unindexed|gap|canonical"):
+            self.load(document)
 
     def test_standalone_json_reads_are_bounded_before_parse(self):
         document = self.document()
         path = self.write_index(document)
         with (
             mock.patch.object(differential, "MAX_INDEX_BYTES", path.stat().st_size - 1),
-            self.assertRaisesRegex(ValueError, "size limit"),
+            pytest.raises(ValueError, match="size limit"),
         ):
             differential.load_differential_evidence_index(
                 path,
@@ -898,14 +898,14 @@ class Issue123DifferentialEvidenceTest(unittest.TestCase):
             mock.patch.object(
                 differential, "MAX_INDEX_BYTES", candidate_path.stat().st_size - 1
             ),
-            self.assertRaisesRegex(ValueError, "size limit"),
+            pytest.raises(ValueError, match="size limit"),
         ):
             differential._load_candidate_evidence(candidate_path)
 
         manifest_size = differential.DEFAULT_MANIFEST.stat().st_size
         with (
             mock.patch.object(differential, "MAX_INDEX_BYTES", manifest_size - 1),
-            self.assertRaisesRegex(ValueError, "size limit"),
+            pytest.raises(ValueError, match="size limit"),
         ):
             differential._load_trusted_manifest(differential.DEFAULT_MANIFEST)
 
@@ -913,32 +913,31 @@ class Issue123DifferentialEvidenceTest(unittest.TestCase):
         capture_steps = differential._frozen_capture_steps(
             self.manifest, "single-gpu-3d"
         )
-        self.assertTrue(all(type(step) is int and step > 0 for step in capture_steps))
-        self.assertNotIn(0, capture_steps)
-        self.assertEqual(
-            differential.frozen_projection_groups(
-                self.manifest,
-                "single-gpu-cuda",
-                "single-gpu-3d",
-                "cuda:0",
-            ),
-            [[0, 1], [2, 5], [20, 100]],
-        )
+        assert all(type(step) is int and step > 0 for step in capture_steps)
+        assert 0 not in capture_steps
+        assert differential.frozen_projection_groups(
+            self.manifest,
+            "single-gpu-cuda",
+            "single-gpu-3d",
+            "cuda:0",
+        ) == [[0, 1], [2, 5], [20, 100]]
         document = self.document()
         record = next(
             item for item in document["cases"] if item["case"] == "single-gpu-3d"
         )
-        self.assertEqual(record["projection_steps"], [0, 1, 2, 5, 20, 100])
+        assert record["projection_steps"] == [0, 1, 2, 5, 20, 100]
         descriptors = [
             descriptor
             for item in document["cases"]
             for role in ("reference", "candidate")
             for descriptor in item[role]
         ]
-        self.assertEqual(len(descriptors), 8)
-        self.assertEqual(len({item["path"] for item in descriptors}), 8)
-        self.assertEqual(len({item["sha256"] for item in descriptors}), 8)
+        assert len(descriptors) == 8
+        assert len({item["path"] for item in descriptors}) == 8
+        assert len({item["sha256"] for item in descriptors}) == 8
         comments = []
+        # Walk the completed ledger in order so uniqueness covers every role and
+        # projection group from the same candidate archive set.
         for item in document["cases"]:
             for role in ("reference", "candidate"):
                 for ordinal, (group, descriptor) in enumerate(
@@ -947,26 +946,23 @@ class Issue123DifferentialEvidenceTest(unittest.TestCase):
                     raw = (self.root / descriptor["path"]).read_bytes()
                     with zipfile.ZipFile(io.BytesIO(raw)) as archive:
                         comment = archive.comment
-                    self.assertEqual(
-                        comment,
-                        differential._group_archive_comment(
-                            document["scope"],
-                            item["case"],
-                            item["device"],
-                            role,
-                            ordinal,
-                            group,
-                            self.candidate,
-                        ),
+                    assert comment == differential._group_archive_comment(
+                        document["scope"],
+                        item["case"],
+                        item["device"],
+                        role,
+                        ordinal,
+                        group,
+                        self.candidate,
                     )
                     comments.append(comment)
-        self.assertEqual(len(set(comments)), 8)
+        assert len(set(comments)) == 8
 
     def test_comparison_is_frozen_not_artifact_selected(self):
         document = self.document()
         document["cases"][0]["comparison"]["rtol"] = 1.0
         document["cases"][0]["comparison"]["atol"] = 1.0
-        with self.assertRaisesRegex(ValueError, "comparison contract differs"):
+        with pytest.raises(ValueError, match="comparison contract differs"):
             self.load(document)
 
         artifact = completion.LoadedArtifact(
@@ -975,9 +971,8 @@ class Issue123DifferentialEvidenceTest(unittest.TestCase):
             raw=b"",
             document=document,
         )
-        with self.assertRaisesRegex(
-            completion.EvidenceError,
-            "could not be independently recomputed",
+        with pytest.raises(
+            completion.EvidenceError, match="could not be independently recomputed"
         ):
             completion._validate_differential(
                 artifact,
@@ -987,87 +982,86 @@ class Issue123DifferentialEvidenceTest(unittest.TestCase):
                 scope="single-gpu-cuda",
             )
 
-    def test_single_gpu_precision_and_projection_steps_are_frozen(self):
+    @pytest.mark.parametrize(
+        ("field", "replacement"),
+        (("precision", "float32"), ("projection_steps", [100])),
+        ids=("precision", "projection-steps"),
+    )
+    def test_single_gpu_precision_and_projection_steps_are_frozen(
+        self, field, replacement
+    ):
         required = differential.expected_records(self.manifest, "single-gpu-cuda")
-        self.assertEqual(
-            required,
-            [
-                {
-                    "case": "single-gpu-2d",
-                    "device": "cuda:0",
-                    "precision": "float32",
-                },
-                {
-                    "case": "single-gpu-3d",
-                    "device": "cuda:0",
-                    "precision": "float64",
-                },
-            ],
-        )
+        assert required == [
+            {
+                "case": "single-gpu-2d",
+                "device": "cuda:0",
+                "precision": "float32",
+            },
+            {
+                "case": "single-gpu-3d",
+                "device": "cuda:0",
+                "precision": "float64",
+            },
+        ]
         document = self.document()
-        self.assertEqual(document["cases"][0]["projection_steps"], [100])
-        self.assertEqual(
-            document["cases"][1]["projection_steps"], [0, 1, 2, 5, 20, 100]
+        assert document["cases"][0]["projection_steps"] == [100]
+        assert document["cases"][1]["projection_steps"] == [0, 1, 2, 5, 20, 100]
+        assert document["cases"][1]["projection_groups"] == [[0, 1], [2, 5], [20, 100]]
+        invalid = copy.deepcopy(document)
+        invalid["cases"][1][field] = replacement
+        with pytest.raises(
+            ValueError,
+            match="case closure differs|identity differs|projection steps",
+        ):
+            self.load(invalid)
+
+    @pytest.mark.parametrize(
+        "steps", ([100, 20], [20, 99]), ids=("reordered", "relabeled")
+    )
+    def test_normalized_projection_steps_reject_reordering_and_relabelling(self, steps):
+        document = self.document()
+        document["cases"][1]["projection_steps"] = steps
+        with pytest.raises(ValueError, match="projection steps"):
+            self.load(document)
+        with pytest.raises(completion.EvidenceError):
+            self.validate_completion_mirror(document)
+
+    @pytest.mark.parametrize("mutation", ("missing", "reordered", "duplicate"), ids=str)
+    def test_normalized_projection_groups_reject_missing_reordered_and_duplicate(
+        self, mutation
+    ):
+        document = self.document()
+        groups = document["cases"][1]["projection_groups"]
+        if mutation == "missing":
+            groups.pop()
+        elif mutation == "reordered":
+            groups[0], groups[1] = groups[1], groups[0]
+        else:
+            groups[1] = copy.deepcopy(groups[0])
+        with pytest.raises(ValueError, match="projection groups differ"):
+            self.load(document)
+
+    @pytest.mark.parametrize("mutation", ("missing", "reordered", "duplicate"), ids=str)
+    def test_group_descriptor_lists_reject_missing_reordered_and_duplicate(
+        self, mutation
+    ):
+        document = self.document()
+        record = document["cases"][1]
+        for role in ("reference", "candidate"):
+            descriptors = record[role]
+            if mutation == "missing":
+                descriptors.pop()
+            elif mutation == "reordered":
+                descriptors[0], descriptors[1] = descriptors[1], descriptors[0]
+            else:
+                descriptors[1] = copy.deepcopy(descriptors[0])
+        message = (
+            "descriptor groups differ"
+            if mutation == "missing"
+            else "NPZ group identity differs|reuses artifact path or bytes"
         )
-        self.assertEqual(
-            document["cases"][1]["projection_groups"], [[0, 1], [2, 5], [20, 100]]
-        )
-        for field in ("precision", "projection_steps"):
-            with self.subTest(field=field):
-                invalid = copy.deepcopy(document)
-                invalid["cases"][1][field] = (
-                    "float32" if field == "precision" else [100]
-                )
-                with self.assertRaisesRegex(
-                    ValueError,
-                    "case closure differs|identity differs|projection steps",
-                ):
-                    self.load(invalid)
-
-    def test_normalized_projection_steps_reject_reordering_and_relabelling(self):
-        for steps in ([100, 20], [20, 99]):
-            with self.subTest(steps=steps):
-                document = self.document()
-                document["cases"][1]["projection_steps"] = steps
-                with self.assertRaisesRegex(ValueError, "projection steps"):
-                    self.load(document)
-                with self.assertRaises(completion.EvidenceError):
-                    self.validate_completion_mirror(document)
-
-    def test_normalized_projection_groups_reject_missing_reordered_and_duplicate(self):
-        for mutation in ("missing", "reordered", "duplicate"):
-            with self.subTest(mutation=mutation):
-                document = self.document()
-                groups = document["cases"][1]["projection_groups"]
-                if mutation == "missing":
-                    groups.pop()
-                elif mutation == "reordered":
-                    groups[0], groups[1] = groups[1], groups[0]
-                else:
-                    groups[1] = copy.deepcopy(groups[0])
-                with self.assertRaisesRegex(ValueError, "projection groups differ"):
-                    self.load(document)
-
-    def test_group_descriptor_lists_reject_missing_reordered_and_duplicate(self):
-        for mutation in ("missing", "reordered", "duplicate"):
-            with self.subTest(mutation=mutation):
-                document = self.document()
-                record = document["cases"][1]
-                for role in ("reference", "candidate"):
-                    descriptors = record[role]
-                    if mutation == "missing":
-                        descriptors.pop()
-                    elif mutation == "reordered":
-                        descriptors[0], descriptors[1] = descriptors[1], descriptors[0]
-                    else:
-                        descriptors[1] = copy.deepcopy(descriptors[0])
-                message = (
-                    "descriptor groups differ"
-                    if mutation == "missing"
-                    else "NPZ group identity differs|reuses artifact path or bytes"
-                )
-                with self.assertRaisesRegex(ValueError, message):
-                    self.load(document)
+        with pytest.raises(ValueError, match=message):
+            self.load(document)
 
     def test_group_npz_identity_is_exact_deterministic_and_has_no_extra_members(self):
         document = self.document()
@@ -1093,16 +1087,13 @@ class Issue123DifferentialEvidenceTest(unittest.TestCase):
             group, document["scope"], record["case"], record["device"]
         )
         with zipfile.ZipFile(path) as archive:
-            self.assertEqual(archive.comment, expected_comment)
-            self.assertEqual(
-                [member.filename for member in archive.infolist()],
-                [f"{name}.npy" for name in names],
-            )
-            self.assertTrue(
-                all(
-                    member.compress_type == zipfile.ZIP_DEFLATED
-                    for member in archive.infolist()
-                )
+            assert archive.comment == expected_comment
+            assert [member.filename for member in archive.infolist()] == [
+                f"{name}.npy" for name in names
+            ]
+            assert all(
+                member.compress_type == zipfile.ZIP_DEFLATED
+                for member in archive.infolist()
             )
 
         arrays = self.arrays(np.float64, "single-gpu-3d")
@@ -1112,12 +1103,10 @@ class Issue123DifferentialEvidenceTest(unittest.TestCase):
             differential._write_npz(
                 output, self.group_arrays(arrays, group), expected_comment
             )
-            self.assertGreater(output.stat().st_size, 0)
-            self.assertLessEqual(
-                output.stat().st_size, differential.MAX_NPZ_ARCHIVE_BYTES
-            )
-        self.assertEqual(first.read_bytes(), second.read_bytes())
-        self.assertEqual(path.read_bytes(), first.read_bytes())
+            assert output.stat().st_size > 0
+            assert output.stat().st_size <= differential.MAX_NPZ_ARCHIVE_BYTES
+        assert first.read_bytes() == second.read_bytes()
+        assert path.read_bytes() == first.read_bytes()
 
         bounded = self.root / "bounded-output.npz"
         with (
@@ -1126,17 +1115,17 @@ class Issue123DifferentialEvidenceTest(unittest.TestCase):
                 "MAX_NPZ_ARCHIVE_BYTES",
                 len(first.read_bytes()) - 1,
             ),
-            self.assertRaisesRegex(ValueError, "archive size exceeds"),
+            pytest.raises(ValueError, match="archive size exceeds"),
         ):
             differential._write_npz(
                 bounded, self.group_arrays(arrays, group), expected_comment
             )
-        self.assertFalse(bounded.exists())
+        assert not (bounded.exists())
 
         with zipfile.ZipFile(path, "a") as archive:
             archive.comment = b"{}"
         record["candidate"][ordinal] = self.descriptor(path)
-        with self.assertRaisesRegex(ValueError, "NPZ group identity differs"):
+        with pytest.raises(ValueError, match="NPZ group identity differs"):
             self.load(document)
 
     def test_npz_preflight_rejects_noncanonical_members_before_numpy_load(self):
@@ -1256,7 +1245,7 @@ class Issue123DifferentialEvidenceTest(unittest.TestCase):
             first_member = archive.infolist()[0]
         encrypted[first_member.header_offset + 6] |= 0x01
         central = encrypted.find(b"PK\x01\x02")
-        self.assertGreaterEqual(central, 0)
+        assert central >= 0
         encrypted[central + 8] |= 0x01
         malformed["encrypted"] = bytes(encrypted)
 
@@ -1284,25 +1273,31 @@ class Issue123DifferentialEvidenceTest(unittest.TestCase):
         ) | 0x07
         malformed["invalid-deflate"] = bytes(invalid_deflate)
 
+        # These corruptions derive from one canonical archive, including mutations
+        # whose offsets were discovered from that archive, so keep the matrix local.
         for mutation, malicious_raw in malformed.items():
             with (
-                self.subTest(mutation=mutation),
                 mock.patch.object(
                     differential.np,
                     "load",
                     side_effect=AssertionError("np.load must not run before preflight"),
                 ) as load,
             ):
-                with self.assertRaises(ValueError):
+                with pytest.raises(ValueError):
                     differential._load_projection(
                         malicious_raw, names, comment, "malicious group"
                     )
                 load.assert_not_called()
 
-    def test_generic_source_npz_preflight_accepts_stored_versions_and_metadata(self):
+    @pytest.mark.parametrize(
+        "version", ((1, 0), (2, 0), (3, 0)), ids=("npy-v1", "npy-v2", "npy-v3")
+    )
+    def test_generic_source_npz_preflight_accepts_stored_versions_and_metadata(
+        self, version
+    ):
         def npy_payload(array, version):
             array = np.asarray(array)
-            self.assertTrue(array.flags.c_contiguous)
+            assert array.flags.c_contiguous
             header = io.BytesIO()
             writer = (
                 np.lib.format.write_array_header_1_0
@@ -1322,27 +1317,19 @@ class Issue123DifferentialEvidenceTest(unittest.TestCase):
                 payload = payload[:6] + b"\x03\x00" + payload[8:]
             return payload + array.tobytes(order="C")
 
-        for version in ((1, 0), (2, 0), (3, 0)):
-            with self.subTest(version=version):
-                path = self.root / f"source-{version[0]}.npz"
-                with zipfile.ZipFile(
-                    path, "w", compression=zipfile.ZIP_STORED
-                ) as archive:
-                    archive.writestr(
-                        "value.npy",
-                        npy_payload(np.arange(4, dtype=np.float64), version),
-                    )
-                    archive.writestr(
-                        "metadata.json.npy",
-                        npy_payload(np.asarray('{"schema":1}'), version),
-                    )
-                resolved, binding = differential._preflight_source_npz(
-                    path, "generic source"
-                )
-                self.assertEqual(resolved, path.resolve())
-                self.assertEqual(
-                    binding, differential._source_archive_identity(resolved)
-                )
+        path = self.root / f"source-{version[0]}.npz"
+        with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_STORED) as archive:
+            archive.writestr(
+                "value.npy",
+                npy_payload(np.arange(4, dtype=np.float64), version),
+            )
+            archive.writestr(
+                "metadata.json.npy",
+                npy_payload(np.asarray('{"schema":1}'), version),
+            )
+        resolved, binding = differential._preflight_source_npz(path, "generic source")
+        assert resolved == path.resolve()
+        assert binding == differential._source_archive_identity(resolved)
 
     def test_generic_source_npz_preflight_rejects_unsafe_dtypes(self):
         def payload(dtype, *, name="value.npy"):
@@ -1368,13 +1355,10 @@ class Issue123DifferentialEvidenceTest(unittest.TestCase):
             ("subarray.npy", ("<f8", (2,))),
             ("metadata.json.npy", "O"),
         ):
-            with self.subTest(name=name):
-                with self.assertRaisesRegex(
-                    ValueError, "shape or dtype|payload contract"
-                ):
-                    differential._preflight_source_npz(
-                        payload(dtype, name=name), "unsafe source"
-                    )
+            with pytest.raises(ValueError, match="shape or dtype|payload contract"):
+                differential._preflight_source_npz(
+                    payload(dtype, name=name), "unsafe source"
+                )
         header = io.BytesIO()
         np.lib.format.write_array_header_1_0(
             header,
@@ -1383,10 +1367,17 @@ class Issue123DifferentialEvidenceTest(unittest.TestCase):
         fortran_path = self.root / "unsafe-fortran.npz"
         with zipfile.ZipFile(fortran_path, "w") as archive:
             archive.writestr("value.npy", header.getvalue() + bytes(32))
-        with self.assertRaisesRegex(ValueError, "shape or dtype"):
+        with pytest.raises(ValueError, match="shape or dtype"):
             differential._preflight_source_npz(fortran_path, "unsafe source")
 
-    def test_builder_preflights_huge_and_truncated_source_before_loaders(self):
+    @pytest.mark.parametrize(
+        ("name", "shape", "payload_bytes"),
+        (("huge-shape", (2**31 - 1,), 0), ("truncated", (2,), 8)),
+        ids=("huge-shape", "truncated-payload"),
+    )
+    def test_builder_preflights_huge_and_truncated_source_before_loaders(
+        self, name, shape, payload_bytes
+    ):
         def malformed(shape, payload_bytes):
             header = io.BytesIO()
             np.lib.format.write_array_header_1_0(
@@ -1402,58 +1393,52 @@ class Issue123DifferentialEvidenceTest(unittest.TestCase):
                 archive.writestr("value.npy", header.getvalue() + bytes(payload_bytes))
             return path
 
-        for name, path in (
-            ("huge-shape", malformed((2**31 - 1,), 0)),
-            ("truncated", malformed((2,), 8)),
+        path = malformed(shape, payload_bytes)
+        with (
+            mock.patch.object(
+                differential.torch_correctness,
+                "_archive_record",
+                side_effect=AssertionError("archive loader must not run"),
+            ) as archive_record,
+            mock.patch.object(
+                differential.torch_correctness,
+                "compare_torch_archives",
+                side_effect=AssertionError("comparison must not run"),
+            ) as compare,
+            mock.patch.object(
+                differential.np,
+                "load",
+                side_effect=AssertionError("np.load must not run"),
+            ) as load,
+            pytest.raises(ValueError),
         ):
-            with (
-                self.subTest(name=name),
-                mock.patch.object(
-                    differential.torch_correctness,
-                    "_archive_record",
-                    side_effect=AssertionError("archive loader must not run"),
-                ) as archive_record,
-                mock.patch.object(
-                    differential.torch_correctness,
-                    "compare_torch_archives",
-                    side_effect=AssertionError("comparison must not run"),
-                ) as compare,
-                mock.patch.object(
-                    differential.np,
-                    "load",
-                    side_effect=AssertionError("np.load must not run"),
-                ) as load,
-                self.assertRaises(ValueError),
-            ):
-                differential.build_differential_evidence(
-                    [path],
-                    [],
-                    self.manifest,
-                    self.candidate,
-                    scope="single-gpu-cuda",
-                    descriptor_root=self.root,
-                    output_directory=self.root / f"output-{name}",
-                )
-            archive_record.assert_not_called()
-            compare.assert_not_called()
-            load.assert_not_called()
+            differential.build_differential_evidence(
+                [path],
+                [],
+                self.manifest,
+                self.candidate,
+                scope="single-gpu-cuda",
+                descriptor_root=self.root,
+                output_directory=self.root / f"output-{name}",
+            )
+        archive_record.assert_not_called()
+        compare.assert_not_called()
+        load.assert_not_called()
 
-    def test_early_field_and_state_tamper_are_recomputed(self):
-        for name in (
-            "step/1/field/Ex",
-            "step/5/state/Ex/0-Cpml/values",
-        ):
-            with self.subTest(name=name):
-                document = self.document()
-                arrays = self.arrays(np.float64, "single-gpu-3d")
-                arrays[name].flat[0] += 1e-3
-                if name == "step/1/field/Ex":
-                    self.refresh_physical(arrays, 1)
-                self.rewrite_candidate(document, 1, arrays)
-                with self.assertRaisesRegex(
-                    ValueError, "recomputed differential failed"
-                ):
-                    self.load(document)
+    @pytest.mark.parametrize(
+        "name",
+        ("step/1/field/Ex", "step/5/state/Ex/0-Cpml/values"),
+        ids=("early-field", "early-state"),
+    )
+    def test_early_field_and_state_tamper_are_recomputed(self, name):
+        document = self.document()
+        arrays = self.arrays(np.float64, "single-gpu-3d")
+        arrays[name].flat[0] += 1e-3
+        if name == "step/1/field/Ex":
+            self.refresh_physical(arrays, 1)
+        self.rewrite_candidate(document, 1, arrays)
+        with pytest.raises(ValueError, match="recomputed differential failed"):
+            self.load(document)
 
     def test_early_and_late_tolerance_modes_are_step_derived(self):
         early_name = "step/1/field/Ex"
@@ -1480,39 +1465,29 @@ class Issue123DifferentialEvidenceTest(unittest.TestCase):
             "cuda:0",
             late_name,
         )
-        self.assertEqual(early["mode"], differential.ELEMENTWISE_COMPARISON_MODE)
-        self.assertEqual(
-            differential._active_tolerance_models("single-gpu-3d"),
-            (
-                "pml",
-                "dcp-ade",
-                "dcp-plrc",
-                "dcp-rc",
-                "dielectric",
-                "drude",
-                "lorentz",
-            ),
+        assert early["mode"] == differential.ELEMENTWISE_COMPARISON_MODE
+        assert differential._active_tolerance_models("single-gpu-3d") == (
+            "pml",
+            "dcp-ade",
+            "dcp-plrc",
+            "dcp-rc",
+            "dielectric",
+            "drude",
+            "lorentz",
         )
-        self.assertNotIn("dm2", differential._active_tolerance_models("single-gpu-3d"))
-        self.assertEqual(
-            early,
-            {
-                "mode": differential.ELEMENTWISE_COMPARISON_MODE,
-                "rtol": 5e-12,
-                "atol": 5e-13,
-            },
-        )
-        self.assertEqual(
-            early_state,
-            {
-                "mode": differential.ELEMENTWISE_COMPARISON_MODE,
-                **self.manifest["tolerances"]["torch"]["pml"]["float64"],
-            },
-        )
-        self.assertEqual(late["mode"], differential.NORMALIZED_COMPARISON_MODE)
-        self.assertEqual(
-            late["absolute_scale_floor"],
-            differential.NORMALIZED_ABSOLUTE_SCALE_FLOOR,
+        assert "dm2" not in differential._active_tolerance_models("single-gpu-3d")
+        assert early == {
+            "mode": differential.ELEMENTWISE_COMPARISON_MODE,
+            "rtol": 5e-12,
+            "atol": 5e-13,
+        }
+        assert early_state == {
+            "mode": differential.ELEMENTWISE_COMPARISON_MODE,
+            **self.manifest["tolerances"]["torch"]["pml"]["float64"],
+        }
+        assert late["mode"] == differential.NORMALIZED_COMPARISON_MODE
+        assert (
+            late["absolute_scale_floor"] == differential.NORMALIZED_ABSOLUTE_SCALE_FLOOR
         )
 
         reference = np.full(16, 0.25, dtype=np.float64)
@@ -1524,7 +1499,7 @@ class Issue123DifferentialEvidenceTest(unittest.TestCase):
         _metrics, artifact_selected_passed = differential._compare_arrays(
             {early_name: reference}, {early_name: candidate}, suite
         )
-        self.assertTrue(artifact_selected_passed)
+        assert artifact_selected_passed
         _metrics, early_passed = differential._compare_arrays(
             {early_name: reference},
             {early_name: candidate},
@@ -1537,8 +1512,8 @@ class Issue123DifferentialEvidenceTest(unittest.TestCase):
             suite,
             array_comparisons={late_name: late},
         )
-        self.assertFalse(early_passed)
-        self.assertTrue(late_passed)
+        assert not (early_passed)
+        assert late_passed
 
     def test_active_early_field_tolerance_rejects_dm2_sized_drift(self):
         document = self.document()
@@ -1546,9 +1521,9 @@ class Issue123DifferentialEvidenceTest(unittest.TestCase):
         arrays["step/1/field/Ex"].flat[0] += 1e-11
         self.refresh_physical(arrays, 1)
         self.rewrite_candidate(document, 1, arrays)
-        with self.assertRaisesRegex(ValueError, "recomputed differential failed"):
+        with pytest.raises(ValueError, match="recomputed differential failed"):
             self.load(document)
-        with self.assertRaises(completion.EvidenceError):
+        with pytest.raises(completion.EvidenceError):
             self.validate_completion_mirror(document)
 
     def test_cross_group_persistent_topology_mutation_is_rejected(self):
@@ -1558,7 +1533,7 @@ class Issue123DifferentialEvidenceTest(unittest.TestCase):
         indices[[0, 1]] = indices[[1, 0]]
         self.rewrite_reference(document, 1, arrays)
         self.rewrite_candidate(document, 1, arrays)
-        with self.assertRaisesRegex(ValueError, "change across capture steps"):
+        with pytest.raises(ValueError, match="change across capture steps"):
             self.load(document)
 
     def test_frozen_geometry_rejects_count_preserving_strategy_swap(self):
@@ -1572,26 +1547,24 @@ class Issue123DifferentialEvidenceTest(unittest.TestCase):
             dielectric[0] = cpml_coordinate
         self.rewrite_reference(document, 1, arrays)
         self.rewrite_candidate(document, 1, arrays)
-        with self.assertRaisesRegex(ValueError, "persistent geometry differs"):
+        with pytest.raises(ValueError, match="persistent geometry differs"):
             self.load(document)
-        with self.assertRaises(completion.EvidenceError):
+        with pytest.raises(completion.EvidenceError):
             self.validate_completion_mirror(document)
 
     def test_frozen_geometry_digest_inventory_covers_every_differential_case(self):
         frozen = differential.FROZEN_PERSISTENT_GEOMETRY_SHA256_BY_CASE
-        self.assertEqual(set(frozen), set(differential.CASE_UPDATER_LABELS))
-        self.assertTrue(
-            all(
-                len(digest) == 64
-                and all(character in "0123456789abcdef" for character in digest)
-                for digest in frozen.values()
-            )
+        assert set(frozen) == set(differential.CASE_UPDATER_LABELS)
+        assert all(
+            len(digest) == 64
+            and all(character in "0123456789abcdef" for character in digest)
+            for digest in frozen.values()
         )
 
     def test_schema_v4_is_rejected(self):
         document = self.document()
         document["schema_version"] = 4
-        with self.assertRaisesRegex(ValueError, "index identity differs"):
+        with pytest.raises(ValueError, match="index identity differs"):
             self.load(document)
 
     def test_single_gpu_3d_float32_projection_is_rejected(self):
@@ -1601,103 +1574,100 @@ class Issue123DifferentialEvidenceTest(unittest.TestCase):
             1,
             self.arrays(np.float32, "single-gpu-3d"),
         )
-        with self.assertRaisesRegex(ValueError, "field dtype differs"):
+        with pytest.raises(ValueError, match="field dtype differs"):
             self.load(document)
 
-    def test_descriptor_path_digest_and_candidate_are_exact(self):
-        for mutation in ("path", "sha256", "candidate_evidence"):
-            with self.subTest(mutation=mutation):
-                document = self.document()
-                descriptor = document["cases"][0]["candidate"][0]
-                if mutation == "path":
-                    descriptor[mutation] = "../escape.npz"
-                elif mutation == "sha256":
-                    descriptor[mutation] = "0" * 64
-                else:
-                    descriptor[mutation] = {
-                        **self.candidate,
-                        "candidate_git_commit": "b" * 40,
-                    }
-                with self.assertRaises(ValueError):
-                    self.load(document)
+    @pytest.mark.parametrize(
+        "mutation", ("path", "sha256", "candidate_evidence"), ids=str
+    )
+    def test_descriptor_path_digest_and_candidate_are_exact(self, mutation):
+        document = self.document()
+        descriptor = document["cases"][0]["candidate"][0]
+        if mutation == "path":
+            descriptor[mutation] = "../escape.npz"
+        elif mutation == "sha256":
+            descriptor[mutation] = "0" * 64
+        else:
+            descriptor[mutation] = {
+                **self.candidate,
+                "candidate_git_commit": "b" * 40,
+            }
+        with pytest.raises(ValueError):
+            self.load(document)
 
-    def test_missing_and_extra_npz_arrays_fail_closed(self):
-        for mutation in ("missing", "extra"):
-            with self.subTest(mutation=mutation):
-                document = self.document()
-                arrays = self.arrays(np.float32, "single-gpu-2d")
-                if mutation == "missing":
-                    del arrays["step/100/field/Hz"]
-                else:
-                    arrays["step/100/state/unexpected"] = np.asarray(
-                        [1.0], dtype=np.float32
-                    )
-                self.rewrite_candidate(document, 0, arrays)
-                with self.assertRaisesRegex(ValueError, "NPZ array closure differs"):
-                    self.load(document)
+    @pytest.mark.parametrize("mutation", ("missing", "extra"), ids=str)
+    def test_missing_and_extra_npz_arrays_fail_closed(self, mutation):
+        document = self.document()
+        arrays = self.arrays(np.float32, "single-gpu-2d")
+        if mutation == "missing":
+            del arrays["step/100/field/Hz"]
+        else:
+            arrays["step/100/state/unexpected"] = np.asarray([1.0], dtype=np.float32)
+        self.rewrite_candidate(document, 0, arrays)
+        with pytest.raises(ValueError, match="NPZ array closure differs"):
+            self.load(document)
 
-    def test_projected_field_shape_is_independent_of_artifact_bytes(self):
-        for mutation in ("empty", "reshape"):
-            with self.subTest(mutation=mutation):
-                document = self.document()
-                for rewrite in (self.rewrite_reference, self.rewrite_candidate):
-                    arrays = self.arrays(np.float32, "single-gpu-2d")
-                    name = "step/100/field/Ex"
-                    if mutation == "empty":
-                        arrays[name] = np.empty(0, dtype=np.float32)
-                    else:
-                        arrays[name] = arrays[name].reshape(-1)
-                    rewrite(document, 0, arrays)
-                with self.assertRaisesRegex(ValueError, "field shape or dtype differs"):
-                    self.load(document)
+    @pytest.mark.parametrize("mutation", ("empty", "reshape"), ids=str)
+    def test_projected_field_shape_is_independent_of_artifact_bytes(self, mutation):
+        document = self.document()
+        for rewrite in (self.rewrite_reference, self.rewrite_candidate):
+            arrays = self.arrays(np.float32, "single-gpu-2d")
+            name = "step/100/field/Ex"
+            if mutation == "empty":
+                arrays[name] = np.empty(0, dtype=np.float32)
+            else:
+                arrays[name] = arrays[name].reshape(-1)
+            rewrite(document, 0, arrays)
+        with pytest.raises(ValueError, match="field shape or dtype differs"):
+            self.load(document)
 
     def test_projected_physical_shape_is_independent_of_artifact_bytes(self):
         document = self.document()
+        # Both roles must carry the same coordinated tamper in one document.
         for rewrite in (self.rewrite_reference, self.rewrite_candidate):
             arrays = self.arrays(np.float64, "single-gpu-3d")
             arrays["step/20/physical/spectrum/Ex"] = np.empty(0, dtype=np.float64)
             rewrite(document, 1, arrays)
-        with self.assertRaisesRegex(ValueError, "physical spectrum differs"):
+        with pytest.raises(ValueError, match="physical spectrum differs"):
             self.load(document)
 
-    def test_rehashed_equal_role_physical_tampering_is_recomputed(self):
-        for name in (
-            "step/20/physical/spectrum/Ex",
-            "step/20/physical/summary",
+    @pytest.mark.parametrize(
+        "name",
+        ("step/20/physical/spectrum/Ex", "step/20/physical/summary"),
+        ids=("spectrum", "summary"),
+    )
+    def test_rehashed_equal_role_physical_tampering_is_recomputed(self, name):
+        document = self.document()
+        arrays = self.arrays(np.float64, "single-gpu-3d")
+        arrays[name].flat[0] += 0.125
+        self.rewrite_reference(document, 1, arrays)
+        self.rewrite_candidate(document, 1, arrays)
+        with pytest.raises(
+            ValueError, match="physical (spectrum|summary) differs from"
         ):
-            with self.subTest(name=name):
-                document = self.document()
-                arrays = self.arrays(np.float64, "single-gpu-3d")
-                arrays[name].flat[0] += 0.125
-                self.rewrite_reference(document, 1, arrays)
-                self.rewrite_candidate(document, 1, arrays)
-                with self.assertRaisesRegex(
-                    ValueError, "physical (spectrum|summary) differs from"
-                ):
-                    self.load(document)
-                with self.assertRaises(completion.EvidenceError):
-                    self.validate_completion_mirror(document)
+            self.load(document)
+        with pytest.raises(completion.EvidenceError):
+            self.validate_completion_mirror(document)
 
-    def test_projected_persistent_count_and_width_are_manifest_derived(self):
-        for mutation in ("empty-values", "missing-index"):
-            with self.subTest(mutation=mutation):
-                document = self.document()
-                for rewrite in (self.rewrite_reference, self.rewrite_candidate):
-                    arrays = self.arrays(np.float32, "single-gpu-2d")
-                    root = "step/100/state/Ex/0-Cpml"
-                    if mutation == "empty-values":
-                        arrays[f"{root}/values"] = np.empty(0, dtype=np.complex128)
-                    else:
-                        arrays[f"{root}/indices"] = arrays[f"{root}/indices"][1:]
-                        arrays[f"{root}/values"] = arrays[f"{root}/values"][2:]
-                    rewrite(document, 0, arrays)
-                message = (
-                    "persistent value shape or dtype"
-                    if mutation == "empty-values"
-                    else "do not cover the complete field"
-                )
-                with self.assertRaisesRegex(ValueError, message):
-                    self.load(document)
+    @pytest.mark.parametrize("mutation", ("empty-values", "missing-index"), ids=str)
+    def test_projected_persistent_count_and_width_are_manifest_derived(self, mutation):
+        document = self.document()
+        for rewrite in (self.rewrite_reference, self.rewrite_candidate):
+            arrays = self.arrays(np.float32, "single-gpu-2d")
+            root = "step/100/state/Ex/0-Cpml"
+            if mutation == "empty-values":
+                arrays[f"{root}/values"] = np.empty(0, dtype=np.complex128)
+            else:
+                arrays[f"{root}/indices"] = arrays[f"{root}/indices"][1:]
+                arrays[f"{root}/values"] = arrays[f"{root}/values"][2:]
+            rewrite(document, 0, arrays)
+        message = (
+            "persistent value shape or dtype"
+            if mutation == "empty-values"
+            else "do not cover the complete field"
+        )
+        with pytest.raises(ValueError, match=message):
+            self.load(document)
 
     def test_mixed_case_uses_model_scoped_persistent_tolerance(self):
         document = self.document()
@@ -1711,7 +1681,7 @@ class Issue123DifferentialEvidenceTest(unittest.TestCase):
         _metrics, suite_passed = differential._compare_arrays(
             {name: arrays[name]}, {name: candidate[name]}, suite
         )
-        self.assertTrue(suite_passed)
+        assert suite_passed
         scoped = differential._frozen_array_comparisons(
             self.manifest,
             "single-gpu-cuda",
@@ -1722,10 +1692,11 @@ class Issue123DifferentialEvidenceTest(unittest.TestCase):
         _metrics, scoped_passed = differential._compare_arrays(
             arrays, candidate, suite, array_comparisons=scoped
         )
-        self.assertFalse(scoped_passed)
+        assert not (scoped_passed)
         self.rewrite_candidate(document, 0, candidate)
-        with self.assertRaisesRegex(
-            ValueError, "persistent indices overlap|recomputed differential failed"
+        with pytest.raises(
+            ValueError,
+            match="persistent indices overlap|recomputed differential failed",
         ):
             self.load(document)
 
@@ -1739,8 +1710,9 @@ class Issue123DifferentialEvidenceTest(unittest.TestCase):
         }
         document["cases"][0]["passed"] = True
         document["passed"] = True
-        with self.assertRaisesRegex(
-            ValueError, "persistent indices overlap|recomputed differential failed"
+        with pytest.raises(
+            ValueError,
+            match="persistent indices overlap|recomputed differential failed",
         ):
             self.load(document)
 
@@ -1748,11 +1720,12 @@ class Issue123DifferentialEvidenceTest(unittest.TestCase):
         document = self.document()
         arrays = self.arrays(np.float32, "single-gpu-2d")
         indices = document["cases"][0]["persistent_arrays"][0]
-        self.assertTrue(indices.endswith("/indices"))
+        assert indices.endswith("/indices")
         arrays[indices][0] += 1
         self.rewrite_candidate(document, 0, arrays)
-        with self.assertRaisesRegex(
-            ValueError, "persistent indices overlap|recomputed differential failed"
+        with pytest.raises(
+            ValueError,
+            match="persistent indices overlap|recomputed differential failed",
         ):
             self.load(document)
 
@@ -1762,9 +1735,9 @@ class Issue123DifferentialEvidenceTest(unittest.TestCase):
         arrays["step/20/field/Ex"] = arrays["step/20/field/Ex"] + 1.0
         self.refresh_physical(arrays, 20)
         self.rewrite_candidate(document, 1, arrays)
-        with self.assertRaisesRegex(ValueError, "recomputed differential failed"):
+        with pytest.raises(ValueError, match="recomputed differential failed"):
             self.load(document)
-        with self.assertRaises(completion.EvidenceError):
+        with pytest.raises(completion.EvidenceError):
             self.validate_completion_mirror(document)
 
     def test_normalized_step20_physical_array_cannot_be_self_omitted(self):
@@ -1775,9 +1748,9 @@ class Issue123DifferentialEvidenceTest(unittest.TestCase):
             del arrays[omitted]
             rewrite(document, 1, arrays)
         document["cases"][1]["physical_arrays"].remove(omitted)
-        with self.assertRaisesRegex(ValueError, "physical array closure"):
+        with pytest.raises(ValueError, match="physical array closure"):
             self.load(document)
-        with self.assertRaises(completion.EvidenceError):
+        with pytest.raises(completion.EvidenceError):
             self.validate_completion_mirror(document)
 
     def test_normalized_persistent_suffix_closure_cannot_change_by_step(self):
@@ -1788,9 +1761,9 @@ class Issue123DifferentialEvidenceTest(unittest.TestCase):
             del arrays[omitted]
             rewrite(document, 1, arrays)
         document["cases"][1]["persistent_arrays"].remove(omitted)
-        with self.assertRaisesRegex(ValueError, "persistent array closure"):
+        with pytest.raises(ValueError, match="persistent array closure"):
             self.load(document)
-        with self.assertRaises(completion.EvidenceError):
+        with pytest.raises(completion.EvidenceError):
             self.validate_completion_mirror(document)
 
     def test_common_persistent_suffix_cannot_be_self_omitted(self):
@@ -1807,9 +1780,9 @@ class Issue123DifferentialEvidenceTest(unittest.TestCase):
             for name in document["cases"][1]["persistent_arrays"]
             if name not in omitted
         ]
-        with self.assertRaisesRegex(ValueError, "persistent array closure"):
+        with pytest.raises(ValueError, match="persistent array closure"):
             self.load(document)
-        with self.assertRaises(completion.EvidenceError):
+        with pytest.raises(completion.EvidenceError):
             self.validate_completion_mirror(document)
 
     def test_source_contract_array_cannot_be_self_omitted(self):
@@ -1821,9 +1794,9 @@ class Issue123DifferentialEvidenceTest(unittest.TestCase):
         document["cases"][0]["contract_arrays"].remove(
             differential.SOURCE_CONTRACT_ARRAY
         )
-        with self.assertRaisesRegex(ValueError, "contract array closure"):
+        with pytest.raises(ValueError, match="contract array closure"):
             self.load(document)
-        with self.assertRaises(completion.EvidenceError):
+        with pytest.raises(completion.EvidenceError):
             self.validate_completion_mirror(document)
 
     def test_source_raw_proof_cannot_be_self_omitted(self):
@@ -1833,9 +1806,9 @@ class Issue123DifferentialEvidenceTest(unittest.TestCase):
             del arrays[differential.SOURCE_PROOF_ARRAY]
             rewrite(document, 0, arrays)
         document["cases"][0]["contract_arrays"].remove(differential.SOURCE_PROOF_ARRAY)
-        with self.assertRaisesRegex(ValueError, "contract array closure"):
+        with pytest.raises(ValueError, match="contract array closure"):
             self.load(document)
-        with self.assertRaises(completion.EvidenceError):
+        with pytest.raises(completion.EvidenceError):
             self.validate_completion_mirror(document)
 
     def test_source_raw_proof_mutation_is_semantically_revalidated(self):
@@ -1857,9 +1830,9 @@ class Issue123DifferentialEvidenceTest(unittest.TestCase):
             changed_arrays = {name: value.copy() for name, value in arrays.items()}
             changed_arrays[differential.SOURCE_PROOF_ARRAY] = proof_array.copy()
             rewrite(document, 0, changed_arrays)
-        with self.assertRaisesRegex(ValueError, "overwrite semantics"):
+        with pytest.raises(ValueError, match="overwrite semantics"):
             self.load(document)
-        with self.assertRaises(completion.EvidenceError):
+        with pytest.raises(completion.EvidenceError):
             self.validate_completion_mirror(document)
 
     def test_rehashed_native_source_index_widening_is_rejected(self):
@@ -1870,7 +1843,7 @@ class Issue123DifferentialEvidenceTest(unittest.TestCase):
             proof["captures"][0]["native"]["indices"],
             "native PointSource indices",
         )
-        self.assertEqual(native_indices.dtype, np.dtype(np.intc))
+        assert native_indices.dtype == np.dtype(np.intc)
         proof["captures"][0]["native"]["indices"] = differential._source_array_record(
             native_indices.astype(np.int64), "widened native indices"
         )
@@ -1883,12 +1856,17 @@ class Issue123DifferentialEvidenceTest(unittest.TestCase):
         ).copy()
         self.rewrite_reference(document, 0, arrays)
         self.rewrite_candidate(document, 0, arrays)
-        with self.assertRaisesRegex(ValueError, "native PointSource target differs"):
+        with pytest.raises(ValueError, match="native PointSource target differs"):
             self.load(document)
-        with self.assertRaises(completion.EvidenceError):
+        with pytest.raises(completion.EvidenceError):
             self.validate_completion_mirror(document)
 
-    def test_source_raw_proof_parser_rejects_malformed_preimages(self):
+    @pytest.mark.parametrize(
+        "mutation",
+        ("dtype", "hex-length", "extra-key", "same-digest", "arbitrary-digests"),
+        ids=str,
+    )
+    def test_source_raw_proof_parser_rejects_malformed_preimages(self, mutation):
         workload = differential._workload(self.manifest, "single-gpu-2d")
         capture_steps = workload.get(
             "capture_steps", self.manifest["reference"]["capture_steps"]
@@ -1897,50 +1875,34 @@ class Issue123DifferentialEvidenceTest(unittest.TestCase):
             differential.SOURCE_PROOF_ARRAY
         ]
         original = json.loads(source.tobytes())
-        for mutation in (
-            "dtype",
-            "hex-length",
-            "extra-key",
-            "same-digest",
-            "arbitrary-digests",
-        ):
-            with self.subTest(mutation=mutation):
-                proof = copy.deepcopy(original)
-                record = proof["captures"][0]["candidate"]["live"][
-                    "overwrite_amplitudes"
-                ]
-                if mutation == "dtype":
-                    record["dtype"] = "object"
-                elif mutation == "hex-length":
-                    record["data_hex"] = record["data_hex"][:-1]
-                elif mutation == "extra-key":
-                    record["unexpected"] = True
-                elif mutation == "same-digest":
-                    proof["candidate_preimage_sha256"] = proof[
-                        "reference_preimage_sha256"
-                    ]
-                else:
-                    proof["reference_preimage_sha256"] = "1" * 64
-                    proof["candidate_preimage_sha256"] = "2" * 64
-                raw = differential._canonical_source_bytes(proof)
-                message = (
-                    "preimage digest differs"
-                    if mutation == "arbitrary-digests"
-                    else None
-                )
-                context = (
-                    self.assertRaisesRegex(ValueError, message)
-                    if message is not None
-                    else self.assertRaises(ValueError)
-                )
-                with context:
-                    differential._validate_source_raw_proof_bytes(
-                        raw,
-                        workload,
-                        capture_steps,
-                        "float32",
-                        self.manifest["reference"]["precondition_steps"],
-                    )
+        proof = copy.deepcopy(original)
+        record = proof["captures"][0]["candidate"]["live"]["overwrite_amplitudes"]
+        if mutation == "dtype":
+            record["dtype"] = "object"
+        elif mutation == "hex-length":
+            record["data_hex"] = record["data_hex"][:-1]
+        elif mutation == "extra-key":
+            record["unexpected"] = True
+        elif mutation == "same-digest":
+            proof["candidate_preimage_sha256"] = proof["reference_preimage_sha256"]
+        else:
+            proof["reference_preimage_sha256"] = "1" * 64
+            proof["candidate_preimage_sha256"] = "2" * 64
+        raw = differential._canonical_source_bytes(proof)
+        message = "preimage digest differs" if mutation == "arbitrary-digests" else None
+        context = (
+            pytest.raises(ValueError, match=message)
+            if message is not None
+            else pytest.raises(ValueError)
+        )
+        with context:
+            differential._validate_source_raw_proof_bytes(
+                raw,
+                workload,
+                capture_steps,
+                "float32",
+                self.manifest["reference"]["precondition_steps"],
+            )
 
     def test_source_raw_proof_clock_is_workload_derived_after_rehash(self):
         workload = differential._workload(self.manifest, "single-gpu-2d")
@@ -1994,7 +1956,7 @@ class Issue123DifferentialEvidenceTest(unittest.TestCase):
         proof["candidate_preimage_sha256"] = differential._source_role_preimage_sha256(
             workload, "candidate", proof["captures"]
         )
-        with self.assertRaisesRegex(ValueError, "time differs from the capture clock"):
+        with pytest.raises(ValueError, match="time differs from the capture clock"):
             differential._validate_source_raw_proof_bytes(
                 differential._canonical_source_bytes(proof),
                 workload,
@@ -2053,7 +2015,7 @@ class Issue123DifferentialEvidenceTest(unittest.TestCase):
         proof["candidate_preimage_sha256"] = differential._source_role_preimage_sha256(
             workload, "candidate", proof["captures"]
         )
-        with self.assertRaisesRegex(ValueError, "time differs from the capture clock"):
+        with pytest.raises(ValueError, match="time differs from the capture clock"):
             differential._validate_source_raw_proof_bytes(
                 differential._canonical_source_bytes(proof),
                 workload,
@@ -2076,9 +2038,9 @@ class Issue123DifferentialEvidenceTest(unittest.TestCase):
         metrics, passed = differential._compare_arrays(
             reference, linf_failure, contract
         )
-        self.assertFalse(passed)
-        self.assertGreater(metrics["maximum_normalized_linf_error"], 1e-6)
-        self.assertLess(metrics["maximum_normalized_l2_error"], 1e-6)
+        assert not (passed)
+        assert metrics["maximum_normalized_linf_error"] > 1e-6
+        assert metrics["maximum_normalized_l2_error"] < 1e-6
 
         l2_reference = {"value": np.asarray([1.0, 0.0, 0.0, 0.0])}
         l2_failure = {
@@ -2088,9 +2050,9 @@ class Issue123DifferentialEvidenceTest(unittest.TestCase):
         metrics, passed = differential._compare_arrays(
             l2_reference, l2_failure, contract
         )
-        self.assertFalse(passed)
-        self.assertLess(metrics["maximum_normalized_linf_error"], 1e-6)
-        self.assertGreater(metrics["maximum_normalized_l2_error"], 1e-6)
+        assert not (passed)
+        assert metrics["maximum_normalized_linf_error"] < 1e-6
+        assert metrics["maximum_normalized_l2_error"] > 1e-6
 
     def test_normalized_contract_keeps_zero_and_integer_arrays_exact(self):
         contract = {
@@ -2103,7 +2065,7 @@ class Issue123DifferentialEvidenceTest(unittest.TestCase):
         zero = {"value": np.zeros(3, dtype=np.float64)}
         tiny = {"value": np.asarray([0.0, 0.0, 1e-30])}
         _metrics, passed = differential._compare_arrays(zero, tiny, contract)
-        self.assertFalse(passed)
+        assert not (passed)
 
         elementwise = {
             "mode": differential.ELEMENTWISE_COMPARISON_MODE,
@@ -2111,12 +2073,12 @@ class Issue123DifferentialEvidenceTest(unittest.TestCase):
             "atol": 1.0,
         }
         _metrics, passed = differential._compare_arrays(zero, tiny, elementwise)
-        self.assertFalse(passed)
+        assert not (passed)
 
         integers = {"value": np.asarray([1, 2], dtype=np.uint64)}
         changed = {"value": np.asarray([1, 3], dtype=np.uint64)}
         _metrics, passed = differential._compare_arrays(integers, changed, contract)
-        self.assertFalse(passed)
+        assert not (passed)
 
     def test_canonical_source_contract_is_exact_and_workload_bound(self):
         document = self.document()
@@ -2128,32 +2090,30 @@ class Issue123DifferentialEvidenceTest(unittest.TestCase):
             dtype=np.uint8,
         ).copy()
         self.rewrite_candidate(document, 0, arrays)
-        with self.assertRaisesRegex(ValueError, "PointSource contract"):
+        with pytest.raises(ValueError, match="PointSource contract"):
             self.load(document)
-        with self.assertRaises(completion.EvidenceError):
+        with pytest.raises(completion.EvidenceError):
             self.validate_completion_mirror(document)
 
-    def test_native_source_raw_amplitude_and_waveform_are_bound(self):
+    @pytest.mark.parametrize("index", (0, 1, 2, 3), ids=lambda value: f"word-{value}")
+    def test_native_source_raw_amplitude_and_waveform_are_bound(self, index):
         archive, metadata, workload, expected = self.native_point_source_inputs()
         differential._validate_native_point_source(
             archive, metadata, workload, expected
         )
 
         key = "step/20/source/Ex/0-PointSourceEx/values"
-        for index in (0, 1, 2, 3):
-            with self.subTest(index=index):
-                changed = _Archive(
-                    {name: value.copy() for name, value in archive.items()}
-                )
-                changed[key][index] += 0.125
-                with self.assertRaisesRegex(
-                    ValueError, "amplitude or waveform differs"
-                ):
-                    differential._validate_native_point_source(
-                        changed, metadata, workload, expected
-                    )
+        changed = _Archive({name: value.copy() for name, value in archive.items()})
+        changed[key][index] += 0.125
+        with pytest.raises(ValueError, match="amplitude or waveform differs"):
+            differential._validate_native_point_source(
+                changed, metadata, workload, expected
+            )
 
-    def test_candidate_source_packed_and_live_state_are_cross_checked(self):
+    @pytest.mark.parametrize(
+        "mutation", ("packed-index", "packed-word", "live-amplitude"), ids=str
+    )
+    def test_candidate_source_packed_and_live_state_are_cross_checked(self, mutation):
         archive, metadata, workload, expected = self.candidate_point_source_inputs()
         differential._validate_candidate_point_source(
             archive, metadata, workload, expected
@@ -2171,30 +2131,26 @@ class Issue123DifferentialEvidenceTest(unittest.TestCase):
                 np.float32(0.125),
             ),
         }
-        for name, (key, index, delta) in mutations.items():
-            with self.subTest(name=name):
-                changed = _Archive(
-                    {array_name: value.copy() for array_name, value in archive.items()}
-                )
-                if name == "packed-word":
-                    changed[key][index] ^= delta
-                else:
-                    changed[key][index] += delta
-                with self.assertRaisesRegex(
-                    ValueError,
-                    "packed/live semantics|overwrite semantics",
-                ):
-                    differential._validate_candidate_point_source(
-                        changed, metadata, workload, expected
-                    )
+        key, index, delta = mutations[mutation]
+        changed = _Archive(
+            {array_name: value.copy() for array_name, value in archive.items()}
+        )
+        if mutation == "packed-word":
+            changed[key][index] ^= delta
+        else:
+            changed[key][index] += delta
+        with pytest.raises(
+            ValueError, match="packed/live semantics|overwrite semantics"
+        ):
+            differential._validate_candidate_point_source(
+                changed, metadata, workload, expected
+            )
 
     def test_precision_limitation_is_recomputed_from_native_step100_fields(self):
         document = self.document()
         limitation = document["cases"][1]["precision_limitation"]
-        self.assertEqual(limitation["reference_step"], 100)
-        self.assertGreater(
-            limitation["reference_field_max_abs"], float(np.finfo(np.float32).max)
-        )
+        assert limitation["reference_step"] == 100
+        assert limitation["reference_field_max_abs"] > float(np.finfo(np.float32).max)
 
         reference = self.arrays(np.float64, "single-gpu-3d")
         reference["step/100/field/Ex"].fill(0.25)
@@ -2202,11 +2158,10 @@ class Issue123DifferentialEvidenceTest(unittest.TestCase):
         candidate = {name: value.copy() for name, value in reference.items()}
         self.rewrite_reference(document, 1, reference)
         self.rewrite_candidate(document, 1, candidate)
-        with self.assertRaisesRegex(ValueError, "dynamic-range limitation"):
+        with pytest.raises(ValueError, match="dynamic-range limitation"):
             self.load(document)
-        with self.assertRaisesRegex(
-            completion.EvidenceError,
-            "range limitation|independently recomputed",
+        with pytest.raises(
+            completion.EvidenceError, match="range limitation|independently recomputed"
         ):
             self.validate_completion_mirror(document)
 
@@ -2215,7 +2170,7 @@ class Issue123DifferentialEvidenceTest(unittest.TestCase):
         document["cases"][0]["persistent_arrays"].append(
             "step/100/source/Ex/0-PointSourceEx/values"
         )
-        with self.assertRaisesRegex(ValueError, "persistent array (category|closure)"):
+        with pytest.raises(ValueError, match="persistent array (category|closure)"):
             self.load(document)
 
     def test_projection_paths_cannot_be_reused_across_cases(self):
@@ -2223,7 +2178,7 @@ class Issue123DifferentialEvidenceTest(unittest.TestCase):
         document["cases"][1]["reference"][0] = copy.deepcopy(
             document["cases"][0]["reference"][0]
         )
-        with self.assertRaisesRegex(ValueError, "reuses artifact path or bytes"):
+        with pytest.raises(ValueError, match="reuses artifact path or bytes"):
             self.load(document)
 
     def test_paired_cpu_tolerance_uses_complex128_manifest_entry(self):
@@ -2233,7 +2188,7 @@ class Issue123DifferentialEvidenceTest(unittest.TestCase):
             "dcp-ade-bloch",
             "cpu",
         )
-        self.assertEqual(tolerance, {"rtol": 1e-11, "atol": 1e-12})
+        assert tolerance == {"rtol": 1e-11, "atol": 1e-12}
 
     def test_builder_output_round_trips_through_strict_loader(self):
         required = differential.expected_records(self.manifest, "single-gpu-cuda")
@@ -2247,6 +2202,8 @@ class Issue123DifferentialEvidenceTest(unittest.TestCase):
             "git_status": "",
             "clean": True,
         }
+        # Build the complete ordered source set once; the resulting index proves
+        # candidate archive reuse and cross-record uniqueness as one transaction.
         for expected in required:
             case = expected["case"]
             reference = source_directory / f"{case}-reference.npz"
@@ -2355,14 +2312,14 @@ class Issue123DifferentialEvidenceTest(unittest.TestCase):
         for record, reference, candidate in zip(
             document["cases"], references, candidates, strict=True
         ):
-            self.assertEqual(record["reference_source"], self.descriptor(reference))
-            self.assertEqual(record["candidate_source"], self.descriptor(candidate))
+            assert record["reference_source"] == self.descriptor(reference)
+            assert record["candidate_source"] == self.descriptor(candidate)
         result = self.load(document)
-        self.assertTrue(result["passed"])
-        self.assertEqual(
-            [record["case"] for record in result["cases"]],
-            ["single-gpu-2d", "single-gpu-3d"],
-        )
+        assert result["passed"]
+        assert [record["case"] for record in result["cases"]] == [
+            "single-gpu-2d",
+            "single-gpu-3d",
+        ]
 
     def test_candidate_cli_writes_exact_three_key_binding(self):
         output = self.root / "candidate.json"
@@ -2384,9 +2341,16 @@ class Issue123DifferentialEvidenceTest(unittest.TestCase):
             ),
             redirect_stdout(io.StringIO()),
         ):
-            self.assertEqual(differential.main(), 0)
-        self.assertEqual(json.loads(output.read_text(encoding="utf-8")), self.candidate)
+            assert differential.main() == 0
+        assert json.loads(output.read_text(encoding="utf-8")) == self.candidate
 
 
-if __name__ == "__main__":
-    unittest.main()
+@contextmanager
+def issue123_differential_fixture(fixture=None):
+    """Yield a differential fixture with LIFO patch and temp-root cleanup."""
+
+    with ExitStack() as stack:
+        if fixture is None:
+            fixture = _Issue123DifferentialFixture()
+        fixture.initialize(stack)
+        yield fixture

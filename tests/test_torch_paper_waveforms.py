@@ -1,9 +1,9 @@
 """Tensor-native Ziolkowski et al. (1995) source waveform coverage."""
 
-import unittest
 from math import cosh, sin
 
 import numpy as np
+import pytest
 import torch
 
 import gmes
@@ -15,6 +15,7 @@ from gmes.source import (
     UltrafastPulseTrain,
 )
 from gmes.torch_source import _evaluate_time, _time_parameters
+from tests.test_torch_fdtd import restore_torch_runtime as restore_torch_runtime
 
 
 def _ultrafast(time, width):
@@ -66,8 +67,42 @@ def _tensor_value(waveform, time, dtype):
     return float(output[0, 0])
 
 
-class TorchPaperWaveformTest(unittest.TestCase):
-    def test_scalar_and_tensor_formulas_match_at_boundaries(self):
+class TestTorchPaperWaveform:
+    @pytest.mark.parametrize(
+        ("waveform_index", "time_index"),
+        (
+            pytest.param(0, 0, id="sech-before"),
+            pytest.param(0, 1, id="sech-start"),
+            pytest.param(0, 2, id="sech-center"),
+            pytest.param(0, 3, id="sech-end"),
+            pytest.param(0, 4, id="sech-after"),
+            pytest.param(1, 0, id="ultrafast-before"),
+            pytest.param(1, 1, id="ultrafast-start"),
+            pytest.param(1, 2, id="ultrafast-center"),
+            pytest.param(1, 3, id="ultrafast-end"),
+            pytest.param(1, 4, id="ultrafast-after"),
+            pytest.param(2, 0, id="train-before"),
+            pytest.param(2, 1, id="train-start"),
+            pytest.param(2, 2, id="train-first-end"),
+            pytest.param(2, 3, id="train-second-start"),
+            pytest.param(2, 4, id="train-second-end"),
+            pytest.param(2, 5, id="train-after"),
+            pytest.param(3, 0, id="smooth-before"),
+            pytest.param(3, 1, id="smooth-start"),
+            pytest.param(3, 2, id="smooth-mid-rise"),
+            pytest.param(3, 3, id="smooth-end-rise"),
+            pytest.param(3, 4, id="smooth-plateau"),
+            pytest.param(4, 0, id="pump-probe-before"),
+            pytest.param(4, 1, id="pump-probe-start"),
+            pytest.param(4, 2, id="pump-probe-pump-end"),
+            pytest.param(4, 3, id="pump-probe-probe-start"),
+            pytest.param(4, 4, id="pump-probe-probe-mid-rise"),
+            pytest.param(4, 5, id="pump-probe-probe-end-rise"),
+        ),
+    )
+    def test_scalar_and_tensor_formulas_match_at_boundaries(
+        self, waveform_index, time_index
+    ):
         omega = 1.7
         width = 2.5
         waveforms = (
@@ -86,63 +121,86 @@ class TorchPaperWaveformTest(unittest.TestCase):
                 (-0.1, 0, width, 3 * width, 5.5 * width, 8 * width),
             ),
         )
-        for waveform, times in waveforms:
-            for time in times:
-                expected = _explicit_value(waveform, time)
-                with self.subTest(waveform=type(waveform).__name__, time=time):
-                    self.assertAlmostEqual(
-                        waveform.oscillator(time), expected, places=14
-                    )
-                    self.assertAlmostEqual(
-                        _tensor_value(waveform, time, torch.float64),
-                        expected,
-                        places=13,
-                    )
-                    self.assertAlmostEqual(
-                        _tensor_value(waveform, time, torch.float32),
-                        expected,
-                        delta=2e-6,
-                    )
+        waveform, times = waveforms[waveform_index]
+        time = times[time_index]
+        expected = _explicit_value(waveform, time)
+        assert round(abs(waveform.oscillator(time) - expected), 14) == 0
+        assert (
+            round(abs(_tensor_value(waveform, time, torch.float64) - expected), 13) == 0
+        )
+        assert abs(_tensor_value(waveform, time, torch.float32) - expected) <= 2e-6
 
     def test_composition_delays_and_zero_area(self):
         width = 3.0
         train = UltrafastPulseTrain(width, alpha=0.25, delay_periods=2)
         probe = PumpProbe(1.3, width, beta=0.02, delay=4 * width)
-        self.assertEqual(train.oscillator(-1), 0.0)
-        self.assertAlmostEqual(
-            train.oscillator(train.delay + width / 2),
-            0.25 * _ultrafast(width / 2, width),
+        assert train.oscillator(-1) == 0.0
+        assert (
+            round(
+                abs(
+                    train.oscillator(train.delay + width / 2)
+                    - 0.25 * _ultrafast(width / 2, width)
+                ),
+                7,
+            )
+            == 0
         )
-        self.assertEqual(probe.oscillator(2 * width), 0.0)
-        self.assertAlmostEqual(
-            probe.oscillator(probe.delay + width / 4),
-            probe.beta * _smooth(width / 4, 1.3, width),
+        assert probe.oscillator(2 * width) == 0.0
+        assert (
+            round(
+                abs(
+                    probe.oscillator(probe.delay + width / 4)
+                    - probe.beta * _smooth(width / 4, 1.3, width)
+                ),
+                7,
+            )
+            == 0
         )
         times = np.linspace(0, width, 100_001)
-        self.assertAlmostEqual(
-            np.trapezoid([_ultrafast(time, width) for time in times], times),
-            0.0,
-            places=12,
+        assert (
+            round(
+                abs(
+                    np.trapezoid([_ultrafast(time, width) for time in times], times)
+                    - 0.0
+                ),
+                12,
+            )
+            == 0
         )
         train_times = np.linspace(0, train.delay + width, 200_001)
-        self.assertAlmostEqual(
-            np.trapezoid([train.oscillator(time) for time in train_times], train_times),
-            0.0,
-            places=11,
+        assert (
+            round(
+                abs(
+                    np.trapezoid(
+                        [train.oscillator(time) for time in train_times], train_times
+                    )
+                    - 0.0
+                ),
+                11,
+            )
+            == 0
         )
 
-    def test_malformed_parameters_fail_before_tensor_allocation(self):
-        invalid = (
+    @pytest.mark.parametrize(
+        "waveform",
+        (
             SechSinePulse(1.0, 0),
             UltrafastPulse(0),
             UltrafastPulseTrain(1.0, alpha=float("nan")),
             SmoothSine(1.0, float("inf")),
             PumpProbe(1.0, 1.0, beta=float("inf"), delay=1.0),
-        )
-        for waveform in invalid:
-            with self.subTest(waveform=type(waveform).__name__):
-                with self.assertRaises((TypeError, ValueError)):
-                    _time_parameters(waveform)
+        ),
+        ids=(
+            "sech-zero-width",
+            "ultrafast-zero-width",
+            "train-nan-alpha",
+            "smooth-infinite-period",
+            "probe-infinite-beta",
+        ),
+    )
+    def test_malformed_parameters_fail_before_tensor_allocation(self, waveform):
+        with pytest.raises((TypeError, ValueError)):
+            _time_parameters(waveform)
 
     def test_paper_waveform_runs_one_real_torch_step(self):
         waveform = SechSinePulse(1.2, 2.0)
@@ -153,13 +211,6 @@ class TorchPaperWaveformTest(unittest.TestCase):
             runtime=gmes.TorchRuntimeConfig(device="cpu", cpu_threads=1),
         )
         simulation.step()
-        self.assertTrue(
-            all(
-                np.isfinite(value).all()
-                for value in simulation.host_snapshot().values()
-            )
+        assert all(
+            np.isfinite(value).all() for value in simulation.host_snapshot().values()
         )
-
-
-if __name__ == "__main__":
-    unittest.main()

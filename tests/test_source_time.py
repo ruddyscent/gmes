@@ -1,8 +1,8 @@
-import unittest
 from math import pi, sin
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 import torch
 
 import gmes
@@ -18,9 +18,10 @@ from gmes.source import (
     TotalFieldScatteredField,
 )
 from gmes.torch_source import TorchTransparentBatch
+from tests.test_torch_fdtd import restore_torch_runtime as restore_torch_runtime
 
 
-class SourceTimeTest(unittest.TestCase):
+class TestSourceTime:
     def make_tfsf(self, **kwargs):
         parameters = {
             "src_time": Continuous(freq=0.8),
@@ -38,65 +39,87 @@ class SourceTimeTest(unittest.TestCase):
         np.testing.assert_array_equal(source.center, (-1, 0.5, 2))
         np.testing.assert_array_equal(source.size, (3, 4, 5))
 
-    def test_tfsf_rejects_each_non_finite_center_and_size_component(self):
-        for argument in ("center", "size"):
-            for axis in range(3):
-                for value in (np.inf, -np.inf, np.nan):
-                    with self.subTest(argument=argument, axis=axis, value=value):
-                        vector = [0, 0, 0] if argument == "center" else [3, 3, 1]
-                        vector[axis] = value
+    @pytest.mark.parametrize(
+        ("argument", "axis", "value"),
+        tuple(
+            (argument, axis, value)
+            for argument in ("center", "size")
+            for axis in range(3)
+            for value in (np.inf, -np.inf, np.nan)
+        ),
+        ids=tuple(
+            f"{argument}-axis-{axis}-{label}"
+            for argument in ("center", "size")
+            for axis in range(3)
+            for label in ("positive-inf", "negative-inf", "nan")
+        ),
+    )
+    def test_tfsf_rejects_each_non_finite_center_and_size_component(
+        self, argument, axis, value
+    ):
+        vector = [0, 0, 0] if argument == "center" else [3, 3, 1]
+        vector[axis] = value
 
-                        with self.assertRaisesRegex(
-                            ValueError,
-                            rf"{argument} must contain only finite values",
-                        ):
-                            self.make_tfsf(**{argument: vector})
+        with pytest.raises(
+            ValueError, match=rf"{argument} must contain only finite values"
+        ):
+            self.make_tfsf(**{argument: vector})
 
     def test_continuous_source_default_width(self):
         source = Continuous(freq=2)
 
-        self.assertEqual(source.width, 2.5)
+        assert source.width == 2.5
 
     def test_continuous_source_window_and_complex_phase(self):
         source = Continuous(freq=0.5, phase=pi / 2, width=1)
         source.init(cmplx=True)
 
-        self.assertEqual(source.oscillator(-1), 0)
-        self.assertEqual(source.oscillator(0), 0j)
-        self.assertAlmostEqual(source.oscillator(1).real, 0.0, places=12)
-        self.assertAlmostEqual(source.oscillator(1).imag, -1.0, places=12)
+        assert source.oscillator(-1) == 0
+        assert source.oscillator(0) == 0j
+        assert round(abs(source.oscillator(1).real - 0.0), 12) == 0
+        assert round(abs(source.oscillator(1).imag - -1.0), 12) == 0
 
-    def test_continuous_source_combines_overlapping_ramps(self):
-        cases = (
+    @pytest.mark.parametrize(
+        ("end", "width", "time", "expected_envelope"),
+        (
             (4, 1, 0.5, 0.5),
             (4, 1, 2, 1.0),
             (4, 1, 3.5, 0.5),
             (2, 1, 1, 1.0),
             (1.5, 1, 0.75, sin(0.375 * pi) ** 4),
             (1, 2, 0.5, sin(0.125 * pi) ** 4),
-        )
+        ),
+        ids=(
+            "ramp-up",
+            "plateau",
+            "ramp-down",
+            "touching-ramps",
+            "overlap-short-end",
+            "overlap-wide-ramp",
+        ),
+    )
+    def test_continuous_source_combines_overlapping_ramps(
+        self, end, width, time, expected_envelope
+    ):
+        source = Continuous(freq=1, start=0, end=end, width=width)
+        source.init(cmplx=True)
 
-        for end, width, time, expected_envelope in cases:
-            with self.subTest(end=end, width=width, time=time):
-                source = Continuous(freq=1, start=0, end=end, width=width)
-                source.init(cmplx=True)
-
-                self.assertAlmostEqual(abs(source.oscillator(time)), expected_envelope)
-                self.assertEqual(source.oscillator(end), 0j)
-                self.assertEqual(source.oscillator(end + 1e-12), 0)
+        assert round(abs(abs(source.oscillator(time)) - expected_envelope), 7) == 0
+        assert source.oscillator(end) == 0j
+        assert source.oscillator(end + 1e-12) == 0
 
     def test_bandpass_is_zero_outside_cutoff(self):
         source = Bandpass(freq=1, fwidth=0.5)
         source.init(cmplx=False)
 
-        self.assertEqual(source.oscillator(source.peak_time + source.cutoff + 1), 0)
+        assert source.oscillator(source.peak_time + source.cutoff + 1) == 0
 
     def test_differentiated_gaussian_is_antisymmetric(self):
         source = DifferentiatedGaussian(tw=2, t0=5)
         source.init(cmplx=False)
 
-        self.assertAlmostEqual(source.oscillator(4), -source.oscillator(6))
-        self.assertEqual(source.oscillator(5), 0.0)
+        assert round(abs(source.oscillator(4) - -source.oscillator(6)), 7) == 0
+        assert source.oscillator(5) == 0.0
 
     def test_torch_transparent_plan_uses_integral_consolidated_sampling(self):
         simulation = gmes.TorchSimulation(
@@ -110,23 +133,19 @@ class SourceTimeTest(unittest.TestCase):
             for batch in simulation.sources.batches
             if isinstance(batch, TorchTransparentBatch)
         )
-        self.assertTrue(batches)
+        assert batches
         for batch in batches:
-            self.assertEqual(batch.targets.dtype, torch.int64)
-            self.assertEqual(batch.samples.dtype, torch.int64)
-            self.assertTrue(torch.isfinite(batch.weights).all())
-            self.assertEqual(torch.unique(batch.targets).numel(), batch.targets.numel())
+            assert batch.targets.dtype == torch.int64
+            assert batch.samples.dtype == torch.int64
+            assert torch.isfinite(batch.weights).all()
+            assert torch.unique(batch.targets).numel() == batch.targets.numel()
             target_size = simulation.state.field(batch.component).numel()
             sample_size = batch.auxiliary.state.field(batch.auxiliary_component).numel()
-            self.assertTrue(
-                torch.all((0 <= batch.targets) & (batch.targets < target_size))
-            )
-            self.assertTrue(
-                torch.all((0 <= batch.samples) & (batch.samples < sample_size))
-            )
+            assert torch.all((0 <= batch.targets) & (batch.targets < target_size))
+            assert torch.all((0 <= batch.samples) & (batch.samples < sample_size))
             for samples, weights in zip(batch.samples, batch.weights):
                 active = samples[weights != 0]
-                self.assertEqual(torch.unique(active).numel(), active.numel())
+                assert torch.unique(active).numel() == active.numel()
 
     def test_tfsf_batches_builtin_geometry_mapping_with_field_clipping(self):
         source = self.make_tfsf()
@@ -160,12 +179,10 @@ class SourceTimeTest(unittest.TestCase):
             if in_range(index, field.shape, Ex)
         ]
 
-        self.assertEqual([index for index, *_ in mapped], expected_indices)
+        assert [index for index, *_ in mapped] == expected_indices
         for index, point, material, underneath in mapped:
-            self.assertEqual(point, space.ex_index_to_space(*index))
-            self.assertEqual(
-                (material, underneath), geometry_tree.material_of_point(point)
-            )
+            assert point == space.ex_index_to_space(*index)
+            assert (material, underneath) == geometry_tree.material_of_point(point)
 
     def test_tfsf_custom_geometry_uses_pointwise_fallback(self):
         class CustomSphere(Sphere):
@@ -194,9 +211,5 @@ class SourceTimeTest(unittest.TestCase):
         finally:
             source_module._torch_tfsf_lowering.reset(lowering_token)
 
-        self.assertGreater(CustomSphere.calls, 0)
-        self.assertTrue(mapped)
-
-
-if __name__ == "__main__":
-    unittest.main()
+        assert CustomSphere.calls > 0
+        assert mapped

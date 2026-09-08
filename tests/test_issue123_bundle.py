@@ -7,24 +7,22 @@ import json
 import shutil
 import stat
 import tempfile
-import unittest
-import warnings
 import zipfile
+from contextlib import contextmanager
 from pathlib import Path
 from unittest import mock
 
 import numpy as np
+import pytest
 
 from benchmarks import issue123_completion as completion
 from benchmarks import issue123_privacy as privacy
 from benchmarks import torch_correctness
 
 
-class Issue123BundleTest(unittest.TestCase):
-    def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temporary.cleanup)
-        self.directory = Path(self.temporary.name)
+class _Issue123BundleFixture:
+    def initialize(self, directory):
+        self.directory = directory
         self.manifest = self.directory / "manifest.json"
         self.manifest.write_bytes(b'{"reference": {}}\n')
         self.candidate = {
@@ -286,10 +284,17 @@ class Issue123BundleTest(unittest.TestCase):
         )
         return inputs, snapshots
 
+
+class TestIssue123Bundle(_Issue123BundleFixture):
+    @pytest.fixture(autouse=True)
+    def _initialize_fixture(self):
+        with issue123_bundle_fixture(self):
+            yield
+
     def test_assembly_is_deterministic_and_relocatable(self):
         first_index = self.assemble("first")
         second_index = self.assemble("second")
-        self.assertEqual(first_index.read_bytes(), second_index.read_bytes())
+        assert first_index.read_bytes() == second_index.read_bytes()
 
         relocated = self.directory / "relocated"
         first_index.parent.rename(relocated)
@@ -303,7 +308,7 @@ class Issue123BundleTest(unittest.TestCase):
             index["payloads"],
         )
         loaded = reader.load(index["artifacts"]["cpu"]["aggregate"], "payload")
-        self.assertEqual(loaded.document, {"value": 1})
+        assert loaded.document == {"value": 1}
 
     def test_two_bundle_reopen_chain_is_finite_authenticated_and_fail_closed(self):
         runtime_raw_by_role = {
@@ -344,8 +349,8 @@ class Issue123BundleTest(unittest.TestCase):
             output=b0_receipt_path,
         )
         b0_receipt = json.loads(b0_raw)
-        self.assertEqual(b0_receipt["issue_response"]["state"], "unchecked")
-        self.assertEqual(stat.S_IMODE(b0_receipt_path.stat().st_mode), 0o600)
+        assert b0_receipt["issue_response"]["state"] == "unchecked"
+        assert stat.S_IMODE(b0_receipt_path.stat().st_mode) == 0o600
 
         (
             b1_source,
@@ -358,8 +363,8 @@ class Issue123BundleTest(unittest.TestCase):
             updated_at=b0_receipt["observed_at"],
             runtime_raw_by_role=runtime_raw_by_role,
         )
-        self.assertEqual(runtime_records, b1_runtime_records)
-        self.assertEqual(frozen_scope_artifacts, b1_scope_artifacts)
+        assert runtime_records == b1_runtime_records
+        assert frozen_scope_artifacts == b1_scope_artifacts
         b1_reopened_root = self.directory / "b1-reopened"
         shutil.copytree(b1_source.parent, b1_reopened_root)
         b1_reopened = b1_reopened_root / "completion-index.json"
@@ -373,19 +378,18 @@ class Issue123BundleTest(unittest.TestCase):
             output=b1_receipt_path,
         )
         b1_receipt = json.loads(b1_raw)
-        self.assertEqual(b1_receipt["issue_response"]["state"], "checked")
-        self.assertEqual(
-            b1_receipt["pre_acknowledgment_receipt_sha256"],
-            hashlib.sha256(b0_raw).hexdigest(),
+        assert b1_receipt["issue_response"]["state"] == "checked"
+        assert (
+            b1_receipt["pre_acknowledgment_receipt_sha256"]
+            == hashlib.sha256(b0_raw).hexdigest()
         )
-        self.assertNotEqual(
-            b0_receipt["source_bundle"]["inventory_root"],
-            b1_receipt["source_bundle"]["inventory_root"],
+        assert (
+            b0_receipt["source_bundle"]["inventory_root"]
+            != b1_receipt["source_bundle"]["inventory_root"]
         )
-        self.assertEqual(
-            completion.completion_bundle_inventory(b1_source, openings_path),
-            completion.completion_bundle_inventory(b1_reopened, openings_path),
-        )
+        assert completion.completion_bundle_inventory(
+            b1_source, openings_path
+        ) == completion.completion_bundle_inventory(b1_reopened, openings_path)
 
         external_runtime = []
         for ordinal, role in enumerate(completion.RUNTIME_RECEIPT_ROLES):
@@ -405,13 +409,13 @@ class Issue123BundleTest(unittest.TestCase):
         try:
             chain = completion._validate_final_bundle_reopen_chain(snapshots)
             expectation = chain["post_bundle_expectation"]
-            self.assertEqual(
-                expectation.o0_canonical_response_sha256,
-                b0_receipt["issue_response"]["canonical_response_sha256"],
+            assert (
+                expectation.o0_canonical_response_sha256
+                == b0_receipt["issue_response"]["canonical_response_sha256"]
             )
-            self.assertEqual(
-                expectation.o1_canonical_response_sha256,
-                b1_receipt["issue_response"]["canonical_response_sha256"],
+            assert (
+                expectation.o1_canonical_response_sha256
+                == b1_receipt["issue_response"]["canonical_response_sha256"]
             )
         finally:
             completion._close_retained_bundle_trees(
@@ -420,13 +424,13 @@ class Issue123BundleTest(unittest.TestCase):
 
         legacy = copy.deepcopy(b1_receipt)
         legacy["schema_version"] = 0
-        with self.assertRaisesRegex(completion.EvidenceError, "identity or stage"):
+        with pytest.raises(completion.EvidenceError, match="identity or stage"):
             completion.validate_bundle_reopen_receipt(
                 privacy.binding_canonical_json_bytes(legacy),
                 "final",
                 openings_path,
             )
-        with self.assertRaisesRegex(completion.EvidenceError, "stage"):
+        with pytest.raises(completion.EvidenceError, match="stage"):
             completion.validate_bundle_reopen_receipt(
                 b0_raw,
                 "final",
@@ -441,7 +445,7 @@ class Issue123BundleTest(unittest.TestCase):
         )
         stale_reopened_root = self.directory / "stale-b1-reopened"
         shutil.copytree(stale_source.parent, stale_reopened_root)
-        with self.assertRaisesRegex(completion.EvidenceError, "does not follow"):
+        with pytest.raises(completion.EvidenceError, match="does not follow"):
             completion.record_bundle_reopen(
                 source_index=stale_source,
                 reopened_index=stale_reopened_root / "completion-index.json",
@@ -451,48 +455,52 @@ class Issue123BundleTest(unittest.TestCase):
             )
 
         (b1_reopened_root / "unexpected.bin").write_bytes(b"unexpected")
-        with self.assertRaisesRegex(completion.EvidenceError, "missing or extra"):
+        with pytest.raises(completion.EvidenceError, match="missing or extra"):
             completion.completion_bundle_inventory(b1_reopened, openings_path)
 
-    def test_retained_source_and_reopened_b1_detect_every_file_and_tree_mutation(self):
-        attacks = (
+    @pytest.mark.parametrize(
+        "copy_name", ("source", "reopened"), ids=("source-tree", "reopened-tree")
+    )
+    @pytest.mark.parametrize(
+        "attack",
+        (
             "append",
             "same-size-rewrite",
             "inode-replacement",
             "extra-file",
             "extra-directory",
-        )
-        for copy_name in ("source", "reopened"):
-            for attack in attacks:
-                suffix = f"retained-{copy_name}-{attack}"
-                inputs, snapshots = self._capture_live_fixture(suffix)
-                try:
-                    root = inputs[copy_name].parent
-                    target = root / "technical" / "0-cpu.json"
-                    raw = target.read_bytes()
-                    if attack == "append":
-                        target.write_bytes(raw + b"x")
-                    elif attack == "same-size-rewrite":
-                        changed = bytearray(raw)
-                        changed[0] ^= 1
-                        target.write_bytes(bytes(changed))
-                    elif attack == "inode-replacement":
-                        replacement = root / "technical" / "replacement.json"
-                        replacement.write_bytes(raw)
-                        replacement.replace(target)
-                    elif attack == "extra-file":
-                        (root / "unexpected.bin").write_bytes(b"unexpected")
-                    else:
-                        (root / "unexpected-empty-directory").mkdir()
-                    with (
-                        self.subTest(copy=copy_name, attack=attack),
-                        self.assertRaises(completion.EvidenceError),
-                    ):
-                        completion._require_core_live_inputs_unchanged(snapshots)
-                finally:
-                    completion._close_retained_bundle_trees(
-                        (snapshots.reopened_bundle, snapshots.source_bundle)
-                    )
+        ),
+        ids=("append", "same-size", "replace-inode", "extra-file", "extra-directory"),
+    )
+    def test_retained_source_and_reopened_b1_detect_every_file_and_tree_mutation(
+        self, copy_name, attack
+    ):
+        suffix = f"retained-{copy_name}-{attack}"
+        inputs, snapshots = self._capture_live_fixture(suffix)
+        try:
+            root = inputs[copy_name].parent
+            target = root / "technical" / "0-cpu.json"
+            raw = target.read_bytes()
+            if attack == "append":
+                target.write_bytes(raw + b"x")
+            elif attack == "same-size-rewrite":
+                changed = bytearray(raw)
+                changed[0] ^= 1
+                target.write_bytes(bytes(changed))
+            elif attack == "inode-replacement":
+                replacement = root / "technical" / "replacement.json"
+                replacement.write_bytes(raw)
+                replacement.replace(target)
+            elif attack == "extra-file":
+                (root / "unexpected.bin").write_bytes(b"unexpected")
+            else:
+                (root / "unexpected-empty-directory").mkdir()
+            with pytest.raises(completion.EvidenceError):
+                completion._require_core_live_inputs_unchanged(snapshots)
+        finally:
+            completion._close_retained_bundle_trees(
+                (snapshots.reopened_bundle, snapshots.source_bundle)
+            )
 
     def test_core_capture_attempts_both_tree_closes_after_first_close_failure(self):
         inputs = self._live_capture_fixture("close-failure")
@@ -519,9 +527,8 @@ class Issue123BundleTest(unittest.TestCase):
                 "_close_retained_bundle_tree",
                 side_effect=close_then_fail_first,
             ),
-            self.assertRaisesRegex(
-                completion.EvidenceError,
-                "synthetic detached capture failed",
+            pytest.raises(
+                completion.EvidenceError, match="synthetic detached capture failed"
             ) as caught,
         ):
             completion._capture_core_live_inputs(
@@ -533,121 +540,137 @@ class Issue123BundleTest(unittest.TestCase):
                 inputs["pre_ack"],
                 inputs["final"],
             )
-        self.assertIs(caught.exception, primary)
-        self.assertEqual(
-            closed_roots,
-            [
-                inputs["reopened"].parent.resolve(),
-                inputs["source"].parent.resolve(),
-            ],
-        )
-        self.assertIsNone(caught.exception.__context__)
+        assert caught.value is primary
+        assert closed_roots == [
+            inputs["reopened"].parent.resolve(),
+            inputs["source"].parent.resolve(),
+        ]
+        assert caught.value.__context__ is None
 
-    def test_retained_tree_close_matrix_preserves_primary_and_closes_once(self):
-        for position in ("first", "middle", "last"):
-            for body_fails in (False, True):
-                suffix = f"close-matrix-{position}-{body_fails}"
-                inputs, snapshots = self._capture_live_fixture(suffix)
-                trees = (snapshots.reopened_bundle, snapshots.source_bundle)
-                owners = []
-                for tree in trees:
-                    owners.extend(
-                        (
-                            *tree.payloads,
-                            tree.index,
-                            *reversed(tree.directories),
-                            tree.root_directory,
-                        )
-                    )
-                descriptors = [owner.fd for owner in owners]
-                target = descriptors[
-                    {"first": 0, "middle": len(descriptors) // 2, "last": -1}[position]
-                ]
-                calls = {descriptor: 0 for descriptor in descriptors}
-                real_close = completion.os.close
-
-                def fail_one_close(descriptor):
-                    if descriptor in calls:
-                        calls[descriptor] += 1
-                    if descriptor == target:
-                        raise OSError("synthetic-descriptor-close-canary")
-                    return real_close(descriptor)
-
-                primary = RuntimeError("synthetic-body-primary")
-                manager = completion.open_authenticated_post_bundle_transition(
-                    source_index=inputs["source"],
-                    reopened_index=inputs["reopened"],
-                    protected_openings=inputs["openings"],
-                    pre_ack_bundle_reopen_receipt=inputs["pre_ack"],
-                    final_bundle_reopen_receipt=inputs["final"],
-                    manifest_path=self.manifest,
-                    runtime_receipt_paths=inputs["runtime"],
+    @pytest.mark.parametrize(
+        ("position", "body_fails"),
+        (
+            ("first", False),
+            ("first", True),
+            ("middle", False),
+            ("middle", True),
+            ("last", False),
+            ("last", True),
+        ),
+        ids=(
+            "first-clean-body",
+            "first-primary-error",
+            "middle-clean-body",
+            "middle-primary-error",
+            "last-clean-body",
+            "last-primary-error",
+        ),
+    )
+    def test_retained_tree_close_matrix_preserves_primary_and_closes_once(
+        self, position, body_fails
+    ):
+        suffix = f"close-matrix-{position}-{body_fails}"
+        inputs, snapshots = self._capture_live_fixture(suffix)
+        trees = (snapshots.reopened_bundle, snapshots.source_bundle)
+        owners = []
+        for tree in trees:
+            owners.extend(
+                (
+                    *tree.payloads,
+                    tree.index,
+                    *reversed(tree.directories),
+                    tree.root_directory,
                 )
-                try:
-                    with (
-                        self.subTest(position=position, body_fails=body_fails),
-                        mock.patch.object(
-                            completion,
-                            "_capture_core_live_inputs",
-                            return_value=snapshots,
-                        ),
-                        mock.patch.object(
-                            completion,
-                            "_validate_final_bundle_reopen_chain",
-                            return_value={"post_bundle_expectation": object()},
-                        ),
-                        mock.patch.object(
-                            completion.os,
-                            "close",
-                            side_effect=fail_one_close,
-                        ),
-                    ):
-                        if body_fails:
-                            with self.assertRaises(RuntimeError) as caught:
-                                with manager:
-                                    raise primary
-                            self.assertIs(caught.exception, primary)
-                            self.assertIsNone(caught.exception.__context__)
-                        else:
-                            with self.assertRaisesRegex(
-                                completion.EvidenceError,
-                                "retained descriptors could not be closed",
-                            ) as caught:
-                                with manager:
-                                    pass
-                            self.assertIsNone(caught.exception.__cause__)
-                            self.assertIsNone(caught.exception.__context__)
-                    self.assertTrue(all(count == 1 for count in calls.values()))
-                finally:
-                    try:
-                        real_close(target)
-                    except OSError:
-                        pass
+            )
+        descriptors = [owner.fd for owner in owners]
+        target = descriptors[
+            {"first": 0, "middle": len(descriptors) // 2, "last": -1}[position]
+        ]
+        calls = {descriptor: 0 for descriptor in descriptors}
+        real_close = completion.os.close
 
-    def test_frozen_first_five_and_ordered_runtime_inventory_reject_drift(self):
-        for copy_name in ("source", "reopened"):
-            inputs = self._live_capture_fixture(f"frozen-{copy_name}")
-            index_path = inputs[copy_name]
-            document = completion._strict_json_bytes(
-                index_path.read_bytes(),
-                "synthetic frozen inventory index",
-            )
-            document["artifacts"]["cpu"]["synthetic_fixture"] = copy.deepcopy(
-                document["artifacts"]["policy_paired_real"]["synthetic_fixture"]
-            )
-            index_path.write_bytes(completion._canonical_json_bytes(document))
+        def fail_one_close(descriptor):
+            if descriptor in calls:
+                calls[descriptor] += 1
+            if descriptor == target:
+                raise OSError("synthetic-descriptor-close-canary")
+            return real_close(descriptor)
+
+        primary = RuntimeError("synthetic-body-primary")
+        manager = completion.open_authenticated_post_bundle_transition(
+            source_index=inputs["source"],
+            reopened_index=inputs["reopened"],
+            protected_openings=inputs["openings"],
+            pre_ack_bundle_reopen_receipt=inputs["pre_ack"],
+            final_bundle_reopen_receipt=inputs["final"],
+            manifest_path=self.manifest,
+            runtime_receipt_paths=inputs["runtime"],
+        )
+        try:
             with (
-                self.subTest(copy=copy_name),
-                self.assertRaisesRegex(
-                    completion.EvidenceError,
-                    "first-five mappings differ",
+                mock.patch.object(
+                    completion,
+                    "_capture_core_live_inputs",
+                    return_value=snapshots,
+                ),
+                mock.patch.object(
+                    completion,
+                    "_validate_final_bundle_reopen_chain",
+                    return_value={"post_bundle_expectation": object()},
+                ),
+                mock.patch.object(
+                    completion.os,
+                    "close",
+                    side_effect=fail_one_close,
                 ),
             ):
-                completion.completion_bundle_inventory(
-                    index_path,
-                    inputs["openings"],
-                )
+                if body_fails:
+                    with pytest.raises(RuntimeError) as caught:
+                        with manager:
+                            raise primary
+                    assert caught.value is primary
+                    assert caught.value.__context__ is None
+                else:
+                    with pytest.raises(
+                        completion.EvidenceError,
+                        match="retained descriptors could not be closed",
+                    ) as caught:
+                        with manager:
+                            pass
+                    assert caught.value.__cause__ is None
+                    assert caught.value.__context__ is None
+            assert all(count == 1 for count in calls.values())
+        finally:
+            try:
+                real_close(target)
+            except OSError:
+                pass
 
+    @pytest.mark.parametrize(
+        "copy_name", ("source", "reopened"), ids=("source-index", "reopened-index")
+    )
+    def test_frozen_first_five_inventory_rejects_drift(self, copy_name):
+        inputs = self._live_capture_fixture(f"frozen-{copy_name}")
+        index_path = inputs[copy_name]
+        document = completion._strict_json_bytes(
+            index_path.read_bytes(),
+            "synthetic frozen inventory index",
+        )
+        document["artifacts"]["cpu"]["synthetic_fixture"] = copy.deepcopy(
+            document["artifacts"]["policy_paired_real"]["synthetic_fixture"]
+        )
+        index_path.write_bytes(completion._canonical_json_bytes(document))
+        with pytest.raises(
+            completion.EvidenceError, match="first-five mappings differ"
+        ):
+            completion.completion_bundle_inventory(index_path, inputs["openings"])
+
+    @pytest.mark.parametrize(
+        "attack",
+        ("reordered", "role", "path", "digest", "size"),
+        ids=("reordered", "wrong-role", "wrong-path", "wrong-digest", "wrong-size"),
+    )
+    def test_ordered_runtime_inventory_rejects_drift(self, attack):
         inputs = self._live_capture_fixture("frozen-runtime")
         loaded_openings, context = privacy.load_private_openings(inputs["openings"])
         mutations = {
@@ -659,52 +682,53 @@ class Issue123BundleTest(unittest.TestCase):
             "digest": lambda records: records[0].update(sha256="0" * 64),
             "size": lambda records: records[0].update(size_bytes=1),
         }
-        for attack, mutate in mutations.items():
-            changed = copy.deepcopy(context)
-            records = changed["technical_inventory"]["runtime_receipts"]
-            mutate(records)
-            changed["technical_input_root"] = privacy.tagged_canonical_sha256(
-                privacy.TECHNICAL_INPUT_INVENTORY_DOMAIN,
-                changed["technical_inventory"],
-            )
-            attack_openings = privacy.PrivateOpenings(
-                loaded_openings.salt_for_private_verification()
-            )
-            attack_openings._populated = True
-            attack_path = inputs["openings"].parent / f"{attack}-openings.json"
-            privacy.write_private_authority_file(
-                attack_path,
-                privacy.serialize_private_openings(attack_openings, changed),
-                label="synthetic frozen inventory attack",
-            )
-            with (
-                self.subTest(runtime_attack=attack),
-                self.assertRaises(completion.EvidenceError),
-            ):
-                completion.completion_bundle_inventory(
-                    inputs["source"],
-                    attack_path,
-                )
+        changed = copy.deepcopy(context)
+        records = changed["technical_inventory"]["runtime_receipts"]
+        mutations[attack](records)
+        changed["technical_input_root"] = privacy.tagged_canonical_sha256(
+            privacy.TECHNICAL_INPUT_INVENTORY_DOMAIN,
+            changed["technical_inventory"],
+        )
+        attack_openings = privacy.PrivateOpenings(
+            loaded_openings.salt_for_private_verification()
+        )
+        attack_openings._populated = True
+        attack_path = inputs["openings"].parent / f"{attack}-openings.json"
+        privacy.write_private_authority_file(
+            attack_path,
+            privacy.serialize_private_openings(attack_openings, changed),
+            label="synthetic frozen inventory attack",
+        )
+        with pytest.raises(completion.EvidenceError):
+            completion.completion_bundle_inventory(inputs["source"], attack_path)
 
-    def test_assembly_rejects_noncanonical_bundle_paths(self):
-        for index, bundle_path in enumerate(
-            (
-                "/absolute.json",
-                "../escape.json",
-                "a/./payload.json",
-                "a//payload.json",
-                "a\\payload.json",
-                "C:/payload.json",
+    @pytest.mark.parametrize(
+        ("index", "bundle_path"),
+        (
+            (0, "/absolute.json"),
+            (1, "../escape.json"),
+            (2, "a/./payload.json"),
+            (3, "a//payload.json"),
+            (4, "a\\payload.json"),
+            (5, "C:/payload.json"),
+        ),
+        ids=(
+            "absolute",
+            "parent",
+            "dot-segment",
+            "empty-segment",
+            "backslash",
+            "drive",
+        ),
+    )
+    def test_assembly_rejects_noncanonical_bundle_paths(self, index, bundle_path):
+        spec = self.specification(bundle_path=bundle_path)
+        with pytest.raises(completion.EvidenceError):
+            completion.assemble_evidence_bundle(
+                spec,
+                self.directory / f"invalid-{index}",
+                self.manifest,
             )
-        ):
-            with self.subTest(bundle_path=bundle_path):
-                spec = self.specification(bundle_path=bundle_path)
-                with self.assertRaises(completion.EvidenceError):
-                    completion.assemble_evidence_bundle(
-                        spec,
-                        self.directory / f"invalid-{index}",
-                        self.manifest,
-                    )
 
     def test_assembly_rejects_payload_symlinks(self):
         target = self.directory / "real.json"
@@ -712,7 +736,7 @@ class Issue123BundleTest(unittest.TestCase):
         link = self.directory / "linked.json"
         link.symlink_to(target)
         spec = self.specification(source_path=link.name)
-        with self.assertRaisesRegex(completion.EvidenceError, "symlink"):
+        with pytest.raises(completion.EvidenceError, match="symlink"):
             completion.assemble_evidence_bundle(
                 spec,
                 self.directory / "symlink-bundle",
@@ -722,7 +746,7 @@ class Issue123BundleTest(unittest.TestCase):
     def test_assembly_rejects_symlinked_manifest_and_output_parent(self):
         manifest_link = self.directory / "manifest-link.json"
         manifest_link.symlink_to(self.manifest)
-        with self.assertRaisesRegex(completion.EvidenceError, "symlink"):
+        with pytest.raises(completion.EvidenceError, match="symlink"):
             completion.assemble_evidence_bundle(
                 self.specification(),
                 self.directory / "manifest-link-bundle",
@@ -733,13 +757,13 @@ class Issue123BundleTest(unittest.TestCase):
         real_parent.mkdir()
         parent_link = self.directory / "parent-link"
         parent_link.symlink_to(real_parent, target_is_directory=True)
-        with self.assertRaisesRegex(completion.EvidenceError, "symlink"):
+        with pytest.raises(completion.EvidenceError, match="symlink"):
             completion.assemble_evidence_bundle(
                 self.specification(),
                 parent_link / "bundle",
                 self.manifest,
             )
-        self.assertEqual(list(real_parent.iterdir()), [])
+        assert list(real_parent.iterdir()) == []
 
     def test_path_audit_allows_only_configured_darwin_system_aliases(self):
         target = self.directory / "real-system-path"
@@ -762,13 +786,13 @@ class Issue123BundleTest(unittest.TestCase):
             output = completion._ensure_directory_without_symlinks(
                 alias / "output", "configured alias output"
             )
-        self.assertEqual(checked, payload.resolve(strict=True))
-        self.assertTrue(stat.S_ISREG(metadata.st_mode))
-        self.assertEqual(output, (target / "output").resolve(strict=True))
+        assert checked == payload.resolve(strict=True)
+        assert stat.S_ISREG(metadata.st_mode)
+        assert output == (target / "output").resolve(strict=True)
 
         with (
             mock.patch.object(completion.platform, "system", return_value="Darwin"),
-            self.assertRaisesRegex(completion.EvidenceError, "symlink"),
+            pytest.raises(completion.EvidenceError, match="symlink"),
         ):
             completion._path_without_symlinks(alias / payload.name, "unlisted alias")
 
@@ -777,23 +801,23 @@ class Issue123BundleTest(unittest.TestCase):
         existing.mkdir()
         marker = existing / "marker"
         marker.write_text("preserve", encoding="utf-8")
-        with self.assertRaisesRegex(completion.EvidenceError, "already exists"):
+        with pytest.raises(completion.EvidenceError, match="already exists"):
             completion.assemble_evidence_bundle(
                 self.specification(),
                 existing,
                 self.manifest,
             )
-        self.assertEqual(marker.read_text(encoding="utf-8"), "preserve")
+        assert marker.read_text(encoding="utf-8") == "preserve"
 
         dangling = self.directory / "dangling"
         dangling.symlink_to(self.directory / "absent", target_is_directory=True)
-        with self.assertRaisesRegex(completion.EvidenceError, "already exists"):
+        with pytest.raises(completion.EvidenceError, match="already exists"):
             completion.assemble_evidence_bundle(
                 self.specification(),
                 dangling,
                 self.manifest,
             )
-        self.assertTrue(dangling.is_symlink())
+        assert dangling.is_symlink()
 
     def test_reader_rejects_symlinked_artifact_after_relocation(self):
         index_path = self.assemble()
@@ -809,7 +833,7 @@ class Issue123BundleTest(unittest.TestCase):
             index["candidate_evidence"],
             index["payloads"],
         )
-        with self.assertRaisesRegex(completion.EvidenceError, "symlink"):
+        with pytest.raises(completion.EvidenceError, match="symlink"):
             reader.load(descriptor, "payload")
 
     def zip_bytes(self, members):
@@ -824,16 +848,15 @@ class Issue123BundleTest(unittest.TestCase):
         return stream.getvalue()
 
     def test_zip_preflight_rejects_escape_duplicate_symlink_and_expansion_caps(self):
-        with self.assertRaises(completion.EvidenceError):
+        with pytest.raises(completion.EvidenceError):
             completion._preflight_zip(
                 self.zip_bytes([("../escape", b"x")]),
                 "escape",
             )
 
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", UserWarning)
+        with pytest.warns(UserWarning, match="Duplicate name"):
             duplicate = self.zip_bytes([("same", b"x"), ("same", b"y")])
-        with self.assertRaisesRegex(completion.EvidenceError, "repeats ZIP member"):
+        with pytest.raises(completion.EvidenceError, match="repeats ZIP member"):
             completion._preflight_zip(duplicate, "duplicate")
 
         stream = io.BytesIO()
@@ -842,18 +865,18 @@ class Issue123BundleTest(unittest.TestCase):
             info.create_system = 3
             info.external_attr = (stat.S_IFLNK | 0o777) << 16
             archive.writestr(info, "target")
-        with self.assertRaisesRegex(completion.EvidenceError, "symbolic link"):
+        with pytest.raises(completion.EvidenceError, match="symbolic link"):
             completion._preflight_zip(stream.getvalue(), "symlink")
 
         compressed = self.zip_bytes([("large", b"0" * 1024)])
-        with self.assertRaisesRegex(completion.EvidenceError, "ZIP byte bound"):
+        with pytest.raises(completion.EvidenceError, match="ZIP byte bound"):
             completion._preflight_zip(
                 compressed,
                 "bounded",
                 max_total_bytes=32,
             )
         with mock.patch.object(completion, "MAX_ZIP_COMPRESSION_RATIO", 2.0):
-            with self.assertRaisesRegex(completion.EvidenceError, "compression-ratio"):
+            with pytest.raises(completion.EvidenceError, match="compression-ratio"):
                 completion._preflight_zip(compressed, "ratio")
 
     def test_zip_preflight_rejects_unindexed_local_record_with_refreshed_bytes(self):
@@ -877,14 +900,14 @@ class Issue123BundleTest(unittest.TestCase):
         ).to_bytes(4, "little")
         raw = bytes(mutated)
         with zipfile.ZipFile(io.BytesIO(raw)) as archive:
-            self.assertEqual(archive.namelist(), ["indexed"])
+            assert archive.namelist() == ["indexed"]
         refreshed_descriptor = {
             "sha256": hashlib.sha256(raw).hexdigest(),
             "size_bytes": len(raw),
         }
-        self.assertEqual(refreshed_descriptor["size_bytes"], len(raw))
-        with self.assertRaisesRegex(
-            completion.EvidenceError, "byte coverage differs|not contiguous"
+        assert refreshed_descriptor["size_bytes"] == len(raw)
+        with pytest.raises(
+            completion.EvidenceError, match="byte coverage differs|not contiguous"
         ):
             completion._preflight_zip(raw, "unindexed")
 
@@ -908,23 +931,23 @@ class Issue123BundleTest(unittest.TestCase):
         numeric = self.npz_artifact({"x": np.arange(4, dtype=np.float64)})
         arrays = completion._npz_arrays(numeric, ["x"], "numeric")
         np.testing.assert_array_equal(arrays["x"], np.arange(4, dtype=np.float64))
-        with self.assertRaisesRegex(completion.EvidenceError, "closure"):
+        with pytest.raises(completion.EvidenceError, match="closure"):
             completion._npz_arrays(numeric, ["x", "y"], "missing")
 
         object_array = self.npz_artifact(
             {"x": np.asarray([{"untrusted": True}], dtype=object)}
         )
-        with self.assertRaises(completion.EvidenceError):
+        with pytest.raises(completion.EvidenceError):
             completion._npz_arrays(object_array, ["x"], "object")
 
         structured = self.npz_artifact(
             {"x": np.asarray([(1, 2)], dtype=[("left", "i4"), ("right", "i4")])}
         )
-        with self.assertRaisesRegex(completion.EvidenceError, "plain numeric"):
+        with pytest.raises(completion.EvidenceError, match="plain numeric"):
             completion._npz_arrays(structured, ["x"], "structured")
 
         with mock.patch.object(completion, "MAX_NPZ_ARRAY_BYTES", 1):
-            with self.assertRaisesRegex(completion.EvidenceError, "bound"):
+            with pytest.raises(completion.EvidenceError, match="bound"):
                 completion._npz_arrays(numeric, ["x"], "bounded")
 
     def test_relocated_bundle_preloads_every_nested_correctness_npz(self):
@@ -1107,7 +1130,7 @@ class Issue123BundleTest(unittest.TestCase):
             "load_correctness_evidence_index",
             return_value=rebuilt,
         ):
-            self.assertIs(
+            assert (
                 completion._validate_correctness_index(
                     index_artifact,
                     manifest,
@@ -1119,13 +1142,13 @@ class Issue123BundleTest(unittest.TestCase):
                         receipt_raw,
                         runtime_receipt,
                     ),
-                ),
-                rebuilt,
+                )
+                is rebuilt
             )
             hardlink = self.directory / "cpu-runtime-receipt-hardlink.json"
             hardlink.hardlink_to(relocated / receipt_bundle_path)
-            with self.assertRaisesRegex(
-                completion.EvidenceError, "not independent from the external"
+            with pytest.raises(
+                completion.EvidenceError, match="not independent from the external"
             ):
                 completion._validate_correctness_index(
                     index_artifact,
@@ -1140,7 +1163,7 @@ class Issue123BundleTest(unittest.TestCase):
                     ),
                 )
         consumed = {path.relative_to(reader.base).as_posix() for path in reader._seen}
-        self.assertTrue(set(nested_paths).issubset(consumed))
+        assert set(nested_paths).issubset(consumed)
 
     def test_evaluator_returns_structured_false_for_untrusted_index(self):
         index_path = self.assemble()
@@ -1149,49 +1172,56 @@ class Issue123BundleTest(unittest.TestCase):
         value["manifest"]["path"] = "../manifest.json"
         index_path.write_bytes(completion._canonical_json_bytes(value))
         result = completion.evaluate_completion(index_path)
-        self.assertFalse(result["issue_completion_satisfied"])
-        self.assertEqual(len(result["cross_scope_errors"]), 1)
+        assert not (result["issue_completion_satisfied"])
+        assert len(result["cross_scope_errors"]) == 1
         error = result["cross_scope_errors"][0]
-        self.assertEqual(error["code"], "invalid-evidence")
-        self.assertEqual(error["phase"], "bundle-index")
-        self.assertIsNone(error["scope"])
-        self.assertEqual(error["message"], "evidence validation failed closed")
-        self.assertNotIn("../manifest.json", repr(result))
+        assert error["code"] == "invalid-evidence"
+        assert error["phase"] == "bundle-index"
+        assert error["scope"] is None
+        assert error["message"] == "evidence validation failed closed"
+        assert "../manifest.json" not in repr(result)
 
     def test_evaluator_rejects_coherently_refreshed_untrusted_manifest(self):
         index_path = self.assemble("substituted-manifest")
         index = completion._strict_json_bytes(index_path.read_bytes(), "index")
-        self.assertEqual(
-            index["candidate_evidence"]["manifest_sha256"],
-            hashlib.sha256(self.manifest.read_bytes()).hexdigest(),
+        assert (
+            index["candidate_evidence"]["manifest_sha256"]
+            == hashlib.sha256(self.manifest.read_bytes()).hexdigest()
         )
         result = completion.evaluate_completion(index_path, self.manifest)
-        self.assertFalse(result["issue_completion_satisfied"])
-        self.assertEqual(result["cross_scope_errors"][0]["phase"], "bundle-index")
-        self.assertEqual(
-            result["cross_scope_errors"][0]["message"],
-            "evidence validation failed closed",
+        assert not (result["issue_completion_satisfied"])
+        assert result["cross_scope_errors"][0]["phase"] == "bundle-index"
+        assert (
+            result["cross_scope_errors"][0]["message"]
+            == "evidence validation failed closed"
         )
-        self.assertNotIn(str(self.manifest), repr(result))
+        assert str(self.manifest) not in repr(result)
 
     def test_frozen_manifest_digest_matches_exact_repository_bytes(self):
-        self.assertEqual(
-            hashlib.sha256(completion.DEFAULT_MANIFEST.read_bytes()).hexdigest(),
-            completion.TRUSTED_MANIFEST_SHA256,
+        assert (
+            hashlib.sha256(completion.DEFAULT_MANIFEST.read_bytes()).hexdigest()
+            == completion.TRUSTED_MANIFEST_SHA256
         )
 
     def test_evaluator_preflights_index_size_before_reading_json(self):
         index_path = self.assemble()
         with mock.patch.object(completion, "MAX_INDEX_BYTES", 1):
             result = completion.evaluate_completion(index_path)
-        self.assertFalse(result["issue_completion_satisfied"])
-        self.assertEqual(result["cross_scope_errors"][0]["phase"], "bundle-index")
-        self.assertEqual(
-            result["cross_scope_errors"][0]["message"],
-            "evidence validation failed closed",
+        assert not (result["issue_completion_satisfied"])
+        assert result["cross_scope_errors"][0]["phase"] == "bundle-index"
+        assert (
+            result["cross_scope_errors"][0]["message"]
+            == "evidence validation failed closed"
         )
-        self.assertNotIn(str(index_path), repr(result))
+        assert str(index_path) not in repr(result)
 
 
-if __name__ == "__main__":
-    unittest.main()
+@contextmanager
+def issue123_bundle_fixture(fixture=None):
+    """Yield an initialized bundle fixture with failure-safe temporary cleanup."""
+
+    with tempfile.TemporaryDirectory() as name:
+        if fixture is None:
+            fixture = _Issue123BundleFixture()
+        fixture.initialize(Path(name))
+        yield fixture

@@ -4,10 +4,11 @@ import importlib.util
 import json
 import platform
 import tempfile
-import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+
+import pytest
 
 
 def _load_benchmark(name):
@@ -51,28 +52,25 @@ def _torch_checkpoint(state, *, auxiliaries=(), probes=None):
     }
 
 
-class FieldUpdateBenchmarkTest(unittest.TestCase):
+class TestFieldUpdateBenchmark:
     def test_historical_native_readers_preserve_pinned_contract(self):
         readers = (load_field_updates(), load_geometry_mapping())
         for reader in readers:
-            with self.subTest(reader=reader.__name__):
-                contract = reader.historical_contract()
-                self.assertEqual(contract["status"], "historical-only")
-                self.assertEqual(contract["reference_tag"], "native-oracle-d87d25a")
-                self.assertEqual(
-                    contract["reference_commit"],
-                    "d87d25afd160d96b1fa0890cacecd90802448d57",
-                )
-                self.assertEqual(contract["observer_tag"], "native-oracle-observer-v5")
-                self.assertEqual(
-                    contract["summary_sha256"],
-                    "1c9bdce2717ba858fd03b2e40302a5b2d19a29920496f969e33aee36e34e1baa",
-                )
+            contract = reader.historical_contract()
+            assert (contract["status"]) == ("historical-only")
+            assert (contract["reference_tag"]) == ("native-oracle-d87d25a")
+            assert (contract["reference_commit"]) == (
+                "d87d25afd160d96b1fa0890cacecd90802448d57"
+            )
+            assert (contract["observer_tag"]) == ("native-oracle-observer-v5")
+            assert (contract["summary_sha256"]) == (
+                "1c9bdce2717ba858fd03b2e40302a5b2d19a29920496f969e33aee36e34e1baa"
+            )
 
 
-class TorchMaterialPlannerBenchmarkTest(unittest.TestCase):
+class TestTorchMaterialPlannerBenchmark:
     @classmethod
-    def setUpClass(cls):
+    def setup_class(cls):
         import gmes
 
         cls.gmes = gmes
@@ -82,10 +80,10 @@ class TorchMaterialPlannerBenchmarkTest(unittest.TestCase):
         sample = {"median_seconds_per_step": 1.0}
         with patch.object(self.benchmark, "run_case", return_value=sample):
             result = self.benchmark.run_policy_matrix("homogeneous")
-        self.assertFalse(result["comparison_valid"])
-        self.assertIsNone(result["auto_to_fastest_forced_ratio"])
-        self.assertIsNone(result["within_ten_percent"])
-        self.assertFalse(result["passed"])
+        assert not (result["comparison_valid"])
+        assert (result["auto_to_fastest_forced_ratio"]) is None
+        assert (result["within_ten_percent"]) is None
+        assert not (result["passed"])
 
     def test_reports_plan_execution_and_policy_metrics(self):
         result = self.benchmark.run_case(
@@ -102,19 +100,18 @@ class TorchMaterialPlannerBenchmarkTest(unittest.TestCase):
             profile=False,
             gmes=self.gmes,
         )
-        self.assertGreater(result["plan_creation_seconds"], 0)
-        self.assertGreater(result["estimated_plan_bytes"], 0)
-        self.assertGreater(result["bytes_per_active_component_cell"], 0)
-        self.assertEqual(result["material_launches_per_step"], 6)
-        self.assertGreater(result["cells_per_second"], 0)
-        self.assertEqual(
+        assert (result["plan_creation_seconds"]) > (0)
+        assert (result["estimated_plan_bytes"]) > (0)
+        assert (result["bytes_per_active_component_cell"]) > (0)
+        assert (result["material_launches_per_step"]) == (6)
+        assert (result["cells_per_second"]) > (0)
+        assert (
             {
                 bucket["selected_policy"]
                 for component in result["decisions"]
                 for bucket in component["buckets"]
-            },
-            {"dense"},
-        )
+            }
+        ) == ({"dense"})
 
     def test_pml_benchmark_reports_execution_and_storage_metrics(self):
         result = self.benchmark.run_case(
@@ -131,31 +128,25 @@ class TorchMaterialPlannerBenchmarkTest(unittest.TestCase):
             profile=True,
             gmes=self.gmes,
         )
-        self.assertGreater(result["cells_per_second"], 0)
-        self.assertGreater(result["pml"]["active_cells"], 0)
-        self.assertGreater(result["pml"]["state_bytes"], 0)
-        self.assertGreater(result["pml"]["gather_scatter_bytes_per_step"], 0)
-        self.assertEqual(
-            result["pml"]["traffic_representation"], "compact-full-curl-v1"
+        assert (result["cells_per_second"]) > (0)
+        assert (result["pml"]["active_cells"]) > (0)
+        assert (result["pml"]["state_bytes"]) > (0)
+        assert (result["pml"]["gather_scatter_bytes_per_step"]) > (0)
+        assert (result["pml"]["traffic_representation"]) == ("compact-full-curl-v1")
+        assert (result["pml"]["indexed_target_cells"]) == (
+            result["pml"]["active_cells"]
         )
-        self.assertEqual(
-            result["pml"]["indexed_target_cells"], result["pml"]["active_cells"]
+        assert (result["pml"]["sparse_residual_axis_targets"]) == (0)
+        assert (result["pml"]["gather_scatter_scalar_values_per_step"]) == (
+            6 * result["pml"]["active_cells"]
         )
-        self.assertEqual(result["pml"]["sparse_residual_axis_targets"], 0)
-        self.assertEqual(
-            result["pml"]["gather_scatter_scalar_values_per_step"],
-            6 * result["pml"]["active_cells"],
+        assert (result["pml"]["launches_per_step"]) == (6)
+        assert (result["profile"]["gather_count"]) > (0)
+        assert (result["profile"]["scatter_count"]) > (0)
+        assert (result["timing_scope"]["included"]) == (
+            ("advance", "device_synchronize")
         )
-        self.assertEqual(result["pml"]["launches_per_step"], 6)
-        self.assertGreater(result["profile"]["gather_count"], 0)
-        self.assertGreater(result["profile"]["scatter_count"], 0)
-        self.assertEqual(
-            result["timing_scope"]["included"], ("advance", "device_synchronize")
-        )
-        self.assertIn(
-            "flush_probes",
-            result["timing_scope"]["excluded_host_boundaries"],
-        )
+        assert ("flush_probes") in (result["timing_scope"]["excluded_host_boundaries"])
 
     def test_compiled_cpu_pml_plan_reports_sparse_residual_traffic(self):
         _, _, _, plans, _ = self.benchmark.build_host_plan(
@@ -168,7 +159,7 @@ class TorchMaterialPlannerBenchmarkTest(unittest.TestCase):
             compile_policy="compile",
         )
         summary = self.benchmark.plan_summary(plans)
-        self.assertTrue(summary["cpml_sparse_residual"])
+        assert summary["cpml_sparse_residual"]
         cpml_buckets = [
             bucket
             for plan in plans
@@ -186,22 +177,17 @@ class TorchMaterialPlannerBenchmarkTest(unittest.TestCase):
             scalar_width=1,
             element_size=8,
         )
-        self.assertEqual(traffic["traffic_representation"], "axis-sparse-residual-v1")
-        self.assertEqual(traffic["indexed_target_cells"], 0)
-        self.assertGreater(traffic["sparse_residual_axis_targets"], 0)
-        self.assertLess(traffic["sparse_residual_axis_targets"], 2 * logical_targets)
-        self.assertEqual(
-            traffic["gather_scatter_scalar_values_per_step"],
-            4 * traffic["sparse_residual_axis_targets"],
+        assert (traffic["traffic_representation"]) == ("axis-sparse-residual-v1")
+        assert (traffic["indexed_target_cells"]) == (0)
+        assert (traffic["sparse_residual_axis_targets"]) > (0)
+        assert (traffic["sparse_residual_axis_targets"]) < (2 * logical_targets)
+        assert (traffic["gather_scatter_scalar_values_per_step"]) == (
+            4 * traffic["sparse_residual_axis_targets"]
         )
-        self.assertLess(
-            traffic["gather_scatter_bytes_per_step"],
-            6 * logical_targets * 8,
-        )
-        self.assertEqual(summary["material_launches_per_step"], 6 + active_axes)
-        self.assertEqual(
-            summary["material_launches_per_step"],
-            sum(item["launches"] for item in summary["decisions"]),
+        assert (traffic["gather_scatter_bytes_per_step"]) < (6 * logical_targets * 8)
+        assert (summary["material_launches_per_step"]) == (6 + active_axes)
+        assert (summary["material_launches_per_step"]) == (
+            sum(item["launches"] for item in summary["decisions"])
         )
 
     def test_fragmented_coverage_matches_contiguous_target_counts(self):
@@ -222,8 +208,8 @@ class TorchMaterialPlannerBenchmarkTest(unittest.TestCase):
                     for bucket in plan.buckets
                     if bucket.signature.model == "drude"
                 )
-            self.assertAlmostEqual(
-                counts["fragmented"] / counts["contiguous"], 1.0, delta=0.1
+            assert (counts["fragmented"] / counts["contiguous"]) == pytest.approx(
+                1.0, abs=0.1
             )
 
     def test_stateful_matrix_executes_with_exact_width_normalization(self):
@@ -241,22 +227,22 @@ class TorchMaterialPlannerBenchmarkTest(unittest.TestCase):
             profile=False,
             gmes=self.gmes,
         )
-        self.assertGreater(result["cells_per_second"], 0)
-        self.assertGreater(result["dispersive_state_bytes"], 0)
-        self.assertEqual(result["state_width_policy"], "exact")
-        self.assertEqual(result["state_padding_elements"], 0)
-        self.assertGreater(result["state_padding_elements_avoided"], 0)
-        self.assertTrue(result["state_width_decisions"])
+        assert (result["cells_per_second"]) > (0)
+        assert (result["dispersive_state_bytes"]) > (0)
+        assert (result["state_width_policy"]) == ("exact")
+        assert (result["state_padding_elements"]) == (0)
+        assert (result["state_padding_elements_avoided"]) > (0)
+        assert result["state_width_decisions"]
         electric_widths = {
             tuple(item["state_shape"])
             for item in result["signatures"]
             if item["component"] == "Ex" and item["model"] == "drude"
         }
-        self.assertEqual(electric_widths, {(1,), (2,), (4,), (8,)})
+        assert (electric_widths) == ({(1,), (2,), (4,), (8,)})
         magnetic_models = {
             item["model"] for item in result["signatures"] if item["component"] == "Hx"
         }
-        self.assertEqual(magnetic_models, {"dielectric"})
+        assert (magnetic_models) == ({"dielectric"})
 
     def test_thousand_dispersive_regions_share_signatures_and_launches(self):
         _, geometry, _, plans, _ = self.benchmark.build_host_plan(
@@ -267,24 +253,22 @@ class TorchMaterialPlannerBenchmarkTest(unittest.TestCase):
             tile_size=64,
             gmes=self.gmes,
         )
-        self.assertEqual(len(geometry), 1001)
+        assert (len(geometry)) == (1001)
         drude_buckets = [
             bucket
             for plan in plans
             for bucket in plan.buckets
             if bucket.signature.model == "drude"
         ]
-        self.assertEqual(len(drude_buckets), 3)
-        self.assertTrue(
-            all(len(bucket.coefficient_table) == 1 for bucket in drude_buckets)
-        )
-        self.assertEqual(sum(plan.launch_count for plan in plans), 9)
-        self.assertEqual(sum(bucket.launch_count for bucket in drude_buckets), 3)
+        assert (len(drude_buckets)) == (3)
+        assert all(len(bucket.coefficient_table) == 1 for bucket in drude_buckets)
+        assert (sum(plan.launch_count for plan in plans)) == (9)
+        assert (sum(bucket.launch_count for bucket in drude_buckets)) == (3)
 
 
-class TorchDm2BenchmarkTest(unittest.TestCase):
+class TestTorchDm2Benchmark:
     @classmethod
-    def setUpClass(cls):
+    def setup_class(cls):
         import gmes
 
         cls.gmes = gmes
@@ -307,12 +291,12 @@ class TorchDm2BenchmarkTest(unittest.TestCase):
         )
         result = self.benchmark.run_case(args, self.gmes)
 
-        self.assertTrue(result["fixed_storage"])
-        self.assertGreater(result["dm2_cells_per_second"], 0)
-        self.assertGreater(result["state"]["persistent_state_bytes"], 0)
-        self.assertGreater(result["state"]["scratch_bytes"], 0)
-        self.assertEqual(result["state"]["transition_widths"], [1])
-        self.assertTrue(result["iteration_distributions"])
+        assert result["fixed_storage"]
+        assert (result["dm2_cells_per_second"]) > (0)
+        assert (result["state"]["persistent_state_bytes"]) > (0)
+        assert (result["state"]["scratch_bytes"]) > (0)
+        assert (result["state"]["transition_widths"]) == ([1])
+        assert result["iteration_distributions"]
 
     def test_mixed_widths_report_exact_and_padding_tradeoff(self):
         space, geometry = self.benchmark.build_case("mixed-widths", self.gmes)
@@ -323,11 +307,10 @@ class TorchDm2BenchmarkTest(unittest.TestCase):
         )
         metrics = self.benchmark._state_metrics(simulation)
 
-        self.assertEqual(metrics["transition_widths"], [1, 2, 4, 8])
-        self.assertGreater(metrics["bounded_padding_overhead"], 1)
-        self.assertLess(
-            metrics["exact_transition_elements"],
-            metrics["bounded_padding_elements"],
+        assert (metrics["transition_widths"]) == ([1, 2, 4, 8])
+        assert (metrics["bounded_padding_overhead"]) > (1)
+        assert (metrics["exact_transition_elements"]) < (
+            metrics["bounded_padding_elements"]
         )
 
     def test_all_material_cases_execute_in_2d_and_3d(self):
@@ -342,32 +325,30 @@ class TorchDm2BenchmarkTest(unittest.TestCase):
             "lorentz",
         }
         for case in ("all-material-2d", "all-material-3d"):
-            with self.subTest(case=case):
-                space, geometry = self.benchmark.build_case(case, self.gmes)
-                simulation = self.gmes.TorchSimulation(
-                    space=space,
-                    geometry=geometry,
-                    runtime=self.gmes.TorchRuntimeConfig(device="cpu", cpu_threads=1),
-                )
-                simulation.step()
-                models = {
-                    bucket.signature.model
-                    for component in simulation.plan.components.values()
-                    for bucket in component.buckets
-                }
-                self.assertTrue(expected_models.issubset(models))
-                diagnostics = simulation.diagnostics()
-                self.assertTrue(diagnostics["dm2"])
-                self.assertGreater(diagnostics["pml"]["active_cells"], 0)
-                self.assertEqual(
-                    set(diagnostics["dispersive"]["models"]),
-                    {"dcp-ade", "dcp-plrc", "dcp-rc", "drude", "lorentz"},
-                )
+            space, geometry = self.benchmark.build_case(case, self.gmes)
+            simulation = self.gmes.TorchSimulation(
+                space=space,
+                geometry=geometry,
+                runtime=self.gmes.TorchRuntimeConfig(device="cpu", cpu_threads=1),
+            )
+            simulation.step()
+            models = {
+                bucket.signature.model
+                for component in simulation.plan.components.values()
+                for bucket in component.buckets
+            }
+            assert expected_models.issubset(models)
+            diagnostics = simulation.diagnostics()
+            assert diagnostics["dm2"]
+            assert (diagnostics["pml"]["active_cells"]) > (0)
+            assert (set(diagnostics["dispersive"]["models"])) == (
+                {"dcp-ade", "dcp-plrc", "dcp-rc", "drude", "lorentz"}
+            )
 
 
-class TorchTuningBenchmarkTest(unittest.TestCase):
+class TestTorchTuningBenchmark:
     @classmethod
-    def setUpClass(cls):
+    def setup_class(cls):
         cls.benchmark = load_torch_tuning()
         cls.manifest = cls.benchmark.load_manifest(cls.benchmark.MANIFEST)
 
@@ -397,9 +378,7 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
                 },
             }
         }
-        self.assertTrue(
-            self.benchmark._torch_baseline_environment_matches(baseline, environment)
-        )
+        assert self.benchmark._torch_baseline_environment_matches(baseline, environment)
         for name, value in (
             ("torch", "2.13.0+cu126"),
             ("cuda_runtime", "12.6"),
@@ -407,15 +386,12 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
         ):
             candidate = copy.deepcopy(environment)
             candidate[name] = value
-            with self.subTest(name=name, value=value):
-                self.assertFalse(
-                    self.benchmark._torch_baseline_environment_matches(
-                        baseline, candidate
-                    )
-                )
+            assert not (
+                self.benchmark._torch_baseline_environment_matches(baseline, candidate)
+            )
         malformed = copy.deepcopy(baseline)
         malformed["environment"]["timing_runtime_identity"]["schema_version"] = True
-        self.assertFalse(
+        assert not (
             self.benchmark._torch_baseline_environment_matches(malformed, environment)
         )
 
@@ -444,10 +420,10 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             threads=1,
             checkpoint=5,
         )
-        self.assertEqual(len(samples), 3)
-        self.assertTrue(all(value > 0 for value in samples))
-        self.assertEqual(simulation.step_count, 7)
-        self.assertEqual(simulation.sample_starts, [5, 7, 5] * 3)
+        assert (len(samples)) == (3)
+        assert all(value > 0 for value in samples)
+        assert (simulation.step_count) == (7)
+        assert (simulation.sample_starts) == ([5, 7, 5] * 3)
 
     def test_authoritative_timer_replays_real_warmup_for_each_repeat(self):
         import torch
@@ -479,8 +455,8 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
                 initial_checkpoint=0,
                 warmup=5,
             )
-        self.assertEqual(samples, [1.0, 1.0, 1.0])
-        self.assertEqual(simulation.sample_starts, [0, 5] * 3)
+        assert (samples) == ([1.0, 1.0, 1.0])
+        assert (simulation.sample_starts) == ([0, 5] * 3)
 
     def test_dynamic_state_finiteness_rejects_changed_nan_and_ignores_plan_inf(self):
         import torch
@@ -502,8 +478,8 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             ["bucket_0"],
             expected_buffers,
         )
-        self.assertTrue(finite["passed"])
-        self.assertNotIn("plan.open_interval", finite["tracked_buffers"])
+        assert finite["passed"]
+        assert ("plan.open_interval") not in (finite["tracked_buffers"])
 
         invalid = copy.deepcopy(advanced)
         invalid["state"]["bucket_0"][0] = float("nan")
@@ -512,11 +488,8 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             ["bucket_0"],
             expected_buffers,
         )
-        self.assertFalse(nonfinite["passed"])
-        self.assertEqual(
-            nonfinite["stages"]["post_timed"]["nonfinite_element_count"],
-            1,
-        )
+        assert not (nonfinite["passed"])
+        assert (nonfinite["stages"]["post_timed"]["nonfinite_element_count"]) == (1)
 
     def test_dynamic_state_finiteness_covers_unchanged_and_auxiliary_tensors(self):
         import torch
@@ -552,12 +525,12 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             ["step_count"],
             expected_buffers,
         )
-        self.assertFalse(result["passed"])
-        self.assertIn("unchanged", result["tracked_buffers"])
-        self.assertIn("auxiliaries[0].state.nested", result["tracked_buffers"])
-        self.assertIn("probes.root_ring", result["tracked_buffers"])
-        self.assertIn("auxiliaries[0].probes.nested_ring", result["tracked_buffers"])
-        self.assertEqual(result["stages"]["initial"]["nonfinite_element_count"], 3)
+        assert not (result["passed"])
+        assert ("unchanged") in (result["tracked_buffers"])
+        assert ("auxiliaries[0].state.nested") in (result["tracked_buffers"])
+        assert ("probes.root_ring") in (result["tracked_buffers"])
+        assert ("auxiliaries[0].probes.nested_ring") in (result["tracked_buffers"])
+        assert (result["stages"]["initial"]["nonfinite_element_count"]) == (3)
 
     def test_dynamic_state_finiteness_requires_complete_checkpoint_v1_schema(self):
         import torch
@@ -569,25 +542,24 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             probes={"ring": torch.ones(1)},
         )
         for path in ("auxiliaries", "probes", "nested-probes"):
-            with self.subTest(path=path):
-                incomplete = copy.deepcopy(complete)
-                if path == "nested-probes":
-                    del incomplete["auxiliaries"][0]["probes"]
-                else:
-                    del incomplete[path]
-                with self.assertRaisesRegex(ValueError, "closure differs"):
-                    self.benchmark._checkpoint_dynamic_tensors(incomplete)
+            incomplete = copy.deepcopy(complete)
+            if path == "nested-probes":
+                del incomplete["auxiliaries"][0]["probes"]
+            else:
+                del incomplete[path]
+            with pytest.raises(ValueError, match="closure differs"):
+                self.benchmark._checkpoint_dynamic_tensors(incomplete)
 
         non_tensor = copy.deepcopy(complete)
         non_tensor["probes"]["ring"] = 1
-        with self.assertRaisesRegex(ValueError, "non-tensor leaf"):
+        with pytest.raises(ValueError, match="non-tensor leaf"):
             self.benchmark._checkpoint_dynamic_tensors(non_tensor)
 
         expected_buffers = sorted(self.benchmark._checkpoint_dynamic_tensors(complete))
         omitted = copy.deepcopy(complete)
         omitted["auxiliaries"] = ()
         omitted["probes"] = {}
-        with self.assertRaisesRegex(ValueError, "inventory differs"):
+        with pytest.raises(ValueError, match="inventory differs"):
             self.benchmark._dynamic_state_finiteness(
                 {"initial": omitted, "post_timed": copy.deepcopy(omitted)},
                 [],
@@ -598,7 +570,7 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             state,
             auxiliaries=(_torch_checkpoint({}),),
         )
-        with self.assertRaisesRegex(ValueError, "field closure"):
+        with pytest.raises(ValueError, match="field closure"):
             self.benchmark._checkpoint_dynamic_tensors(empty_auxiliary)
 
     def test_checkpoint_tensor_flattening_does_not_retain_tensor_cycles(self):
@@ -615,9 +587,9 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             return references, flattened
 
         references, flattened = flatten_once()
-        self.assertTrue(all(reference() is not None for reference in references))
+        assert all(reference() is not None for reference in references)
         del flattened
-        self.assertTrue(all(reference() is None for reference in references))
+        assert all(reference() is None for reference in references)
 
     def test_checksum_rejects_nonfinite_field_values(self):
         import torch
@@ -627,7 +599,7 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             device=torch.device("cpu"),
             state=SimpleNamespace(fields=lambda: fields),
         )
-        with self.assertRaisesRegex(ValueError, "non-finite"):
+        with pytest.raises(ValueError, match="non-finite"):
             self.benchmark._checksum(simulation)
 
     def test_current_rss_reads_linux_proc_resident_pages(self):
@@ -649,9 +621,9 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
                 return_value=reader,
             ) as reader_type,
         ):
-            self.assertEqual(self.benchmark._current_rss_bytes(), 42 * 4096)
+            assert (self.benchmark._current_rss_bytes()) == (42 * 4096)
         reader_type.assert_called_once_with()
-        self.assertTrue(reader.closed)
+        assert reader.closed
 
     def test_linux_proc_statm_reader_reuses_fd_buffer_and_zero_offset(self):
         payloads = iter(
@@ -681,8 +653,8 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             patch.object(self.benchmark.os, "close") as close_file,
         ):
             reader = self.benchmark._LinuxProcStatmReader()
-            self.assertEqual(reader(), 42 * 4096)
-            self.assertEqual(reader(), 0)
+            assert (reader()) == (42 * 4096)
+            assert (reader()) == (0)
             reader.close()
             reader.close()
 
@@ -690,29 +662,29 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             "/proc/self/statm",
             self.benchmark.os.O_RDONLY | self.benchmark.os.O_CLOEXEC,
         )
-        self.assertEqual([item[0] for item in calls], [17, 17])
-        self.assertEqual([item[3] for item in calls], [0, 0])
-        self.assertIs(calls[0][1], calls[1][1])
-        self.assertIs(calls[0][2], calls[1][2])
+        assert ([item[0] for item in calls]) == ([17, 17])
+        assert ([item[3] for item in calls]) == ([0, 0])
+        assert (calls[0][1]) is (calls[1][1])
+        assert (calls[0][2]) is (calls[1][2])
         close_file.assert_called_once_with(17)
 
     def test_linux_proc_statm_reader_repeats_real_proc_reads(self):
         if platform.system() != "Linux" or not hasattr(self.benchmark.os, "preadv"):
-            self.skipTest("Linux preadv is required")
+            pytest.skip("Linux preadv is required")
         reader = self.benchmark._LinuxProcStatmReader()
         fd = reader._fd
         iov = reader._iov
         try:
             first = reader()
             second = reader()
-            self.assertEqual(reader._fd, fd)
-            self.assertIs(reader._iov, iov)
+            assert (reader._fd) == (fd)
+            assert (reader._iov) is (iov)
         finally:
             reader.close()
-        self.assertIs(type(first), int)
-        self.assertIs(type(second), int)
-        self.assertGreaterEqual(first, 0)
-        self.assertGreaterEqual(second, 0)
+        assert (type(first)) is (int)
+        assert (type(second)) is (int)
+        assert (first) >= (0)
+        assert (second) >= (0)
 
     def test_linux_proc_statm_reader_rejects_malformed_or_truncated_data(self):
         cases = (
@@ -731,28 +703,27 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             ),
         )
         for name, payload in cases:
-            with self.subTest(name=name):
 
-                def preadv(_fd, iov, _offset):
-                    iov[0][: len(payload)] = payload
-                    return len(payload)
+            def preadv(_fd, iov, _offset):
+                iov[0][: len(payload)] = payload
+                return len(payload)
 
-                with (
-                    patch.object(self.benchmark.os, "getpid", return_value=321),
-                    patch.object(self.benchmark.os, "sysconf", return_value=4096),
-                    patch.object(self.benchmark.os, "open", return_value=17),
-                    patch.object(
-                        self.benchmark.os,
-                        "preadv",
-                        side_effect=preadv,
-                        create=True,
-                    ),
-                    patch.object(self.benchmark.os, "close") as close_file,
-                ):
-                    reader = self.benchmark._LinuxProcStatmReader()
-                    self.assertIsNone(reader())
-                    reader.close()
-                close_file.assert_called_once_with(17)
+            with (
+                patch.object(self.benchmark.os, "getpid", return_value=321),
+                patch.object(self.benchmark.os, "sysconf", return_value=4096),
+                patch.object(self.benchmark.os, "open", return_value=17),
+                patch.object(
+                    self.benchmark.os,
+                    "preadv",
+                    side_effect=preadv,
+                    create=True,
+                ),
+                patch.object(self.benchmark.os, "close") as close_file,
+            ):
+                reader = self.benchmark._LinuxProcStatmReader()
+                assert (reader()) is None
+                reader.close()
+            close_file.assert_called_once_with(17)
 
     def test_linux_proc_statm_reader_fails_closed_for_provider_errors(self):
         with (
@@ -761,25 +732,24 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             patch.object(self.benchmark.os, "open") as open_file,
         ):
             reader = self.benchmark._LinuxProcStatmReader()
-            self.assertIsNone(reader())
+            assert (reader()) is None
             reader.close()
         open_file.assert_not_called()
 
         for page_size in (0, -1):
-            with self.subTest(page_size=page_size):
-                with (
-                    patch.object(self.benchmark.os, "getpid", return_value=321),
-                    patch.object(
-                        self.benchmark.os,
-                        "sysconf",
-                        return_value=page_size,
-                    ),
-                    patch.object(self.benchmark.os, "open") as open_file,
-                ):
-                    reader = self.benchmark._LinuxProcStatmReader()
-                    self.assertIsNone(reader())
-                    reader.close()
-                open_file.assert_not_called()
+            with (
+                patch.object(self.benchmark.os, "getpid", return_value=321),
+                patch.object(
+                    self.benchmark.os,
+                    "sysconf",
+                    return_value=page_size,
+                ),
+                patch.object(self.benchmark.os, "open") as open_file,
+            ):
+                reader = self.benchmark._LinuxProcStatmReader()
+                assert (reader()) is None
+                reader.close()
+            open_file.assert_not_called()
 
         with (
             patch.object(self.benchmark.os, "getpid", return_value=321),
@@ -793,7 +763,7 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             patch.object(self.benchmark.os, "open", side_effect=OSError),
         ):
             reader = self.benchmark._LinuxProcStatmReader()
-            self.assertIsNone(reader())
+            assert (reader()) is None
             reader.close()
 
         with (
@@ -808,7 +778,7 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             patch.object(self.benchmark.os, "open") as open_file,
         ):
             reader = self.benchmark._LinuxProcStatmReader()
-            self.assertIsNone(reader())
+            assert (reader()) is None
             reader.close()
         open_file.assert_not_called()
 
@@ -830,33 +800,32 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             patch.object(self.benchmark.os, "open") as open_file,
         ):
             reader = self.benchmark._LinuxProcStatmReader()
-            self.assertIsNone(reader())
+            assert (reader()) is None
             reader.close()
         open_file.assert_not_called()
 
         for error in (OSError, AttributeError):
-            with self.subTest(preadv_error=error.__name__):
-                with (
-                    patch.object(self.benchmark.os, "getpid", return_value=321),
-                    patch.object(self.benchmark.os, "sysconf", return_value=4096),
-                    patch.object(self.benchmark.os, "open", return_value=17),
-                    patch.object(
-                        self.benchmark.os,
-                        "preadv",
-                        side_effect=error,
-                        create=True,
-                    ),
-                    patch.object(
-                        self.benchmark.os,
-                        "close",
-                        side_effect=OSError if error is OSError else None,
-                    ) as close_file,
-                ):
-                    reader = self.benchmark._LinuxProcStatmReader()
-                    self.assertIsNone(reader())
-                    reader.close()
-                    reader.close()
-                close_file.assert_called_once_with(17)
+            with (
+                patch.object(self.benchmark.os, "getpid", return_value=321),
+                patch.object(self.benchmark.os, "sysconf", return_value=4096),
+                patch.object(self.benchmark.os, "open", return_value=17),
+                patch.object(
+                    self.benchmark.os,
+                    "preadv",
+                    side_effect=error,
+                    create=True,
+                ),
+                patch.object(
+                    self.benchmark.os,
+                    "close",
+                    side_effect=OSError if error is OSError else None,
+                ) as close_file,
+            ):
+                reader = self.benchmark._LinuxProcStatmReader()
+                assert (reader()) is None
+                reader.close()
+                reader.close()
+            close_file.assert_called_once_with(17)
 
     def test_linux_proc_statm_reader_rejects_int64_overflow(self):
         maximum_pages = self.benchmark.INT64_MAX // 4096
@@ -885,8 +854,8 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             patch.object(self.benchmark.os, "close"),
         ):
             reader = self.benchmark._LinuxProcStatmReader()
-            self.assertEqual(reader(), maximum_pages * 4096)
-            self.assertIsNone(reader())
+            assert (reader()) == (maximum_pages * 4096)
+            assert (reader()) is None
             reader.close()
 
     def test_linux_proc_statm_reader_reopens_before_locking_after_fork(self):
@@ -919,17 +888,14 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             reader = self.benchmark._LinuxProcStatmReader()
             original_lock = reader._lock
             original_iov = reader._iov
-            self.assertEqual(reader(), 42 * 4096)
-            self.assertEqual(reader(), 42 * 4096)
-            self.assertIsNot(reader._lock, original_lock)
-            self.assertIs(reader._iov, original_iov)
+            assert (reader()) == (42 * 4096)
+            assert (reader()) == (42 * 4096)
+            assert (reader._lock) is not (original_lock)
+            assert (reader._iov) is (original_iov)
             reader.close()
 
-        self.assertEqual(open_file.call_count, 2)
-        self.assertEqual(
-            [item.args[0] for item in close_file.call_args_list],
-            [17, 23],
-        )
+        assert (open_file.call_count) == (2)
+        assert ([item.args[0] for item in close_file.call_args_list]) == ([17, 23])
 
     def test_linux_rss_provider_uses_versioned_exact_schema(self):
         payload = b"1000 42 7 0 0 0 0\n"
@@ -952,16 +918,15 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             patch.object(self.benchmark.os, "close") as close_file,
         ):
             reader, provider = self.benchmark._current_rss_provider()
-            self.assertEqual(
-                provider,
+            assert (provider) == (
                 {
                     "name": "proc-self-statm-preadv-v1",
                     "units": "bytes",
                     "validated": True,
-                },
+                }
             )
-            self.assertTrue(self.benchmark._rss_provider_valid(provider))
-            self.assertFalse(
+            assert self.benchmark._rss_provider_valid(provider)
+            assert not (
                 self.benchmark._rss_provider_valid(
                     {
                         "name": "proc-self-statm",
@@ -976,7 +941,7 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             self.benchmark.os.O_RDONLY | self.benchmark.os.O_CLOEXEC,
         )
         preadv_file.assert_called_once()
-        self.assertEqual(preadv_file.call_args.args[2], 0)
+        assert (preadv_file.call_args.args[2]) == (0)
         close_file.assert_called_once_with(17)
 
     def test_linux_rss_provider_fails_closed_when_prevalidation_fails(self):
@@ -994,9 +959,9 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             patch.object(self.benchmark.os, "close") as close_file,
         ):
             reader, provider = self.benchmark._current_rss_provider()
-            self.assertFalse(provider["validated"])
-            self.assertFalse(self.benchmark._rss_provider_valid(provider))
-            self.assertIsNone(reader())
+            assert not (provider["validated"])
+            assert not (self.benchmark._rss_provider_valid(provider))
+            assert (reader()) is None
             reader.close()
         preadv_file.assert_called_once()
         close_file.assert_called_once_with(17)
@@ -1010,7 +975,7 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
                 return_value=12_641_280,
             ) as direct,
         ):
-            self.assertEqual(self.benchmark._current_rss_bytes(), 12_641_280)
+            assert (self.benchmark._current_rss_bytes()) == (12_641_280)
         direct.assert_called_once_with()
 
     def test_ps_rss_reference_converts_kibibytes_to_bytes(self):
@@ -1021,7 +986,7 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
                 self.benchmark.subprocess, "run", return_value=completed
             ) as run,
         ):
-            self.assertEqual(self.benchmark._ps_current_rss_bytes(), 12345 * 1024)
+            assert (self.benchmark._ps_current_rss_bytes()) == (12345 * 1024)
         run.assert_called_once_with(
             ("ps", "-o", "rss=", "-p", "321"),
             check=False,
@@ -1031,7 +996,7 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
 
     def test_current_rss_fails_closed_when_measurement_is_unavailable(self):
         with patch.object(self.benchmark.platform, "system", return_value="Windows"):
-            self.assertIsNone(self.benchmark._current_rss_bytes())
+            assert (self.benchmark._current_rss_bytes()) is None
 
         class Reader:
             closed = False
@@ -1051,8 +1016,8 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
                 return_value=reader,
             ),
         ):
-            self.assertIsNone(self.benchmark._current_rss_bytes())
-        self.assertTrue(reader.closed)
+            assert (self.benchmark._current_rss_bytes()) is None
+        assert reader.closed
 
     def test_cpu_memory_probe_measures_growth_and_restores_warm_checkpoint(self):
         import torch
@@ -1077,17 +1042,16 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             side_effect=[10_000, 10_512],
         ):
             result = self.benchmark._cpu_memory_probe(simulation, "warm", 0)
-        self.assertEqual(
-            result,
+        assert (result) == (
             {
                 "probe_steps": 1,
                 "before_bytes": 10_000,
                 "after_bytes": 10_512,
                 "growth_bytes": 512,
-            },
+            }
         )
-        self.assertEqual(simulation.advances, [1])
-        self.assertEqual(simulation.checkpoints, ["warm", "warm"])
+        assert (simulation.advances) == ([1])
+        assert (simulation.checkpoints) == (["warm", "warm"])
 
     def test_cpu_memory_probe_records_missing_measurement(self):
         import torch
@@ -1103,13 +1067,13 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             side_effect=[None, 10_512],
         ):
             result = self.benchmark._cpu_memory_probe(simulation, {}, 2)
-        self.assertIsNone(result["growth_bytes"])
+        assert (result["growth_bytes"]) is None
 
     def test_cpu_memory_gate_requires_a_real_bounded_measurement(self):
         cpu = self.benchmark.torch.device("cpu")
-        self.assertFalse(self.benchmark._memory_growth_bounded(cpu, None, None))
-        self.assertTrue(self.benchmark._memory_growth_bounded(cpu, None, 1024**2))
-        self.assertFalse(self.benchmark._memory_growth_bounded(cpu, None, 1024**2 + 1))
+        assert not (self.benchmark._memory_growth_bounded(cpu, None, None))
+        assert self.benchmark._memory_growth_bounded(cpu, None, 1024**2)
+        assert not (self.benchmark._memory_growth_bounded(cpu, None, 1024**2 + 1))
 
     def test_cpu_rss_plateau_accepts_stabilization_and_bounded_oscillation(self):
         samples = [
@@ -1121,12 +1085,12 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             )
         ]
         result = self.benchmark._evaluate_cpu_rss_plateau(samples)
-        self.assertTrue(result["bounded"])
-        self.assertFalse(result["persistent_positive_order_trend"])
-        self.assertLessEqual(result["stable_start_upward_excursion_bytes"], 1024**2)
-        self.assertEqual(result["stabilization_boundary_index"], 16)
-        self.assertEqual(len(result["evaluation_block_slopes_bytes_per_window"]), 2)
-        self.assertEqual(result["peak_rss_bytes"], 20_200)
+        assert result["bounded"]
+        assert not (result["persistent_positive_order_trend"])
+        assert (result["stable_start_upward_excursion_bytes"]) <= (1024**2)
+        assert (result["stabilization_boundary_index"]) == (16)
+        assert (len(result["evaluation_block_slopes_bytes_per_window"])) == (2)
+        assert (result["peak_rss_bytes"]) == (20_200)
 
     def test_cpu_rss_plateau_accepts_falling_evaluation_windows(self):
         stable = tuple(range(20_000_000, 18_800_000, -100_000))
@@ -1136,14 +1100,11 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
                 for value in tuple(range(16)) + stable
             ]
         )
-        self.assertTrue(result["bounded"])
-        self.assertFalse(result["persistent_positive_order_trend"])
-        self.assertEqual(result["stable_start_upward_excursion_bytes"], 0)
-        self.assertTrue(
-            all(
-                slope < 0
-                for slope in result["evaluation_block_slopes_bytes_per_window"]
-            )
+        assert result["bounded"]
+        assert not (result["persistent_positive_order_trend"])
+        assert (result["stable_start_upward_excursion_bytes"]) == (0)
+        assert all(
+            slope < 0 for slope in result["evaluation_block_slopes_bytes_per_window"]
         )
 
     def test_cpu_rss_plateau_rejects_persistent_growth(self):
@@ -1153,9 +1114,9 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
         result = self.benchmark._evaluate_cpu_rss_plateau(
             [{"before_bytes": value, "after_bytes": value} for value in values]
         )
-        self.assertFalse(result["bounded"])
-        self.assertTrue(result["persistent_positive_order_trend"])
-        self.assertLessEqual(result["stable_start_upward_excursion_bytes"], 1024**2)
+        assert not (result["bounded"])
+        assert result["persistent_positive_order_trend"]
+        assert (result["stable_start_upward_excursion_bytes"]) <= (1024**2)
 
     def test_cpu_rss_plateau_rejects_large_excursion_without_trend(self):
         stable = (
@@ -1172,16 +1133,16 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
                 for value in tuple(range(16)) + stable
             ]
         )
-        self.assertFalse(result["bounded"])
-        self.assertFalse(result["persistent_positive_order_trend"])
+        assert not (result["bounded"])
+        assert not (result["persistent_positive_order_trend"])
 
     def test_cpu_rss_plateau_fails_closed_for_unavailable_evidence(self):
-        self.assertFalse(self.benchmark._evaluate_cpu_rss_plateau([])["bounded"])
+        assert not (self.benchmark._evaluate_cpu_rss_plateau([])["bounded"])
         malformed = [{"before_bytes": 1, "after_bytes": 1} for _ in range(28)]
         malformed[-1]["after_bytes"] = None
         result = self.benchmark._evaluate_cpu_rss_plateau(malformed)
-        self.assertFalse(result["bounded"])
-        self.assertIn("unavailable", result["error"])
+        assert not (result["bounded"])
+        assert ("unavailable") in (result["error"])
 
     def test_cpu_memory_plateau_probe_closes_reader_after_success(self):
         class Reader:
@@ -1212,9 +1173,9 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             return_value=(reader, provider),
         ):
             result = self.benchmark._cpu_memory_plateau_probe(simulation, 5)
-        self.assertTrue(result["bounded"])
-        self.assertEqual(reader.calls, 56)
-        self.assertTrue(reader.closed)
+        assert result["bounded"]
+        assert (reader.calls) == (56)
+        assert reader.closed
 
     def test_cpu_memory_plateau_probe_closes_reader_after_early_failure(self):
         class Reader:
@@ -1229,7 +1190,7 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
         reader = Reader()
         simulation = SimpleNamespace(
             device=SimpleNamespace(type="cpu"),
-            advance=lambda _steps: self.fail("advance must not be called"),
+            advance=lambda _steps: pytest.fail("advance must not be called"),
         )
         with patch.object(
             self.benchmark,
@@ -1237,8 +1198,8 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             return_value=(reader, {}),
         ):
             result = self.benchmark._cpu_memory_plateau_probe(simulation, 5)
-        self.assertFalse(result["bounded"])
-        self.assertTrue(reader.closed)
+        assert not (result["bounded"])
+        assert reader.closed
 
     def test_cpu_memory_plateau_probe_closes_reader_after_advance_exception(self):
         class Reader:
@@ -1264,10 +1225,10 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
                 "_current_rss_provider",
                 return_value=(reader, {}),
             ),
-            self.assertRaisesRegex(RuntimeError, "advance failed"),
+            pytest.raises(RuntimeError, match="advance failed"),
         ):
             self.benchmark._cpu_memory_plateau_probe(simulation, 5)
-        self.assertTrue(reader.closed)
+        assert reader.closed
 
     def test_darwin_rss_provider_validates_direct_bytes_against_ps(self):
         with (
@@ -1284,10 +1245,10 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             ),
         ):
             reader, provider = self.benchmark._current_rss_provider()
-            self.assertEqual(reader(), 100_300_000)
-        self.assertEqual(provider["name"], "proc-pid-rusage-v0")
-        self.assertEqual(provider["units"], "bytes")
-        self.assertTrue(provider["validated"])
+            assert (reader()) == (100_300_000)
+        assert (provider["name"]) == ("proc-pid-rusage-v0")
+        assert (provider["units"]) == ("bytes")
+        assert provider["validated"]
 
     def test_darwin_rss_provider_fails_closed_on_unit_mismatch(self):
         with (
@@ -1304,12 +1265,9 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             ),
         ):
             reader, provider = self.benchmark._current_rss_provider()
-            self.assertIsNone(reader())
-        self.assertFalse(provider["validated"])
-        self.assertEqual(
-            provider["validation"]["reference_bytes"],
-            100_000,
-        )
+            assert (reader()) is None
+        assert not (provider["validated"])
+        assert (provider["validation"]["reference_bytes"]) == (100_000)
 
     def test_fresh_cpu_rss_probe_binds_request_and_child_pid(self):
         request = self.benchmark._cpu_rss_request(
@@ -1350,10 +1308,10 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             ) as run,
         ):
             result = self.benchmark._fresh_cpu_memory_probe(request, self.manifest)
-        self.assertTrue(result["plateau"]["bounded"])
+        assert result["plateau"]["bounded"]
         command = run.call_args.args[0]
-        self.assertIn("--cpu-rss-child", command)
-        self.assertIn("two-level", command)
+        assert ("--cpu-rss-child") in (command)
+        assert ("two-level") in (command)
 
         payload["parent_pid"] = 99
         completed.stdout = json.dumps(payload)
@@ -1367,14 +1325,14 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             patch.object(self.benchmark.subprocess, "run", return_value=completed),
         ):
             invalid = self.benchmark._fresh_cpu_memory_probe(request, self.manifest)
-        self.assertFalse(invalid["plateau"]["bounded"])
-        self.assertIn("binding", invalid["binding_error"])
+        assert not (invalid["plateau"]["bounded"])
+        assert ("binding") in (invalid["binding_error"])
 
     def test_cuda_memory_gate_preserves_allocated_growth_behavior(self):
         cuda = self.benchmark.torch.device("cuda")
-        self.assertTrue(self.benchmark._memory_growth_bounded(cuda, None, None))
-        self.assertTrue(self.benchmark._memory_growth_bounded(cuda, 1024**2, None))
-        self.assertFalse(self.benchmark._memory_growth_bounded(cuda, 1024**2 + 1, None))
+        assert self.benchmark._memory_growth_bounded(cuda, None, None)
+        assert self.benchmark._memory_growth_bounded(cuda, 1024**2, None)
+        assert not (self.benchmark._memory_growth_bounded(cuda, 1024**2 + 1, None))
 
     def test_trace_summary_counts_raw_allocator_events(self):
         trace = {
@@ -1425,42 +1383,39 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             path.write_text(json.dumps(trace))
             trace_bytes = path.read_bytes()
             result = self.benchmark._trace_summary(path)
-        self.assertEqual(result["chrome_trace_size_bytes"], len(trace_bytes))
-        self.assertEqual(
-            result["chrome_trace_sha256"], hashlib.sha256(trace_bytes).hexdigest()
+        assert (result["chrome_trace_size_bytes"]) == (len(trace_bytes))
+        assert (result["chrome_trace_sha256"]) == (
+            hashlib.sha256(trace_bytes).hexdigest()
         )
-        self.assertEqual(result["positive_allocation_events"], 3)
-        self.assertEqual(result["allocated_bytes"], 80)
-        self.assertEqual(result["freed_bytes"], 80)
-        self.assertEqual(result["allocation_net_bytes"], 0)
-        self.assertEqual(result["max_allocation_bytes"], 32)
-        self.assertEqual(result["allocation_size_histogram"], {"16": 1, "32": 2})
-        self.assertEqual(result["live_allocation_baseline_bytes"], 1000)
-        self.assertEqual(result["peak_live_allocated_bytes"], 1080)
-        self.assertEqual(result["final_live_allocated_bytes"], 1000)
-        self.assertEqual(result["live_allocation_growth_bytes"], 0)
-        self.assertTrue(result["live_allocation_metrics_complete"])
-        self.assertEqual(result["compiled_region_events"], 2)
-        self.assertEqual(
-            result["compiled_region_names"],
+        assert (result["positive_allocation_events"]) == (3)
+        assert (result["allocated_bytes"]) == (80)
+        assert (result["freed_bytes"]) == (80)
+        assert (result["allocation_net_bytes"]) == (0)
+        assert (result["max_allocation_bytes"]) == (32)
+        assert (result["allocation_size_histogram"]) == ({"16": 1, "32": 2})
+        assert (result["live_allocation_baseline_bytes"]) == (1000)
+        assert (result["peak_live_allocated_bytes"]) == (1080)
+        assert (result["final_live_allocated_bytes"]) == (1000)
+        assert (result["live_allocation_growth_bytes"]) == (0)
+        assert result["live_allocation_metrics_complete"]
+        assert (result["compiled_region_events"]) == (2)
+        assert (result["compiled_region_names"]) == (
             {
                 "Torch-Compiled Region: 0/0": 1,
                 "Torch-Compiled Region: 1/0": 1,
-            },
+            }
         )
-        self.assertEqual(result["cuda_graph_launches"], 1)
-        self.assertEqual(result["indexed_write_operations_outside_compiled_regions"], 2)
-        self.assertEqual(
-            result["indexed_write_names_outside_compiled_regions"],
-            {"aten::index_add_": 1, "aten::index_put_": 1},
+        assert (result["cuda_graph_launches"]) == (1)
+        assert (result["indexed_write_operations_outside_compiled_regions"]) == (2)
+        assert (result["indexed_write_names_outside_compiled_regions"]) == (
+            {"aten::index_add_": 1, "aten::index_put_": 1}
         )
-        self.assertEqual(
-            result["policy_write_operations"],
+        assert (result["policy_write_operations"]) == (
             {
                 "aten::masked_scatter_": 0,
                 "aten::index_copy_": 1,
                 "aten::scatter_": 0,
-            },
+            }
         )
 
     def test_trace_summary_reports_complete_zero_live_metrics_without_events(self):
@@ -1469,11 +1424,11 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             path.write_text(json.dumps({"traceEvents": []}))
             result = self.benchmark._trace_summary(path)
 
-        self.assertEqual(result["live_allocation_baseline_bytes"], 0)
-        self.assertEqual(result["peak_live_allocated_bytes"], 0)
-        self.assertEqual(result["final_live_allocated_bytes"], 0)
-        self.assertEqual(result["live_allocation_growth_bytes"], 0)
-        self.assertTrue(result["live_allocation_metrics_complete"])
+        assert (result["live_allocation_baseline_bytes"]) == (0)
+        assert (result["peak_live_allocated_bytes"]) == (0)
+        assert (result["final_live_allocated_bytes"]) == (0)
+        assert (result["live_allocation_growth_bytes"]) == (0)
+        assert result["live_allocation_metrics_complete"]
 
     def test_trace_summary_marks_missing_total_allocated_incomplete(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1485,8 +1440,8 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             )
             result = self.benchmark._trace_summary(path)
 
-        self.assertFalse(result["live_allocation_metrics_complete"])
-        self.assertIsNone(result["live_allocation_growth_bytes"])
+        assert not (result["live_allocation_metrics_complete"])
+        assert (result["live_allocation_growth_bytes"]) is None
 
     def test_trace_summary_rejects_discontinuous_live_allocation_totals(self):
         trace = {
@@ -1510,9 +1465,9 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             path.write_text(json.dumps(trace))
             result = self.benchmark._trace_summary(path)
 
-        self.assertFalse(result["live_allocation_metrics_complete"])
-        self.assertIsNone(result["live_allocation_baseline_bytes"])
-        self.assertIsNone(result["final_live_allocated_bytes"])
+        assert not (result["live_allocation_metrics_complete"])
+        assert (result["live_allocation_baseline_bytes"]) is None
+        assert (result["final_live_allocated_bytes"]) is None
 
     def test_trace_summary_rejects_negative_live_allocation_values(self):
         trace = {
@@ -1528,8 +1483,8 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             path.write_text(json.dumps(trace))
             result = self.benchmark._trace_summary(path)
 
-        self.assertFalse(result["live_allocation_metrics_complete"])
-        self.assertIsNone(result["peak_live_allocated_bytes"])
+        assert not (result["live_allocation_metrics_complete"])
+        assert (result["peak_live_allocated_bytes"]) is None
 
     def _allocation_profiler(self):
         return {
@@ -1610,8 +1565,8 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             "live_allocation_metrics_complete": True,
         }
         contract = self._allocation_contract(profiler)
-        self.assertTrue(contract["satisfied"])
-        self.assertEqual(contract["status"], "zero-allocation")
+        assert contract["satisfied"]
+        assert (contract["status"]) == ("zero-allocation")
 
     def test_cpu_nonzero_allocation_passes_with_bound_reviewed_provenance(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1621,10 +1576,10 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
                 self._allocation_profiler(),
                 self._allocation_provenance(source_path),
             )
-        self.assertTrue(contract["satisfied"])
-        self.assertEqual(contract["status"], "reviewed-fixed-temporary")
-        self.assertTrue(contract["checks"]["generated_sources_verified"])
-        self.assertEqual(len(contract["verified_generated_sources"]), 1)
+        assert contract["satisfied"]
+        assert (contract["status"]) == ("reviewed-fixed-temporary")
+        assert contract["checks"]["generated_sources_verified"]
+        assert (len(contract["verified_generated_sources"])) == (1)
 
     def test_cpu_compiled_allocation_does_not_require_op_attribution(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1635,8 +1590,8 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             contract = self._allocation_contract(
                 profiler, self._allocation_provenance(source_path)
             )
-        self.assertTrue(contract["checks"]["trace_allocation_integrity"])
-        self.assertTrue(contract["satisfied"])
+        assert contract["checks"]["trace_allocation_integrity"]
+        assert contract["satisfied"]
 
     def test_cpu_nonzero_allocation_requires_canonical_public_issue_urls(self):
         valid_url = "https://github.com/pytorch/pytorch/issues/195330"
@@ -1653,17 +1608,16 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             source_path = Path(directory) / "generated.cpp"
             source_path.write_text("// generated indexed-update kernel\n")
             for value in invalid_values:
-                with self.subTest(value=value):
-                    provenance = self._allocation_provenance(source_path)
-                    if value is None:
-                        del provenance["upstream_issue_urls"]
-                    else:
-                        provenance["upstream_issue_urls"] = value
-                    contract = self._allocation_contract(
-                        self._allocation_profiler(), provenance
-                    )
-                    self.assertFalse(contract["satisfied"])
-                    self.assertFalse(contract["checks"]["public_upstream_issues_valid"])
+                provenance = self._allocation_provenance(source_path)
+                if value is None:
+                    del provenance["upstream_issue_urls"]
+                else:
+                    provenance["upstream_issue_urls"] = value
+                contract = self._allocation_contract(
+                    self._allocation_profiler(), provenance
+                )
+                assert not (contract["satisfied"])
+                assert not (contract["checks"]["public_upstream_issues_valid"])
 
     def test_cpu_allocation_rejects_full_field_or_domain_clones(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1674,13 +1628,13 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             field_sized = self._allocation_contract(
                 profiler, self._allocation_provenance(source_path)
             )
-            self.assertFalse(field_sized["satisfied"])
-            self.assertFalse(field_sized["checks"]["no_field_buffer_sized_allocations"])
+            assert not (field_sized["satisfied"])
+            assert not (field_sized["checks"]["no_field_buffer_sized_allocations"])
             provenance = self._allocation_provenance(source_path)
             provenance["full_field_or_domain_clone_events"] = 1
             clone = self._allocation_contract(self._allocation_profiler(), provenance)
-            self.assertFalse(clone["satisfied"])
-            self.assertFalse(clone["checks"]["full_field_or_domain_clone_events_zero"])
+            assert not (clone["satisfied"])
+            assert not (clone["checks"]["full_field_or_domain_clone_events_zero"])
 
     def test_cpu_allocation_rejects_field_size_despite_fixed_scratch_inventory(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1696,9 +1650,9 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
                 "fixed_temporary_buffer"
             ] = "state._boundary_ey_2"
             contract = self._allocation_contract(profiler, provenance)
-            self.assertFalse(contract["satisfied"])
-            self.assertFalse(contract["checks"]["no_field_buffer_sized_allocations"])
-            self.assertFalse(contract["checks"]["provenance_allocations_valid"])
+            assert not (contract["satisfied"])
+            assert not (contract["checks"]["no_field_buffer_sized_allocations"])
+            assert not (contract["checks"]["provenance_allocations_valid"])
 
     def test_fixed_temporary_buffer_inventory_recurses_auxiliaries(self):
         torch = self.benchmark.torch
@@ -1729,12 +1683,11 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
 
         result = self.benchmark._fixed_boundary_buffer_sizes_bytes(simulation)
 
-        self.assertEqual(
-            result,
+        assert (result) == (
             {
                 "sources.auxiliaries[0].state._boundary_hx_1": 36,
                 "state._boundary_ey_2": 24,
-            },
+            }
         )
 
     def test_cpu_allocation_rejects_imbalance_and_final_live_growth(self):
@@ -1747,21 +1700,21 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             imbalance = self._allocation_contract(
                 profiler, self._allocation_provenance(source_path)
             )
-            self.assertFalse(imbalance["satisfied"])
-            self.assertFalse(imbalance["checks"]["allocation_bytes_balanced"])
+            assert not (imbalance["satisfied"])
+            assert not (imbalance["checks"]["allocation_bytes_balanced"])
             profiler = self._allocation_profiler()
             profiler["final_live_allocated_bytes"] = 4097
             profiler["live_allocation_growth_bytes"] = 1
             growth = self._allocation_contract(
                 profiler, self._allocation_provenance(source_path)
             )
-            self.assertFalse(growth["satisfied"])
-            self.assertFalse(growth["checks"]["live_allocation_growth_zero"])
+            assert not (growth["satisfied"])
+            assert not (growth["checks"]["live_allocation_growth_zero"])
 
     def test_cpu_allocation_missing_or_unaccounted_provenance_fails_closed(self):
         missing = self._allocation_contract(self._allocation_profiler())
-        self.assertFalse(missing["satisfied"])
-        self.assertFalse(missing["checks"]["reviewed_provenance_present"])
+        assert not (missing["satisfied"])
+        assert not (missing["checks"]["reviewed_provenance_present"])
         with tempfile.TemporaryDirectory() as directory:
             source_path = Path(directory) / "generated.cpp"
             source_path.write_text("// generated indexed-update kernel\n")
@@ -1770,10 +1723,8 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             unaccounted = self._allocation_contract(
                 self._allocation_profiler(), provenance
             )
-        self.assertFalse(unaccounted["satisfied"])
-        self.assertFalse(
-            unaccounted["checks"]["provenance_allocations_fully_accounted"]
-        )
+        assert not (unaccounted["satisfied"])
+        assert not (unaccounted["checks"]["provenance_allocations_fully_accounted"])
 
     def test_cpu_allocation_rejects_malformed_field_size_metadata(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1784,8 +1735,8 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             contract = self._allocation_contract(
                 profiler, self._allocation_provenance(source_path)
             )
-        self.assertFalse(contract["satisfied"])
-        self.assertFalse(contract["checks"]["field_buffer_sizes_present"])
+        assert not (contract["satisfied"])
+        assert not (contract["checks"]["field_buffer_sizes_present"])
 
     def test_cpu_allocation_requires_generated_source_hash_match(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1796,11 +1747,9 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             contract = self._allocation_contract(
                 self._allocation_profiler(), provenance
             )
-        self.assertFalse(contract["satisfied"])
-        self.assertFalse(contract["checks"]["generated_sources_verified"])
-        self.assertFalse(
-            contract["verified_generated_sources"][0]["matches_provenance"]
-        )
+        assert not (contract["satisfied"])
+        assert not (contract["checks"]["generated_sources_verified"])
+        assert not (contract["verified_generated_sources"][0]["matches_provenance"])
 
     def test_non_cpu_allocation_contract_is_not_applied(self):
         contract = self.benchmark._fixed_temporary_allocation_contract(
@@ -1808,9 +1757,9 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             {},
             compile_cache_key="compile-key",
         )
-        self.assertTrue(contract["satisfied"])
-        self.assertFalse(contract["applied"])
-        self.assertEqual(contract["status"], "not-applied")
+        assert contract["satisfied"]
+        assert not (contract["applied"])
+        assert (contract["status"]) == ("not-applied")
 
     def test_allocation_provenance_loader_selects_one_exact_record(self):
         record = {
@@ -1841,15 +1790,14 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
                 execution_policy="auto",
                 threads=1,
             )
-            self.assertEqual(
-                loaded["source_artifact"]["sha256"],
-                hashlib.sha256(path.read_bytes()).hexdigest(),
+            assert (loaded["source_artifact"]["sha256"]) == (
+                hashlib.sha256(path.read_bytes()).hexdigest()
             )
             document["records"].append(dict(record))
             path.write_text(json.dumps(document))
-            with self.assertRaisesRegex(ValueError, "duplicate selector"):
+            with pytest.raises(ValueError, match="duplicate selector"):
                 self.benchmark._load_allocation_provenance(path)
-        self.assertEqual(selected, record)
+        assert (selected) == (record)
 
     def test_saved_slice_allocation_can_be_reviewed_without_rerunning(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1958,16 +1906,16 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
                 document,
                 self.benchmark.ALLOCATION_PROVENANCE_METHOD,
             )
-            self.assertEqual(errors, [])
-            self.assertTrue(recomputed["satisfied"])
-            self.assertEqual(recomputed["status"], "reviewed-fixed-temporary")
+            assert (errors) == ([])
+            assert recomputed["satisfied"]
+            assert (recomputed["status"]) == ("reviewed-fixed-temporary")
             missing, missing_errors = self.benchmark._recompute_cpu_allocation_contract(
                 candidate,
                 None,
                 self.benchmark.ALLOCATION_PROVENANCE_METHOD,
             )
-            self.assertFalse(missing["satisfied"])
-            self.assertTrue(missing_errors)
+            assert not (missing["satisfied"])
+            assert missing_errors
             other_failure = json.loads(json.dumps(candidate))
             other_failure["acceptance"]["compiler_clean"] = False
             _result, other_errors = self.benchmark._recompute_cpu_allocation_contract(
@@ -1975,14 +1923,14 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
                 document,
                 self.benchmark.ALLOCATION_PROVENANCE_METHOD,
             )
-            self.assertIn("non-allocation gate failure", " ".join(other_errors))
+            assert ("non-allocation gate failure") in (" ".join(other_errors))
             trace_path.write_text(json.dumps({"traceEvents": []}))
             _result, trace_errors = self.benchmark._recompute_cpu_allocation_contract(
                 candidate,
                 document,
                 self.benchmark.ALLOCATION_PROVENANCE_METHOD,
             )
-            self.assertIn("does not match", " ".join(trace_errors))
+            assert ("does not match") in (" ".join(trace_errors))
 
     def test_source_and_compiled_region_contracts_recurse_auxiliaries(self):
         target = SimpleNamespace(numel=lambda: 1)
@@ -1999,10 +1947,9 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             _fused_source_updates=True,
             sources=SimpleNamespace(batches=[batch], auxiliaries=[auxiliary]),
         )
-        self.assertEqual(self.benchmark._compiled_local_simulation_count(simulation), 2)
-        self.assertEqual(
-            self.benchmark._source_index_operations_per_step(simulation),
-            {"aten::index_add_": 1},
+        assert (self.benchmark._compiled_local_simulation_count(simulation)) == (2)
+        assert (self.benchmark._source_index_operations_per_step(simulation)) == (
+            {"aten::index_add_": 1}
         )
 
     def test_trace_filename_separates_every_execution_contract(self):
@@ -2035,7 +1982,7 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
                 experimental_dispersive_grouping_scope="two-level",
             )
         )
-        self.assertEqual(len({baseline, *variants}), 1 + len(variants))
+        assert (len({baseline, *variants})) == (1 + len(variants))
 
     def test_native_gate_rejects_a_mismatched_measurement_contract(self):
         spec = self.benchmark.find_case(self.manifest, "cpu-crossover-2d")
@@ -2119,11 +2066,11 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             inconsistent = self.benchmark._native_gate(
                 path, "cpu-crossover-2d", 1, candidate, pinned_manifest
             )
-        self.assertTrue(valid["comparison_valid"])
-        self.assertFalse(invalid["comparison_valid"])
-        self.assertIn("contract", " ".join(invalid["contract_errors"]))
-        self.assertFalse(inconsistent["comparison_valid"])
-        self.assertIn("raw samples", " ".join(inconsistent["contract_errors"]))
+        assert valid["comparison_valid"]
+        assert not (invalid["comparison_valid"])
+        assert ("contract") in (" ".join(invalid["contract_errors"]))
+        assert not (inconsistent["comparison_valid"])
+        assert ("raw samples") in (" ".join(inconsistent["contract_errors"]))
 
     def test_native_gate_rejects_unpinned_embedded_contract(self):
         spec = self.benchmark.find_case(self.manifest, "cpu-crossover-2d")
@@ -2202,8 +2149,8 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             result = self.benchmark._native_gate(
                 path, "cpu-crossover-2d", 1, candidate, self.manifest
             )
-        self.assertFalse(result["comparison_valid"])
-        self.assertIn("SHA-256", " ".join(result["contract_errors"]))
+        assert not (result["comparison_valid"])
+        assert ("SHA-256") in (" ".join(result["contract_errors"]))
 
     def test_bootstrap_geomean_detects_significant_regression(self):
         statistics = dict(
@@ -2229,11 +2176,11 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             statistics,
             ratio_key="candidate_to_torch_baseline_ratio",
         )
-        self.assertTrue(equal["evaluated"])
-        self.assertFalse(equal["significant_regression"])
-        self.assertTrue(equal["passed"])
-        self.assertTrue(slower["significant_regression"])
-        self.assertFalse(slower["passed"])
+        assert equal["evaluated"]
+        assert not (equal["significant_regression"])
+        assert equal["passed"]
+        assert slower["significant_regression"]
+        assert not (slower["passed"])
 
     def test_bootstrap_geomean_fails_closed_for_invalid_evidence(self):
         statistics = self.manifest["performance_gates"]["cpu_acceptance"]["statistics"]
@@ -2242,9 +2189,9 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             statistics,
             ratio_key="candidate_to_torch_baseline_ratio",
         )
-        self.assertFalse(result["evaluated"])
-        self.assertIsNone(result["geometric_mean_ratio"])
-        self.assertFalse(result["passed"])
+        assert not (result["evaluated"])
+        assert (result["geometric_mean_ratio"]) is None
+        assert not (result["passed"])
 
     def test_bootstrap_geomean_rejects_nonfinite_or_inconsistent_samples(self):
         statistics = dict(
@@ -2267,14 +2214,13 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             gate(True),
             gate(1.0, ratio=True),
         ):
-            with self.subTest(malformed=malformed):
-                result = self.benchmark._bootstrap_geomean_regression(
-                    [malformed],
-                    statistics,
-                    ratio_key="candidate_to_torch_baseline_ratio",
-                )
-                self.assertFalse(result["evaluated"])
-                self.assertFalse(result["passed"])
+            result = self.benchmark._bootstrap_geomean_regression(
+                [malformed],
+                statistics,
+                ratio_key="candidate_to_torch_baseline_ratio",
+            )
+            assert not (result["evaluated"])
+            assert not (result["passed"])
 
     def test_state_progress_requires_every_field_and_material_state(self):
         import torch
@@ -2291,15 +2237,15 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
         source_only = {name: value.clone() for name, value in first.items()}
         source_only["ex"].fill_(1)
         incomplete = self.benchmark._state_change_summary(first, source_only)
-        self.assertFalse(incomplete["all_fields_changed"])
-        self.assertFalse(incomplete["pml_state_changed"])
+        assert not (incomplete["all_fields_changed"])
+        assert not (incomplete["pml_state_changed"])
 
         complete = {name: value.clone().fill_(1) for name, value in first.items()}
         result = self.benchmark._state_change_summary(first, complete)
-        self.assertTrue(result["all_fields_changed"])
-        self.assertTrue(result["pml_state_changed"])
-        self.assertTrue(result["dispersive_state_changed"])
-        self.assertTrue(result["dm2_state_changed"])
+        assert result["all_fields_changed"]
+        assert result["pml_state_changed"]
+        assert result["dispersive_state_changed"]
+        assert result["dm2_state_changed"]
 
     def test_cpu_slice_aggregator_recomputes_and_binds_evidence(self):
         manifest = json.loads(json.dumps(self.manifest))
@@ -2624,18 +2570,15 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
                 None,
                 evidence,
             )
-            self.assertTrue(result["suite_acceptance"]["passed"])
-            self.assertTrue(
-                all(
-                    "path" not in source
-                    for source in result["torch_baseline"]["source_artifacts"]
-                )
+            assert result["suite_acceptance"]["passed"]
+            assert all(
+                "path" not in source
+                for source in result["torch_baseline"]["source_artifacts"]
             )
-            self.assertEqual(result["acceptance_scope"], "cpu-performance-only")
-            self.assertFalse(result["issue_completion_satisfied"])
-            self.assertEqual(
-                result["issue_completion_blockers"],
-                ["complete-field-and-persistent-state-correctness-not-bound"],
+            assert (result["acceptance_scope"]) == ("cpu-performance-only")
+            assert not (result["issue_completion_satisfied"])
+            assert (result["issue_completion_blockers"]) == (
+                ["complete-field-and-persistent-state-correctness-not-bound"]
             )
             required_correctness = [
                 case["name"]
@@ -2784,15 +2727,12 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
                 correctness_evidence,
                 runtime_receipt,
             )
-            self.assertEqual(
-                bound["acceptance_scope"], "cpu-performance-and-correctness"
-            )
-            self.assertTrue(bound["cpu_correctness_satisfied"])
-            self.assertTrue(bound["suite_acceptance"]["correctness_evidence_bound"])
-            self.assertFalse(bound["issue_completion_satisfied"])
-            self.assertEqual(
-                bound["issue_completion_blockers"],
-                ["gpu-policy-macos-evidence-not-bound"],
+            assert (bound["acceptance_scope"]) == ("cpu-performance-and-correctness")
+            assert bound["cpu_correctness_satisfied"]
+            assert bound["suite_acceptance"]["correctness_evidence_bound"]
+            assert not (bound["issue_completion_satisfied"])
+            assert (bound["issue_completion_blockers"]) == (
+                ["gpu-policy-macos-evidence-not-bound"]
             )
             invalid_runtime_modes = {
                 "device": {
@@ -2825,32 +2765,29 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
                 },
             }
             for label, runtime_mode in invalid_runtime_modes.items():
-                with self.subTest(correctness_runtime=label):
-                    wrong_mode = json.loads(json.dumps(correctness_evidence))
-                    wrong_mode["runtime_mode"] = runtime_mode
-                    self.assertFalse(
-                        self.benchmark.correctness_binding_complete(
-                            wrong_mode,
-                            manifest,
-                            evidence,
-                            runtime_receipt=runtime_receipt,
-                            require_source_artifact=True,
-                        )
-                    )
-                    rejected = self.benchmark._aggregate_cpu_slice_outputs(
-                        [artifact(1), artifact(4)],
-                        manifest,
-                        Path("native.json"),
-                        torch_baseline,
-                        None,
-                        evidence,
+                wrong_mode = json.loads(json.dumps(correctness_evidence))
+                wrong_mode["runtime_mode"] = runtime_mode
+                assert not (
+                    self.benchmark.correctness_binding_complete(
                         wrong_mode,
-                        runtime_receipt,
+                        manifest,
+                        evidence,
+                        runtime_receipt=runtime_receipt,
+                        require_source_artifact=True,
                     )
-                    self.assertFalse(rejected["cpu_correctness_satisfied"])
-                    self.assertFalse(
-                        rejected["suite_acceptance"]["correctness_evidence_bound"]
-                    )
+                )
+                rejected = self.benchmark._aggregate_cpu_slice_outputs(
+                    [artifact(1), artifact(4)],
+                    manifest,
+                    Path("native.json"),
+                    torch_baseline,
+                    None,
+                    evidence,
+                    wrong_mode,
+                    runtime_receipt,
+                )
+                assert not (rejected["cpu_correctness_satisfied"])
+                assert not (rejected["suite_acceptance"]["correctness_evidence_bound"])
             tampered_correctness = json.loads(json.dumps(correctness_evidence))
             tampered_correctness["candidate_evidence"]["solver_abi"] = "tampered"
             unbound = self.benchmark._aggregate_cpu_slice_outputs(
@@ -2863,18 +2800,15 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
                 tampered_correctness,
                 runtime_receipt,
             )
-            self.assertFalse(unbound["cpu_correctness_satisfied"])
-            self.assertEqual(result["suite_acceptance"]["cpu_evaluated_cell_count"], 12)
-            self.assertTrue(
-                result["suite_acceptance"]["torch_baseline_geomean_statistics"][
-                    "evaluated"
-                ]
+            assert not (unbound["cpu_correctness_satisfied"])
+            assert (result["suite_acceptance"]["cpu_evaluated_cell_count"]) == (12)
+            assert result["suite_acceptance"]["torch_baseline_geomean_statistics"][
+                "evaluated"
+            ]
+            assert (result["suite_acceptance"]["native_comparison_role"]) == (
+                "informational"
             )
-            self.assertEqual(
-                result["suite_acceptance"]["native_comparison_role"],
-                "informational",
-            )
-            self.assertFalse(
+            assert not (
                 result["suite_acceptance"]["native_geomean_statistics"]["passed"]
             )
             tampered_baseline = artifact(4)
@@ -2908,7 +2842,7 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
                 None,
                 evidence,
             )
-            self.assertFalse(incomplete["suite_acceptance"]["passed"])
+            assert not (incomplete["suite_acceptance"]["passed"])
             physical = artifact(4)
             physical["cases"][0]["acceptance"]["passed"] = "true"
             invalid = self.benchmark._aggregate_cpu_slice_outputs(
@@ -3071,31 +3005,27 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
                         evidence,
                     )
                 )
-        self.assertFalse(invalid["suite_acceptance"]["passed"])
-        self.assertFalse(experimental_result["suite_acceptance"]["passed"])
-        self.assertFalse(slow["suite_acceptance"]["passed"])
-        self.assertFalse(tampered_baseline_result["suite_acceptance"]["passed"])
-        self.assertFalse(invalid_allocation_result["suite_acceptance"]["passed"])
-        self.assertTrue(
-            bootstrap_failure["suite_acceptance"][
-                "torch_baseline_individual_within_five_percent"
-            ]
-        )
-        self.assertFalse(
+        assert not (invalid["suite_acceptance"]["passed"])
+        assert not (experimental_result["suite_acceptance"]["passed"])
+        assert not (slow["suite_acceptance"]["passed"])
+        assert not (tampered_baseline_result["suite_acceptance"]["passed"])
+        assert not (invalid_allocation_result["suite_acceptance"]["passed"])
+        assert bootstrap_failure["suite_acceptance"][
+            "torch_baseline_individual_within_five_percent"
+        ]
+        assert not (
             bootstrap_failure["suite_acceptance"]["torch_baseline_geomean_statistics"][
                 "passed"
             ]
         )
-        self.assertFalse(bootstrap_failure["suite_acceptance"]["passed"])
-        self.assertFalse(invalid_native_result["suite_acceptance"]["passed"])
-        self.assertFalse(thread_environment_result["suite_acceptance"]["passed"])
+        assert not (bootstrap_failure["suite_acceptance"]["passed"])
+        assert not (invalid_native_result["suite_acceptance"]["passed"])
+        assert not (thread_environment_result["suite_acceptance"]["passed"])
         for label, raw_evidence_result in raw_evidence_results.items():
-            with self.subTest(raw_evidence=label):
-                self.assertFalse(raw_evidence_result["suite_acceptance"]["passed"])
-                self.assertIn(
-                    "CPU runtime evidence",
-                    " ".join(raw_evidence_result["suite_acceptance"]["errors"]),
-                )
+            assert not (raw_evidence_result["suite_acceptance"]["passed"])
+            assert ("CPU runtime evidence") in (
+                " ".join(raw_evidence_result["suite_acceptance"]["errors"])
+            )
 
     def test_cpu_slice_aggregator_rejects_mixed_candidate_provenance(self):
         output = {"schema_version": 4, "kind": "cpu-acceptance-thread-slice"}
@@ -3104,8 +3034,8 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             self.manifest,
             expected_evidence={"candidate_git_status": ""},
         )
-        self.assertFalse(result["passed"])
-        self.assertIn("provenance", " ".join(result["errors"]))
+        assert not (result["passed"])
+        assert ("provenance") in (" ".join(result["errors"]))
 
     def test_policy_matrix_binds_distinct_runtime_paths_and_timing(self):
         args = SimpleNamespace(
@@ -3220,11 +3150,11 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             result = self.benchmark._policy_matrix(
                 args, "cpu-crossover-2d", self.manifest
             )
-            self.assertTrue(result["comparison_valid"])
-            self.assertAlmostEqual(result["auto_to_fastest_forced_ratio"], 1.05)
-            self.assertTrue(result["within_ten_percent"])
-            self.assertTrue(result["all_acceptance_passed"])
-            self.assertTrue(result["passed"])
+            assert result["comparison_valid"]
+            assert round(abs(result["auto_to_fastest_forced_ratio"] - 1.05), 7) == 0
+            assert result["within_ten_percent"]
+            assert result["all_acceptance_passed"]
+            assert result["passed"]
 
             samples["compact"]["diagnostics"]["boundaries"][
                 "execution_representation"
@@ -3232,8 +3162,8 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             boundary_tamper = self.benchmark._policy_matrix(
                 args, "cpu-crossover-2d", self.manifest
             )
-            self.assertFalse(boundary_tamper["comparison_valid"])
-            self.assertFalse(boundary_tamper["passed"])
+            assert not (boundary_tamper["comparison_valid"])
+            assert not (boundary_tamper["passed"])
 
             samples["compact"] = sample("compact", 1.2)
             samples["compact"]["diagnostics"]["dispersive"]["policy_executions"][0][
@@ -3242,8 +3172,8 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             tampered_representation = self.benchmark._policy_matrix(
                 args, "cpu-crossover-2d", self.manifest
             )
-            self.assertFalse(tampered_representation["comparison_valid"])
-            self.assertFalse(tampered_representation["passed"])
+            assert not (tampered_representation["comparison_valid"])
+            assert not (tampered_representation["passed"])
 
             samples["compact"] = sample("compact", 1.2)
             samples["compact"]["runtime"]["compile_cache_key"] = samples["dense"][
@@ -3252,26 +3182,26 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             duplicate_key = self.benchmark._policy_matrix(
                 args, "cpu-crossover-2d", self.manifest
             )
-            self.assertFalse(duplicate_key["comparison_valid"])
-            self.assertFalse(duplicate_key["passed"])
+            assert not (duplicate_key["comparison_valid"])
+            assert not (duplicate_key["passed"])
 
             samples["compact"] = sample("compact", 1.2)
             samples["auto"] = sample("auto", 1.11)
             slow_auto = self.benchmark._policy_matrix(
                 args, "cpu-crossover-2d", self.manifest
             )
-            self.assertTrue(slow_auto["comparison_valid"])
-            self.assertFalse(slow_auto["within_ten_percent"])
-            self.assertFalse(slow_auto["passed"])
+            assert slow_auto["comparison_valid"]
+            assert not (slow_auto["within_ten_percent"])
+            assert not (slow_auto["passed"])
 
             samples["auto"] = sample("auto", 1.05)
             samples["tiled"]["acceptance"]["passed"] = False
             rejected = self.benchmark._policy_matrix(
                 args, "cpu-crossover-2d", self.manifest
             )
-            self.assertTrue(rejected["comparison_valid"])
-            self.assertFalse(rejected["all_acceptance_passed"])
-            self.assertFalse(rejected["passed"])
+            assert rejected["comparison_valid"]
+            assert not (rejected["all_acceptance_passed"])
+            assert not (rejected["passed"])
 
     def _cuda_evidence_case(self, name, *, complex_case, region_count=None):
         raw_plan = [
@@ -3376,16 +3306,14 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
 
     def test_cuda_memory_producer_rejects_peak_below_live_allocations(self):
         device = SimpleNamespace(type="cuda")
-        self.assertTrue(
-            self.benchmark._cuda_memory_bounded(
-                device,
-                0,
-                4096,
-                4096,
-                8192,
-            )
+        assert self.benchmark._cuda_memory_bounded(
+            device,
+            0,
+            4096,
+            4096,
+            8192,
         )
-        self.assertFalse(
+        assert not (
             self.benchmark._cuda_memory_bounded(
                 device,
                 0,
@@ -3402,23 +3330,21 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
         ]
         with patch.object(self.benchmark, "_profiler_trace_matches", return_value=True):
             gate = self.benchmark._paired_real_cuda_gate(results)
-            self.assertTrue(gate["passed"])
+            assert gate["passed"]
 
             timing_tamper = json.loads(json.dumps(results))
             timing_tamper[0]["measurements"]["advance"]["relative_mad"] = 0.5
-            self.assertFalse(
-                self.benchmark._paired_real_cuda_gate(timing_tamper)["passed"]
-            )
+            assert not (self.benchmark._paired_real_cuda_gate(timing_tamper)["passed"])
 
             transfer_tamper = json.loads(json.dumps(results))
             transfer_tamper[0]["profiler"]["host_to_device_events"] = 1
-            self.assertFalse(
+            assert not (
                 self.benchmark._paired_real_cuda_gate(transfer_tamper)["passed"]
             )
 
             representation_tamper = json.loads(json.dumps(results))
             representation_tamper[0]["runtime"]["paired_real"] = False
-            self.assertFalse(
+            assert not (
                 self.benchmark._paired_real_cuda_gate(representation_tamper)["passed"]
             )
 
@@ -3426,7 +3352,7 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             boundary_tamper[0]["diagnostics"]["boundaries"][
                 "execution_representation"
             ] = "tampered"
-            self.assertFalse(
+            assert not (
                 self.benchmark._paired_real_cuda_gate(boundary_tamper)["passed"]
             )
 
@@ -3444,10 +3370,9 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             tampered_gate = self.benchmark._paired_real_cuda_gate(
                 allocation_peak_tamper
             )
-            self.assertFalse(tampered_gate["passed"])
-            self.assertIn(
-                "CUDA allocation metrics are invalid",
-                " ".join(tampered_gate["errors"]),
+            assert not (tampered_gate["passed"])
+            assert ("CUDA allocation metrics are invalid") in (
+                " ".join(tampered_gate["errors"])
             )
 
     def test_region_invariance_gate_binds_raw_plans_and_profiled_launches(self):
@@ -3459,7 +3384,7 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
         ]
         with patch.object(self.benchmark, "_profiler_trace_matches", return_value=True):
             gate = self.benchmark._region_invariance_gate(results)
-            self.assertTrue(gate["passed"])
+            assert gate["passed"]
 
             plan_tamper = json.loads(json.dumps(results))
             plan_tamper[1]["region_equivalence"]["effective_material_plan"][0][
@@ -3470,15 +3395,11 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
                     plan_tamper[1]["region_equivalence"]["effective_material_plan"]
                 )
             )
-            self.assertFalse(
-                self.benchmark._region_invariance_gate(plan_tamper)["passed"]
-            )
+            assert not (self.benchmark._region_invariance_gate(plan_tamper)["passed"])
 
             launch_tamper = json.loads(json.dumps(results))
             launch_tamper[1]["profiler"]["kernel_launches"] = 21
-            self.assertFalse(
-                self.benchmark._region_invariance_gate(launch_tamper)["passed"]
-            )
+            assert not (self.benchmark._region_invariance_gate(launch_tamper)["passed"])
 
     def test_equivalent_region_cases_increase_only_input_region_count(self):
         baseline = self.benchmark._build_case(
@@ -3489,17 +3410,16 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
         )
         baseline_spec, baseline_space, baseline_geometry, _, _ = baseline
         expanded_spec, expanded_space, expanded_geometry, _, _ = expanded
-        self.assertEqual(baseline_spec["size"], expanded_spec["size"])
-        self.assertEqual(
-            baseline_space.whole_field_size.tolist(),
-            expanded_space.whole_field_size.tolist(),
+        assert (baseline_spec["size"]) == (expanded_spec["size"])
+        assert (baseline_space.whole_field_size.tolist()) == (
+            expanded_space.whole_field_size.tolist()
         )
-        self.assertEqual(baseline_spec["geometry_region_count"], 1)
-        self.assertEqual(expanded_spec["geometry_region_count"], 32)
-        self.assertEqual(len(baseline_geometry), 2)
-        self.assertEqual(len(expanded_geometry), 33)
-        self.assertEqual(
-            baseline_spec["equivalence_group"], expanded_spec["equivalence_group"]
+        assert (baseline_spec["geometry_region_count"]) == (1)
+        assert (expanded_spec["geometry_region_count"]) == (32)
+        assert (len(baseline_geometry)) == (2)
+        assert (len(expanded_geometry)) == (33)
+        assert (baseline_spec["equivalence_group"]) == (
+            expanded_spec["equivalence_group"]
         )
 
     def test_policy_gate_enforces_the_complete_matrix(self):
@@ -3550,7 +3470,7 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             ),
             patch("builtins.print"),
         ):
-            self.assertEqual(self.benchmark.main(), 0)
+            assert (self.benchmark.main()) == (0)
 
         def rejected(_args, name, _manifest, _allocation):
             return {
@@ -3573,7 +3493,7 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             ),
             patch("builtins.print"),
         ):
-            self.assertEqual(self.benchmark.main(), 2)
+            assert (self.benchmark.main()) == (2)
 
     def test_enforced_cpu_gate_requires_a_native_comparison(self):
         import torch
@@ -3611,7 +3531,7 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             patch("builtins.print"),
         ):
             status = self.benchmark.main()
-        self.assertEqual(status, 2)
+        assert (status) == (2)
 
     def test_cpu_slice_aggregation_forwards_allocation_document(self):
         args = SimpleNamespace(
@@ -3668,7 +3588,7 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             None,
             None,
         )
-        self.assertEqual(status, 2)
+        assert (status) == (2)
 
     def test_enforced_cpu_gate_requires_a_torch_baseline_comparison(self):
         args = SimpleNamespace(
@@ -3714,7 +3634,7 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
             patch("builtins.print"),
         ):
             status = self.benchmark.main()
-        self.assertEqual(status, 2)
+        assert (status) == (2)
 
     def test_single_cpu_case_cannot_claim_suite_acceptance(self):
         args = SimpleNamespace(
@@ -3821,20 +3741,13 @@ class TorchTuningBenchmarkTest(unittest.TestCase):
         ):
             status = self.benchmark.main()
         output = json.loads(rendered.call_args.args[0])
-        self.assertTrue(output["diagnostic_acceptance"]["passed"])
-        self.assertFalse(output["suite_acceptance"]["passed"])
-        self.assertEqual(
-            output["suite_acceptance"]["cpu_suite_status"], "diagnostic-only"
+        assert output["diagnostic_acceptance"]["passed"]
+        assert not (output["suite_acceptance"]["passed"])
+        assert (output["suite_acceptance"]["cpu_suite_status"]) == ("diagnostic-only")
+        assert (output["suite_acceptance"]["native_comparison_role"]) == (
+            "informational"
         )
-        self.assertEqual(
-            output["suite_acceptance"]["native_comparison_role"],
-            "informational",
-        )
-        self.assertTrue(
-            output["suite_acceptance"]["torch_baseline_individual_within_five_percent"]
-        )
-        self.assertEqual(status, 2)
-
-
-if __name__ == "__main__":
-    unittest.main()
+        assert output["suite_acceptance"][
+            "torch_baseline_individual_within_five_percent"
+        ]
+        assert (status) == (2)

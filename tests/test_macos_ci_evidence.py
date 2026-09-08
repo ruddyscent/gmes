@@ -8,21 +8,21 @@ import subprocess
 import sys
 import tarfile
 import tempfile
-import unittest
 import warnings
 import zipfile
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from unittest import mock
+
+import pytest
 
 from benchmarks import issue123_completion as completion
 from benchmarks import macos_ci_evidence as evidence
 
 
-class MacOSCiEvidenceTest(unittest.TestCase):
-    def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
+class _MacOSCiEvidenceFixture:
+    def initialize(self, stack):
+        self.root = Path(stack.enter_context(tempfile.TemporaryDirectory()))
         self.directory = self.root / "evidence"
         self.records = self.root / "records"
         self.work = self.root / "work"
@@ -321,19 +321,26 @@ class MacOSCiEvidenceTest(unittest.TestCase):
             },
         }
 
+
+class TestMacOSCiEvidence(_MacOSCiEvidenceFixture):
+    @pytest.fixture(autouse=True)
+    def _initialize_fixture(self):
+        with macos_ci_evidence_fixture(self):
+            yield
+
     def test_capture_binds_packages_and_structured_command_outputs(self):
         runtime_index = self._capture()
         document = json.loads(runtime_index.read_text())
 
-        self.assertEqual(document["schema_version"], 2)
-        self.assertEqual(
-            [item["role"] for item in document["runtime_checks"]],
-            list(evidence.RUNTIME_ROLES),
+        assert document["schema_version"] == 2
+        assert [item["role"] for item in document["runtime_checks"]] == list(
+            evidence.RUNTIME_ROLES
         )
+        # Runtime roles are one ordered evidence inventory bound to this capture.
         for check in document["runtime_checks"]:
-            self.assertEqual(check["stdout"]["media_type"], evidence.MEDIA_TYPE_JSON)
-            self.assertEqual(check["stderr"]["media_type"], evidence.MEDIA_TYPE_TEXT)
-            self.assertEqual(check["result"]["host_contract"]["schema_version"], 2)
+            assert check["stdout"]["media_type"] == evidence.MEDIA_TYPE_JSON
+            assert check["stderr"]["media_type"] == evidence.MEDIA_TYPE_TEXT
+            assert check["result"]["host_contract"]["schema_version"] == 2
         evidence._load_runtime_index(runtime_index, evidence.DEFAULT_MANIFEST)
 
     def test_capture_rejects_embedded_result_that_differs_from_raw_stdout(self):
@@ -343,7 +350,7 @@ class MacOSCiEvidenceTest(unittest.TestCase):
         record["result"]["passed"] = False
         record_path.write_text(json.dumps(record))
 
-        with self.assertRaisesRegex(evidence.EvidenceError, "result differs"):
+        with pytest.raises(evidence.EvidenceError, match="result differs"):
             self._capture()
 
     def test_capture_rejects_boolean_exit_code(self):
@@ -353,7 +360,7 @@ class MacOSCiEvidenceTest(unittest.TestCase):
         record["exit_code"] = False
         record_path.write_text(json.dumps(record))
 
-        with self.assertRaisesRegex(evidence.EvidenceError, "did not succeed"):
+        with pytest.raises(evidence.EvidenceError, match="did not succeed"):
             self._capture()
 
     def test_suite_validation_recomputes_compiler_hot_path(self):
@@ -361,7 +368,7 @@ class MacOSCiEvidenceTest(unittest.TestCase):
         result = self._result(role)
         result["torch_cpu"]["modes"][1]["compiler"]["final"]["unique_graphs"] = 2
 
-        with self.assertRaisesRegex(evidence.EvidenceError, "summaries differ"):
+        with pytest.raises(evidence.EvidenceError, match="summaries differ"):
             evidence._validate_probe_result(
                 result,
                 role,
@@ -375,26 +382,34 @@ class MacOSCiEvidenceTest(unittest.TestCase):
             "captured Torch addresses",
         )
 
-        self.assertEqual(addresses, {"state.field": 101})
+        assert addresses == {"state.field": 101}
         evidence._validate_addresses(addresses, "captured Torch addresses")
 
-    def test_allocated_addresses_reject_invalid_or_unallocated_maps(self):
-        for addresses in (
-            {"state.field": -1},
-            {"state.field": False},
-            {"plan.empty_targets": 0},
-        ):
-            with (
-                self.subTest(addresses=addresses),
-                self.assertRaisesRegex(evidence.EvidenceError, "addresses"),
-            ):
+    @pytest.mark.parametrize(
+        ("validator", "addresses"),
+        (
+            ("allocated", {"state.field": -1}),
+            ("allocated", {"state.field": False}),
+            ("allocated", {"plan.empty_targets": 0}),
+            ("serialized", {"state.field": 0}),
+            ("serialized", {"state.field": -1}),
+        ),
+        ids=(
+            "allocated-negative",
+            "allocated-boolean",
+            "allocated-empty-only",
+            "serialized-zero",
+            "serialized-negative",
+        ),
+    )
+    def test_allocated_addresses_reject_invalid_or_unallocated_maps(
+        self, validator, addresses
+    ):
+        if validator == "allocated":
+            with pytest.raises(evidence.EvidenceError, match="addresses"):
                 evidence._allocated_addresses(addresses, "captured Torch addresses")
-
-        for addresses in ({"state.field": 0}, {"state.field": -1}):
-            with (
-                self.subTest(serialized=addresses),
-                self.assertRaisesRegex(evidence.EvidenceError, "addresses"),
-            ):
+        else:
+            with pytest.raises(evidence.EvidenceError, match="addresses"):
                 evidence._validate_addresses(addresses, "captured Torch addresses")
 
     def test_inductor_import_filter_ignores_only_the_exact_warning(self):
@@ -420,8 +435,8 @@ class MacOSCiEvidenceTest(unittest.TestCase):
         with warnings.catch_warnings():
             warnings.simplefilter("error")
             evidence._run_under_inductor_import_warning_filter(exact.advance, 1)
-            self.assertEqual(exact.calls, [1])
-            with self.assertRaises(DeprecationWarning):
+            assert exact.calls == [1]
+            with pytest.raises(DeprecationWarning):
                 warnings.warn_explicit(
                     evidence.TORCH_JIT_SCRIPT_METHOD_PY314_WARNING,
                     DeprecationWarning,
@@ -430,20 +445,38 @@ class MacOSCiEvidenceTest(unittest.TestCase):
                     module="torch.jit._script",
                 )
 
-        for message, module in (
+    @pytest.mark.parametrize(
+        ("message", "module"),
+        (
             ("an unrelated deprecation", "torch.jit._script"),
             (evidence.TORCH_JIT_SCRIPT_METHOD_PY314_WARNING, "torch.jit._other"),
-        ):
-            with (
-                self.subTest(message=message, module=module),
-                warnings.catch_warnings(),
-            ):
-                warnings.simplefilter("error")
-                with self.assertRaises(DeprecationWarning):
-                    simulation = Simulation(message, module)
-                    evidence._run_under_inductor_import_warning_filter(
-                        simulation.advance, 1
-                    )
+        ),
+        ids=("unrelated-message", "wrong-module"),
+    )
+    def test_inductor_import_filter_propagates_nonmatching_warnings(
+        self, message, module
+    ):
+        class Simulation:
+            def __init__(self):
+                self.calls = []
+
+            def advance(self, steps):
+                self.calls.append(steps)
+                warnings.warn_explicit(
+                    message,
+                    DeprecationWarning,
+                    filename="torch/jit/_script.py",
+                    lineno=359,
+                    module=module,
+                )
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            with pytest.raises(DeprecationWarning):
+                simulation = Simulation()
+                evidence._run_under_inductor_import_warning_filter(
+                    simulation.advance, 1
+                )
 
     def test_installed_archive_requires_exact_pep610_url_and_sha(self):
         package = self._package("wheel-import").resolve()
@@ -455,7 +488,7 @@ class MacOSCiEvidenceTest(unittest.TestCase):
         with mock.patch.object(
             evidence.metadata, "distribution", return_value=distribution
         ):
-            self.assertEqual(evidence._installed_archive_sha256(package), digest)
+            assert evidence._installed_archive_sha256(package) == digest
 
         distribution.read_text.return_value = json.dumps(
             {"archive_info": {"hashes": {"sha256": "0" * 64}}, "url": package.as_uri()}
@@ -464,7 +497,7 @@ class MacOSCiEvidenceTest(unittest.TestCase):
             mock.patch.object(
                 evidence.metadata, "distribution", return_value=distribution
             ),
-            self.assertRaisesRegex(evidence.EvidenceError, "digest differs"),
+            pytest.raises(evidence.EvidenceError, match="digest differs"),
         ):
             evidence._installed_archive_sha256(package)
 
@@ -478,7 +511,7 @@ class MacOSCiEvidenceTest(unittest.TestCase):
         with mock.patch.object(
             evidence.metadata, "distribution", return_value=distribution
         ):
-            self.assertEqual(evidence._installed_archive_sha256(package), digest)
+            assert evidence._installed_archive_sha256(package) == digest
 
     def test_installed_archive_rejects_malformed_or_symlinked_pep610_url(self):
         package = self._package("wheel-import").resolve()
@@ -490,7 +523,7 @@ class MacOSCiEvidenceTest(unittest.TestCase):
         with mock.patch.object(
             evidence.metadata, "distribution", return_value=distribution
         ):
-            self.assertEqual(evidence._installed_archive_sha256(package), digest)
+            assert evidence._installed_archive_sha256(package) == digest
 
         distribution.read_text.return_value = json.dumps(
             {"archive_info": {"hash": "sha512=not-a-sha256"}, "url": package.as_uri()}
@@ -499,7 +532,7 @@ class MacOSCiEvidenceTest(unittest.TestCase):
             mock.patch.object(
                 evidence.metadata, "distribution", return_value=distribution
             ),
-            self.assertRaisesRegex(evidence.EvidenceError, "digest differs"),
+            pytest.raises(evidence.EvidenceError, match="digest differs"),
         ):
             evidence._installed_archive_sha256(package)
 
@@ -510,7 +543,7 @@ class MacOSCiEvidenceTest(unittest.TestCase):
             mock.patch.object(
                 evidence.metadata, "distribution", return_value=distribution
             ),
-            self.assertRaisesRegex(evidence.EvidenceError, "digest differs"),
+            pytest.raises(evidence.EvidenceError, match="digest differs"),
         ):
             evidence._installed_archive_sha256(package)
 
@@ -523,7 +556,7 @@ class MacOSCiEvidenceTest(unittest.TestCase):
             mock.patch.object(
                 evidence.metadata, "distribution", return_value=distribution
             ),
-            self.assertRaisesRegex(evidence.EvidenceError, "local evidence archive"),
+            pytest.raises(evidence.EvidenceError, match="local evidence archive"),
         ):
             evidence._installed_archive_sha256(package)
 
@@ -534,7 +567,7 @@ class MacOSCiEvidenceTest(unittest.TestCase):
             mock.patch.object(
                 evidence.metadata, "distribution", return_value=distribution
             ),
-            self.assertRaisesRegex(evidence.EvidenceError, "local evidence archive"),
+            pytest.raises(evidence.EvidenceError, match="local evidence archive"),
         ):
             evidence._installed_archive_sha256(package)
 
@@ -551,7 +584,7 @@ class MacOSCiEvidenceTest(unittest.TestCase):
 
         with zipfile.ZipFile(archive_path, "a") as archive:
             archive.writestr("unexpected.txt", b"extra")
-        with self.assertRaisesRegex(evidence.EvidenceError, "member closure"):
+        with pytest.raises(evidence.EvidenceError, match="member closure"):
             evidence._validate_actions_archive(
                 archive_path,
                 runtime_index,
@@ -580,39 +613,34 @@ class MacOSCiEvidenceTest(unittest.TestCase):
             )
         document = json.loads(index_path.read_text())
         scope = json.loads(scope_path.read_text())
-        self.assertEqual(
-            set(document),
-            {
-                "schema_version",
-                "kind",
-                "candidate_evidence",
-                "actions_artifact",
-                "packages",
-                "runtime_checks",
-                "passed",
-            },
-        )
-        self.assertNotIn("jobs", document)
-        self.assertNotIn("pull_request", document)
-        self.assertNotIn("code_scanning_analyses", document)
-        self.assertEqual(set(scope), {"index", "actions_archive"})
-        self.assertEqual(scope["index"]["media_type"], evidence.MEDIA_TYPE_JSON)
-        self.assertEqual(
-            scope["actions_archive"]["media_type"], evidence.MEDIA_TYPE_ZIP
-        )
+        assert set(document) == {
+            "schema_version",
+            "kind",
+            "candidate_evidence",
+            "actions_artifact",
+            "packages",
+            "runtime_checks",
+            "passed",
+        }
+        assert "jobs" not in document
+        assert "pull_request" not in document
+        assert "code_scanning_analyses" not in document
+        assert set(scope) == {"index", "actions_archive"}
+        assert scope["index"]["media_type"] == evidence.MEDIA_TYPE_JSON
+        assert scope["actions_archive"]["media_type"] == evidence.MEDIA_TYPE_ZIP
         result = completion._validate_macos_scope(
             scope,
             completion.ArtifactReader(self.directory, self.candidate),
             self.candidate,
         )
-        self.assertEqual(result["runtime_checks"], list(evidence.RUNTIME_ROLES))
+        assert result["runtime_checks"] == list(evidence.RUNTIME_ROLES)
 
         stdout_path = self.logs / "wheel-default-suite.stdout.json"
         stdout = json.loads(stdout_path.read_text())
         stdout["torch_cpu"]["modes"][1]["compiler"]["final"]["unique_graphs"] = 2
         stdout_path.write_text(json.dumps(stdout))
-        with self.assertRaisesRegex(
-            completion.EvidenceError, "(?:byte size|digest) differs"
+        with pytest.raises(
+            completion.EvidenceError, match="(?:byte size|digest) differs"
         ):
             completion._validate_macos_scope(
                 scope,
@@ -633,7 +661,7 @@ class MacOSCiEvidenceTest(unittest.TestCase):
 
         with (
             mock.patch.object(evidence, "_github_api", side_effect=github_api),
-            self.assertRaisesRegex(evidence.EvidenceError, "successful candidate run"),
+            pytest.raises(evidence.EvidenceError, match="successful candidate run"),
         ):
             evidence.assemble_macos_index(
                 runtime_index=runtime_index,
@@ -651,7 +679,7 @@ class MacOSCiEvidenceTest(unittest.TestCase):
         before = record_path.read_bytes()
         with (
             mock.patch.object(evidence.subprocess, "run") as run,
-            self.assertRaisesRegex(evidence.EvidenceError, "historical observer"),
+            pytest.raises(evidence.EvidenceError, match="historical observer"),
         ):
             evidence.record_runtime_command(
                 role=role,
@@ -664,8 +692,8 @@ class MacOSCiEvidenceTest(unittest.TestCase):
                 working_directory=self.work,
             )
         run.assert_not_called()
-        self.assertEqual(record_path.read_bytes(), before)
-        with self.assertRaisesRegex(evidence.EvidenceError, "historical observer"):
+        assert record_path.read_bytes() == before
+        with pytest.raises(evidence.EvidenceError, match="historical observer"):
             evidence.probe_installed_package(
                 role, None, evidence.ROOT, evidence.ROOT, package
             )
@@ -686,7 +714,7 @@ class MacOSCiEvidenceTest(unittest.TestCase):
                     self.candidate["candidate_git_commit"],
                 ],
             ),
-            self.assertRaisesRegex(evidence.EvidenceError, "historical observer"),
+            pytest.raises(evidence.EvidenceError, match="historical observer"),
         ):
             evidence.main()
 
@@ -700,34 +728,39 @@ class MacOSCiEvidenceTest(unittest.TestCase):
         alias.symlink_to(canonical_cache, target_is_directory=True)
         record["command"]["environment"]["TORCHINDUCTOR_CACHE_DIR"] = str(alias)
         record_path.write_text(json.dumps(record))
-        with self.assertRaisesRegex(evidence.EvidenceError, "environment differs"):
+        with pytest.raises(evidence.EvidenceError, match="environment differs"):
             self._capture()
         record["command"]["environment"]["TORCHINDUCTOR_CACHE_DIR"] = "relative"
         record_path.write_text(json.dumps(record))
-        with self.assertRaisesRegex(evidence.EvidenceError, "environment differs"):
+        with pytest.raises(evidence.EvidenceError, match="environment differs"):
             self._capture()
 
     def test_cache_path_accepts_only_darwin_system_root_aliases(self):
         expected = Path("/private/var/folders/example/torchinductor/wheel-import")
         with mock.patch.object(evidence.platform, "system", return_value="Darwin"):
-            self.assertTrue(
-                evidence._path_is_exact(
-                    "/var/folders/example/torchinductor/wheel-import", expected
-                )
+            assert evidence._path_is_exact(
+                "/var/folders/example/torchinductor/wheel-import", expected
             )
-            self.assertTrue(evidence._path_is_exact(str(expected), expected))
-            self.assertFalse(
+            assert evidence._path_is_exact(str(expected), expected)
+            assert not (
                 evidence._path_is_exact(
                     "/opt/folders/example/torchinductor/wheel-import", expected
                 )
             )
         with mock.patch.object(evidence.platform, "system", return_value="Linux"):
-            self.assertFalse(
+            assert not (
                 evidence._path_is_exact(
                     "/var/folders/example/torchinductor/wheel-import", expected
                 )
             )
 
 
-if __name__ == "__main__":
-    unittest.main()
+@contextmanager
+def macos_ci_evidence_fixture(fixture=None):
+    """Yield a macOS evidence fixture with immediate temp-root cleanup."""
+
+    with ExitStack() as stack:
+        if fixture is None:
+            fixture = _MacOSCiEvidenceFixture()
+        fixture.initialize(stack)
+        yield fixture

@@ -50,13 +50,20 @@ and CI choice.
 ```sh
 uv python install 3.14
 uv sync --locked --extra torch-cpu --extra hdf5
-uv run --no-sync python -m unittest discover -v
+uv run --no-sync python -m pytest -v
 uv build
 ```
 
 Choose the narrowest tests that cover the change. Configure Torch device,
 dtype, CPU threads, and compilation policy explicitly; compilation warmup and
 trusted CUDA/two-GPU evidence are not substitutes for each other.
+
+Write new tests as pytest-native functions or plain `Test*` classes using
+direct assertions. Parametrize independent cases with stable semantic IDs;
+keep intentionally stateful sequences intact. Use focused fixtures/finalizers
+that restore patches, temporary resources, and runtime state on failure.
+Future Taflove reproduction tests follow the same rules and must keep their
+device, dtype, thread, and compile-policy contracts explicit.
 
 - For checkpoint, replay, or state-collector changes, derive the required
   persistent-state inventory from the solver's update and restore paths,

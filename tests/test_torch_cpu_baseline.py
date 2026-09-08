@@ -4,11 +4,11 @@ import importlib.util
 import json
 import math
 import tempfile
-import unittest
 from pathlib import Path
 from statistics import median
 from unittest.mock import patch
 
+import pytest
 import torch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -22,23 +22,23 @@ def load_script(name):
     return module
 
 
-class TorchCpuBaselineTest(unittest.TestCase):
+class TestTorchCpuBaseline:
     _HOST_IDENTITY_SALT = (
         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
     )
 
     @classmethod
-    def setUpClass(cls):
+    def setup_class(cls):
         cls.baseline_module = load_script("torch_cpu_baseline.py")
         cls.manifest = json.loads(
             (ROOT / "benchmarks" / "native_oracle_workloads.json").read_text()
         )
 
-    def setUp(self):
+    def setup_method(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.directory = Path(self.temporary.name)
 
-    def tearDown(self):
+    def teardown_method(self):
         self.temporary.cleanup()
 
     def _case_specs(self):
@@ -232,45 +232,39 @@ class TorchCpuBaselineTest(unittest.TestCase):
 
     def test_loads_two_slices_and_records_exact_source_hashes(self):
         baseline, paths = self._load()
-        self.assertEqual(baseline["kind"], "torch-cpu-baseline")
-        self.assertEqual(
-            [item["thread_mode"] for item in baseline["source_artifacts"]],
-            ["one", "physical"],
+        assert (baseline["kind"]) == ("torch-cpu-baseline")
+        assert ([item["thread_mode"] for item in baseline["source_artifacts"]]) == (
+            ["one", "physical"]
         )
-        self.assertEqual(
-            [len(item["cases"]) for item in baseline["source_artifacts"]], [6, 6]
+        assert ([len(item["cases"]) for item in baseline["source_artifacts"]]) == (
+            [6, 6]
         )
         actual = {
             hashlib.sha256(path.read_bytes()).hexdigest(): path.stat().st_size
             for path in paths
         }
-        self.assertEqual(
+        assert (
             {
                 item["sha256"]: item["size_bytes"]
                 for item in baseline["source_artifacts"]
-            },
-            actual,
-        )
+            }
+        ) == (actual)
         for item in baseline["source_artifacts"]:
-            self.assertNotIn("path", item)
-            self.assertNotIn("raw_cpu_model", item)
-            self.assertTrue(
-                item["publication_url"].startswith(
-                    "https://github.com/ruddyscent/gmes/releases/download/"
-                )
+            assert ("path") not in (item)
+            assert ("raw_cpu_model") not in (item)
+            assert item["publication_url"].startswith(
+                "https://github.com/ruddyscent/gmes/releases/download/"
             )
-        self.assertEqual(baseline["source_artifacts"][0]["evidence"], self._evidence())
-        self.assertNotIn("thread_environment", baseline["environment"])
-        self.assertEqual(
-            baseline["source_artifacts"][0]["thread_environment"],
+        assert (baseline["source_artifacts"][0]["evidence"]) == (self._evidence())
+        assert ("thread_environment") not in (baseline["environment"])
+        assert (baseline["source_artifacts"][0]["thread_environment"]) == (
             {
                 "OMP_NUM_THREADS": "1",
                 "MKL_NUM_THREADS": "1",
                 "OPENBLAS_NUM_THREADS": "1",
-            },
+            }
         )
-        self.assertEqual(
-            baseline["environment"],
+        assert (baseline["environment"]) == (
             {
                 "hostname": "redacted",
                 "host_identity": self.baseline_module._host_identity_token_from_raw_environment(
@@ -281,7 +275,7 @@ class TorchCpuBaselineTest(unittest.TestCase):
                     "torch": "2.13.0+cpu",
                     "cuda_runtime": None,
                 },
-            },
+            }
         )
         json.dumps(baseline, allow_nan=False)
 
@@ -289,7 +283,7 @@ class TorchCpuBaselineTest(unittest.TestCase):
         artifacts = self.manifest["performance_gates"]["cpu_acceptance"][
             "timing_reference"
         ]["slice_artifacts"]
-        self.assertEqual(
+        assert (
             [
                 (
                     artifact["thread_mode"],
@@ -299,7 +293,8 @@ class TorchCpuBaselineTest(unittest.TestCase):
                     artifact["sha256"],
                 )
                 for artifact in artifacts
-            ],
+            ]
+        ) == (
             [
                 (
                     "one",
@@ -315,13 +310,13 @@ class TorchCpuBaselineTest(unittest.TestCase):
                     18292,
                     "b1a3c82a069c2475560468a7b8d0a237db89e857bdce96f8fc812449b5c35602",
                 ),
-            ],
+            ]
         )
         for name in (
             "torch-cpu-baseline-one.json",
             "torch-cpu-baseline-physical.json",
         ):
-            self.assertFalse(
+            assert not (
                 (ROOT / "benchmarks" / "evidence" / "issue-123" / name).exists()
             )
 
@@ -329,9 +324,8 @@ class TorchCpuBaselineTest(unittest.TestCase):
         artifacts = self.manifest["performance_gates"]["cpu_acceptance"][
             "timing_reference"
         ]["slice_artifacts"]
-        self.assertEqual(
-            {artifact["thread_mode"]: artifact for artifact in artifacts},
-            self.baseline_module._FROZEN_SLICE_ARTIFACTS,
+        assert ({artifact["thread_mode"]: artifact for artifact in artifacts}) == (
+            self.baseline_module._FROZEN_SLICE_ARTIFACTS
         )
 
     def test_timing_runtime_identity_contract_is_exact_and_fail_closed(self):
@@ -341,49 +335,46 @@ class TorchCpuBaselineTest(unittest.TestCase):
             "cuda_runtime": None,
         }
         contract = self.baseline_module._manifest_contract(self.manifest)
-        self.assertEqual(contract["timing_runtime_identity"], expected)
-        self.assertEqual(
-            self.baseline_module.timing_runtime_identity(self._environment(1)),
-            expected,
+        assert (contract["timing_runtime_identity"]) == (expected)
+        assert (self.baseline_module.timing_runtime_identity(self._environment(1))) == (
+            expected
         )
         torch_version_environment = self._environment(1)
         torch_version_environment["torch"] = type(torch.__version__)("2.13.0+cpu")
         normalized = self.baseline_module.timing_runtime_identity(
             torch_version_environment
         )
-        self.assertEqual(normalized, expected)
-        self.assertIs(type(normalized["torch"]), str)
+        assert (normalized) == (expected)
+        assert (type(normalized["torch"])) is (str)
         baseline, _paths = self._load()
-        self.assertTrue(
-            self.baseline_module.timing_runtime_identity_matches(
-                baseline["environment"], self._environment(1)
-            )
+        assert self.baseline_module.timing_runtime_identity_matches(
+            baseline["environment"], self._environment(1)
         )
 
         cuda_build = self._environment(1)
         cuda_build["torch"] = "2.13.0+cu126"
-        self.assertFalse(
+        assert not (
             self.baseline_module.timing_runtime_identity_matches(
                 baseline["environment"], cuda_build
             )
         )
         cuda_runtime = self._environment(1)
         cuda_runtime["cuda_runtime"] = "12.6"
-        self.assertFalse(
+        assert not (
             self.baseline_module.timing_runtime_identity_matches(
                 baseline["environment"], cuda_runtime
             )
         )
         malformed = self._environment(1)
         del malformed["cuda_runtime"]
-        self.assertFalse(
+        assert not (
             self.baseline_module.timing_runtime_identity_matches(
                 baseline["environment"], malformed
             )
         )
         tampered = copy.deepcopy(baseline["environment"])
         tampered["timing_runtime_identity"]["torch"] = "2.13.0+cu126"
-        self.assertFalse(
+        assert not (
             self.baseline_module.timing_runtime_identity_matches(
                 tampered, self._environment(1)
             )
@@ -428,21 +419,21 @@ class TorchCpuBaselineTest(unittest.TestCase):
             manifest["performance_gates"]["cpu_acceptance"]["timing_reference"][
                 "timing_runtime_identity"
             ] = identity
-            with self.subTest(identity=identity), self.assertRaises(ValueError):
+            with pytest.raises(ValueError):
                 self.baseline_module._manifest_contract(manifest)
 
         missing = copy.deepcopy(self.manifest)
         del missing["performance_gates"]["cpu_acceptance"]["timing_reference"][
             "timing_runtime_identity"
         ]
-        with self.assertRaisesRegex(ValueError, "timing reference schema"):
+        with pytest.raises(ValueError, match="timing reference schema"):
             self.baseline_module._manifest_contract(missing)
 
         extra = copy.deepcopy(self.manifest)
         extra["performance_gates"]["cpu_acceptance"]["timing_reference"][
             "unexpected"
         ] = None
-        with self.assertRaisesRegex(ValueError, "timing reference schema"):
+        with pytest.raises(ValueError, match="timing reference schema"):
             self.baseline_module._manifest_contract(extra)
 
     def test_rejects_incomplete_or_noncanonical_release_asset_schema(self):
@@ -450,7 +441,7 @@ class TorchCpuBaselineTest(unittest.TestCase):
         del missing_size["performance_gates"]["cpu_acceptance"]["timing_reference"][
             "slice_artifacts"
         ][0]["size_bytes"]
-        with self.assertRaisesRegex(ValueError, "artifact schema"):
+        with pytest.raises(ValueError, match="artifact schema"):
             self.baseline_module._manifest_contract(missing_size)
 
         for publication_url in (
@@ -464,10 +455,7 @@ class TorchCpuBaselineTest(unittest.TestCase):
             manifest["performance_gates"]["cpu_acceptance"]["timing_reference"][
                 "slice_artifacts"
             ][0]["publication_url"] = publication_url
-            with (
-                self.subTest(publication_url=publication_url),
-                self.assertRaisesRegex(ValueError, "artifact pin"),
-            ):
+            with (pytest.raises(ValueError, match="artifact pin"),):
                 self.baseline_module._manifest_contract(manifest)
 
     def test_rejects_artifact_byte_size_that_differs_from_the_manifest_pin(self):
@@ -491,7 +479,7 @@ class TorchCpuBaselineTest(unittest.TestCase):
         by_mode = {artifact["thread_mode"]: artifact for artifact in artifacts}
         with (
             patch.object(self.baseline_module, "_FROZEN_SLICE_ARTIFACTS", by_mode),
-            self.assertRaisesRegex(ValueError, "byte size does not match"),
+            pytest.raises(ValueError, match="byte size does not match"),
         ):
             self.baseline_module.load_torch_cpu_baseline(paths, manifest)
 
@@ -520,10 +508,10 @@ class TorchCpuBaselineTest(unittest.TestCase):
             "slice_artifacts"
         ] = [pins["one"], pins["physical"]]
         raw = one_path.read_bytes()
-        self.assertIn(b": ", raw)
+        assert (b": ") in (raw)
         one_path.write_bytes(raw.replace(b": ", b":\t", 1))
         with patch.object(self.baseline_module, "_FROZEN_SLICE_ARTIFACTS", pins):
-            with self.assertRaisesRegex(ValueError, "SHA-256 does not match"):
+            with pytest.raises(ValueError, match="SHA-256 does not match"):
                 self.baseline_module.load_torch_cpu_baseline(paths, manifest)
 
     def test_rejects_nonexact_legacy_evidence(self):
@@ -534,40 +522,37 @@ class TorchCpuBaselineTest(unittest.TestCase):
         ):
             one = self._artifact(1)
             one["evidence"][mutation] = "dirty" if mutation.endswith("status") else "0"
-            with (
-                self.subTest(mutation=mutation),
-                self.assertRaisesRegex(ValueError, "evidence"),
-            ):
+            with (pytest.raises(ValueError, match="evidence"),):
                 self._load(one=one)
 
     def test_rejects_incomplete_or_different_host_identity(self):
         one = self._artifact(1)
         del one["environment"]["host_identity"]
-        with self.assertRaisesRegex(ValueError, "public environment schema"):
+        with pytest.raises(ValueError, match="public environment schema"):
             self._load(one=one)
         physical = self._artifact(4)
         physical["environment"]["hostname"] = "another-host"
-        with self.assertRaisesRegex(ValueError, "hostname must be redacted"):
+        with pytest.raises(ValueError, match="hostname must be redacted"):
             self._load(physical=physical)
         physical = self._artifact(4)
         physical["environment"]["host_identity"]["sha256"] = "0" * 64
-        with self.assertRaisesRegex(ValueError, "different host identity"):
+        with pytest.raises(ValueError, match="different host identity"):
             self._load(physical=physical)
 
     def test_rejects_unexpected_public_profiler_fields(self):
         one = self._artifact(1)
         one["cases"][0]["profiler"]["chrome_trace"] = "/tmp/trace.json"
-        with self.assertRaisesRegex(ValueError, "profiler schema"):
+        with pytest.raises(ValueError, match="profiler schema"):
             self._load(one=one)
 
     def test_rejects_wrong_case_order_or_workload_spec(self):
         one = self._artifact(1)
         one["cases"][0], one["cases"][1] = one["cases"][1], one["cases"][0]
-        with self.assertRaisesRegex(ValueError, "wrong case order"):
+        with pytest.raises(ValueError, match="wrong case order"):
             self._load(one=one)
         one = self._artifact(1)
         one["cases"][0]["workload"]["resolution"] += 1
-        with self.assertRaisesRegex(ValueError, "differs from manifest"):
+        with pytest.raises(ValueError, match="differs from manifest"):
             self._load(one=one)
 
     def test_rejects_wrong_runtime_or_hard_control(self):
@@ -580,22 +565,22 @@ class TorchCpuBaselineTest(unittest.TestCase):
         for group, name, value in mutations:
             one = self._artifact(1)
             one["cases"][0][group][name] = value
-            with self.subTest(group=group, name=name), self.assertRaises(ValueError):
+            with pytest.raises(ValueError):
                 self._load(one=one)
         one = self._artifact(1)
         one["cases"][0]["benchmark_contract"]["profile_steps"] = 6
-        with self.assertRaisesRegex(ValueError, "benchmark contract"):
+        with pytest.raises(ValueError, match="benchmark contract"):
             self._load(one=one)
         one = self._artifact(1)
         one["cases"][0]["memory"]["bounded"] = False
-        with self.assertRaisesRegex(ValueError, "not bounded"):
+        with pytest.raises(ValueError, match="not bounded"):
             self._load(one=one)
 
     def test_rejects_legacy_allocation_or_pass_flags_from_public_projection(self):
         one = self._artifact(1)
         one["cases"][0]["acceptance"]["recurring_allocations_zero"] = True
         one["cases"][0]["acceptance"]["passed"] = True
-        with self.assertRaisesRegex(ValueError, "runtime controls"):
+        with pytest.raises(ValueError, match="runtime controls"):
             self._load(one=one)
 
     def test_sanitizer_removes_host_process_trace_and_local_path_data(self):
@@ -626,15 +611,12 @@ class TorchCpuBaselineTest(unittest.TestCase):
             "/home/",
             "chrome_trace",
         ):
-            with self.subTest(text=text):
-                self.assertNotIn(text, rendered)
-        self.assertEqual(
-            set(public["environment"]),
-            {"hostname", "host_identity", "thread_environment"},
+            assert (text) not in (rendered)
+        assert (set(public["environment"])) == (
+            {"hostname", "host_identity", "thread_environment"}
         )
-        self.assertEqual(
-            set(public["cases"][0]["profiler"]),
-            set(self.baseline_module._PUBLIC_PROFILER_KEYS),
+        assert (set(public["cases"][0]["profiler"])) == (
+            set(self.baseline_module._PUBLIC_PROFILER_KEYS)
         )
 
     def test_host_identity_commitment_requires_matching_salt_and_host(self):
@@ -642,25 +624,22 @@ class TorchCpuBaselineTest(unittest.TestCase):
         baseline = self.baseline_module._host_identity_token_from_raw_environment(
             environment, self._HOST_IDENTITY_SALT
         )
-        self.assertEqual(
+        assert (
             self.baseline_module.privacy_preserving_host_identity(
                 environment, salt=self._HOST_IDENTITY_SALT
-            ),
-            baseline,
-        )
-        self.assertNotEqual(
+            )
+        ) == (baseline)
+        assert (
             self.baseline_module._host_identity_token_from_raw_environment(
                 environment, "f" * 64
-            ),
-            baseline,
-        )
+            )
+        ) != (baseline)
         environment["cpu_model"] = "different CPU"
-        self.assertNotEqual(
+        assert (
             self.baseline_module._host_identity_token_from_raw_environment(
                 environment, self._HOST_IDENTITY_SALT
-            ),
-            baseline,
-        )
+            )
+        ) != (baseline)
 
     def test_host_identity_ignores_device_build_context_but_not_public_version(self):
         environment = self._environment(1)
@@ -674,29 +653,23 @@ class TorchCpuBaselineTest(unittest.TestCase):
             {"index": 1, "name": "synthetic device"},
         ]
         environment["gpu_topology"] = "synthetic topology"
-        self.assertEqual(
+        assert (
             self.baseline_module._host_identity_token_from_raw_environment(
                 environment, self._HOST_IDENTITY_SALT
-            ),
-            baseline,
-        )
+            )
+        ) == (baseline)
         environment["torch"] = "2.13.1+cu130"
-        self.assertNotEqual(
+        assert (
             self.baseline_module._host_identity_token_from_raw_environment(
                 environment, self._HOST_IDENTITY_SALT
-            ),
-            baseline,
-        )
+            )
+        ) != (baseline)
 
     def test_public_torch_version_ignores_only_the_local_build_suffix(self):
-        self.assertEqual(
-            self.baseline_module.public_torch_version("2.13.0+cpu"), "2.13.0"
-        )
-        self.assertEqual(
-            self.baseline_module.public_torch_version("2.13.0+cu130"), "2.13.0"
-        )
+        assert (self.baseline_module.public_torch_version("2.13.0+cpu")) == ("2.13.0")
+        assert (self.baseline_module.public_torch_version("2.13.0+cu130")) == ("2.13.0")
         for value in (None, "", "+cpu", "2.13.0+", "2.13.0+cpu+other"):
-            with self.subTest(value=value), self.assertRaises(ValueError):
+            with pytest.raises(ValueError):
                 self.baseline_module.public_torch_version(value)
 
     def test_host_identity_rejects_stable_host_field_changes(self):
@@ -716,13 +689,11 @@ class TorchCpuBaselineTest(unittest.TestCase):
         for name, value in mutations.items():
             candidate = copy.deepcopy(environment)
             candidate[name] = value
-            with self.subTest(name=name):
-                self.assertNotEqual(
-                    self.baseline_module._host_identity_token_from_raw_environment(
-                        candidate, self._HOST_IDENTITY_SALT
-                    ),
-                    baseline,
+            assert (
+                self.baseline_module._host_identity_token_from_raw_environment(
+                    candidate, self._HOST_IDENTITY_SALT
                 )
+            ) != (baseline)
 
     def test_public_host_identity_rejects_previous_schema(self):
         environment = self._environment(1)
@@ -730,7 +701,7 @@ class TorchCpuBaselineTest(unittest.TestCase):
             environment, self._HOST_IDENTITY_SALT
         )
         public["schema"] = "torch-cpu-host-identity-v1"
-        with self.assertRaisesRegex(ValueError, "public host identity"):
+        with pytest.raises(ValueError, match="public host identity"):
             self.baseline_module._public_host_identity_token(public)
 
     def test_rejects_bad_raw_samples_and_reported_median(self):
@@ -738,21 +709,18 @@ class TorchCpuBaselineTest(unittest.TestCase):
         for values in bad_values:
             one = self._artifact(1)
             one["cases"][0]["measurements"]["advance"] = self._advance(values)
-            with (
-                self.subTest(values=values[-1:]),
-                self.assertRaisesRegex(ValueError, "raw samples|15 raw samples"),
-            ):
+            with (pytest.raises(ValueError, match="raw samples|15 raw samples"),):
                 self._load(one=one)
         one = self._artifact(1)
         one["cases"][0]["measurements"]["advance"]["median_seconds"] = 99.0
-        with self.assertRaisesRegex(ValueError, "reported median"):
+        with pytest.raises(ValueError, match="reported median"):
             self._load(one=one)
 
     def test_rejects_unstable_raw_samples(self):
         one = self._artifact(1)
         values = [float(value) for value in range(50, 200, 10)]
         one["cases"][0]["measurements"]["advance"] = self._advance(values)
-        with self.assertRaisesRegex(ValueError, "relative-MAD limit"):
+        with pytest.raises(ValueError, match="relative-MAD limit"):
             self._load(one=one)
 
     def test_rejects_malformed_allocation_histogram(self):
@@ -764,19 +732,19 @@ class TorchCpuBaselineTest(unittest.TestCase):
         for name, value, message in mutations:
             one = self._artifact(1)
             one["cases"][0]["profiler"][name] = value
-            with self.subTest(name=name), self.assertRaisesRegex(ValueError, message):
+            with pytest.raises(ValueError, match=message):
                 self._load(one=one)
         one = self._artifact(1)
         one["cases"][0]["profiler"]["allocation_size_histogram"]["792"] = 6
-        with self.assertRaisesRegex(ValueError, "divisible by profile steps"):
+        with pytest.raises(ValueError, match="divisible by profile steps"):
             self._load(one=one)
 
     def test_finds_case_by_name_and_exact_thread_count(self):
         baseline, _paths = self._load()
         case = self.baseline_module.find_baseline_case(baseline, "cpu-crossover-2d", 4)
-        self.assertEqual(case["name"], "cpu-crossover-2d")
-        self.assertEqual(case["threads"], 4)
-        with self.assertRaises(KeyError):
+        assert (case["name"]) == ("cpu-crossover-2d")
+        assert (case["threads"]) == (4)
+        with pytest.raises(KeyError):
             self.baseline_module.find_baseline_case(baseline, "cpu-crossover-2d", 2)
 
     def test_compares_candidate_at_and_above_five_percent_boundary(self):
@@ -784,45 +752,41 @@ class TorchCpuBaselineTest(unittest.TestCase):
         boundary = self.baseline_module.compare_candidate_to_baseline(
             baseline, self._candidate(1.05)
         )
-        self.assertTrue(boundary["comparison_valid"])
-        self.assertTrue(boundary["within_five_percent"])
-        self.assertAlmostEqual(boundary["candidate_to_torch_baseline_ratio"], 1.05)
-        self.assertEqual(len(boundary["reference_raw_seconds_per_step"]), 15)
-        self.assertEqual(len(boundary["candidate_raw_seconds_per_step"]), 15)
+        assert boundary["comparison_valid"]
+        assert boundary["within_five_percent"]
+        assert round(abs(boundary["candidate_to_torch_baseline_ratio"] - 1.05), 7) == 0
+        assert (len(boundary["reference_raw_seconds_per_step"])) == (15)
+        assert (len(boundary["candidate_raw_seconds_per_step"])) == (15)
         reference = self.baseline_module.find_baseline_case(
             baseline, "cpu-crossover-2d", 1
         )
-        self.assertEqual(
-            boundary["reference_source_artifact_sha256"],
-            reference["source_artifact_sha256"],
+        assert (boundary["reference_source_artifact_sha256"]) == (
+            reference["source_artifact_sha256"]
         )
-        self.assertEqual(
-            boundary["reference_root_commit"],
-            self._evidence()["candidate_git_commit"],
+        assert (boundary["reference_root_commit"]) == (
+            self._evidence()["candidate_git_commit"]
         )
 
         slower = self.baseline_module.compare_candidate_to_baseline(
             baseline, self._candidate(1.050001)
         )
-        self.assertTrue(slower["comparison_valid"])
-        self.assertFalse(slower["within_five_percent"])
+        assert slower["comparison_valid"]
+        assert not (slower["within_five_percent"])
 
         wrong_contract = self._candidate()
         wrong_contract["runtime"]["execution_policy"] = "dense"
         invalid = self.baseline_module.compare_candidate_to_baseline(
             baseline, wrong_contract
         )
-        self.assertFalse(invalid["comparison_valid"])
-        self.assertTrue(invalid["contract_errors"])
+        assert not (invalid["comparison_valid"])
+        assert invalid["contract_errors"]
 
     def test_candidate_comparison_recomputes_full_timing_summary(self):
         baseline, _paths = self._load()
         candidate = self._candidate()
-        self.assertTrue(
-            self.baseline_module.compare_candidate_to_baseline(baseline, candidate)[
-                "comparison_valid"
-            ]
-        )
+        assert self.baseline_module.compare_candidate_to_baseline(baseline, candidate)[
+            "comparison_valid"
+        ]
         for name in (
             "p95_seconds",
             "population_stdev_seconds",
@@ -830,16 +794,15 @@ class TorchCpuBaselineTest(unittest.TestCase):
         ):
             tampered = copy.deepcopy(candidate)
             tampered["measurements"]["advance"][name] += 1.0
-            with self.subTest(name=name):
-                result = self.baseline_module.compare_candidate_to_baseline(
-                    baseline, tampered
-                )
-                self.assertFalse(result["comparison_valid"])
-                self.assertTrue(result["contract_errors"])
+            result = self.baseline_module.compare_candidate_to_baseline(
+                baseline, tampered
+            )
+            assert not (result["comparison_valid"])
+            assert result["contract_errors"]
 
         unexpected = copy.deepcopy(candidate)
         unexpected["measurements"]["advance"]["unexpected"] = 1.0
-        self.assertFalse(
+        assert not (
             self.baseline_module.compare_candidate_to_baseline(baseline, unexpected)[
                 "comparison_valid"
             ]
@@ -847,7 +810,7 @@ class TorchCpuBaselineTest(unittest.TestCase):
 
         missing = copy.deepcopy(candidate)
         del missing["measurements"]["advance"]["p95_seconds"]
-        self.assertFalse(
+        assert not (
             self.baseline_module.compare_candidate_to_baseline(baseline, missing)[
                 "comparison_valid"
             ]
@@ -856,9 +819,5 @@ class TorchCpuBaselineTest(unittest.TestCase):
     def test_public_baseline_advance_schema_remains_minimal(self):
         one = self._artifact(1)
         one["cases"][0]["measurements"]["advance"]["p95_seconds"] = 100.0
-        with self.assertRaisesRegex(ValueError, "advance measurement schema"):
+        with pytest.raises(ValueError, match="advance measurement schema"):
             self._load(one=one)
-
-
-if __name__ == "__main__":
-    unittest.main()

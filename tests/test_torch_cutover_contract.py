@@ -5,7 +5,8 @@ import os
 import pickle
 import subprocess
 import sys
-import unittest
+
+import pytest
 
 import gmes
 
@@ -113,23 +114,23 @@ EXPECTED_EXPORTS = frozenset(
 )
 
 
-class TorchCutoverContractTest(unittest.TestCase):
+class TestTorchCutoverContract:
     """Verify the supported public boundary independently of legacy adapters."""
 
     def test_exact_root_exports_and_canonical_constant_identity(self):
-        self.assertEqual(len(gmes.__all__), 98)
-        self.assertEqual(set(gmes.__all__), EXPECTED_EXPORTS)
-        self.assertEqual(len(gmes.__all__), len(set(gmes.__all__)))
-        self.assertIs(gmes.Ex, gmes.constant.Ex)
+        assert (len(gmes.__all__)) == (98)
+        assert (set(gmes.__all__)) == (EXPECTED_EXPORTS)
+        assert (len(gmes.__all__)) == (len(set(gmes.__all__)))
+        assert (gmes.Ex) is (gmes.constant.Ex)
 
         old_ex = gmes.constant.Ex
         old_vector = gmes.constant.PlusX.vector
         old_pickle = pickle.dumps(old_ex)
         reloaded = importlib.reload(gmes.constant)
-        self.assertIs(reloaded.Ex, old_ex)
-        self.assertIs(reloaded.PlusX.vector, old_vector)
-        self.assertIs(pickle.loads(old_pickle), old_ex)
-        self.assertIs(pickle.loads(pickle.dumps(reloaded.Ex)), old_ex)
+        assert (reloaded.Ex) is (old_ex)
+        assert (reloaded.PlusX.vector) is (old_vector)
+        assert (pickle.loads(old_pickle)) is (old_ex)
+        assert (pickle.loads(pickle.dumps(reloaded.Ex))) is (old_ex)
         markers = (
             reloaded.Component,
             reloaded.Electric,
@@ -159,7 +160,7 @@ class TorchCutoverContractTest(unittest.TestCase):
             reloaded.PlusZ,
             reloaded.MinusZ,
         )
-        self.assertEqual({marker.tag for marker in markers}, set(range(27)))
+        assert ({marker.tag for marker in markers}) == (set(range(27)))
 
     def test_root_import_does_not_load_matplotlib_or_a_gmes_native_module(self):
         result = subprocess.run(
@@ -175,10 +176,10 @@ class TorchCutoverContractTest(unittest.TestCase):
             env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
             text=True,
         )
-        self.assertEqual(result.returncode, 0, result.stderr)
+        assert (result.returncode) == (0)
 
     def test_parallel_cartesian_rejects_before_runtime_allocation(self):
-        with self.assertRaisesRegex(NotImplementedError, "parallel=True.*unsupported"):
+        with pytest.raises(NotImplementedError, match="parallel=True.*unsupported"):
             gmes.Cartesian((1, 1, 1), parallel=True)
 
     def test_retired_modules_are_absent_after_atomic_cutover(self):
@@ -188,10 +189,5 @@ class TorchCutoverContractTest(unittest.TestCase):
             "gmes.pw_source",
             "gmes.pw_material",
         ):
-            with self.subTest(module=module_name):
-                with self.assertRaises(ModuleNotFoundError):
-                    importlib.import_module(module_name)
-
-
-if __name__ == "__main__":
-    unittest.main()
+            with pytest.raises(ModuleNotFoundError):
+                importlib.import_module(module_name)

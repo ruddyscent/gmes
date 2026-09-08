@@ -28,7 +28,7 @@ locked CPU, CUDA 12.6, or CUDA 13.0 PyTorch index and must not be combined:
 ```sh
 uv python install 3.14
 uv sync --locked --extra torch-cpu --extra hdf5
-uv run --no-sync python -m unittest discover -v
+uv run --no-sync python -m pytest -v
 uv build
 ```
 
@@ -89,7 +89,7 @@ configuration; do not publish local `dist/` files.
 ```sh
 uv run --no-sync python -m mypy
 uv run --no-sync python -m pylint $(git ls-files 'gmes/*.py') setup.py
-uv run --no-sync python -m unittest discover -v
+uv run --no-sync python -m pytest -v
 uv build
 ```
 

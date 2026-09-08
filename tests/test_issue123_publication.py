@@ -9,10 +9,12 @@ import statistics
 import tempfile
 import traceback
 import unicodedata
-import unittest
 import zipfile
+from contextlib import ExitStack
 from pathlib import Path
 from unittest import mock
+
+import pytest
 
 from benchmarks import issue123_operations as operations
 from benchmarks import issue123_privacy as privacy
@@ -56,8 +58,8 @@ def _exception_messages(error):
     return messages
 
 
-class Issue123PublicationTest(unittest.TestCase):
-    def setUp(self):
+class _Issue123PublicationFixture:
+    def initialize(self):
         self.bindings = {
             "final_sha": "a" * 40,
             "manifest_sha256": "b" * 64,
@@ -569,49 +571,50 @@ class Issue123PublicationTest(unittest.TestCase):
         entries[publication.MANIFEST_PATH] = publication.canonical_json_bytes(manifest)
         return publication._encode_archive(entries)
 
+
+class TestIssue123Publication(_Issue123PublicationFixture):
+    @pytest.fixture(autouse=True)
+    def _initialize_fixture(self):
+        issue123_publication_fixture(self)
+
     def test_assets_are_deterministic_reopenable_and_non_circular(self):
-        self.assertEqual(
-            publication.ASSET_ORDER,
-            tuple(operations.TECHNICAL_RELEASE_ASSETS.items()),
+        assert publication.ASSET_ORDER == tuple(
+            operations.TECHNICAL_RELEASE_ASSETS.items()
         )
-        self.assertEqual(
-            publication.REQUIRED_JOB_NAMES,
-            (*operations.REQUIRED_STATUS_CONTEXTS, *operations.REQUIRED_CODEQL_JOBS),
+        assert publication.REQUIRED_JOB_NAMES == (
+            *operations.REQUIRED_STATUS_CONTEXTS,
+            *operations.REQUIRED_CODEQL_JOBS,
         )
         again = publication.build_publication_assets(
             self.projection,
             expected_policy=self.policy,
             expected_bindings=self.bindings,
         )
-        self.assertEqual(self.assets, again)
-        self.assertEqual(
-            list(self.assets),
-            [name for _role, name in publication.ASSET_ORDER],
-        )
+        assert self.assets == again
+        assert list(self.assets) == [name for _role, name in publication.ASSET_ORDER]
         archive = self.assets[publication.TECHNICAL_EVIDENCE_ASSET]
         with zipfile.ZipFile(io.BytesIO(archive)) as handle:
-            self.assertEqual(tuple(handle.namelist()), publication.ARCHIVE_ENTRY_ORDER)
-            self.assertEqual(handle.comment, b"")
+            assert tuple(handle.namelist()) == publication.ARCHIVE_ENTRY_ORDER
+            assert handle.comment == b""
             for info in handle.infolist():
-                self.assertEqual(info.compress_type, zipfile.ZIP_STORED)
-                self.assertEqual(info.date_time, publication.FIXED_ZIP_TIMESTAMP)
-                self.assertEqual(info.extra, b"")
-                self.assertEqual(info.comment, b"")
-                self.assertEqual(info.external_attr >> 16, stat.S_IFREG | 0o644)
+                assert info.compress_type == zipfile.ZIP_STORED
+                assert info.date_time == publication.FIXED_ZIP_TIMESTAMP
+                assert info.extra == b""
+                assert info.comment == b""
+                assert info.external_attr >> 16 == stat.S_IFREG | 0o644
             manifest = json.loads(handle.read(publication.MANIFEST_PATH))
-        self.assertNotIn(
-            publication.MANIFEST_PATH,
-            [item["path"] for item in manifest["payloads"]],
-        )
-        self.assertIn(
-            publication.EXECUTION_WITNESS_PATH,
-            [item["path"] for item in manifest["payloads"]],
-        )
+        assert publication.MANIFEST_PATH not in [
+            item["path"] for item in manifest["payloads"]
+        ]
+        assert publication.EXECUTION_WITNESS_PATH in [
+            item["path"] for item in manifest["payloads"]
+        ]
         summary = json.loads(self.assets[publication.TECHNICAL_SUMMARY_ASSET])
-        self.assertEqual(
-            [item["role"] for item in summary["assets"]],
-            ["technical_evidence", "raw_timing", "event_profiler"],
-        )
+        assert [item["role"] for item in summary["assets"]] == [
+            "technical_evidence",
+            "raw_timing",
+            "event_profiler",
+        ]
         downloaded = {name: bytes(bytearray(raw)) for name, raw in self.assets.items()}
         ledger = {
             role: {
@@ -627,13 +630,11 @@ class Issue123PublicationTest(unittest.TestCase):
             expected_bindings=self.bindings,
             expected_assets=ledger,
         )
-        self.assertEqual(
-            result["asset_order"], [role for role, _ in publication.ASSET_ORDER]
-        )
-        self.assertEqual(result["kind"], publication.VALIDATION_KIND)
+        assert result["asset_order"] == [role for role, _ in publication.ASSET_ORDER]
+        assert result["kind"] == publication.VALIDATION_KIND
         bad_ledger = copy.deepcopy(ledger)
         bad_ledger["technical_evidence"]["sha256"] = "0" * 64
-        with self.assertRaises(publication.PublicationError):
+        with pytest.raises(publication.PublicationError):
             publication.validate_publication_assets(
                 downloaded,
                 expected_policy=self.policy,
@@ -651,16 +652,13 @@ class Issue123PublicationTest(unittest.TestCase):
             expected_bindings=self.bindings,
             expected_assets=self.ledger,
         )
-        self.assertEqual(
-            receipt,
-            publication.finalize_publication(
-                self.assets,
-                publication.canonical_json_bytes(release),
-                expected_policy=self.policy,
-                expected_release_identity=self.release_identity,
-                expected_bindings=self.bindings,
-                expected_assets=self.ledger,
-            ),
+        assert receipt == publication.finalize_publication(
+            self.assets,
+            publication.canonical_json_bytes(release),
+            expected_policy=self.policy,
+            expected_release_identity=self.release_identity,
+            expected_bindings=self.bindings,
+            expected_assets=self.ledger,
         )
         downloaded = {name: bytes(bytearray(raw)) for name, raw in self.assets.items()}
         reopened = publication.validate_publication_receipt(
@@ -671,29 +669,28 @@ class Issue123PublicationTest(unittest.TestCase):
             expected_bindings=copy.deepcopy(self.bindings),
             expected_assets=copy.deepcopy(self.ledger),
         )
-        self.assertEqual(reopened["kind"], publication.PUBLICATION_RECEIPT_KIND)
-        self.assertEqual(
-            reopened["release_capture"]["tag_ref"]["object_sha"],
-            self.bindings["final_sha"],
+        assert reopened["kind"] == publication.PUBLICATION_RECEIPT_KIND
+        assert (
+            reopened["release_capture"]["tag_ref"]["object_sha"]
+            == self.bindings["final_sha"]
         )
-        self.assertEqual(
-            reopened["execution_witness"]["claims"][0]["validation_workflow"],
-            "CI",
-        )
-        self.assertNotIn("receipt_sha256", reopened["hashes"])
-        self.assertEqual(
-            reopened["hashes"]["release_capture_sha256"],
-            hashlib.sha256(publication.canonical_json_bytes(release)).hexdigest(),
+        assert reopened["execution_witness"]["claims"][0]["validation_workflow"] == "CI"
+        assert "receipt_sha256" not in reopened["hashes"]
+        assert (
+            reopened["hashes"]["release_capture_sha256"]
+            == hashlib.sha256(publication.canonical_json_bytes(release)).hexdigest()
         )
         witness_member = reopened["execution_witness_member"]
-        self.assertEqual(witness_member["path"], publication.EXECUTION_WITNESS_PATH)
-        self.assertEqual(
-            witness_member["sha256"],
-            hashlib.sha256(
+        assert witness_member["path"] == publication.EXECUTION_WITNESS_PATH
+        assert (
+            witness_member["sha256"]
+            == hashlib.sha256(
                 publication.canonical_json_bytes(reopened["execution_witness"])
-            ).hexdigest(),
+            ).hexdigest()
         )
 
+        # Keep this audit sequential: every mutation is checked against the same
+        # receipt and release identity established above.
         for label, mutate in (
             (
                 "release-api-query",
@@ -722,10 +719,7 @@ class Issue123PublicationTest(unittest.TestCase):
         ):
             forged = copy.deepcopy(release)
             mutate(forged)
-            with (
-                self.subTest(label=label),
-                self.assertRaises(publication.PublicationError),
-            ):
+            with (pytest.raises(publication.PublicationError),):
                 publication.finalize_publication(
                     self.assets,
                     forged,
@@ -742,7 +736,7 @@ class Issue123PublicationTest(unittest.TestCase):
         )
         for asset in bool_release_ids["assets"]:
             asset["release_id"] = True
-        with self.assertRaises(publication.PublicationError):
+        with pytest.raises(publication.PublicationError):
             publication.finalize_publication(
                 self.assets,
                 bool_release_ids,
@@ -768,7 +762,7 @@ class Issue123PublicationTest(unittest.TestCase):
         forged_receipt["hashes"]["execution_witness_member_sha256"] = forged_receipt[
             "execution_witness_member"
         ]["sha256"]
-        with self.assertRaises(publication.PublicationError):
+        with pytest.raises(publication.PublicationError):
             publication.validate_publication_receipt(
                 publication.canonical_json_bytes(forged_receipt),
                 downloaded,
@@ -792,7 +786,7 @@ class Issue123PublicationTest(unittest.TestCase):
         bool_receipt["hashes"]["execution_witness_member_sha256"] = bool_receipt[
             "execution_witness_member"
         ]["sha256"]
-        with self.assertRaises(publication.PublicationError):
+        with pytest.raises(publication.PublicationError):
             publication.validate_publication_receipt(
                 publication.canonical_json_bytes(bool_receipt),
                 downloaded,
@@ -829,7 +823,7 @@ class Issue123PublicationTest(unittest.TestCase):
             for role, asset_name in publication.ASSET_ORDER
         }
         refreshed_capture = self._release_capture(forged_assets, refreshed_ledger)
-        with self.assertRaises(publication.PublicationError):
+        with pytest.raises(publication.PublicationError):
             publication.finalize_publication(
                 forged_assets,
                 refreshed_capture,
@@ -838,7 +832,7 @@ class Issue123PublicationTest(unittest.TestCase):
                 expected_bindings=self.bindings,
                 expected_assets=self.ledger,
             )
-        with self.assertRaises(publication.PublicationError):
+        with pytest.raises(publication.PublicationError):
             publication.finalize_publication(
                 forged_assets,
                 refreshed_capture,
@@ -862,7 +856,7 @@ class Issue123PublicationTest(unittest.TestCase):
                 f"releases/assets/{record['asset_id']}"
             )
 
-        with self.assertRaises(publication.PublicationError):
+        with pytest.raises(publication.PublicationError):
             publication.finalize_publication(
                 self.assets,
                 substituted,
@@ -881,7 +875,7 @@ class Issue123PublicationTest(unittest.TestCase):
             expected_bindings=self.bindings,
             expected_assets=self.ledger,
         )
-        with self.assertRaises(publication.PublicationError):
+        with pytest.raises(publication.PublicationError):
             publication.validate_publication_receipt(
                 receipt,
                 self.assets,
@@ -893,7 +887,7 @@ class Issue123PublicationTest(unittest.TestCase):
 
         extra_field = copy.deepcopy(self.release_identity)
         extra_field["unexpected"] = 1
-        with self.assertRaises(publication.PublicationError):
+        with pytest.raises(publication.PublicationError):
             publication.finalize_publication(
                 self.assets,
                 self._release_capture(),
@@ -914,85 +908,83 @@ class Issue123PublicationTest(unittest.TestCase):
         cpu_expectation = policy["scopes"][0]["traces"][0]
         cpu_expectation["semantic_signatures"].append(["memset", "complete"])
         cpu_expectation["event_count"] += 1
-        with self.assertRaisesRegex(publication.PublicationError, "cpu-eager"):
+        with pytest.raises(publication.PublicationError, match="cpu-eager"):
             publication._derive_execution_witness(
                 policy["execution_witnesses"], scopes, self.bindings
             )
 
-    def test_compiled_regions_cannot_be_relabelled_as_eager_downloads(self):
-        for scope_index, claim_index, error in (
+    @pytest.mark.parametrize(
+        ("scope_index", "claim_index", "error"),
+        (
             (0, 0, "cpu-eager"),
             (2, 1, "cuda-eager"),
-        ):
-            with self.subTest(claim=error):
-                policy = copy.deepcopy(self.policy)
-                scope_name = publication.TECHNICAL_SCOPE_ORDER[scope_index]
+        ),
+        ids=("cpu-eager", "cuda-eager"),
+    )
+    def test_compiled_regions_cannot_be_relabelled_as_eager_downloads(
+        self, scope_index, claim_index, error
+    ):
+        policy = copy.deepcopy(self.policy)
+        scope_name = publication.TECHNICAL_SCOPE_ORDER[scope_index]
 
-                def add_compiled_region(entries):
-                    path = publication.SCOPE_PATHS[scope_name]
-                    scope = json.loads(entries[path])
-                    trace = scope["traces"][0]
-                    trace["events"].append(
-                        self._event(len(trace["events"]), "compiled-region", 21, 1)
-                    )
-                    trace["summary"]["event_count"] += 1
-                    trace["summary"]["compiled_region_events"] += 1
-                    entries[path] = publication.canonical_json_bytes(scope)
+        def add_compiled_region(entries):
+            path = publication.SCOPE_PATHS[scope_name]
+            scope = json.loads(entries[path])
+            trace = scope["traces"][0]
+            trace["events"].append(
+                self._event(len(trace["events"]), "compiled-region", 21, 1)
+            )
+            trace["summary"]["event_count"] += 1
+            trace["summary"]["compiled_region_events"] += 1
+            entries[path] = publication.canonical_json_bytes(scope)
 
-                    expectation = policy["scopes"][scope_index]["traces"][0]
-                    expectation["semantic_signatures"].append(
-                        ["compiled-region", "complete"]
-                    )
-                    expectation["event_count"] += 1
-                    expectation["compiled_region_events"] += 1
+            expectation = policy["scopes"][scope_index]["traces"][0]
+            expectation["semantic_signatures"].append(["compiled-region", "complete"])
+            expectation["event_count"] += 1
+            expectation["compiled_region_events"] += 1
 
-                    witness = json.loads(entries[publication.EXECUTION_WITNESS_PATH])
-                    claim = witness["claims"][claim_index]
-                    signatures = [
-                        [event["semantic_token"], event["phase"]]
-                        for event in trace["events"]
-                    ]
-                    normalized_trace = {
-                        "clock": trace["clock"],
-                        "events": trace["events"],
-                        "summary": trace["summary"],
-                    }
-                    claim["event_count"] = trace["summary"]["event_count"]
-                    claim["semantic_inventory_sha256"] = _inventory_digest(signatures)
-                    claim["normalized_trace_sha256"] = _inventory_digest(
-                        normalized_trace
-                    )
-                    entries[publication.EXECUTION_WITNESS_PATH] = (
-                        publication.canonical_json_bytes(witness)
-                    )
+            witness = json.loads(entries[publication.EXECUTION_WITNESS_PATH])
+            claim = witness["claims"][claim_index]
+            signatures = [
+                [event["semantic_token"], event["phase"]] for event in trace["events"]
+            ]
+            normalized_trace = {
+                "clock": trace["clock"],
+                "events": trace["events"],
+                "summary": trace["summary"],
+            }
+            claim["event_count"] = trace["summary"]["event_count"]
+            claim["semantic_inventory_sha256"] = _inventory_digest(signatures)
+            claim["normalized_trace_sha256"] = _inventory_digest(normalized_trace)
+            entries[publication.EXECUTION_WITNESS_PATH] = (
+                publication.canonical_json_bytes(witness)
+            )
 
-                archive = self._rehash_archive(add_compiled_region)
-                downloaded = dict(self.assets)
-                downloaded[publication.TECHNICAL_EVIDENCE_ASSET] = archive
-                summary = json.loads(downloaded[publication.TECHNICAL_SUMMARY_ASSET])
-                summary["assets"][0]["size_bytes"] = len(archive)
-                summary["assets"][0]["sha256"] = hashlib.sha256(archive).hexdigest()
-                downloaded[publication.TECHNICAL_SUMMARY_ASSET] = (
-                    publication.canonical_json_bytes(summary)
-                )
-                downloaded = {
-                    name: bytes(bytearray(raw)) for name, raw in downloaded.items()
-                }
-                refreshed_ledger = {
-                    role: {
-                        "name": name,
-                        "size_bytes": len(downloaded[name]),
-                        "sha256": hashlib.sha256(downloaded[name]).hexdigest(),
-                    }
-                    for role, name in publication.ASSET_ORDER
-                }
-                with self.assertRaisesRegex(publication.PublicationError, error):
-                    publication.validate_publication_assets(
-                        downloaded,
-                        expected_policy=policy,
-                        expected_bindings=self.bindings,
-                        expected_assets=refreshed_ledger,
-                    )
+        archive = self._rehash_archive(add_compiled_region)
+        downloaded = dict(self.assets)
+        downloaded[publication.TECHNICAL_EVIDENCE_ASSET] = archive
+        summary = json.loads(downloaded[publication.TECHNICAL_SUMMARY_ASSET])
+        summary["assets"][0]["size_bytes"] = len(archive)
+        summary["assets"][0]["sha256"] = hashlib.sha256(archive).hexdigest()
+        downloaded[publication.TECHNICAL_SUMMARY_ASSET] = (
+            publication.canonical_json_bytes(summary)
+        )
+        downloaded = {name: bytes(bytearray(raw)) for name, raw in downloaded.items()}
+        refreshed_ledger = {
+            role: {
+                "name": name,
+                "size_bytes": len(downloaded[name]),
+                "sha256": hashlib.sha256(downloaded[name]).hexdigest(),
+            }
+            for role, name in publication.ASSET_ORDER
+        }
+        with pytest.raises(publication.PublicationError, match=error):
+            publication.validate_publication_assets(
+                downloaded,
+                expected_policy=policy,
+                expected_bindings=self.bindings,
+                expected_assets=refreshed_ledger,
+            )
 
     def test_boolean_integer_aliases_fail_closed(self):
         policy = copy.deepcopy(self.policy)
@@ -1003,7 +995,7 @@ class Issue123PublicationTest(unittest.TestCase):
         ][0]
         public_array["shape"] = [True]
         public_array["element_count"] = 1
-        with self.assertRaises(publication.PublicationError):
+        with pytest.raises(publication.PublicationError):
             publication.build_publication_assets(
                 projection,
                 expected_policy=policy,
@@ -1018,7 +1010,7 @@ class Issue123PublicationTest(unittest.TestCase):
         ][0]["comparison"]
         comparison["rtol"] = False
         comparison["max_allowed_error"] = comparison["atol"]
-        with self.assertRaises(publication.PublicationError):
+        with pytest.raises(publication.PublicationError):
             publication.build_publication_assets(
                 projection,
                 expected_policy=policy,
@@ -1032,7 +1024,7 @@ class Issue123PublicationTest(unittest.TestCase):
                 correctness
             )
 
-        with self.assertRaises(publication.PublicationError):
+        with pytest.raises(publication.PublicationError):
             publication.validate_public_archive(
                 self._rehash_archive(bool_capture),
                 expected_policy=self.policy,
@@ -1046,7 +1038,7 @@ class Issue123PublicationTest(unittest.TestCase):
                 publication.canonical_json_bytes(witness)
             )
 
-        with self.assertRaises(publication.PublicationError):
+        with pytest.raises(publication.PublicationError):
             publication.validate_public_archive(
                 self._rehash_archive(bool_witness_attempt),
                 expected_policy=self.policy,
@@ -1062,7 +1054,7 @@ class Issue123PublicationTest(unittest.TestCase):
         eager_expectation = policy["scopes"][2]["traces"][0]
         del eager_expectation["semantic_signatures"][2]
         eager_expectation["event_count"] -= 1
-        with self.assertRaisesRegex(publication.PublicationError, "cuda-eager"):
+        with pytest.raises(publication.PublicationError, match="cuda-eager"):
             publication._derive_execution_witness(
                 policy["execution_witnesses"], scopes, self.bindings
             )
@@ -1092,15 +1084,16 @@ class Issue123PublicationTest(unittest.TestCase):
             expected_bindings=policy["bindings"],
             expected_assets=ledger,
         )
-        self.assertEqual(validated["kind"], publication.VALIDATION_KIND)
-        self.assertEqual(
-            [scope["scope"] for scope in validated["technical_scopes"]],
-            list(publication.TECHNICAL_SCOPE_ORDER),
+        assert validated["kind"] == publication.VALIDATION_KIND
+        assert [scope["scope"] for scope in validated["technical_scopes"]] == list(
+            publication.TECHNICAL_SCOPE_ORDER
         )
         for raw in downloaded.values():
-            self.assertNotIn(salt.hex().encode(), raw)
+            assert salt.hex().encode() not in raw
 
-    def test_synthetic_literal_profile_cli_is_deterministic_and_path_free(self):
+    def test_synthetic_literal_profile_cli_is_deterministic_and_path_free(
+        self, request
+    ):
         policy, private = privacy_fixture._fixture()
         for policy_scope, private_scope in zip(
             policy["scopes"], private["scopes"], strict=True
@@ -1108,6 +1101,8 @@ class Issue123PublicationTest(unittest.TestCase):
             policy_scope["correctness"] = []
             private_scope["correctness"] = []
         salt = bytes(range(32))
+        patch_stack = ExitStack()
+        request.addfinalizer(patch_stack.close)
         with tempfile.TemporaryDirectory() as name:
             root = Path(name)
             specification, runtime_paths, document = (
@@ -1132,13 +1127,13 @@ class Issue123PublicationTest(unittest.TestCase):
                         copy.deepcopy(record["selector"]),
                     ),
                 )
-            literal_patcher = mock.patch.object(
-                privacy,
-                "CODE_OWNED_LITERAL_TARGET_BINDINGS",
-                literal_bindings,
+            patch_stack.enter_context(
+                mock.patch.object(
+                    privacy,
+                    "CODE_OWNED_LITERAL_TARGET_BINDINGS",
+                    literal_bindings,
+                )
             )
-            literal_patcher.start()
-            self.addCleanup(literal_patcher.stop)
             policy_path = root / "policy.json"
             policy_raw = publication.canonical_json_bytes(policy)
             policy_path.write_bytes(policy_raw)
@@ -1159,24 +1154,20 @@ class Issue123PublicationTest(unittest.TestCase):
                     salt=salt,
                 )
                 results.append(result)
-                self.assertEqual(
-                    list(result["asset_paths"]),
-                    [role for role, _asset in publication.ASSET_ORDER],
-                )
-                self.assertEqual(
-                    stat.S_IMODE(result["private_openings"].stat().st_mode),
-                    0o600,
-                )
-                self.assertEqual(stat.S_IMODE(private_directory.stat().st_mode), 0o700)
-            self.assertEqual(results[0]["asset_ledger"], results[1]["asset_ledger"])
+                assert list(result["asset_paths"]) == [
+                    role for role, _asset in publication.ASSET_ORDER
+                ]
+                assert stat.S_IMODE(result["private_openings"].stat().st_mode) == 0o600
+                assert stat.S_IMODE(private_directory.stat().st_mode) == 0o700
+            assert results[0]["asset_ledger"] == results[1]["asset_ledger"]
             for role, _asset in publication.ASSET_ORDER:
-                self.assertEqual(
-                    results[0]["asset_paths"][role].read_bytes(),
-                    results[1]["asset_paths"][role].read_bytes(),
+                assert (
+                    results[0]["asset_paths"][role].read_bytes()
+                    == results[1]["asset_paths"][role].read_bytes()
                 )
                 public_raw = results[0]["asset_paths"][role].read_bytes()
-                self.assertNotIn(salt.hex().encode(), public_raw)
-                self.assertNotIn(str(root).encode(), public_raw)
+                assert salt.hex().encode() not in public_raw
+                assert str(root).encode() not in public_raw
 
             cli_private_directory = root / "cli-authority"
             cli_private_directory.mkdir(mode=0o700)
@@ -1206,9 +1197,9 @@ class Issue123PublicationTest(unittest.TestCase):
                 ]
             )
             with mock.patch("builtins.print") as printed:
-                self.assertEqual(publication.main(prepare_arguments), 0)
+                assert publication.main(prepare_arguments) == 0
             printed.assert_called_once_with("issue123-publication-prepare-ok")
-            self.assertNotIn(str(root), printed.call_args.args[0])
+            assert str(root) not in printed.call_args.args[0]
 
             cli_asset_bytes = {
                 asset: (cli_assets / asset).read_bytes()
@@ -1232,7 +1223,7 @@ class Issue123PublicationTest(unittest.TestCase):
             )
             receipt_path = root / "publication-receipt.json"
             with mock.patch("builtins.print") as printed:
-                self.assertEqual(
+                assert (
                     publication.main(
                         [
                             "finalize",
@@ -1249,12 +1240,12 @@ class Issue123PublicationTest(unittest.TestCase):
                             "--receipt-output",
                             str(receipt_path),
                         ]
-                    ),
-                    0,
+                    )
+                    == 0
                 )
             printed.assert_called_once_with("issue123-publication-finalize-ok")
-            self.assertNotIn(str(root), printed.call_args.args[0])
-            self.assertEqual(stat.S_IMODE(receipt_path.stat().st_mode), 0o600)
+            assert str(root) not in printed.call_args.args[0]
+            assert stat.S_IMODE(receipt_path.stat().st_mode) == 0o600
 
     def test_publication_outputs_reject_bundle_public_and_alias_overlap(self):
         policy, private = privacy_fixture._fixture()
@@ -1336,11 +1327,10 @@ class Issue123PublicationTest(unittest.TestCase):
                 "CODE_OWNED_LITERAL_TARGET_BINDINGS",
                 literal_bindings,
             ):
+                # These paths intentionally share one alias topology so the final
+                # bundle snapshot proves that every failed attempt left it intact.
                 for label, asset_output, sidecar_output in cases:
-                    with (
-                        self.subTest(label=label),
-                        self.assertRaises(publication.PublicationError),
-                    ):
+                    with (pytest.raises(publication.PublicationError),):
                         publication.prepare_publication(
                             source_specification=specification,
                             completion_index=completion_index,
@@ -1351,8 +1341,8 @@ class Issue123PublicationTest(unittest.TestCase):
                             private_openings_output=sidecar_output,
                             salt=bytes(range(32)),
                         )
-                    self.assertFalse(asset_output.exists())
-                    self.assertFalse(sidecar_output.exists())
+                    assert not (asset_output.exists())
+                    assert not (sidecar_output.exists())
             bundle_after = {
                 path.relative_to(completion_index.parent).as_posix(): (
                     path.stat().st_dev,
@@ -1362,7 +1352,7 @@ class Issue123PublicationTest(unittest.TestCase):
                 for path in completion_index.parent.rglob("*")
                 if path.is_file()
             }
-            self.assertEqual(bundle_after, bundle_before)
+            assert bundle_after == bundle_before
 
             asset_directory = root / "downloaded-assets"
             asset_directory.mkdir()
@@ -1385,7 +1375,7 @@ class Issue123PublicationTest(unittest.TestCase):
                 asset_directory / "receipt.json",
                 asset_alias / "receipt.json",
             ):
-                with self.assertRaises(publication.PublicationError):
+                with pytest.raises(publication.PublicationError):
                     publication.finalize_publication_files(
                         asset_directory=asset_directory,
                         release_capture_path=release_path,
@@ -1394,26 +1384,25 @@ class Issue123PublicationTest(unittest.TestCase):
                         policy_sha256=policy_sha256,
                         receipt_output=receipt_output,
                     )
-                self.assertFalse(receipt_output.exists())
-            self.assertEqual(
-                {path.name: path.read_bytes() for path in asset_directory.iterdir()},
-                final_before,
-            )
+                assert not (receipt_output.exists())
+            assert {
+                path.name: path.read_bytes() for path in asset_directory.iterdir()
+            } == final_before
 
     def test_publication_library_path_failures_are_typed_fixed_and_context_free(self):
         marker = "SYNTHETIC-PATH-CANARY-É"
 
         def assert_private(error, expected):
-            self.assertIs(type(error), publication.PublicationError)
-            self.assertEqual(error.args, (expected,))
-            self.assertIsNone(error.__cause__)
-            self.assertIsNone(error.__context__)
+            assert type(error) is publication.PublicationError
+            assert error.args == (expected,)
+            assert error.__cause__ is None
+            assert error.__context__ is None
             rendered = "".join(
                 traceback.format_exception(type(error), error, error.__traceback__)
             )
             rendered += " ".join(_exception_messages(error)) + repr(error)
             folded = unicodedata.normalize("NFKC", rendered).casefold()
-            self.assertNotIn(unicodedata.normalize("NFKC", marker).casefold(), folded)
+            assert unicodedata.normalize("NFKC", marker).casefold() not in folded
 
         with tempfile.TemporaryDirectory() as name:
             root = Path(name)
@@ -1433,7 +1422,7 @@ class Issue123PublicationTest(unittest.TestCase):
                 source_alias,
             )
             for source in source_cases:
-                with self.assertRaises(publication.PublicationError) as caught:
+                with pytest.raises(publication.PublicationError) as caught:
                     publication.prepare_publication(
                         source_specification=source,
                         completion_index=root / "unused-index.json",
@@ -1443,9 +1432,7 @@ class Issue123PublicationTest(unittest.TestCase):
                         asset_output_directory=root / "unused-assets",
                         private_openings_output=private_root / "unused-openings.json",
                     )
-                assert_private(
-                    caught.exception, "publication source preparation failed"
-                )
+                assert_private(caught.value, "publication source preparation failed")
 
             real_private_reader = privacy._private_file_bytes
 
@@ -1460,7 +1447,7 @@ class Issue123PublicationTest(unittest.TestCase):
                     "_private_file_bytes",
                     side_effect=deny_source,
                 ),
-                self.assertRaises(publication.PublicationError) as caught,
+                pytest.raises(publication.PublicationError) as caught,
             ):
                 publication.prepare_publication(
                     source_specification=source_target,
@@ -1471,7 +1458,7 @@ class Issue123PublicationTest(unittest.TestCase):
                     asset_output_directory=root / "unused-assets",
                     private_openings_output=private_root / "unused-openings.json",
                 )
-            assert_private(caught.exception, "publication source preparation failed")
+            assert_private(caught.value, "publication source preparation failed")
 
             asset_target = root / "asset-target"
             asset_target.mkdir()
@@ -1482,7 +1469,7 @@ class Issue123PublicationTest(unittest.TestCase):
                 None,
                 asset_alias,
             ):
-                with self.assertRaises(publication.PublicationError) as caught:
+                with pytest.raises(publication.PublicationError) as caught:
                     publication.finalize_publication_files(
                         asset_directory=asset_directory,
                         release_capture_path=root / "unused-release.json",
@@ -1492,7 +1479,7 @@ class Issue123PublicationTest(unittest.TestCase):
                         receipt_output=private_root / "unused-receipt.json",
                     )
                 assert_private(
-                    caught.exception, "publication asset directory is unavailable"
+                    caught.value, "publication asset directory is unavailable"
                 )
 
             real_lexical_path = privacy._lexical_path_without_symlinks
@@ -1508,7 +1495,7 @@ class Issue123PublicationTest(unittest.TestCase):
                     "_lexical_path_without_symlinks",
                     side_effect=deny_assets,
                 ),
-                self.assertRaises(publication.PublicationError) as caught,
+                pytest.raises(publication.PublicationError) as caught,
             ):
                 publication.finalize_publication_files(
                     asset_directory=asset_target,
@@ -1518,11 +1505,21 @@ class Issue123PublicationTest(unittest.TestCase):
                     policy_sha256=policy_sha256,
                     receipt_output=private_root / "unused-receipt.json",
                 )
-            assert_private(
-                caught.exception, "publication asset directory is unavailable"
-            )
+            assert_private(caught.value, "publication asset directory is unavailable")
 
-    def test_publication_cli_failure_tokens_never_render_private_text(self):
+    @pytest.mark.parametrize(
+        ("command", "token", "boundary"),
+        (
+            ("prepare", "issue123-publication-prepare-failed\n", publication.main),
+            ("prepare", "issue123-publication-prepare-failed\n", publication._cli),
+            ("finalize", "issue123-publication-finalize-failed\n", publication.main),
+            ("finalize", "issue123-publication-finalize-failed\n", publication._cli),
+        ),
+        ids=("prepare-main", "prepare-cli", "finalize-main", "finalize-cli"),
+    )
+    def test_publication_cli_failure_tokens_never_render_private_text(
+        self, command, token, boundary
+    ):
         marker = (
             "/tmp/synthetic-private.invalid/identity "
             + "salt="
@@ -1531,71 +1528,61 @@ class Issue123PublicationTest(unittest.TestCase):
             + "cd" * 32
             + " raw-body=fixture-private-value"
         )
-        for command, token in (
-            ("prepare", "issue123-publication-prepare-failed\n"),
-            ("finalize", "issue123-publication-finalize-failed\n"),
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(
+                publication,
+                "_main",
+                side_effect=publication.PublicationError(marker),
+            ),
+            mock.patch("sys.stdout", new=stdout),
+            mock.patch("sys.stderr", new=stderr),
         ):
-            for boundary in (publication.main, publication._cli):
-                stdout = io.StringIO()
-                stderr = io.StringIO()
-                with (
-                    self.subTest(command=command, boundary=boundary.__name__),
-                    mock.patch.object(
-                        publication,
-                        "_main",
-                        side_effect=publication.PublicationError(marker),
-                    ),
-                    mock.patch("sys.stdout", new=stdout),
-                    mock.patch("sys.stderr", new=stderr),
-                ):
-                    status = boundary([command])
-                self.assertEqual(status, 2)
-                self.assertEqual(stdout.getvalue(), "")
-                self.assertEqual(stderr.getvalue(), token)
-                rendered = stdout.getvalue() + stderr.getvalue()
-                self.assertNotIn("Traceback", rendered)
-                self.assertNotIn(marker, rendered)
+            status = boundary([command])
+        assert status == 2
+        assert stdout.getvalue() == ""
+        assert stderr.getvalue() == token
+        rendered = stdout.getvalue() + stderr.getvalue()
+        assert "Traceback" not in rendered
+        assert marker not in rendered
         with (
             mock.patch.object(
                 publication,
                 "_main",
                 side_effect=RuntimeError(marker),
             ),
-            self.assertRaisesRegex(RuntimeError, "synthetic-private"),
+            pytest.raises(RuntimeError, match="synthetic-private"),
         ):
             publication.main(["prepare"])
 
-    def test_stale_binding_components_fail_independently(self):
-        mutations = [
-            ("final_sha", "c" * 40),
-            ("manifest_sha256", "d" * 64),
-        ]
-        for field, replacement in mutations:
+    @pytest.mark.parametrize(
+        ("target", "field", "replacement"),
+        (
+            ("binding", "final_sha", "c" * 40),
+            ("binding", "manifest_sha256", "d" * 64),
+            ("job", "run_id", None),
+            ("job", "run_attempt", None),
+            ("job", "job_id", None),
+        ),
+        ids=("final-sha", "manifest-digest", "run-id", "run-attempt", "job-id"),
+    )
+    def test_stale_binding_components_fail_independently(
+        self, target, field, replacement
+    ):
+        expected = copy.deepcopy(self.bindings)
+        if target == "binding":
             expected = copy.deepcopy(self.bindings)
             expected[field] = replacement
-            with (
-                self.subTest(field=field),
-                self.assertRaises(publication.PublicationError),
-            ):
-                publication.validate_publication_assets(
-                    self.assets,
-                    expected_policy=self.policy,
-                    expected_bindings=expected,
-                    expected_assets=self.ledger,
-                )
-        for field in ("run_id", "run_attempt", "job_id"):
-            expected = copy.deepcopy(self.bindings)
+        else:
             expected["jobs"][0][field] += 1
-            with (
-                self.subTest(field=field),
-                self.assertRaises(publication.PublicationError),
-            ):
-                publication.validate_publication_assets(
-                    self.assets,
-                    expected_policy=self.policy,
-                    expected_bindings=expected,
-                    expected_assets=self.ledger,
-                )
+        with pytest.raises(publication.PublicationError):
+            publication.validate_publication_assets(
+                self.assets,
+                expected_policy=self.policy,
+                expected_bindings=expected,
+                expected_assets=self.ledger,
+            )
 
     def test_rehashed_event_and_array_removal_cannot_bypass_policy(self):
         def remove_event(entries):
@@ -1610,7 +1597,7 @@ class Issue123PublicationTest(unittest.TestCase):
             entries[path] = publication.canonical_json_bytes(scope)
 
         archive = self._rehash_archive(remove_event)
-        with self.assertRaises(publication.PublicationError):
+        with pytest.raises(publication.PublicationError):
             publication.validate_public_archive(
                 archive,
                 expected_policy=self.policy,
@@ -1640,7 +1627,7 @@ class Issue123PublicationTest(unittest.TestCase):
             entries[scope_path] = publication.canonical_json_bytes(scope)
 
         archive = self._rehash_archive(remove_case)
-        with self.assertRaises(publication.PublicationError):
+        with pytest.raises(publication.PublicationError):
             publication.validate_public_archive(
                 archive,
                 expected_policy=self.policy,
@@ -1667,7 +1654,7 @@ class Issue123PublicationTest(unittest.TestCase):
             entries[scope_path] = publication.canonical_json_bytes(scope)
 
         archive = self._rehash_archive(remove_array)
-        with self.assertRaises(publication.PublicationError):
+        with pytest.raises(publication.PublicationError):
             publication.validate_public_archive(
                 archive,
                 expected_policy=self.policy,
@@ -1688,7 +1675,7 @@ class Issue123PublicationTest(unittest.TestCase):
             entries[path] = publication.canonical_json_bytes(scope)
 
         archive = self._rehash_archive(leak)
-        with self.assertRaises(publication.PublicationError):
+        with pytest.raises(publication.PublicationError):
             publication.validate_public_archive(
                 archive,
                 expected_policy=self.policy,
@@ -1708,7 +1695,7 @@ class Issue123PublicationTest(unittest.TestCase):
             entries[path] = publication.canonical_json_bytes(scope)
 
         archive = self._rehash_archive(replace_samples)
-        with self.assertRaises(publication.PublicationError):
+        with pytest.raises(publication.PublicationError):
             publication.validate_public_archive(
                 archive,
                 expected_policy=self.policy,
@@ -1744,11 +1731,11 @@ class Issue123PublicationTest(unittest.TestCase):
         signatures = [
             [event["semantic_token"], event["phase"]] for event in valid_events
         ]
-        self.assertEqual(
+        assert (
             publication._recompute_trace_summary(
                 valid_events, summary, "valid flow trace", signatures
-            ),
-            summary,
+            )
+            == summary
         )
 
         equal_time = [
@@ -1760,18 +1747,16 @@ class Issue123PublicationTest(unittest.TestCase):
         equal_signatures = [
             [event["semantic_token"], event["phase"]] for event in equal_time
         ]
-        self.assertEqual(
+        assert (
             publication._recompute_trace_summary(
                 equal_time, equal_summary, "equal-time flow", equal_signatures
-            ),
-            equal_summary,
+            )
+            == equal_summary
         )
 
         reverse_time = copy.deepcopy(equal_time)
         reverse_time[0]["start_us"] = 1.0
-        with self.assertRaisesRegex(
-            publication.PublicationError, "timestamps decrease"
-        ):
+        with pytest.raises(publication.PublicationError, match="timestamps decrease"):
             publication._recompute_trace_summary(
                 reverse_time,
                 equal_summary,
@@ -1785,9 +1770,7 @@ class Issue123PublicationTest(unittest.TestCase):
         ]
         missing_summary = copy.deepcopy(summary)
         missing_summary["event_count"] = len(missing_ordinal)
-        with self.assertRaisesRegex(
-            publication.PublicationError, "flow has no ordinal"
-        ):
+        with pytest.raises(publication.PublicationError, match="flow has no ordinal"):
             publication._recompute_trace_summary(
                 missing_ordinal,
                 missing_summary,
@@ -1805,6 +1788,8 @@ class Issue123PublicationTest(unittest.TestCase):
             ("duplicate end", ("flow-start", "flow-end", "flow-end")),
             ("unclosed", ("flow-start", "flow-step")),
         )
+        # These topology cases share the validated summary fixture and intentionally
+        # remain sequential so the surrounding missing-ordinal checks run only once.
         for case, phases in invalid_topologies:
             events = [
                 self._event(
@@ -1818,11 +1803,8 @@ class Issue123PublicationTest(unittest.TestCase):
             ]
             observed_summary = copy.deepcopy(summary)
             observed_summary["event_count"] = len(events)
-            with (
-                self.subTest(case=case),
-                self.assertRaisesRegex(
-                    publication.PublicationError, "topology is incomplete"
-                ),
+            with pytest.raises(
+                publication.PublicationError, match="topology is incomplete"
             ):
                 publication._recompute_trace_summary(
                     events,
@@ -1846,7 +1828,7 @@ class Issue123PublicationTest(unittest.TestCase):
             "metadata-origin",
             [[event["semantic_token"], event["phase"]] for event in trace["events"]],
         )
-        with self.assertRaisesRegex(publication.PublicationError, "local origin"):
+        with pytest.raises(publication.PublicationError, match="local origin"):
             publication._validate_trace_record(
                 trace,
                 expectation,
@@ -1910,6 +1892,8 @@ class Issue123PublicationTest(unittest.TestCase):
                 correctness
             )
 
+        # Rehash mutations intentionally share one pristine archive and culminate
+        # in the thread-context control below.
         for mutate in (
             swap_event_kinds,
             add_event,
@@ -1917,10 +1901,7 @@ class Issue123PublicationTest(unittest.TestCase):
             forge_zero_reference_excess,
         ):
             archive = self._rehash_archive(mutate)
-            with (
-                self.subTest(mutate=mutate.__name__),
-                self.assertRaises(publication.PublicationError),
-            ):
+            with (pytest.raises(publication.PublicationError),):
                 publication.validate_public_archive(
                     archive,
                     expected_policy=self.policy,
@@ -1934,7 +1915,7 @@ class Issue123PublicationTest(unittest.TestCase):
             entries[path] = publication.canonical_json_bytes(scope)
 
         archive = self._rehash_archive(collapse_thread_context)
-        with self.assertRaises(publication.PublicationError):
+        with pytest.raises(publication.PublicationError):
             publication.validate_public_archive(
                 archive,
                 expected_policy=self.policy,
@@ -1949,23 +1930,22 @@ class Issue123PublicationTest(unittest.TestCase):
             {"credentials": "abcdefghijklmnop"},
             {"tokens": "abcdefghijklmnop"},
         )
+        # Scanner probes stay sequential with the malformed-input and policy
+        # controls below to exercise one fail-closed validation progression.
         for attack in attacks:
-            with (
-                self.subTest(attack=attack),
-                self.assertRaises(publication.PublicationError),
-            ):
+            with (pytest.raises(publication.PublicationError),):
                 publication.scan_public_bytes(publication.canonical_json_bytes(attack))
         malformed = (
             b"[" * 2000 + b"0" + b"]" * 2000 + b"\n",
             b'{"value":' + b"9" * 5000 + b"}\n",
         )
         for raw in malformed:
-            with self.assertRaises(publication.PublicationError):
+            with pytest.raises(publication.PublicationError):
                 publication.scan_public_bytes(raw)
 
         policy = copy.deepcopy(self.policy)
         policy["scopes"][0]["correctness"][0]["captures"][0]["arrays"][0]["shape"] = [0]
-        with self.assertRaises(publication.PublicationError):
+        with pytest.raises(publication.PublicationError):
             publication.validate_public_archive(
                 self.assets[publication.TECHNICAL_EVIDENCE_ASSET],
                 expected_policy=policy,
@@ -1984,7 +1964,7 @@ class Issue123PublicationTest(unittest.TestCase):
             policy = copy.deepcopy(self.policy)
             policy["scopes"][4]["payloads"][0]["name"] = payload_name
             policy["scopes"][4]["payloads"][0]["size_bytes"] = size_bytes
-            with self.assertRaises(publication.PublicationError):
+            with pytest.raises(publication.PublicationError):
                 publication.validate_public_archive(
                     self.assets[publication.TECHNICAL_EVIDENCE_ASSET],
                     expected_policy=policy,
@@ -2004,7 +1984,7 @@ class Issue123PublicationTest(unittest.TestCase):
                 policy["scopes"][0]["correctness"][0]["captures"][0]["arrays"][0][
                     field
                 ] = malformed_value
-            with self.assertRaises(publication.PublicationError):
+            with pytest.raises(publication.PublicationError):
                 publication.validate_public_archive(
                     self.assets[publication.TECHNICAL_EVIDENCE_ASSET],
                     expected_policy=policy,
@@ -2021,11 +2001,10 @@ class Issue123PublicationTest(unittest.TestCase):
             "．．/evidence.bin",
             "evidence/ｐｒｉｖａｔｅ/data.bin",
         )
+        # Invalid aliases and the final portable control share one payload builder,
+        # so retain their ordered reject-then-accept progression.
         for name in names:
-            with (
-                self.subTest(name=name),
-                self.assertRaises(publication.PublicationError),
-            ):
+            with (pytest.raises(publication.PublicationError),):
                 publication._portable_payload_name(
                     name, "downloaded payload", "application/octet-stream"
                 )
@@ -2033,7 +2012,7 @@ class Issue123PublicationTest(unittest.TestCase):
             projection = copy.deepcopy(self.projection)
             policy["scopes"][4]["payloads"][0]["name"] = name
             projection["technical_scopes"][4]["payloads"][0]["name"] = name
-            with self.assertRaises(publication.PublicationError):
+            with pytest.raises(publication.PublicationError):
                 publication.build_publication_assets(
                     projection,
                     expected_policy=policy,
@@ -2058,37 +2037,33 @@ class Issue123PublicationTest(unittest.TestCase):
         )
         for assignment in assignments:
             with (
-                self.subTest(assignment=assignment),
-                self.assertRaisesRegex(
+                pytest.raises(
                     publication.PublicationError,
-                    "environment or identity assignment",
+                    match="environment or identity assignment",
                 ),
             ):
                 build_with_payload_name(f"{assignment}/evidence.whl")
 
         portable_name = "portable/PATH/evidence.whl"
-        self.assertEqual(
+        assert (
             publication._portable_payload_name(
                 portable_name, "downloaded payload", "application/vnd.python.wheel"
-            ),
-            portable_name,
+            )
+            == portable_name
         )
         portable_assets = build_with_payload_name(portable_name)
-        self.assertEqual(
-            list(portable_assets), [name for _role, name in publication.ASSET_ORDER]
-        )
+        assert list(portable_assets) == [
+            name for _role, name in publication.ASSET_ORDER
+        ]
 
     def test_independent_text_scans_apply_nfkc_and_redact_keys(self):
         marker = "authorization_private_probe_value"
-        with self.assertRaises(publication.PublicationError) as exact_keys:
+        with pytest.raises(publication.PublicationError) as exact_keys:
             publication._exact_keys(
                 {marker: True}, {"expected"}, "downloaded fixture object"
             )
-        self.assertTrue(
-            all(
-                marker not in message
-                for message in _exception_messages(exact_keys.exception)
-            )
+        assert all(
+            marker not in message for message in _exception_messages(exact_keys.value)
         )
         attacks = (
             {_fullwidth_ascii("hostname"): "samplehost"},
@@ -2097,17 +2072,11 @@ class Issue123PublicationTest(unittest.TestCase):
         )
         for attack in attacks:
             raw = publication.canonical_json_bytes(attack)
-            with (
-                self.subTest(attack=attack),
-                self.assertRaises(publication.PublicationError) as caught,
-            ):
+            with (pytest.raises(publication.PublicationError) as caught,):
                 publication.scan_public_bytes(raw, "downloaded fixture")
-            self.assertTrue(_exception_messages(caught.exception))
-            self.assertTrue(
-                all(
-                    marker not in message
-                    for message in _exception_messages(caught.exception)
-                )
+            assert _exception_messages(caught.value)
+            assert all(
+                marker not in message for message in _exception_messages(caught.value)
             )
 
         environment_names = (
@@ -2144,6 +2113,8 @@ class Issue123PublicationTest(unittest.TestCase):
             "LD_LIBRARY_PATH",
             "DYLD_LIBRARY_PATH",
         )
+        # Environment spellings share the redaction marker and the final safe-path
+        # control, making this an intentionally sequential normalization audit.
         for environment_name in environment_names:
             variants = (
                 (
@@ -2160,13 +2131,7 @@ class Issue123PublicationTest(unittest.TestCase):
                     {key: "synthetic-value"},
                     {"public_label": assignment},
                 ):
-                    with (
-                        self.subTest(
-                            environment_name=environment_name,
-                            attack=attack,
-                        ),
-                        self.assertRaises(publication.PublicationError),
-                    ):
+                    with (pytest.raises(publication.PublicationError),):
                         publication.scan_public_bytes(
                             publication.canonical_json_bytes(attack),
                             "downloaded fixture",
@@ -2182,16 +2147,28 @@ class Issue123PublicationTest(unittest.TestCase):
         duplicate = (
             "{" + json.dumps(marker) + ":1," + json.dumps(marker) + ":2}\n"
         ).encode("utf-8")
-        with self.assertRaises(publication.PublicationError) as caught:
+        with pytest.raises(publication.PublicationError) as caught:
             publication.scan_public_bytes(duplicate, "downloaded fixture")
-        self.assertTrue(
-            all(
-                marker not in message
-                for message in _exception_messages(caught.exception)
-            )
+        assert all(
+            marker not in message for message in _exception_messages(caught.value)
         )
 
-    def test_zip_metadata_and_name_attacks_fail(self):
+    @pytest.mark.parametrize(
+        "attack_index",
+        range(9),
+        ids=(
+            "deflated",
+            "symlink-mode",
+            "archive-comment",
+            "entry-extra",
+            "duplicate-name",
+            "parent-name",
+            "case-alias",
+            "local-name-mismatch",
+            "malformed-utf8",
+        ),
+    )
+    def test_zip_metadata_and_name_attacks_fail(self, attack_index):
         valid_entries = self._entries(self.assets[publication.TECHNICAL_EVIDENCE_ASSET])
 
         def archive_with(
@@ -2216,41 +2193,42 @@ class Issue123PublicationTest(unittest.TestCase):
         ordered = [
             (name, valid_entries[name]) for name in publication.ARCHIVE_ENTRY_ORDER
         ]
-        attacks = [
-            archive_with(ordered, compression=zipfile.ZIP_DEFLATED),
-            archive_with(ordered, mode=stat.S_IFLNK | 0o777),
-            archive_with(ordered, comment=b"comment"),
-            archive_with(ordered, extra=b"\x0a\x00\x00\x00"),
-            archive_with(
-                [
-                    *ordered,
-                    (
-                        publication.MANIFEST_PATH,
-                        valid_entries[publication.MANIFEST_PATH],
-                    ),
-                ]
-            ),
-            archive_with(
-                [
-                    (
-                        ("../manifest.json", raw)
-                        if name == publication.MANIFEST_PATH
-                        else (name, raw)
-                    )
-                    for name, raw in ordered
-                ]
-            ),
-            archive_with(
-                [
-                    (
-                        ("SCOPES/01-CPU.JSON", raw)
-                        if name == publication.SCOPE_PATHS["cpu"]
-                        else (name, raw)
-                    )
-                    for name, raw in ordered
-                ]
-            ),
-        ]
+        with pytest.warns(UserWarning, match="Duplicate name"):
+            attacks = [
+                archive_with(ordered, compression=zipfile.ZIP_DEFLATED),
+                archive_with(ordered, mode=stat.S_IFLNK | 0o777),
+                archive_with(ordered, comment=b"comment"),
+                archive_with(ordered, extra=b"\x0a\x00\x00\x00"),
+                archive_with(
+                    [
+                        *ordered,
+                        (
+                            publication.MANIFEST_PATH,
+                            valid_entries[publication.MANIFEST_PATH],
+                        ),
+                    ]
+                ),
+                archive_with(
+                    [
+                        (
+                            ("../manifest.json", raw)
+                            if name == publication.MANIFEST_PATH
+                            else (name, raw)
+                        )
+                        for name, raw in ordered
+                    ]
+                ),
+                archive_with(
+                    [
+                        (
+                            ("SCOPES/01-CPU.JSON", raw)
+                            if name == publication.SCOPE_PATHS["cpu"]
+                            else (name, raw)
+                        )
+                        for name, raw in ordered
+                    ]
+                ),
+            ]
         local_name_mismatch = bytearray(
             self.assets[publication.TECHNICAL_EVIDENCE_ASSET]
         )
@@ -2264,17 +2242,18 @@ class Issue123PublicationTest(unittest.TestCase):
         malformed_utf8[30] = 0xFF
         malformed_utf8[central + 46] = 0xFF
         attacks.append(bytes(malformed_utf8))
-        for index, archive in enumerate(attacks):
-            with (
-                self.subTest(index=index),
-                self.assertRaises(publication.PublicationError),
-            ):
-                publication.validate_public_archive(
-                    archive,
-                    expected_policy=self.policy,
-                    expected_bindings=self.bindings,
-                )
+        with pytest.raises(publication.PublicationError):
+            publication.validate_public_archive(
+                attacks[attack_index],
+                expected_policy=self.policy,
+                expected_bindings=self.bindings,
+            )
 
 
-if __name__ == "__main__":
-    unittest.main()
+def issue123_publication_fixture(fixture=None):
+    """Return a neutral initialized publication fixture for cross-file tests."""
+
+    if fixture is None:
+        fixture = _Issue123PublicationFixture()
+    fixture.initialize()
+    return fixture

@@ -58,6 +58,21 @@ Choose the narrowest tests that cover the change. Configure Torch device,
 dtype, CPU threads, and compilation policy explicitly; compilation warmup and
 trusted CUDA/two-GPU evidence are not substitutes for each other.
 
+- For checkpoint, replay, or state-collector changes, derive the required
+  persistent-state inventory from the solver's update and restore paths,
+  including auxiliary material and boundary state. Compare that inventory
+  with the collected and compared fields. Passing comparisons do not establish
+  full-state coverage when required fields are omitted.
+- Define comparison criteria from the controlling numerical and API contracts.
+  Distinguish exact clock or identity requirements from permitted physical
+  tolerances; do not impose zero tolerance on every value or relax existing
+  requirements merely to make a test pass.
+- Keep tests portable: do not hard-code personal interpreter or temporary
+  directory paths. Declare specialized runtime prerequisites explicitly and
+  distinguish unsupported environments from failures in supported ones.
+  When relevant, check canonical and aliased temporary paths and ordinary CPU
+  execution before expensive GPU validation, preserving production guards.
+
 `uv sync --locked` consumes the committed lockfile. Use `uv lock --upgrade`
 only in a dedicated dependency-update change. The `dev` dependencies are a
 PEP 735 group installed by uv by default, not a package extra; do not restore
@@ -74,6 +89,22 @@ the former `.[dev,hdf5]` pip workflow.
 
 ## Issues and pull requests
 
+- Before starting or resuming issue/PR work, inspect existing issue comments,
+  linked PR bodies, general comments, reviews, and relevant inline threads and
+  replies, including resolved or outdated discussions. Reconcile completed
+  verification, remaining conditions, and withdrawn conclusions with the current
+  code and linked evidence. Record why earlier evidence cannot be reused before
+  repeating work. Keep a concise record of source links, revisions, environments,
+  and artifacts for follow-up tasks; refresh changed discussion rather than
+  repeatedly loading the full history. Disclose unavailable discussion or
+  evidence, and preserve independent review before sharing prior verdicts.
+- For multi-stage issues, record the required correctness, memory, performance,
+  and operational-approval outcomes and identify which are outside this issue's
+  scope. Map required outcomes to existing evidence and remaining checks before
+  expanding diagnostics. When evidence changes the scope or invalidates an
+  earlier completion claim, update that record. Once the required outcomes are
+  satisfied, continue the authorized delivery steps rather than adding optional
+  work; keep deferred improvements in their agreed scope.
 - Assign relevant labels when creating every issue or pull request, including
   draft pull requests. Prefer existing repository labels and choose them
   based on the purpose and scope of the work.

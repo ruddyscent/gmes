@@ -103,7 +103,7 @@ class TestSourceDistribution:
 
             for archive in (wheel, sdist):
                 environment = output_directory / archive.stem
-                venv.EnvBuilder(with_pip=True).create(environment)
+                venv.EnvBuilder(with_pip=True, symlinks=os.name != "nt").create(environment)
                 python = environment / (
                     "Scripts/python.exe" if os.name == "nt" else "bin/python"
                 )

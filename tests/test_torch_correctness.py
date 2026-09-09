@@ -15,6 +15,7 @@ import torch
 import gmes
 import gmes.torch_fdtd
 from benchmarks import historical_probes, native_oracle, torch_correctness, torch_tuning
+from tests.pytest_failure_collector import FailureCollector
 
 PROBE_TRUST = {
     "expected_manifest_sha256": "cce4820ccc0e8050db6baf47d18fe646ee2c59bb64c89c0279cd38be1ba17d41",
@@ -404,68 +405,74 @@ class TestTorchCorrectness:
                 include_tolerances=True,
             )
             assert result["passed"]
-            with np.load(candidate, allow_pickle=False) as archive:
-                metadata = native_oracle.read_metadata(archive)
-                assert (metadata["backend_metadata"]["auxiliary_precisions"]) == (
-                    ["float64"]
-                )
-                for step in ("0", *(str(value) for value in capture_steps)):
-                    auxiliary = metadata["steps"][step]["sources"]["auxiliary"][0]
-                    assert (auxiliary["backend_metadata"]["precision"]) == ("float64")
-                    main_prefix = f"torch/step/{step}/state"
-                    auxiliary_prefix = f"torch/step/{step}/auxiliary/0/state"
-                    assert (archive[f"{main_prefix}/source_time"].dtype) == (
-                        np.dtype("float32")
+            with FailureCollector() as failures:
+                with np.load(candidate, allow_pickle=False) as archive:
+                    metadata = native_oracle.read_metadata(archive)
+                    assert (metadata["backend_metadata"]["auxiliary_precisions"]) == (
+                        ["float64"]
                     )
-                    assert (archive[f"{auxiliary_prefix}/source_time"].dtype) == (
-                        np.dtype("float64")
-                    )
-                    for prefix in (main_prefix, auxiliary_prefix):
-                        count = archive[f"{prefix}/step_count"]
-                        source_time = archive[f"{prefix}/source_time"]
-                        time_step = archive[f"{prefix}/time_step"]
-                        expected_time = np.multiply(
-                            count.astype(source_time.dtype),
-                            time_step,
-                            dtype=source_time.dtype,
-                        )
-                        assert np.array_equal(source_time, expected_time)
-                    for component in ("Ex", "Hy"):
-                        key = (
-                            f"step/{step}/source_aux/"
-                            f"0-TotalFieldScatteredField/field/{component}"
-                        )
-                        assert (archive[key].dtype) == (np.dtype("float64"))
+                    for step in ("0", *(str(value) for value in capture_steps)):
+                        with failures.case(step):
+                            auxiliary = metadata["steps"][step]["sources"]["auxiliary"][
+                                0
+                            ]
+                            assert (auxiliary["backend_metadata"]["precision"]) == (
+                                "float64"
+                            )
+                            main_prefix = f"torch/step/{step}/state"
+                            auxiliary_prefix = f"torch/step/{step}/auxiliary/0/state"
+                            assert (archive[f"{main_prefix}/source_time"].dtype) == (
+                                np.dtype("float32")
+                            )
+                            assert (
+                                archive[f"{auxiliary_prefix}/source_time"].dtype
+                            ) == (np.dtype("float64"))
+                            for prefix in (main_prefix, auxiliary_prefix):
+                                count = archive[f"{prefix}/step_count"]
+                                source_time = archive[f"{prefix}/source_time"]
+                                time_step = archive[f"{prefix}/time_step"]
+                                expected_time = np.multiply(
+                                    count.astype(source_time.dtype),
+                                    time_step,
+                                    dtype=source_time.dtype,
+                                )
+                                assert np.array_equal(source_time, expected_time)
+                            for component in ("Ex", "Hy"):
+                                key = (
+                                    f"step/{step}/source_aux/"
+                                    f"0-TotalFieldScatteredField/field/{component}"
+                                )
+                                assert (archive[key].dtype) == (np.dtype("float64"))
 
-            tolerances = {
-                record["key"]: record for record in result["tolerance_results"]
-            }
-            assert (
-                {
-                    name: tolerances[
-                        "step/100/source_aux/" "0-TotalFieldScatteredField/field/Hy"
-                    ][name]
-                    for name in ("rtol", "atol", "scope")
+                tolerances = {
+                    record["key"]: record for record in result["tolerance_results"]
                 }
-            ) == (
-                {
-                    "rtol": 2e-12,
-                    "atol": 2e-13,
-                    "scope": "strategies/dielectric,pml/float64",
-                }
-            )
-            assert (
-                {
-                    name: tolerances["step/100/field/Hy"][name]
-                    for name in ("rtol", "atol", "scope")
-                }
-            ) == (
-                {
-                    "rtol": 5e-5,
-                    "atol": 5e-6,
-                    "scope": "strategies/dielectric,pml/float32",
-                }
-            )
+                assert (
+                    {
+                        name: tolerances[
+                            "step/100/source_aux/" "0-TotalFieldScatteredField/field/Hy"
+                        ][name]
+                        for name in ("rtol", "atol", "scope")
+                    }
+                ) == (
+                    {
+                        "rtol": 2e-12,
+                        "atol": 2e-13,
+                        "scope": "strategies/dielectric,pml/float64",
+                    }
+                )
+                assert (
+                    {
+                        name: tolerances["step/100/field/Hy"][name]
+                        for name in ("rtol", "atol", "scope")
+                    }
+                ) == (
+                    {
+                        "rtol": 5e-5,
+                        "atol": 5e-6,
+                        "scope": "strategies/dielectric,pml/float32",
+                    }
+                )
 
     def test_auxiliary_precision_metadata_corruption_fails_closed(self):
         manifest = self._small_manifest(("tfsf-transparent",))
@@ -708,27 +715,33 @@ class TestTorchCorrectness:
                 for record in metadata["steps"]["0"]["materials"]
             }
             assert (set(records)) == (set(native_oracle.COMPONENT_NAMES))
-            for component in native_oracle.COMPONENT_NAMES:
-                assert (records[component]["strategies"]) == (["Dummy"])
-                assert (records[component]["cells"]) == (
-                    int(np.prod(metadata["maps"][component]["shape"]))
-                )
-            tolerances = {
-                record["key"]: record for record in result["tolerance_results"]
-            }
-            expected = manifest["tolerances"]["torch"]["dielectric"]["float64"]
-            for key in (
-                "step/100/field/Ex",
-                "step/100/physical/spectrum/Ex",
-            ):
-                assert (
-                    {name: tolerances[key][name] for name in ("rtol", "atol", "scope")}
-                ) == (
-                    {
-                        **expected,
-                        "scope": "dummy-source-numerics/dielectric/float64",
-                    }
-                )
+            with FailureCollector() as failures:
+                for component in native_oracle.COMPONENT_NAMES:
+                    with failures.case(f"component:{component}"):
+                        assert (records[component]["strategies"]) == (["Dummy"])
+                        assert (records[component]["cells"]) == (
+                            int(np.prod(metadata["maps"][component]["shape"]))
+                        )
+                tolerances = {
+                    record["key"]: record for record in result["tolerance_results"]
+                }
+                expected = manifest["tolerances"]["torch"]["dielectric"]["float64"]
+                for key in (
+                    "step/100/field/Ex",
+                    "step/100/physical/spectrum/Ex",
+                ):
+                    with failures.case(f"tolerance:{key}"):
+                        assert (
+                            {
+                                name: tolerances[key][name]
+                                for name in ("rtol", "atol", "scope")
+                            }
+                        ) == (
+                            {
+                                **expected,
+                                "scope": "dummy-source-numerics/dielectric/float64",
+                            }
+                        )
 
     def test_candidate_capture_is_independent_of_legacy_native_state(self):
         manifest = self._small_manifest(("dcp-plrc-bloch",))

@@ -17,6 +17,7 @@ from gmes.torch_source import (
     TorchTransparentBatch,
     prepare_sources,
 )
+from tests.pytest_failure_collector import FailureCollector
 from tests.test_torch_fdtd import restore_torch_runtime as restore_torch_runtime
 
 _COMPONENTS = ("Ex", "Ey", "Ez", "Hx", "Hy", "Hz")
@@ -311,15 +312,17 @@ class TestTorchPointSource:
                 / 2.5,
             ),
         )
-        for component, center, value in expected:
-            target = _yee_index(component, center, size, resolution)
-            assert round(abs(snapshot[component][target] - value), 14) == 0
+        with FailureCollector() as failures:
+            for component, center, value in expected:
+                target = _yee_index(component, center, size, resolution)
+                with failures.case(f"{component}@{center}"):
+                    assert round(abs(snapshot[component][target] - value), 14) == 0
 
-        ey_batch = next(
-            batch for batch in simulation.sources.batches if batch.component == "Ey"
-        )
-        assert ey_batch.overwrite_targets.numel() == 0
-        assert ey_batch.additive_targets.numel() == 1
+            ey_batch = next(
+                batch for batch in simulation.sources.batches if batch.component == "Ey"
+            )
+            assert ey_batch.overwrite_targets.numel() == 0
+            assert ey_batch.additive_targets.numel() == 1
 
     def test_time_models_currents_overlap_and_half_steps_are_finite(self):
         simulation = _torch_simulation(_point_sources, size=(2, 2, 2))
@@ -475,25 +478,27 @@ class TestTorchPointSource:
             transparent_time=torch.tensor(magnetic_time, dtype=simulation.dtype),
         )
         snapshot = simulation.host_snapshot()
-        for index, component in enumerate(_COMPONENTS):
-            time = electric_time if component.startswith("E") else magnetic_time
-            expected = (
-                0.1
-                * (index + 1)
-                * _continuous_value(
-                    time,
-                    frequency=0.15 + 0.01 * index,
-                    width=0.8,
+        with FailureCollector() as failures:
+            for index, component in enumerate(_COMPONENTS):
+                time = electric_time if component.startswith("E") else magnetic_time
+                expected = (
+                    0.1
+                    * (index + 1)
+                    * _continuous_value(
+                        time,
+                        frequency=0.15 + 0.01 * index,
+                        width=0.8,
+                    )
                 )
-            )
-            target = _yee_index(component, (0, 0, 0), size, 2)
-            assert round(abs(snapshot[component][target] - expected), 14) == 0
+                target = _yee_index(component, (0, 0, 0), size, 2)
+                with failures.case(component):
+                    assert round(abs(snapshot[component][target] - expected), 14) == 0
 
-        simulation.load_host_fields(zeros)
-        _advance_and_assert_finite(simulation, 3)
-        snapshot = simulation.host_snapshot()
-        for component in _COMPONENTS:
-            assert np.count_nonzero(snapshot[component]) > 0
+            simulation.load_host_fields(zeros)
+            _advance_and_assert_finite(simulation, 3)
+            snapshot = simulation.host_snapshot()
+            for component in _COMPONENTS:
+                assert np.count_nonzero(snapshot[component]) > 0
 
     def test_source_composes_with_cpml_and_mixed_dispersive_material(self):
         def geometry():
@@ -693,36 +698,42 @@ class TestTorchTransparentSource:
             and bool(torch.count_nonzero(batch.weights))
         }
         assert set(gaussian_batches) == {"Ey", "Hz"}
-        for component, gaussian_batch in gaussian_batches.items():
-            uniform_batch = uniform_batches[component]
-            uniform_rows = {
-                int(target): row
-                for row, target in enumerate(uniform_batch.targets.cpu().numpy())
-            }
-            for row, target_tensor in enumerate(gaussian_batch.targets):
-                target = int(target_tensor)
-                uniform_row = uniform_rows[target]
-                np.testing.assert_array_equal(
-                    gaussian_batch.samples[row].cpu(),
-                    uniform_batch.samples[uniform_row].cpu(),
-                )
-                gaussian_weights = gaussian_batch.weights[row].cpu().numpy()
-                uniform_weights = uniform_batch.weights[uniform_row].cpu().numpy()
-                active = uniform_weights != 0
-                target_index = np.unravel_index(target, gaussian.plan.shapes[component])
-                _, y, z = _yee_coordinate(
-                    component,
-                    target_index,
-                    size,
-                    resolution,
-                )
-                expected_mode = np.exp(-((y * y + z * z) / 0.7**2))
-                np.testing.assert_allclose(
-                    gaussian_weights[active] / uniform_weights[active],
-                    expected_mode,
-                    rtol=2e-14,
-                    atol=2e-14,
-                )
+        with FailureCollector() as failures:
+            for component, gaussian_batch in gaussian_batches.items():
+                uniform_batch = uniform_batches[component]
+                uniform_rows = {
+                    int(target): row
+                    for row, target in enumerate(uniform_batch.targets.cpu().numpy())
+                }
+                for row, target_tensor in enumerate(gaussian_batch.targets):
+                    target = int(target_tensor)
+                    with failures.case(f"{component}@{target}"):
+                        uniform_row = uniform_rows[target]
+                        np.testing.assert_array_equal(
+                            gaussian_batch.samples[row].cpu(),
+                            uniform_batch.samples[uniform_row].cpu(),
+                        )
+                        gaussian_weights = gaussian_batch.weights[row].cpu().numpy()
+                        uniform_weights = (
+                            uniform_batch.weights[uniform_row].cpu().numpy()
+                        )
+                        active = uniform_weights != 0
+                        target_index = np.unravel_index(
+                            target, gaussian.plan.shapes[component]
+                        )
+                        _, y, z = _yee_coordinate(
+                            component,
+                            target_index,
+                            size,
+                            resolution,
+                        )
+                        expected_mode = np.exp(-((y * y + z * z) / 0.7**2))
+                        np.testing.assert_allclose(
+                            gaussian_weights[active] / uniform_weights[active],
+                            expected_mode,
+                            rtol=2e-14,
+                            atol=2e-14,
+                        )
 
     def test_float32_tfsf_uses_double_auxiliary_and_fixed_cast_storage(self):
         simulation = _torch_simulation(lambda: [_tfsf()], precision="float32")
@@ -734,44 +745,46 @@ class TestTorchTransparentSource:
         assert simulation.diagnostics()["sources"]["auxiliary_precisions"] == (
             "float64",
         )
-        for label, module in (
-            ("plan", auxiliary.plan),
-            ("state", auxiliary.state),
-            ("source", auxiliary.sources),
-        ):
-            for name, value in module.named_buffers():
-                if value.is_floating_point():
-                    assert value.dtype == torch.float64
+        with FailureCollector() as failures:
+            for label, module in (
+                ("plan", auxiliary.plan),
+                ("state", auxiliary.state),
+                ("source", auxiliary.sources),
+            ):
+                for name, value in module.named_buffers():
+                    if value.is_floating_point():
+                        with failures.case(f"{label}:{name}"):
+                            assert value.dtype == torch.float64
 
-        transparent = tuple(
-            batch
-            for batch in simulation.sources.batches
-            if isinstance(batch, TorchTransparentBatch)
-        )
-        assert transparent
-        for batch in transparent:
-            assert batch.weights.dtype == torch.float64
-            assert batch._sample_values.dtype == torch.float64
-            assert batch._values.dtype == torch.float64
-            assert batch._outer_values.dtype == torch.float32
-
-        addresses = simulation.buffer_addresses()
-        simulation.advance(100)
-        assert addresses == simulation.buffer_addresses()
-        for state in (simulation.state, auxiliary.state):
-            expected_time = state.step_count.to(state.source_time.dtype).mul(
-                state.time_step
+            transparent = tuple(
+                batch
+                for batch in simulation.sources.batches
+                if isinstance(batch, TorchTransparentBatch)
             )
-            assert torch.equal(state.source_time, expected_time)
+            assert transparent
+            for batch in transparent:
+                assert batch.weights.dtype == torch.float64
+                assert batch._sample_values.dtype == torch.float64
+                assert batch._values.dtype == torch.float64
+                assert batch._outer_values.dtype == torch.float32
 
-        actual = simulation.host_snapshot()
-        for name in _COMPONENTS:
-            assert np.isfinite(actual[name]).all(), name
-        assert any(np.count_nonzero(value) for value in actual.values())
-        actual_auxiliary = auxiliary.host_snapshot()
-        for name in ("Ex", "Hy"):
-            assert np.isfinite(actual_auxiliary[name]).all(), name
-            assert np.count_nonzero(actual_auxiliary[name]) > 0
+            addresses = simulation.buffer_addresses()
+            simulation.advance(100)
+            assert addresses == simulation.buffer_addresses()
+            for state in (simulation.state, auxiliary.state):
+                expected_time = state.step_count.to(state.source_time.dtype).mul(
+                    state.time_step
+                )
+                assert torch.equal(state.source_time, expected_time)
+
+            actual = simulation.host_snapshot()
+            for name in _COMPONENTS:
+                assert np.isfinite(actual[name]).all(), name
+            assert any(np.count_nonzero(value) for value in actual.values())
+            actual_auxiliary = auxiliary.host_snapshot()
+            for name in ("Ex", "Hy"):
+                assert np.isfinite(actual_auxiliary[name]).all(), name
+                assert np.count_nonzero(actual_auxiliary[name]) > 0
 
     @pytest.mark.skipif(not (torch.cuda.is_available()), reason="CUDA is unavailable")
     @pytest.mark.parametrize(

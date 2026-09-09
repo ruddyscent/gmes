@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 
 import gmes
+from tests.pytest_failure_collector import FailureCollector
 from tests.test_torch_fdtd import restore_torch_runtime as restore_torch_runtime
 
 
@@ -220,12 +221,14 @@ class TestTorchDm2PhysicalRetention:
             simulation.load_host_fields(_uniform_electric_fields(simulation, 4)).step()
             for snapshot in simulation.dm2_state_snapshot():
                 slopes[snapshot["component"]].append(snapshot["rho"][:, 0, 1] / dt)
-        for component, component_slopes in slopes.items():
-            for slope in component_slopes:
-                np.testing.assert_allclose(slope, expected, rtol=0, atol=1e-5)
-            np.testing.assert_allclose(
-                component_slopes[0], component_slopes[1], rtol=0, atol=1e-5
-            )
+        with FailureCollector() as failures:
+            for component, component_slopes in slopes.items():
+                with failures.case(component):
+                    for slope in component_slopes:
+                        np.testing.assert_allclose(slope, expected, rtol=0, atol=1e-5)
+                    np.testing.assert_allclose(
+                        component_slopes[0], component_slopes[1], rtol=0, atol=1e-5
+                    )
 
     def test_lossless_bloch_sphere_invariant(self):
         simulation = _dm2_simulation(

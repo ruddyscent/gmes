@@ -1,6 +1,7 @@
 include VERSION README.md LICENSE CHANGELOG.md CONTRIBUTING.md SECURITY.md build-constraints.txt gmes/py.typed gmes/constant.py gmes/constant.pyi
 recursive-include examples README *.md *.py
 recursive-include tests README *.py
+include tests/pytest-migration-map.json tests/pytest-migration-map-relations.sha256
 recursive-include tests/fixtures/issue124 *
 recursive-include utils *.py
 recursive-include benchmarks README.md *.json *.py

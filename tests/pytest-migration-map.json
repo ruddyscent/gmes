@@ -14,17 +14,21 @@
     "total": 913
   },
   "classification_counts": {
-    "parametrized": 319,
-    "retained-sequential": 9
+    "parametrized": 318,
+    "retained-sequential": 10
   },
   "coverage_exclusions": [
+    {
+      "node_pattern": "tests/test_pytest_migration_map.py::test_failure_collector_preserves_sequential_continuation",
+      "reason": "tests the migration-only failure collector"
+    },
     {
       "node_pattern": "tests/test_pytest_migration_map.py::test_pytest_migration_map_is_complete_and_auditable",
       "reason": "validates the migration map itself"
     }
   ],
   "current_collection": {
-    "node_count": 4033
+    "node_count": 4034
   },
   "gaps": {
     "ambiguous_methods": [],
@@ -34,6 +38,39 @@
     "unmapped_methods": [],
     "unmapped_subtests": []
   },
+  "helper_owned_subtests": [
+    {
+      "new": [
+        {
+          "count": 483,
+          "node_pattern": "tests/test_docstrings.py::TestDocstringCoverage::test_public_exports_have_docstrings",
+          "old_case_count": 344
+        },
+        {
+          "count": 14,
+          "node_pattern": "tests/test_docstrings.py::TestDocstringCoverage::test_supported_extension_hooks_have_docstrings",
+          "old_case_count": 11
+        }
+      ],
+      "old": "tests/test_docstrings.py::DocstringCoverageTest._assert_public_members_documented::subTest@131",
+      "parameter_tokens": [
+        "pytest.mark.parametrize"
+      ]
+    },
+    {
+      "new": [
+        {
+          "count": 12,
+          "node_pattern": "tests/test_material_bulk.py::TestMaterialMappingFastPath::test_batched_mapping_matches_pointwise_for_all_components_and_clipping",
+          "old_case_count": 12
+        }
+      ],
+      "old": "tests/test_material_bulk.py::MaterialMappingFastPathTest.assert_planner_maps_match_pointwise_geometry::subTest@66",
+      "parameter_tokens": [
+        "pytest.mark.parametrize"
+      ]
+    }
+  ],
   "method_mappings": [
     {
       "line": 78,
@@ -293,12 +330,12 @@
       "line": 757,
       "new": [
         {
-          "node_pattern": "tests/test_benchmarks.py::TestTorchTuningBenchmark::test_linux_proc_statm_reader_fails_closed_for_provider_errors",
-          "count": 2
+          "count": 2,
+          "node_pattern": "tests/test_benchmarks.py::TestTorchTuningBenchmark::test_linux_proc_statm_reader_fails_closed_for_provider_errors"
         },
         {
-          "node_pattern": "tests/test_benchmarks.py::TestTorchTuningBenchmark::test_linux_proc_statm_reader_fails_closed_for_provider_errors_provider_errors",
-          "count": 2
+          "count": 2,
+          "node_pattern": "tests/test_benchmarks.py::TestTorchTuningBenchmark::test_linux_proc_statm_reader_fails_closed_for_provider_errors_provider_errors"
         }
       ],
       "old": "tests/test_benchmarks.py::TorchTuningBenchmarkTest.test_linux_proc_statm_reader_fails_closed_for_provider_errors"
@@ -797,12 +834,12 @@
       "line": 2304,
       "new": [
         {
-          "node_pattern": "tests/test_benchmarks.py::TestTorchTuningBenchmark::test_cpu_slice_aggregator_recomputes_and_binds_evidence",
-          "count": 4
+          "count": 4,
+          "node_pattern": "tests/test_benchmarks.py::TestTorchTuningBenchmark::test_cpu_slice_aggregator_recomputes_and_binds_evidence"
         },
         {
-          "node_pattern": "tests/test_benchmarks.py::TestTorchTuningBenchmark::test_cpu_slice_aggregator_recomputes_and_binds_evidence_raw_evidence",
-          "count": 16
+          "count": 16,
+          "node_pattern": "tests/test_benchmarks.py::TestTorchTuningBenchmark::test_cpu_slice_aggregator_recomputes_and_binds_evidence_raw_evidence"
         }
       ],
       "old": "tests/test_benchmarks.py::TorchTuningBenchmarkTest.test_cpu_slice_aggregator_recomputes_and_binds_evidence"
@@ -1131,12 +1168,12 @@
       "line": 82,
       "new": [
         {
-          "node_pattern": "tests/test_documentation.py::TestDevelopmentDocumentation::test_issue123_authority_clis_and_fixed_point_are_documented",
-          "count": 6
+          "count": 6,
+          "node_pattern": "tests/test_documentation.py::TestDevelopmentDocumentation::test_issue123_authority_clis_and_fixed_point_are_documented"
         },
         {
-          "node_pattern": "tests/test_documentation.py::TestDevelopmentDocumentation::test_issue123_authority_clis_and_fixed_point_are_documented_forbidden_literals",
-          "count": 5
+          "count": 5,
+          "node_pattern": "tests/test_documentation.py::TestDevelopmentDocumentation::test_issue123_authority_clis_and_fixed_point_are_documented_forbidden_literals"
         }
       ],
       "old": "tests/test_documentation.py::DevelopmentDocumentationTest.test_issue123_authority_clis_and_fixed_point_are_documented"
@@ -1155,12 +1192,12 @@
       "line": 234,
       "new": [
         {
-          "node_pattern": "tests/test_documentation.py::TestDevelopmentDocumentation::test_issue123_public_privacy_contract_is_documented_without_literals",
-          "count": 4
+          "count": 4,
+          "node_pattern": "tests/test_documentation.py::TestDevelopmentDocumentation::test_issue123_public_privacy_contract_is_documented_without_literals"
         },
         {
-          "node_pattern": "tests/test_documentation.py::TestDevelopmentDocumentation::test_issue123_public_privacy_contract_is_documented_without_literals_variants",
-          "count": 10
+          "count": 10,
+          "node_pattern": "tests/test_documentation.py::TestDevelopmentDocumentation::test_issue123_public_privacy_contract_is_documented_without_literals_variants"
         }
       ],
       "old": "tests/test_documentation.py::DevelopmentDocumentationTest.test_issue123_public_privacy_contract_is_documented_without_literals"
@@ -2323,12 +2360,12 @@
       "line": 2829,
       "new": [
         {
-          "node_pattern": "tests/test_issue123_completion.py::TestIssue123Completion::test_generic_correctness_npz_preflight_preserves_bounded_compatibility",
-          "count": 3
+          "count": 3,
+          "node_pattern": "tests/test_issue123_completion.py::TestIssue123Completion::test_generic_correctness_npz_preflight_preserves_bounded_compatibility"
         },
         {
-          "node_pattern": "tests/test_issue123_completion.py::TestIssue123Completion::test_generic_correctness_npz_preflight_preserves_bounded_compatibility_mutations",
-          "count": 2
+          "count": 2,
+          "node_pattern": "tests/test_issue123_completion.py::TestIssue123Completion::test_generic_correctness_npz_preflight_preserves_bounded_compatibility_mutations"
         }
       ],
       "old": "tests/test_issue123_completion.py::Issue123CompletionTest.test_generic_correctness_npz_preflight_preserves_bounded_compatibility"
@@ -2347,12 +2384,12 @@
       "line": 2943,
       "new": [
         {
-          "node_pattern": "tests/test_issue123_completion.py::TestIssue123Completion::test_cuda_memory_peak_covers_both_allocated_samples",
-          "count": 2
+          "count": 2,
+          "node_pattern": "tests/test_issue123_completion.py::TestIssue123Completion::test_cuda_memory_peak_covers_both_allocated_samples"
         },
         {
-          "node_pattern": "tests/test_issue123_completion.py::TestIssue123Completion::test_cuda_memory_peak_covers_both_allocated_samples_two_gpu",
-          "count": 2
+          "count": 2,
+          "node_pattern": "tests/test_issue123_completion.py::TestIssue123Completion::test_cuda_memory_peak_covers_both_allocated_samples_two_gpu"
         }
       ],
       "old": "tests/test_issue123_completion.py::Issue123CompletionTest.test_cuda_memory_peak_covers_both_allocated_samples"
@@ -2491,12 +2528,12 @@
       "line": 4023,
       "new": [
         {
-          "node_pattern": "tests/test_issue123_completion.py::TestIssue123Completion::test_correctness_full_candidate_evidence_is_independently_frozen",
-          "count": 5
+          "count": 5,
+          "node_pattern": "tests/test_issue123_completion.py::TestIssue123Completion::test_correctness_full_candidate_evidence_is_independently_frozen"
         },
         {
-          "node_pattern": "tests/test_issue123_completion.py::TestIssue123Completion::test_correctness_full_candidate_evidence_is_independently_frozen_wrong_fields",
-          "count": 5
+          "count": 5,
+          "node_pattern": "tests/test_issue123_completion.py::TestIssue123Completion::test_correctness_full_candidate_evidence_is_independently_frozen_wrong_fields"
         }
       ],
       "old": "tests/test_issue123_completion.py::Issue123CompletionTest.test_correctness_full_candidate_evidence_is_independently_frozen"
@@ -3485,12 +3522,12 @@
       "line": 2135,
       "new": [
         {
-          "node_pattern": "tests/test_issue123_operations.py::TestIssue123Operations::test_malformed_pagination_and_request_metadata_fail_closed",
-          "count": 7
+          "count": 7,
+          "node_pattern": "tests/test_issue123_operations.py::TestIssue123Operations::test_malformed_pagination_and_request_metadata_fail_closed"
         },
         {
-          "node_pattern": "tests/test_issue123_operations.py::TestIssue123Operations::test_malformed_pagination_and_request_metadata_fail_closed_request_metadata",
-          "count": 15
+          "count": 15,
+          "node_pattern": "tests/test_issue123_operations.py::TestIssue123Operations::test_malformed_pagination_and_request_metadata_fail_closed_request_metadata"
         }
       ],
       "old": "tests/test_issue123_operations.py::Issue123OperationsTest.test_malformed_pagination_and_request_metadata_fail_closed"
@@ -3639,12 +3676,12 @@
       "line": 2989,
       "new": [
         {
-          "node_pattern": "tests/test_issue123_operations.py::TestIssue123Operations::test_final_checklist_requires_exact_state_order_and_section",
-          "count": 4
+          "count": 4,
+          "node_pattern": "tests/test_issue123_operations.py::TestIssue123Operations::test_final_checklist_requires_exact_state_order_and_section"
         },
         {
-          "node_pattern": "tests/test_issue123_operations.py::TestIssue123Operations::test_final_checklist_requires_exact_state_order_and_section_invalid_sections",
-          "count": 6
+          "count": 6,
+          "node_pattern": "tests/test_issue123_operations.py::TestIssue123Operations::test_final_checklist_requires_exact_state_order_and_section_invalid_sections"
         }
       ],
       "old": "tests/test_issue123_operations.py::Issue123OperationsTest.test_final_checklist_requires_exact_state_order_and_section"
@@ -3927,12 +3964,12 @@
       "line": 2177,
       "new": [
         {
-          "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyProjection::test_trace_semantic_invariants_cannot_be_redeclared",
-          "count": 7
+          "count": 7,
+          "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyProjection::test_trace_semantic_invariants_cannot_be_redeclared"
         },
         {
-          "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyProjection::test_trace_semantic_invariants_cannot_be_redeclared_policy_flags",
-          "count": 6
+          "count": 6,
+          "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyProjection::test_trace_semantic_invariants_cannot_be_redeclared_policy_flags"
         }
       ],
       "old": "tests/test_issue123_privacy.py::Issue123PrivacyProjectionTest.test_trace_semantic_invariants_cannot_be_redeclared"
@@ -4195,12 +4232,12 @@
       "line": 3097,
       "new": [
         {
-          "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_utf8_surrogate_failures_are_chain_free",
-          "count": 3
+          "count": 3,
+          "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_utf8_surrogate_failures_are_chain_free"
         },
         {
-          "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_utf8_surrogate_failures_are_chain_free_payload_carriers",
-          "count": 4
+          "count": 4,
+          "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_utf8_surrogate_failures_are_chain_free_payload_carriers"
         }
       ],
       "old": "tests/test_issue123_privacy.py::Issue123PrivacyScannerTest.test_utf8_surrogate_failures_are_chain_free"
@@ -4229,16 +4266,16 @@
       "line": 3401,
       "new": [
         {
-          "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_forbidden_openings_are_normalized_across_payload_encodings",
-          "count": 7
+          "count": 7,
+          "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_forbidden_openings_are_normalized_across_payload_encodings"
         },
         {
-          "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_forbidden_openings_are_normalized_across_payload_encodings_payload_bytes",
-          "count": 7
+          "count": 7,
+          "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_forbidden_openings_are_normalized_across_payload_encodings_payload_bytes"
         },
         {
-          "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_forbidden_openings_are_normalized_across_payload_encodings_tar_carriers",
-          "count": 3
+          "count": 3,
+          "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_forbidden_openings_are_normalized_across_payload_encodings_tar_carriers"
         }
       ],
       "old": "tests/test_issue123_privacy.py::Issue123PrivacyScannerTest.test_forbidden_openings_are_normalized_across_payload_encodings"
@@ -4261,12 +4298,12 @@
           "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_non_ascii_normalization_suffixes_match_the_whole_string_oracle"
         },
         {
-          "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_non_ascii_normalization_suffixes_match_the_whole_string_oracle_payload_carriers",
-          "count": 4
+          "count": 4,
+          "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_non_ascii_normalization_suffixes_match_the_whole_string_oracle_payload_carriers"
         },
         {
-          "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_non_ascii_normalization_suffixes_match_the_whole_string_oracle_payload_carriers_tar_carriers",
-          "count": 6
+          "count": 6,
+          "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_non_ascii_normalization_suffixes_match_the_whole_string_oracle_payload_carriers_tar_carriers"
         },
         {
           "count": 1,
@@ -4329,20 +4366,20 @@
       "line": 4009,
       "new": [
         {
-          "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_tar_library_exceptions_are_chain_free_and_non_leaking",
-          "count": 2
+          "count": 2,
+          "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_tar_library_exceptions_are_chain_free_and_non_leaking"
         },
         {
-          "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_tar_library_exceptions_are_chain_free_and_non_leaking_iteration_and_close",
-          "count": 4
+          "count": 4,
+          "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_tar_library_exceptions_are_chain_free_and_non_leaking_iteration_and_close"
         },
         {
-          "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_tar_library_exceptions_are_chain_free_and_non_leaking_open_errors",
-          "count": 2
+          "count": 2,
+          "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_tar_library_exceptions_are_chain_free_and_non_leaking_open_errors"
         },
         {
-          "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_tar_library_exceptions_are_chain_free_and_non_leaking_invalid_helpers",
-          "count": 2
+          "count": 2,
+          "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_tar_library_exceptions_are_chain_free_and_non_leaking_invalid_helpers"
         }
       ],
       "old": "tests/test_issue123_privacy.py::Issue123PrivacyScannerTest.test_tar_library_exceptions_are_chain_free_and_non_leaking"
@@ -4369,12 +4406,12 @@
           "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_pax_allowlist_aliases_and_identical_overlay_budget_matrix_accepted_keys"
         },
         {
-          "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_pax_allowlist_aliases_and_identical_overlay_budget_matrix_thresholds",
-          "count": 5
+          "count": 5,
+          "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_pax_allowlist_aliases_and_identical_overlay_budget_matrix_thresholds"
         },
         {
-          "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_pax_allowlist_aliases_and_identical_overlay_budget_matrix_thresholds_below",
-          "count": 5
+          "count": 5,
+          "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_pax_allowlist_aliases_and_identical_overlay_budget_matrix_thresholds_below"
         },
         {
           "count": 2,
@@ -4407,12 +4444,12 @@
       "line": 4413,
       "new": [
         {
-          "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_rejects_nonempty_compressed_archive_directory_bodies",
-          "count": 2
+          "count": 2,
+          "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_rejects_nonempty_compressed_archive_directory_bodies"
         },
         {
-          "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_rejects_nonempty_compressed_archive_directory_bodies_tar_bodies",
-          "count": 2
+          "count": 2,
+          "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_rejects_nonempty_compressed_archive_directory_bodies_tar_bodies"
         }
       ],
       "old": "tests/test_issue123_privacy.py::Issue123PrivacyScannerTest.test_rejects_nonempty_compressed_archive_directory_bodies"
@@ -4511,12 +4548,12 @@
       "line": 4899,
       "new": [
         {
-          "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_strict_and_contextual_json_exceptions_are_fully_sanitized",
-          "count": 4
+          "count": 4,
+          "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_strict_and_contextual_json_exceptions_are_fully_sanitized"
         },
         {
-          "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_strict_and_contextual_json_exceptions_are_fully_sanitized_parser_errors",
-          "count": 4
+          "count": 4,
+          "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_strict_and_contextual_json_exceptions_are_fully_sanitized_parser_errors"
         }
       ],
       "old": "tests/test_issue123_privacy.py::Issue123PrivacyScannerTest.test_strict_and_contextual_json_exceptions_are_fully_sanitized"
@@ -4555,16 +4592,16 @@
       "line": 5183,
       "new": [
         {
-          "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_contiguous_tar_scan_closes_physical_record_boundaries",
-          "count": 6
+          "count": 6,
+          "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_contiguous_tar_scan_closes_physical_record_boundaries"
         },
         {
-          "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_contiguous_tar_scan_closes_physical_record_boundaries_padding",
-          "count": 2
+          "count": 2,
+          "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_contiguous_tar_scan_closes_physical_record_boundaries_padding"
         },
         {
-          "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_contiguous_tar_scan_closes_physical_record_boundaries_pax_headers",
-          "count": 2
+          "count": 2,
+          "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_contiguous_tar_scan_closes_physical_record_boundaries_pax_headers"
         }
       ],
       "old": "tests/test_issue123_privacy.py::Issue123PrivacyScannerTest.test_contiguous_tar_scan_closes_physical_record_boundaries"
@@ -4893,12 +4930,12 @@
       "line": 2014,
       "new": [
         {
-          "node_pattern": "tests/test_issue123_publication.py::TestIssue123Publication::test_independent_payload_path_validator_rejects_windows_aliases",
-          "count": 7
+          "count": 7,
+          "node_pattern": "tests/test_issue123_publication.py::TestIssue123Publication::test_independent_payload_path_validator_rejects_windows_aliases"
         },
         {
-          "node_pattern": "tests/test_issue123_publication.py::TestIssue123Publication::test_independent_payload_path_validator_rejects_windows_aliases_assignments",
-          "count": 2
+          "count": 2,
+          "node_pattern": "tests/test_issue123_publication.py::TestIssue123Publication::test_independent_payload_path_validator_rejects_windows_aliases_assignments"
         }
       ],
       "old": "tests/test_issue123_publication.py::Issue123PublicationTest.test_independent_payload_path_validator_rejects_windows_aliases"
@@ -4907,12 +4944,12 @@
       "line": 2081,
       "new": [
         {
-          "node_pattern": "tests/test_issue123_publication.py::TestIssue123Publication::test_independent_text_scans_apply_nfkc_and_redact_keys",
-          "count": 3
+          "count": 3,
+          "node_pattern": "tests/test_issue123_publication.py::TestIssue123Publication::test_independent_text_scans_apply_nfkc_and_redact_keys"
         },
         {
-          "node_pattern": "tests/test_issue123_publication.py::TestIssue123Publication::test_independent_text_scans_apply_nfkc_and_redact_keys_environment_names",
-          "count": 128
+          "count": 128,
+          "node_pattern": "tests/test_issue123_publication.py::TestIssue123Publication::test_independent_text_scans_apply_nfkc_and_redact_keys_environment_names"
         }
       ],
       "old": "tests/test_issue123_publication.py::Issue123PublicationTest.test_independent_text_scans_apply_nfkc_and_redact_keys"
@@ -9339,15 +9376,14 @@
       "old_methods": 85,
       "old_subtests": 11,
       "path": "tests/test_benchmarks.py",
-      "subtests_retained-sequential": 11
+      "subtests_parametrized": 11
     },
     {
       "methods_mapped": 13,
       "old_methods": 13,
       "old_subtests": 2,
       "path": "tests/test_ci_configuration.py",
-      "subtests_parametrized": 1,
-      "subtests_retained-sequential": 1
+      "subtests_parametrized": 2
     },
     {
       "methods_mapped": 4,
@@ -9361,8 +9397,7 @@
       "old_methods": 8,
       "old_subtests": 6,
       "path": "tests/test_documentation.py",
-      "subtests_parametrized": 1,
-      "subtests_retained-sequential": 5
+      "subtests_parametrized": 6
     },
     {
       "methods_mapped": 3,
@@ -9388,7 +9423,7 @@
       "old_methods": 28,
       "old_subtests": 5,
       "path": "tests/test_full_state_qualification.py",
-      "subtests_retained-sequential": 5
+      "subtests_parametrized": 5
     },
     {
       "methods_mapped": 7,
@@ -9423,40 +9458,36 @@
       "old_methods": 82,
       "old_subtests": 29,
       "path": "tests/test_issue123_completion.py",
-      "subtests_parametrized": 16,
-      "subtests_retained-sequential": 13
+      "subtests_parametrized": 28,
+      "subtests_retained-sequential": 1
     },
     {
       "methods_mapped": 55,
       "old_methods": 55,
       "old_subtests": 18,
       "path": "tests/test_issue123_differential.py",
-      "subtests_parametrized": 16,
-      "subtests_retained-sequential": 2
+      "subtests_parametrized": 18
     },
     {
       "methods_mapped": 40,
       "old_methods": 40,
       "old_subtests": 23,
       "path": "tests/test_issue123_operations.py",
-      "subtests_parametrized": 13,
-      "subtests_retained-sequential": 10
+      "subtests_parametrized": 23
     },
     {
       "methods_mapped": 91,
       "old_methods": 91,
       "old_subtests": 66,
       "path": "tests/test_issue123_privacy.py",
-      "subtests_parametrized": 10,
-      "subtests_retained-sequential": 56
+      "subtests_parametrized": 66
     },
     {
       "methods_mapped": 23,
       "old_methods": 23,
       "old_subtests": 14,
       "path": "tests/test_issue123_publication.py",
-      "subtests_parametrized": 5,
-      "subtests_retained-sequential": 9
+      "subtests_parametrized": 14
     },
     {
       "methods_mapped": 4,
@@ -9491,14 +9522,14 @@
       "old_methods": 16,
       "old_subtests": 6,
       "path": "tests/test_native_oracle.py",
-      "subtests_retained-sequential": 6
+      "subtests_parametrized": 6
     },
     {
       "methods_mapped": 17,
       "old_methods": 17,
       "old_subtests": 6,
       "path": "tests/test_native_summary.py",
-      "subtests_retained-sequential": 6
+      "subtests_parametrized": 6
     },
     {
       "methods_mapped": 8,
@@ -9543,28 +9574,29 @@
       "old_methods": 42,
       "old_subtests": 20,
       "path": "tests/test_torch_correctness.py",
-      "subtests_retained-sequential": 20
+      "subtests_parametrized": 17,
+      "subtests_retained-sequential": 3
     },
     {
       "methods_mapped": 1,
       "old_methods": 1,
       "old_subtests": 1,
       "path": "tests/test_torch_correctness_cli.py",
-      "subtests_retained-sequential": 1
+      "subtests_parametrized": 1
     },
     {
       "methods_mapped": 27,
       "old_methods": 27,
       "old_subtests": 10,
       "path": "tests/test_torch_cpu_baseline.py",
-      "subtests_retained-sequential": 10
+      "subtests_parametrized": 10
     },
     {
       "methods_mapped": 4,
       "old_methods": 4,
       "old_subtests": 1,
       "path": "tests/test_torch_cutover_contract.py",
-      "subtests_retained-sequential": 1
+      "subtests_parametrized": 1
     },
     {
       "methods_mapped": 18,
@@ -9606,7 +9638,7 @@
       "old_methods": 37,
       "old_subtests": 15,
       "path": "tests/test_torch_lowered_materialization.py",
-      "subtests_retained-sequential": 15
+      "subtests_parametrized": 15
     },
     {
       "methods_mapped": 7,
@@ -9621,7 +9653,7 @@
       "old_methods": 29,
       "old_subtests": 4,
       "path": "tests/test_torch_memory_stability.py",
-      "subtests_retained-sequential": 4
+      "subtests_parametrized": 4
     },
     {
       "methods_mapped": 4,
@@ -9649,7 +9681,7 @@
       "old_methods": 14,
       "old_subtests": 4,
       "path": "tests/test_torch_selected_launcher_attestation.py",
-      "subtests_retained-sequential": 4
+      "subtests_parametrized": 4
     },
     {
       "methods_mapped": 4,
@@ -9663,8 +9695,8 @@
       "old_methods": 20,
       "old_subtests": 8,
       "path": "tests/test_torch_sources_output.py",
-      "subtests_parametrized": 5,
-      "subtests_retained-sequential": 3
+      "subtests_parametrized": 4,
+      "subtests_retained-sequential": 4
     },
     {
       "methods_mapped": 1,
@@ -9688,7 +9720,7 @@
     "methods": 913,
     "subtests": 328
   },
-  "schema_version": 3,
+  "schema_version": 4,
   "semantic_audits": {
     "methods": [
       {
@@ -9708,6 +9740,136 @@
         "new": [
           {
             "count": 4,
+            "node_pattern": "tests/test_benchmarks.py::TestTorchTuningBenchmark::test_cpu_slice_aggregator_recomputes_and_binds_evidence"
+          },
+          {
+            "count": 16,
+            "node_pattern": "tests/test_benchmarks.py::TestTorchTuningBenchmark::test_cpu_slice_aggregator_recomputes_and_binds_evidence_raw_evidence"
+          }
+        ],
+        "old": "tests/test_benchmarks.py::TorchTuningBenchmarkTest.test_cpu_slice_aggregator_recomputes_and_binds_evidence"
+      },
+      {
+        "new": [
+          {
+            "count": 2,
+            "node_pattern": "tests/test_benchmarks.py::TestTorchTuningBenchmark::test_linux_proc_statm_reader_fails_closed_for_provider_errors"
+          },
+          {
+            "count": 2,
+            "node_pattern": "tests/test_benchmarks.py::TestTorchTuningBenchmark::test_linux_proc_statm_reader_fails_closed_for_provider_errors_provider_errors"
+          }
+        ],
+        "old": "tests/test_benchmarks.py::TorchTuningBenchmarkTest.test_linux_proc_statm_reader_fails_closed_for_provider_errors"
+      },
+      {
+        "new": [
+          {
+            "count": 6,
+            "node_pattern": "tests/test_documentation.py::TestDevelopmentDocumentation::test_issue123_authority_clis_and_fixed_point_are_documented"
+          },
+          {
+            "count": 5,
+            "node_pattern": "tests/test_documentation.py::TestDevelopmentDocumentation::test_issue123_authority_clis_and_fixed_point_are_documented_forbidden_literals"
+          }
+        ],
+        "old": "tests/test_documentation.py::DevelopmentDocumentationTest.test_issue123_authority_clis_and_fixed_point_are_documented"
+      },
+      {
+        "new": [
+          {
+            "count": 4,
+            "node_pattern": "tests/test_documentation.py::TestDevelopmentDocumentation::test_issue123_public_privacy_contract_is_documented_without_literals"
+          },
+          {
+            "count": 10,
+            "node_pattern": "tests/test_documentation.py::TestDevelopmentDocumentation::test_issue123_public_privacy_contract_is_documented_without_literals_variants"
+          }
+        ],
+        "old": "tests/test_documentation.py::DevelopmentDocumentationTest.test_issue123_public_privacy_contract_is_documented_without_literals"
+      },
+      {
+        "new": [
+          {
+            "count": 2,
+            "node_pattern": "tests/test_issue123_bundle.py::TestIssue123Bundle::test_frozen_first_five_inventory_rejects_drift"
+          },
+          {
+            "count": 5,
+            "node_pattern": "tests/test_issue123_bundle.py::TestIssue123Bundle::test_ordered_runtime_inventory_rejects_drift"
+          }
+        ],
+        "old": "tests/test_issue123_bundle.py::Issue123BundleTest.test_frozen_first_five_and_ordered_runtime_inventory_reject_drift"
+      },
+      {
+        "new": [
+          {
+            "count": 5,
+            "node_pattern": "tests/test_issue123_completion.py::TestIssue123Completion::test_correctness_full_candidate_evidence_is_independently_frozen"
+          },
+          {
+            "count": 5,
+            "node_pattern": "tests/test_issue123_completion.py::TestIssue123Completion::test_correctness_full_candidate_evidence_is_independently_frozen_wrong_fields"
+          }
+        ],
+        "old": "tests/test_issue123_completion.py::Issue123CompletionTest.test_correctness_full_candidate_evidence_is_independently_frozen"
+      },
+      {
+        "new": [
+          {
+            "count": 2,
+            "node_pattern": "tests/test_issue123_completion.py::TestIssue123Completion::test_cuda_memory_peak_covers_both_allocated_samples"
+          },
+          {
+            "count": 2,
+            "node_pattern": "tests/test_issue123_completion.py::TestIssue123Completion::test_cuda_memory_peak_covers_both_allocated_samples_two_gpu"
+          }
+        ],
+        "old": "tests/test_issue123_completion.py::Issue123CompletionTest.test_cuda_memory_peak_covers_both_allocated_samples"
+      },
+      {
+        "new": [
+          {
+            "count": 3,
+            "node_pattern": "tests/test_issue123_completion.py::TestIssue123Completion::test_generic_correctness_npz_preflight_preserves_bounded_compatibility"
+          },
+          {
+            "count": 2,
+            "node_pattern": "tests/test_issue123_completion.py::TestIssue123Completion::test_generic_correctness_npz_preflight_preserves_bounded_compatibility_mutations"
+          }
+        ],
+        "old": "tests/test_issue123_completion.py::Issue123CompletionTest.test_generic_correctness_npz_preflight_preserves_bounded_compatibility"
+      },
+      {
+        "new": [
+          {
+            "count": 4,
+            "node_pattern": "tests/test_issue123_operations.py::TestIssue123Operations::test_final_checklist_requires_exact_state_order_and_section"
+          },
+          {
+            "count": 6,
+            "node_pattern": "tests/test_issue123_operations.py::TestIssue123Operations::test_final_checklist_requires_exact_state_order_and_section_invalid_sections"
+          }
+        ],
+        "old": "tests/test_issue123_operations.py::Issue123OperationsTest.test_final_checklist_requires_exact_state_order_and_section"
+      },
+      {
+        "new": [
+          {
+            "count": 7,
+            "node_pattern": "tests/test_issue123_operations.py::TestIssue123Operations::test_malformed_pagination_and_request_metadata_fail_closed"
+          },
+          {
+            "count": 15,
+            "node_pattern": "tests/test_issue123_operations.py::TestIssue123Operations::test_malformed_pagination_and_request_metadata_fail_closed_request_metadata"
+          }
+        ],
+        "old": "tests/test_issue123_operations.py::Issue123OperationsTest.test_malformed_pagination_and_request_metadata_fail_closed"
+      },
+      {
+        "new": [
+          {
+            "count": 4,
             "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyProjection::test_numeric_boolean_and_null_identity_leaves_are_scanned"
           },
           {
@@ -9716,6 +9878,198 @@
           }
         ],
         "old": "tests/test_issue123_privacy.py::Issue123PrivacyProjectionTest.test_numeric_boolean_and_null_identity_leaves_are_scanned"
+      },
+      {
+        "new": [
+          {
+            "count": 5,
+            "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyProjection::test_nonfinite_or_nonpositive_timing_samples_fail"
+          },
+          {
+            "count": 1,
+            "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyProjection::test_timing_companion_metadata_fails"
+          }
+        ],
+        "old": "tests/test_issue123_privacy.py::Issue123PrivacyProjectionTest.test_timing_companion_metadata_and_nonfinite_samples_fail"
+      },
+      {
+        "new": [
+          {
+            "count": 7,
+            "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyProjection::test_trace_semantic_invariants_cannot_be_redeclared"
+          },
+          {
+            "count": 6,
+            "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyProjection::test_trace_semantic_invariants_cannot_be_redeclared_policy_flags"
+          }
+        ],
+        "old": "tests/test_issue123_privacy.py::Issue123PrivacyProjectionTest.test_trace_semantic_invariants_cannot_be_redeclared"
+      },
+      {
+        "new": [
+          {
+            "count": 6,
+            "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_contiguous_tar_scan_closes_physical_record_boundaries"
+          },
+          {
+            "count": 2,
+            "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_contiguous_tar_scan_closes_physical_record_boundaries_padding"
+          },
+          {
+            "count": 2,
+            "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_contiguous_tar_scan_closes_physical_record_boundaries_pax_headers"
+          }
+        ],
+        "old": "tests/test_issue123_privacy.py::Issue123PrivacyScannerTest.test_contiguous_tar_scan_closes_physical_record_boundaries"
+      },
+      {
+        "new": [
+          {
+            "count": 7,
+            "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_forbidden_openings_are_normalized_across_payload_encodings"
+          },
+          {
+            "count": 7,
+            "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_forbidden_openings_are_normalized_across_payload_encodings_payload_bytes"
+          },
+          {
+            "count": 3,
+            "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_forbidden_openings_are_normalized_across_payload_encodings_tar_carriers"
+          }
+        ],
+        "old": "tests/test_issue123_privacy.py::Issue123PrivacyScannerTest.test_forbidden_openings_are_normalized_across_payload_encodings"
+      },
+      {
+        "new": [
+          {
+            "count": 672,
+            "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_non_ascii_normalization_suffixes_match_the_whole_string_oracle"
+          },
+          {
+            "count": 4,
+            "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_non_ascii_normalization_suffixes_match_the_whole_string_oracle_payload_carriers"
+          },
+          {
+            "count": 6,
+            "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_non_ascii_normalization_suffixes_match_the_whole_string_oracle_payload_carriers_tar_carriers"
+          },
+          {
+            "count": 1,
+            "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_non_ascii_normalization_suffixes_match_the_whole_string_oracle_unicode_inventory"
+          }
+        ],
+        "old": "tests/test_issue123_privacy.py::Issue123PrivacyScannerTest.test_non_ascii_normalization_suffixes_match_the_whole_string_oracle"
+      },
+      {
+        "new": [
+          {
+            "count": 77,
+            "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_pax_allowlist_aliases_and_identical_overlay_budget_matrix"
+          },
+          {
+            "count": 22,
+            "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_pax_allowlist_aliases_and_identical_overlay_budget_matrix_accepted_keys"
+          },
+          {
+            "count": 5,
+            "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_pax_allowlist_aliases_and_identical_overlay_budget_matrix_thresholds"
+          },
+          {
+            "count": 5,
+            "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_pax_allowlist_aliases_and_identical_overlay_budget_matrix_thresholds_below"
+          },
+          {
+            "count": 2,
+            "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_pax_allowlist_aliases_and_identical_overlay_budget_matrix_shadowed_openings"
+          }
+        ],
+        "old": "tests/test_issue123_privacy.py::Issue123PrivacyScannerTest.test_pax_allowlist_aliases_and_identical_overlay_budget_matrix"
+      },
+      {
+        "new": [
+          {
+            "count": 2,
+            "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_rejects_nonempty_compressed_archive_directory_bodies"
+          },
+          {
+            "count": 2,
+            "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_rejects_nonempty_compressed_archive_directory_bodies_tar_bodies"
+          }
+        ],
+        "old": "tests/test_issue123_privacy.py::Issue123PrivacyScannerTest.test_rejects_nonempty_compressed_archive_directory_bodies"
+      },
+      {
+        "new": [
+          {
+            "count": 4,
+            "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_strict_and_contextual_json_exceptions_are_fully_sanitized"
+          },
+          {
+            "count": 4,
+            "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_strict_and_contextual_json_exceptions_are_fully_sanitized_parser_errors"
+          }
+        ],
+        "old": "tests/test_issue123_privacy.py::Issue123PrivacyScannerTest.test_strict_and_contextual_json_exceptions_are_fully_sanitized"
+      },
+      {
+        "new": [
+          {
+            "count": 2,
+            "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_tar_library_exceptions_are_chain_free_and_non_leaking"
+          },
+          {
+            "count": 4,
+            "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_tar_library_exceptions_are_chain_free_and_non_leaking_iteration_and_close"
+          },
+          {
+            "count": 2,
+            "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_tar_library_exceptions_are_chain_free_and_non_leaking_open_errors"
+          },
+          {
+            "count": 2,
+            "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_tar_library_exceptions_are_chain_free_and_non_leaking_invalid_helpers"
+          }
+        ],
+        "old": "tests/test_issue123_privacy.py::Issue123PrivacyScannerTest.test_tar_library_exceptions_are_chain_free_and_non_leaking"
+      },
+      {
+        "new": [
+          {
+            "count": 3,
+            "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_utf8_surrogate_failures_are_chain_free"
+          },
+          {
+            "count": 4,
+            "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_utf8_surrogate_failures_are_chain_free_payload_carriers"
+          }
+        ],
+        "old": "tests/test_issue123_privacy.py::Issue123PrivacyScannerTest.test_utf8_surrogate_failures_are_chain_free"
+      },
+      {
+        "new": [
+          {
+            "count": 7,
+            "node_pattern": "tests/test_issue123_publication.py::TestIssue123Publication::test_independent_payload_path_validator_rejects_windows_aliases"
+          },
+          {
+            "count": 2,
+            "node_pattern": "tests/test_issue123_publication.py::TestIssue123Publication::test_independent_payload_path_validator_rejects_windows_aliases_assignments"
+          }
+        ],
+        "old": "tests/test_issue123_publication.py::Issue123PublicationTest.test_independent_payload_path_validator_rejects_windows_aliases"
+      },
+      {
+        "new": [
+          {
+            "count": 3,
+            "node_pattern": "tests/test_issue123_publication.py::TestIssue123Publication::test_independent_text_scans_apply_nfkc_and_redact_keys"
+          },
+          {
+            "count": 128,
+            "node_pattern": "tests/test_issue123_publication.py::TestIssue123Publication::test_independent_text_scans_apply_nfkc_and_redact_keys_environment_names"
+          }
+        ],
+        "old": "tests/test_issue123_publication.py::Issue123PublicationTest.test_independent_text_scans_apply_nfkc_and_redact_keys"
       },
       {
         "new": [
@@ -9733,19 +10087,15 @@
       {
         "new": [
           {
-            "count": 1,
-            "node_pattern": "tests/test_torch_dispersive.py::TestDispersiveOracle::test_scalar_ade_recurrence_matches_explicit_independent_equations"
+            "count": 8,
+            "node_pattern": "tests/test_torch_correctness.py::TestTorchCorrectness::test_dummy_source_numerics_reuse_nondispersive_tolerance"
           },
           {
             "count": 2,
-            "node_pattern": "tests/test_torch_dispersive.py::TestDispersiveOracle::test_scalar_convolution_recurrences_match_explicit_independent_equations"
-          },
-          {
-            "count": 2,
-            "node_pattern": "tests/test_torch_dispersive.py::TestDispersiveOracle::test_scalar_recurrences_match_explicit_independent_equations"
+            "node_pattern": "tests/test_torch_correctness.py::TestTorchCorrectness::test_dummy_source_numerics_reuse_nondispersive_tolerance_exact_state"
           }
         ],
-        "old": "tests/test_torch_dispersive.py::DispersiveOracleTest.test_scalar_recurrences_match_explicit_independent_equations"
+        "old": "tests/test_torch_correctness.py::TorchCorrectnessTest.test_dummy_source_numerics_reuse_nondispersive_tolerance"
       },
       {
         "new": [
@@ -9759,6 +10109,23 @@
           }
         ],
         "old": "tests/test_torch_dispersive.py::DispersiveOracleTest.test_paired_real_complex_recurrences_match_dense_reference"
+      },
+      {
+        "new": [
+          {
+            "count": 1,
+            "node_pattern": "tests/test_torch_dispersive.py::TestDispersiveOracle::test_scalar_ade_recurrence_matches_explicit_independent_equations"
+          },
+          {
+            "count": 2,
+            "node_pattern": "tests/test_torch_dispersive.py::TestDispersiveOracle::test_scalar_convolution_recurrences_match_explicit_independent_equations"
+          },
+          {
+            "count": 2,
+            "node_pattern": "tests/test_torch_dispersive.py::TestDispersiveOracle::test_scalar_recurrences_match_explicit_independent_equations"
+          }
+        ],
+        "old": "tests/test_torch_dispersive.py::DispersiveOracleTest.test_scalar_recurrences_match_explicit_independent_equations"
       },
       {
         "new": [
@@ -9789,12 +10156,460 @@
     ],
     "subtests": [
       {
+        "count": 272,
+        "node_pattern": "tests/test_annotations.py::TestAnnotationCoverage::test_public_annotations_are_complete_and_resolvable",
+        "old": "tests/test_annotations.py::AnnotationCoverageTest.test_public_annotations_are_complete_and_resolvable::subTest@100",
+        "parameter_tokens": [
+          "pytest.mark.parametrize"
+        ]
+      },
+      {
+        "count": 4,
+        "node_pattern": "tests/test_benchmarks.py::TestTorchTuningBenchmark::test_cpu_slice_aggregator_recomputes_and_binds_evidence",
+        "old": "tests/test_benchmarks.py::TorchTuningBenchmarkTest.test_cpu_slice_aggregator_recomputes_and_binds_evidence::subTest@2828",
+        "parameter_tokens": [
+          "pytest.mark.parametrize"
+        ]
+      },
+      {
+        "count": 16,
+        "node_pattern": "tests/test_benchmarks.py::TestTorchTuningBenchmark::test_cpu_slice_aggregator_recomputes_and_binds_evidence_raw_evidence",
+        "old": "tests/test_benchmarks.py::TorchTuningBenchmarkTest.test_cpu_slice_aggregator_recomputes_and_binds_evidence::subTest@3093",
+        "parameter_tokens": [
+          "pytest.mark.parametrize"
+        ]
+      },
+      {
+        "count": 2,
+        "node_pattern": "tests/test_benchmarks.py::TestTorchTuningBenchmark::test_linux_proc_statm_reader_fails_closed_for_provider_errors",
+        "old": "tests/test_benchmarks.py::TorchTuningBenchmarkTest.test_linux_proc_statm_reader_fails_closed_for_provider_errors::subTest@769",
+        "parameter_tokens": [
+          "pytest.mark.parametrize"
+        ]
+      },
+      {
+        "count": 2,
+        "node_pattern": "tests/test_benchmarks.py::TestTorchTuningBenchmark::test_linux_proc_statm_reader_fails_closed_for_provider_errors_provider_errors",
+        "old": "tests/test_benchmarks.py::TorchTuningBenchmarkTest.test_linux_proc_statm_reader_fails_closed_for_provider_errors::subTest@838",
+        "parameter_tokens": [
+          "pytest.mark.parametrize"
+        ]
+      },
+      {
+        "count": 6,
+        "node_pattern": "tests/test_documentation.py::TestDevelopmentDocumentation::test_issue123_authority_clis_and_fixed_point_are_documented",
+        "old": "tests/test_documentation.py::DevelopmentDocumentationTest.test_issue123_authority_clis_and_fixed_point_are_documented::subTest@142",
+        "parameter_tokens": [
+          "pytest.mark.parametrize"
+        ]
+      },
+      {
+        "count": 5,
+        "node_pattern": "tests/test_documentation.py::TestDevelopmentDocumentation::test_issue123_authority_clis_and_fixed_point_are_documented_forbidden_literals",
+        "old": "tests/test_documentation.py::DevelopmentDocumentationTest.test_issue123_authority_clis_and_fixed_point_are_documented::subTest@195",
+        "parameter_tokens": [
+          "pytest.mark.parametrize"
+        ]
+      },
+      {
+        "count": 4,
+        "node_pattern": "tests/test_documentation.py::TestDevelopmentDocumentation::test_issue123_public_privacy_contract_is_documented_without_literals",
+        "old": "tests/test_documentation.py::DevelopmentDocumentationTest.test_issue123_public_privacy_contract_is_documented_without_literals::subTest@255",
+        "parameter_tokens": [
+          "pytest.mark.parametrize"
+        ]
+      },
+      {
+        "count": 10,
+        "node_pattern": "tests/test_documentation.py::TestDevelopmentDocumentation::test_issue123_public_privacy_contract_is_documented_without_literals_variants",
+        "old": "tests/test_documentation.py::DevelopmentDocumentationTest.test_issue123_public_privacy_contract_is_documented_without_literals::subTest@294",
+        "parameter_tokens": [
+          "pytest.mark.parametrize"
+        ]
+      },
+      {
+        "count": 2,
+        "node_pattern": "tests/test_issue123_bundle.py::TestIssue123Bundle::test_frozen_first_five_inventory_rejects_drift",
+        "old": "tests/test_issue123_bundle.py::Issue123BundleTest.test_frozen_first_five_and_ordered_runtime_inventory_reject_drift::subTest@640",
+        "parameter_tokens": [
+          "pytest.mark.parametrize"
+        ]
+      },
+      {
+        "count": 5,
+        "node_pattern": "tests/test_issue123_bundle.py::TestIssue123Bundle::test_ordered_runtime_inventory_rejects_drift",
+        "old": "tests/test_issue123_bundle.py::Issue123BundleTest.test_frozen_first_five_and_ordered_runtime_inventory_reject_drift::subTest@681",
+        "parameter_tokens": [
+          "pytest.mark.parametrize"
+        ]
+      },
+      {
+        "count": 5,
+        "node_pattern": "tests/test_issue123_completion.py::TestIssue123Completion::test_correctness_full_candidate_evidence_is_independently_frozen",
+        "old": "tests/test_issue123_completion.py::Issue123CompletionTest.test_correctness_full_candidate_evidence_is_independently_frozen::subTest@4042",
+        "parameter_tokens": [
+          "pytest.mark.parametrize"
+        ]
+      },
+      {
+        "count": 5,
+        "node_pattern": "tests/test_issue123_completion.py::TestIssue123Completion::test_correctness_full_candidate_evidence_is_independently_frozen_wrong_fields",
+        "old": "tests/test_issue123_completion.py::Issue123CompletionTest.test_correctness_full_candidate_evidence_is_independently_frozen::subTest@4060",
+        "parameter_tokens": [
+          "pytest.mark.parametrize"
+        ]
+      },
+      {
+        "count": 2,
+        "node_pattern": "tests/test_issue123_completion.py::TestIssue123Completion::test_cuda_memory_peak_covers_both_allocated_samples",
+        "old": "tests/test_issue123_completion.py::Issue123CompletionTest.test_cuda_memory_peak_covers_both_allocated_samples::subTest@2959",
+        "parameter_tokens": [
+          "pytest.mark.parametrize"
+        ]
+      },
+      {
+        "count": 2,
+        "node_pattern": "tests/test_issue123_completion.py::TestIssue123Completion::test_cuda_memory_peak_covers_both_allocated_samples_two_gpu",
+        "old": "tests/test_issue123_completion.py::Issue123CompletionTest.test_cuda_memory_peak_covers_both_allocated_samples::subTest@2984",
+        "parameter_tokens": [
+          "pytest.mark.parametrize"
+        ]
+      },
+      {
+        "count": 3,
+        "node_pattern": "tests/test_issue123_completion.py::TestIssue123Completion::test_generic_correctness_npz_preflight_preserves_bounded_compatibility",
+        "old": "tests/test_issue123_completion.py::Issue123CompletionTest.test_generic_correctness_npz_preflight_preserves_bounded_compatibility::subTest@2867",
+        "parameter_tokens": [
+          "pytest.mark.parametrize"
+        ]
+      },
+      {
+        "count": 2,
+        "node_pattern": "tests/test_issue123_completion.py::TestIssue123Completion::test_generic_correctness_npz_preflight_preserves_bounded_compatibility_mutations",
+        "old": "tests/test_issue123_completion.py::Issue123CompletionTest.test_generic_correctness_npz_preflight_preserves_bounded_compatibility::subTest@2882",
+        "parameter_tokens": [
+          "pytest.mark.parametrize"
+        ]
+      },
+      {
+        "count": 4,
+        "node_pattern": "tests/test_issue123_operations.py::TestIssue123Operations::test_final_checklist_requires_exact_state_order_and_section",
+        "old": "tests/test_issue123_operations.py::Issue123OperationsTest.test_final_checklist_requires_exact_state_order_and_section::subTest@3029",
+        "parameter_tokens": [
+          "pytest.mark.parametrize"
+        ]
+      },
+      {
+        "count": 6,
+        "node_pattern": "tests/test_issue123_operations.py::TestIssue123Operations::test_final_checklist_requires_exact_state_order_and_section_invalid_sections",
+        "old": "tests/test_issue123_operations.py::Issue123OperationsTest.test_final_checklist_requires_exact_state_order_and_section::subTest@3063",
+        "parameter_tokens": [
+          "pytest.mark.parametrize"
+        ]
+      },
+      {
+        "count": 7,
+        "node_pattern": "tests/test_issue123_operations.py::TestIssue123Operations::test_malformed_pagination_and_request_metadata_fail_closed",
+        "old": "tests/test_issue123_operations.py::Issue123OperationsTest.test_malformed_pagination_and_request_metadata_fail_closed::subTest@2181",
+        "parameter_tokens": [
+          "pytest.mark.parametrize"
+        ]
+      },
+      {
+        "count": 15,
+        "node_pattern": "tests/test_issue123_operations.py::TestIssue123Operations::test_malformed_pagination_and_request_metadata_fail_closed_request_metadata",
+        "old": "tests/test_issue123_operations.py::Issue123OperationsTest.test_malformed_pagination_and_request_metadata_fail_closed::subTest@2247",
+        "parameter_tokens": [
+          "pytest.mark.parametrize"
+        ]
+      },
+      {
+        "count": 4,
+        "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyProjection::test_numeric_boolean_and_null_identity_leaves_are_scanned",
+        "old": "tests/test_issue123_privacy.py::Issue123PrivacyProjectionTest.test_numeric_boolean_and_null_identity_leaves_are_scanned::subTest@2329",
+        "parameter_tokens": [
+          "pytest.mark.parametrize"
+        ]
+      },
+      {
+        "count": 5,
+        "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyProjection::test_nonfinite_or_nonpositive_timing_samples_fail",
+        "old": "tests/test_issue123_privacy.py::Issue123PrivacyProjectionTest.test_timing_companion_metadata_and_nonfinite_samples_fail::subTest@2125",
+        "parameter_tokens": [
+          "pytest.mark.parametrize"
+        ]
+      },
+      {
+        "count": 7,
+        "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyProjection::test_trace_semantic_invariants_cannot_be_redeclared",
+        "old": "tests/test_issue123_privacy.py::Issue123PrivacyProjectionTest.test_trace_semantic_invariants_cannot_be_redeclared::subTest@2206",
+        "parameter_tokens": [
+          "pytest.mark.parametrize"
+        ]
+      },
+      {
+        "count": 6,
+        "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyProjection::test_trace_semantic_invariants_cannot_be_redeclared_policy_flags",
+        "old": "tests/test_issue123_privacy.py::Issue123PrivacyProjectionTest.test_trace_semantic_invariants_cannot_be_redeclared::subTest@2220",
+        "parameter_tokens": [
+          "pytest.mark.parametrize"
+        ]
+      },
+      {
+        "count": 6,
+        "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_contiguous_tar_scan_closes_physical_record_boundaries",
+        "old": "tests/test_issue123_privacy.py::Issue123PrivacyScannerTest.test_contiguous_tar_scan_closes_physical_record_boundaries::subTest@5227",
+        "parameter_tokens": [
+          "pytest.mark.parametrize"
+        ]
+      },
+      {
+        "count": 2,
+        "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_contiguous_tar_scan_closes_physical_record_boundaries_padding",
+        "old": "tests/test_issue123_privacy.py::Issue123PrivacyScannerTest.test_contiguous_tar_scan_closes_physical_record_boundaries::subTest@5264",
+        "parameter_tokens": [
+          "pytest.mark.parametrize"
+        ]
+      },
+      {
+        "count": 2,
+        "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_contiguous_tar_scan_closes_physical_record_boundaries_pax_headers",
+        "old": "tests/test_issue123_privacy.py::Issue123PrivacyScannerTest.test_contiguous_tar_scan_closes_physical_record_boundaries::subTest@5315",
+        "parameter_tokens": [
+          "pytest.mark.parametrize"
+        ]
+      },
+      {
+        "count": 7,
+        "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_forbidden_openings_are_normalized_across_payload_encodings",
+        "old": "tests/test_issue123_privacy.py::Issue123PrivacyScannerTest.test_forbidden_openings_are_normalized_across_payload_encodings::subTest@3415",
+        "parameter_tokens": [
+          "pytest.mark.parametrize"
+        ]
+      },
+      {
+        "count": 7,
+        "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_forbidden_openings_are_normalized_across_payload_encodings_payload_bytes",
+        "old": "tests/test_issue123_privacy.py::Issue123PrivacyScannerTest.test_forbidden_openings_are_normalized_across_payload_encodings::subTest@3420",
+        "parameter_tokens": [
+          "pytest.mark.parametrize"
+        ]
+      },
+      {
+        "count": 3,
+        "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_forbidden_openings_are_normalized_across_payload_encodings_tar_carriers",
+        "old": "tests/test_issue123_privacy.py::Issue123PrivacyScannerTest.test_forbidden_openings_are_normalized_across_payload_encodings::subTest@3454",
+        "parameter_tokens": [
+          "pytest.mark.parametrize"
+        ]
+      },
+      {
+        "count": 672,
+        "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_non_ascii_normalization_suffixes_match_the_whole_string_oracle",
+        "old": "tests/test_issue123_privacy.py::Issue123PrivacyScannerTest.test_non_ascii_normalization_suffixes_match_the_whole_string_oracle::subTest@3570",
+        "parameter_tokens": [
+          "pytest.mark.parametrize"
+        ]
+      },
+      {
+        "count": 4,
+        "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_non_ascii_normalization_suffixes_match_the_whole_string_oracle_payload_carriers",
+        "old": "tests/test_issue123_privacy.py::Issue123PrivacyScannerTest.test_non_ascii_normalization_suffixes_match_the_whole_string_oracle::subTest@3610",
+        "parameter_tokens": [
+          "pytest.mark.parametrize"
+        ]
+      },
+      {
+        "count": 6,
+        "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_non_ascii_normalization_suffixes_match_the_whole_string_oracle_payload_carriers_tar_carriers",
+        "old": "tests/test_issue123_privacy.py::Issue123PrivacyScannerTest.test_non_ascii_normalization_suffixes_match_the_whole_string_oracle::subTest@3650",
+        "parameter_tokens": [
+          "pytest.mark.parametrize"
+        ]
+      },
+      {
+        "count": 77,
+        "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_pax_allowlist_aliases_and_identical_overlay_budget_matrix",
+        "old": "tests/test_issue123_privacy.py::Issue123PrivacyScannerTest.test_pax_allowlist_aliases_and_identical_overlay_budget_matrix::subTest@4223",
+        "parameter_tokens": [
+          "pytest.mark.parametrize"
+        ]
+      },
+      {
+        "count": 22,
+        "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_pax_allowlist_aliases_and_identical_overlay_budget_matrix_accepted_keys",
+        "old": "tests/test_issue123_privacy.py::Issue123PrivacyScannerTest.test_pax_allowlist_aliases_and_identical_overlay_budget_matrix::subTest@4282",
+        "parameter_tokens": [
+          "pytest.mark.parametrize"
+        ]
+      },
+      {
+        "count": 5,
+        "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_pax_allowlist_aliases_and_identical_overlay_budget_matrix_thresholds",
+        "old": "tests/test_issue123_privacy.py::Issue123PrivacyScannerTest.test_pax_allowlist_aliases_and_identical_overlay_budget_matrix::subTest@4306",
+        "parameter_tokens": [
+          "pytest.mark.parametrize"
+        ]
+      },
+      {
+        "count": 5,
+        "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_pax_allowlist_aliases_and_identical_overlay_budget_matrix_thresholds_below",
+        "old": "tests/test_issue123_privacy.py::Issue123PrivacyScannerTest.test_pax_allowlist_aliases_and_identical_overlay_budget_matrix::subTest@4311",
+        "parameter_tokens": [
+          "pytest.mark.parametrize"
+        ]
+      },
+      {
+        "count": 2,
+        "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_pax_allowlist_aliases_and_identical_overlay_budget_matrix_shadowed_openings",
+        "old": "tests/test_issue123_privacy.py::Issue123PrivacyScannerTest.test_pax_allowlist_aliases_and_identical_overlay_budget_matrix::subTest@4342",
+        "parameter_tokens": [
+          "pytest.mark.parametrize"
+        ]
+      },
+      {
+        "count": 2,
+        "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_rejects_nonempty_compressed_archive_directory_bodies",
+        "old": "tests/test_issue123_privacy.py::Issue123PrivacyScannerTest.test_rejects_nonempty_compressed_archive_directory_bodies::subTest@4423",
+        "parameter_tokens": [
+          "pytest.mark.parametrize"
+        ]
+      },
+      {
+        "count": 2,
+        "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_rejects_nonempty_compressed_archive_directory_bodies_tar_bodies",
+        "old": "tests/test_issue123_privacy.py::Issue123PrivacyScannerTest.test_rejects_nonempty_compressed_archive_directory_bodies::subTest@4435",
+        "parameter_tokens": [
+          "pytest.mark.parametrize"
+        ]
+      },
+      {
+        "count": 4,
+        "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_strict_and_contextual_json_exceptions_are_fully_sanitized",
+        "old": "tests/test_issue123_privacy.py::Issue123PrivacyScannerTest.test_strict_and_contextual_json_exceptions_are_fully_sanitized::subTest@4958",
+        "parameter_tokens": [
+          "pytest.mark.parametrize"
+        ]
+      },
+      {
+        "count": 4,
+        "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_strict_and_contextual_json_exceptions_are_fully_sanitized_parser_errors",
+        "old": "tests/test_issue123_privacy.py::Issue123PrivacyScannerTest.test_strict_and_contextual_json_exceptions_are_fully_sanitized::subTest@4965",
+        "parameter_tokens": [
+          "pytest.mark.parametrize"
+        ]
+      },
+      {
+        "count": 2,
+        "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_tar_library_exceptions_are_chain_free_and_non_leaking",
+        "old": "tests/test_issue123_privacy.py::Issue123PrivacyScannerTest.test_tar_library_exceptions_are_chain_free_and_non_leaking::subTest@4027",
+        "parameter_tokens": [
+          "pytest.mark.parametrize"
+        ]
+      },
+      {
+        "count": 4,
+        "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_tar_library_exceptions_are_chain_free_and_non_leaking_iteration_and_close",
+        "old": "tests/test_issue123_privacy.py::Issue123PrivacyScannerTest.test_tar_library_exceptions_are_chain_free_and_non_leaking::subTest@4047",
+        "parameter_tokens": [
+          "pytest.mark.parametrize"
+        ]
+      },
+      {
+        "count": 2,
+        "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_tar_library_exceptions_are_chain_free_and_non_leaking_open_errors",
+        "old": "tests/test_issue123_privacy.py::Issue123PrivacyScannerTest.test_tar_library_exceptions_are_chain_free_and_non_leaking::subTest@4057",
+        "parameter_tokens": [
+          "pytest.mark.parametrize"
+        ]
+      },
+      {
+        "count": 3,
+        "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_utf8_surrogate_failures_are_chain_free",
+        "old": "tests/test_issue123_privacy.py::Issue123PrivacyScannerTest.test_utf8_surrogate_failures_are_chain_free::subTest@3101",
+        "parameter_tokens": [
+          "pytest.mark.parametrize"
+        ]
+      },
+      {
+        "count": 4,
+        "node_pattern": "tests/test_issue123_privacy.py::TestIssue123PrivacyScanner::test_utf8_surrogate_failures_are_chain_free_payload_carriers",
+        "old": "tests/test_issue123_privacy.py::Issue123PrivacyScannerTest.test_utf8_surrogate_failures_are_chain_free::subTest@3133",
+        "parameter_tokens": [
+          "pytest.mark.parametrize"
+        ]
+      },
+      {
+        "count": 7,
+        "node_pattern": "tests/test_issue123_publication.py::TestIssue123Publication::test_independent_payload_path_validator_rejects_windows_aliases",
+        "old": "tests/test_issue123_publication.py::Issue123PublicationTest.test_independent_payload_path_validator_rejects_windows_aliases::subTest@2026",
+        "parameter_tokens": [
+          "pytest.mark.parametrize"
+        ]
+      },
+      {
+        "count": 2,
+        "node_pattern": "tests/test_issue123_publication.py::TestIssue123Publication::test_independent_payload_path_validator_rejects_windows_aliases_assignments",
+        "old": "tests/test_issue123_publication.py::Issue123PublicationTest.test_independent_payload_path_validator_rejects_windows_aliases::subTest@2061",
+        "parameter_tokens": [
+          "pytest.mark.parametrize"
+        ]
+      },
+      {
+        "count": 3,
+        "node_pattern": "tests/test_issue123_publication.py::TestIssue123Publication::test_independent_text_scans_apply_nfkc_and_redact_keys",
+        "old": "tests/test_issue123_publication.py::Issue123PublicationTest.test_independent_text_scans_apply_nfkc_and_redact_keys::subTest@2101",
+        "parameter_tokens": [
+          "pytest.mark.parametrize"
+        ]
+      },
+      {
+        "count": 128,
+        "node_pattern": "tests/test_issue123_publication.py::TestIssue123Publication::test_independent_text_scans_apply_nfkc_and_redact_keys_environment_names",
+        "old": "tests/test_issue123_publication.py::Issue123PublicationTest.test_independent_text_scans_apply_nfkc_and_redact_keys::subTest@2164",
+        "parameter_tokens": [
+          "pytest.mark.parametrize"
+        ]
+      },
+      {
         "count": 2,
         "node_pattern": "tests/test_macos_ci_evidence.py::TestMacOSCiEvidence::test_inductor_import_filter_propagates_nonmatching_warnings",
         "old": "tests/test_macos_ci_evidence.py::MacOSCiEvidenceTest.test_inductor_import_filter_ignores_only_the_exact_warning::subTest@438",
         "parameter_tokens": [
           "unrelated-message",
           "wrong-module"
+        ]
+      },
+      {
+        "count": 8,
+        "node_pattern": "tests/test_torch_correctness.py::TestTorchCorrectness::test_dummy_source_numerics_reuse_nondispersive_tolerance",
+        "old": "tests/test_torch_correctness.py::TorchCorrectnessTest.test_dummy_source_numerics_reuse_nondispersive_tolerance::subTest@2540",
+        "parameter_tokens": [
+          "pytest.mark.parametrize"
+        ]
+      },
+      {
+        "count": 2,
+        "node_pattern": "tests/test_torch_correctness.py::TestTorchCorrectness::test_dummy_source_numerics_reuse_nondispersive_tolerance_exact_state",
+        "old": "tests/test_torch_correctness.py::TorchCorrectnessTest.test_dummy_source_numerics_reuse_nondispersive_tolerance::subTest@2560",
+        "parameter_tokens": [
+          "pytest.mark.parametrize"
+        ]
+      },
+      {
+        "count": 5,
+        "node_pattern": "tests/test_torch_dispersive.py::TestDispersiveOracle::test_paired_real_complex_recurrences_match_dense_reference",
+        "old": "tests/test_torch_dispersive.py::DispersiveOracleTest.test_paired_real_complex_recurrences_match_dense_reference::subTest@429",
+        "parameter_tokens": [
+          "pytest.mark.parametrize"
+        ]
+      },
+      {
+        "count": 2,
+        "node_pattern": "tests/test_torch_dispersive.py::TestDispersiveOracle::test_scalar_recurrences_match_explicit_independent_equations",
+        "old": "tests/test_torch_dispersive.py::DispersiveOracleTest.test_scalar_recurrences_match_explicit_independent_equations::subTest@201",
+        "parameter_tokens": [
+          "pytest.mark.parametrize"
         ]
       },
       {
@@ -9808,6 +10623,14 @@
       },
       {
         "count": 6,
+        "node_pattern": "tests/test_torch_fdtd.py::TestTorchState::test_direct_mutation_views_match_the_solver_slices",
+        "old": "tests/test_torch_fdtd.py::TorchStateTest.test_direct_mutation_views_match_the_solver_slices::subTest@531",
+        "parameter_tokens": [
+          "pytest.mark.parametrize"
+        ]
+      },
+      {
+        "count": 6,
         "node_pattern": "tests/test_torch_fdtd.py::TestTorchState::test_boundary_planes_match_solver_slices",
         "old": "tests/test_torch_fdtd.py::TorchStateTest.test_direct_mutation_views_match_the_solver_slices::subTest@539",
         "parameter_tokens": [
@@ -9816,6 +10639,14 @@
           "x",
           "y",
           "z"
+        ]
+      },
+      {
+        "count": 3,
+        "node_pattern": "tests/test_torch_pml.py::TestTorchPmlStorage::test_cpml_cuda_direct_view_metadata_uses_actual_plan_buckets",
+        "old": "tests/test_torch_pml.py::TorchPmlStorageTest.test_cpml_cuda_direct_view_metadata_uses_actual_plan_buckets::subTest@835",
+        "parameter_tokens": [
+          "pytest.mark.parametrize"
         ]
       },
       {
@@ -10108,6 +10939,10 @@
         {
           "count": 483,
           "node_pattern": "tests/test_docstrings.py::TestDocstringCoverage::test_public_exports_have_docstrings"
+        },
+        {
+          "count": 14,
+          "node_pattern": "tests/test_docstrings.py::TestDocstringCoverage::test_supported_extension_hooks_have_docstrings"
         }
       ],
       "old": "tests/test_docstrings.py::DocstringCoverageTest._assert_public_members_documented::subTest@131"
@@ -14428,7 +15263,7 @@
         "component": "component",
         "size": "size"
       },
-      "kind": "parametrized",
+      "kind": "retained-sequential",
       "line": 494,
       "new": [
         {
@@ -14436,7 +15271,13 @@
           "node_pattern": "tests/test_torch_sources_output.py::TestTorchPointSource::test_all_yee_components_and_collapsed_axes_are_driven"
         }
       ],
-      "old": "tests/test_torch_sources_output.py::TorchPointSourceTest.test_all_yee_components_and_collapsed_axes_are_driven::subTest@494"
+      "old": "tests/test_torch_sources_output.py::TorchPointSourceTest.test_all_yee_components_and_collapsed_axes_are_driven::subTest@494",
+      "reason": {
+        "category": "shared evolving state",
+        "evidence_token": "simulation.load_host_fields(zeros)",
+        "explanation": "Each component is checked against one lowered source snapshot before the same simulation is reset and advanced to validate all driven fields.",
+        "source_node": "tests/test_torch_sources_output.py::TestTorchPointSource::test_all_yee_components_and_collapsed_axes_are_driven"
+      }
     },
     {
       "args": {

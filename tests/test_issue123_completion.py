@@ -26,6 +26,7 @@ from benchmarks import issue123_operations as operations
 from benchmarks import issue123_privacy as privacy
 from benchmarks import torch_tuning
 from benchmarks import two_gpu_failure_evidence as failure_evidence
+from tests.pytest_failure_collector import FailureCollector
 
 
 def _synthetic_common_host_fixture():
@@ -3552,17 +3553,20 @@ class TestIssue123Completion(_Issue123CompletionFixture):
         assert "bucket_ex_0_current" in inventory
         assert not (any(name.startswith("bucket_ex_1_") for name in inventory))
         state = simulation.state.state_dict()
-        for name, (_family, width, targets) in inventory.items():
-            assert state[name].numel() == width * targets * 2
-        diagnostics = json.loads(json.dumps(simulation.diagnostics()))
-        completion._validate_frozen_cuda_material_plan(
-            {
-                "workload": workload,
-                "runtime": {"precision": "float32"},
-                "diagnostics": diagnostics,
-            },
-            "test",
-        )
+        failures = FailureCollector()
+        with failures:
+            for name, (_family, width, targets) in inventory.items():
+                with failures.case(name):
+                    assert state[name].numel() == width * targets * 2
+            diagnostics = json.loads(json.dumps(simulation.diagnostics()))
+            completion._validate_frozen_cuda_material_plan(
+                {
+                    "workload": workload,
+                    "runtime": {"precision": "float32"},
+                    "diagnostics": diagnostics,
+                },
+                "test",
+            )
 
     def test_cuda_correctness_indexes_are_loaded_and_exactly_bound(self):
         records = []

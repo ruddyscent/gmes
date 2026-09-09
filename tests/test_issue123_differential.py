@@ -1128,7 +1128,33 @@ class TestIssue123DifferentialEvidence(_Issue123DifferentialFixture):
         with pytest.raises(ValueError, match="NPZ group identity differs"):
             self.load(document)
 
-    def test_npz_preflight_rejects_noncanonical_members_before_numpy_load(self):
+    @pytest.mark.parametrize(
+        "mutation_malicious_raw_case",
+        range(18),
+        ids=(
+            "tiny-huge-shape",
+            "truncated-payload",
+            "padded-payload",
+            "unsupported-version",
+            "object",
+            "structured",
+            "subarray",
+            "fortran",
+            "stored",
+            "symlink",
+            "directory-mode",
+            "prepended",
+            "trailing",
+            "encrypted",
+            "local-only-encrypted",
+            "local-only-stored",
+            "corrupt-deflate",
+            "invalid-deflate",
+        ),
+    )
+    def test_npz_preflight_rejects_noncanonical_members_before_numpy_load(
+        self, mutation_malicious_raw_case
+    ):
         document = self.document()
         record = document["cases"][1]
         ordinal = 0
@@ -1275,19 +1301,23 @@ class TestIssue123DifferentialEvidence(_Issue123DifferentialFixture):
 
         # These corruptions derive from one canonical archive, including mutations
         # whose offsets were discovered from that archive, so keep the matrix local.
-        for mutation, malicious_raw in malformed.items():
-            with (
-                mock.patch.object(
-                    differential.np,
-                    "load",
-                    side_effect=AssertionError("np.load must not run before preflight"),
-                ) as load,
-            ):
-                with pytest.raises(ValueError):
-                    differential._load_projection(
-                        malicious_raw, names, comment, "malicious group"
-                    )
-                load.assert_not_called()
+        mutation_malicious_raw_case_values = tuple(malformed.items())
+        assert len(mutation_malicious_raw_case_values) == 18
+        mutation, malicious_raw = mutation_malicious_raw_case_values[
+            mutation_malicious_raw_case
+        ]
+        with (
+            mock.patch.object(
+                differential.np,
+                "load",
+                side_effect=AssertionError("np.load must not run before preflight"),
+            ) as load,
+        ):
+            with pytest.raises(ValueError):
+                differential._load_projection(
+                    malicious_raw, names, comment, "malicious group"
+                )
+            load.assert_not_called()
 
     @pytest.mark.parametrize(
         "version", ((1, 0), (2, 0), (3, 0)), ids=("npy-v1", "npy-v2", "npy-v3")
@@ -1331,7 +1361,12 @@ class TestIssue123DifferentialEvidence(_Issue123DifferentialFixture):
         assert resolved == path.resolve()
         assert binding == differential._source_archive_identity(resolved)
 
-    def test_generic_source_npz_preflight_rejects_unsafe_dtypes(self):
+    @pytest.mark.parametrize(
+        "name_dtype_case",
+        range(5),
+        ids=("text", "object", "structured", "subarray", "object-metadata"),
+    )
+    def test_generic_source_npz_preflight_rejects_unsafe_dtypes(self, name_dtype_case):
         def payload(dtype, *, name="value.npy"):
             dtype = np.dtype(dtype)
             header = io.BytesIO()
@@ -1348,17 +1383,21 @@ class TestIssue123DifferentialEvidence(_Issue123DifferentialFixture):
                 archive.writestr(name, header.getvalue() + bytes(dtype.itemsize))
             return path
 
-        for name, dtype in (
-            ("text.npy", "<U1"),
-            ("object.npy", "O"),
-            ("structured.npy", [("value", "<f8")]),
-            ("subarray.npy", ("<f8", (2,))),
-            ("metadata.json.npy", "O"),
-        ):
-            with pytest.raises(ValueError, match="shape or dtype|payload contract"):
-                differential._preflight_source_npz(
-                    payload(dtype, name=name), "unsafe source"
-                )
+        name_dtype_case_values = tuple(
+            (
+                ("text.npy", "<U1"),
+                ("object.npy", "O"),
+                ("structured.npy", [("value", "<f8")]),
+                ("subarray.npy", ("<f8", (2,))),
+                ("metadata.json.npy", "O"),
+            )
+        )
+        assert len(name_dtype_case_values) == 5
+        name, dtype = name_dtype_case_values[name_dtype_case]
+        with pytest.raises(ValueError, match="shape or dtype|payload contract"):
+            differential._preflight_source_npz(
+                payload(dtype, name=name), "unsafe source"
+            )
         header = io.BytesIO()
         np.lib.format.write_array_header_1_0(
             header,

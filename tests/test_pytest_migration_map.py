@@ -1,12 +1,23 @@
 """Validate the durable issue-179 unittest-to-pytest migration inventory."""
 
 import ast
+import hashlib
 import json
+import os
+import subprocess
+import sys
+from collections import Counter
 from pathlib import Path
 
 MAP_PATH = Path(__file__).with_name("pytest-migration-map.json")
 BASE_REVISION = "8c1ea5aba7b11d96bd85541f95241c0539b280f9"
 BASELINE_LOG_SHA256 = "c6fb3f7c2f1c61cb8544d20fc80de481dbe6a6c999dc703688c6d0d0857b2234"
+# Independently verified against BASE_REVISION: all 913 method identities and
+# 328 subTest call-site identities. Keep this anchor outside the editable map;
+# validation must also work in source distributions that do not contain .git.
+BASELINE_IDENTITIES_SHA256 = (
+    "d6a9c2fb6fce47f105239c83b69ea973d0ac8e49192db79d68fab8861b16b7bb"
+)
 MAP_VALIDATION_NODE = "tests/test_pytest_migration_map.py::test_pytest_migration_map_is_complete_and_auditable"
 
 
@@ -66,6 +77,32 @@ def _current_converted_test_patterns():
     return patterns
 
 
+def _collected_test_counts():
+    # A separate collection-only process includes the full suite even when this
+    # validator was selected alone. It never executes this test recursively.
+    environment = dict(os.environ)
+    environment["PYTEST_ADDOPTS"] = ""
+    environment["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "--collect-only", "-q", "--color=no", "tests"],
+        cwd=MAP_PATH.parent.parent,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    nodes = [
+        line
+        for line in result.stdout.splitlines()
+        if line.startswith("tests/") and "::" in line
+    ]
+    assert nodes, result.stdout
+    assert len(nodes) == len(set(nodes)), "duplicate collected node IDs"
+    return Counter(node.split("[", 1)[0] for node in nodes)
+
+
 def test_pytest_migration_map_is_complete_and_auditable():
     migration_map = json.loads(MAP_PATH.read_text())
 
@@ -84,11 +121,10 @@ def test_pytest_migration_map_is_complete_and_auditable():
         "total": 913,
     }
     assert migration_map["old_counts"] == {"methods": 913, "subtests": 328}
-    assert migration_map["classification_counts"] == {
-        "parametrized": 144,
-        "retained-sequential": 184,
+    assert set(migration_map["classification_counts"]) == {
+        "parametrized",
+        "retained-sequential",
     }
-    assert migration_map["current_collection"]["node_count"] >= 913
     assert all(not gap for gap in migration_map["gaps"].values())
 
     methods = migration_map["method_mappings"]
@@ -97,6 +133,24 @@ def test_pytest_migration_map_is_complete_and_auditable():
     assert len(subtests) == 328
     assert len({item["old"] for item in methods}) == len(methods)
     assert len({item["old"] for item in subtests}) == len(subtests)
+    baseline_identities = {
+        "methods": sorted(item["old"] for item in methods),
+        "subtests": sorted(item["old"] for item in subtests),
+    }
+    identities_json = json.dumps(
+        baseline_identities, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    )
+    assert (
+        hashlib.sha256(identities_json.encode("utf-8")).hexdigest()
+        == BASELINE_IDENTITIES_SHA256
+    ), "mapped old identities do not match the immutable baseline inventory"
+    assert migration_map["classification_counts"] == dict(
+        Counter(item["kind"] for item in subtests)
+    )
+    collected_counts = _collected_test_counts()
+    assert migration_map["current_collection"]["node_count"] == sum(
+        collected_counts.values()
+    )
 
     for item in [*methods, *subtests]:
         assert item["line"] > 0
@@ -105,15 +159,28 @@ def test_pytest_migration_map_is_complete_and_auditable():
             node["node_pattern"].startswith("tests/") and node["count"] > 0
             for node in item["new"]
         )
+        patterns = [node["node_pattern"] for node in item["new"]]
+        assert len(patterns) == len(set(patterns)), item["old"]
+        for node in item["new"]:
+            assert node["node_pattern"] in collected_counts, node
+            assert type(node["count"]) is int
+            assert node["count"] == collected_counts[node["node_pattern"]], node
 
     mapped_patterns = {node["node_pattern"] for item in methods for node in item["new"]}
+    mapped_occurrences = Counter(
+        node["node_pattern"] for item in methods for node in item["new"]
+    )
+    assert all(count == 1 for count in mapped_occurrences.values()), mapped_occurrences
     assert migration_map["coverage_exclusions"] == [
         {
             "node_pattern": MAP_VALIDATION_NODE,
             "reason": "validates the migration map itself",
         }
     ]
-    assert _current_converted_test_patterns() - mapped_patterns == {MAP_VALIDATION_NODE}
+    expected_patterns = mapped_patterns | {MAP_VALIDATION_NODE}
+    assert _current_converted_test_patterns() == expected_patterns
+    assert set(collected_counts) == expected_patterns
+    assert collected_counts[MAP_VALIDATION_NODE] == 1
 
     retained = [item for item in subtests if item["kind"] == "retained-sequential"]
     assert (

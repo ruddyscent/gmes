@@ -1525,7 +1525,30 @@ class TestIssue123Operations(_Issue123OperationsFixture):
                 document, cases[case_index][1], self.candidate
             )
 
-    def test_technical_release_and_asset_ledger_fail_closed(self):
+    @pytest.mark.parametrize(
+        "label_raw_case",
+        range(17),
+        ids=(
+            "release-target",
+            "annotated-tag",
+            "tag-target",
+            "draft",
+            "prerelease",
+            "mutable",
+            "release-author",
+            "release-after-comments",
+            "missing-asset",
+            "duplicate-name",
+            "duplicate-id",
+            "zero-size",
+            "digest-algorithm",
+            "uploader",
+            "embedded-ledger-drift",
+            "synchronized-off-domain-url",
+            "cross-asset-url",
+        ),
+    )
+    def test_technical_release_and_asset_ledger_fail_closed(self, label_raw_case):
         _output, index_path, _scope = self._capture()
         document = json.loads(index_path.read_text())
         cases = []
@@ -1630,13 +1653,59 @@ class TestIssue123Operations(_Issue123OperationsFixture):
         )
         cases.append(("cross-asset-url", mismatched_comment_url))
 
-        # Each release mutation is evaluated against the same captured index so
-        # cross-record consistency stays fixed throughout this sequential audit.
-        for label, raw in cases:
-            with (pytest.raises(operations.EvidenceError),):
-                operations.evaluate_operations(document, raw, self.candidate)
+        label_raw_case_values = tuple(cases)
+        assert len(label_raw_case_values) == 17
+        label, raw = label_raw_case_values[label_raw_case]
+        with (pytest.raises(operations.EvidenceError),):
+            operations.evaluate_operations(document, raw, self.candidate)
 
-    def test_structured_owner_contracts_reject_field_and_authorship_attacks(self):
+    @pytest.mark.parametrize(
+        "label_raw_case",
+        range(38),
+        ids=(
+            "issue-123-absent",
+            "issue-123-omitted-field",
+            "issue-123-wrong-field",
+            "issue-123-duplicate-field",
+            "issue-123-duplicate",
+            "issue-123-non-owner",
+            "issue-123-wrong-owner-login",
+            "issue-123-repeated-literal",
+            "issue-123-repeated-sha",
+            "issue-123-quoted-template",
+            "issue-123-cross-comment-fields",
+            "pull-request-absent",
+            "pull-request-omitted-field",
+            "pull-request-wrong-field",
+            "pull-request-duplicate-field",
+            "pull-request-duplicate",
+            "pull-request-non-owner",
+            "pull-request-wrong-owner-login",
+            "pull-request-repeated-literal",
+            "pull-request-repeated-sha",
+            "pull-request-quoted-template",
+            "pull-request-cross-comment-fields",
+            "issue-115-absent",
+            "issue-115-omitted-field",
+            "issue-115-wrong-field",
+            "issue-115-duplicate-field",
+            "issue-115-duplicate",
+            "issue-115-non-owner",
+            "issue-115-wrong-owner-login",
+            "issue-115-repeated-literal",
+            "issue-115-repeated-sha",
+            "issue-115-quoted-template",
+            "issue-115-cross-comment-fields",
+            "PR-contract-substituted-for-amendment",
+            "handoff-substituted-for-PR-contract",
+            "amendment-substituted-for-handoff",
+            "cross-stream-comment-id",
+            "obsolete-owner-baseline-pair",
+        ),
+    )
+    def test_structured_owner_contracts_reject_field_and_authorship_attacks(
+        self, label_raw_case
+    ):
         _output, index_path, _scope = self._capture()
         document = json.loads(index_path.read_text())
         specifications = (
@@ -1842,11 +1911,11 @@ class TestIssue123Operations(_Issue123OperationsFixture):
         )
         cases.append(("obsolete-owner-baseline-pair", obsolete_baselines))
 
-        # Contract mutations share one captured response closure and are kept
-        # sequential to ensure no failed evaluation contaminates the next copy.
-        for label, raw in cases:
-            with (pytest.raises(operations.EvidenceError),):
-                operations.evaluate_operations(document, raw, self.candidate)
+        label_raw_case_values = tuple(cases)
+        assert len(label_raw_case_values) == 38
+        label, raw = label_raw_case_values[label_raw_case]
+        with (pytest.raises(operations.EvidenceError),):
+            operations.evaluate_operations(document, raw, self.candidate)
 
     def test_superseded_owner_comment_provenance_is_exact_and_complete(self):
         assert tuple(
@@ -2149,7 +2218,12 @@ class TestIssue123Operations(_Issue123OperationsFixture):
                 deleted_document, deleted_raw, self.candidate
             )
 
-    def test_rest_page_ledger_rejects_route_filter_and_last_substitution(self):
+    @pytest.mark.parametrize(
+        "label_url_case", range(2), ids=("suffix-route", "extra-filter")
+    )
+    def test_rest_page_ledger_rejects_route_filter_and_last_substitution(
+        self, label_url_case
+    ):
         _output, index_path, _scope = self._capture()
         document = json.loads(index_path.read_text())
         raw = copy.deepcopy(self.responses)
@@ -2178,13 +2252,15 @@ class TestIssue123Operations(_Issue123OperationsFixture):
                 f"https://api.github.com/{endpoint}?page=2&per_page=100&since=now"
             ),
         }
-        for label, url in attacks.items():
-            changed = copy.deepcopy(complete)
-            page = changed["response_captures"][role]["pages"][0]
-            page["headers"]["link"]["next"] = url
-            page["next"]["value"] = url
-            with (pytest.raises(operations.EvidenceError),):
-                operations.evaluate_operations(changed, raw, self.candidate)
+        label_url_case_values = tuple(attacks.items())
+        assert len(label_url_case_values) == 2
+        label, url = label_url_case_values[label_url_case]
+        changed = copy.deepcopy(complete)
+        page = changed["response_captures"][role]["pages"][0]
+        page["headers"]["link"]["next"] = url
+        page["next"]["value"] = url
+        with (pytest.raises(operations.EvidenceError),):
+            operations.evaluate_operations(changed, raw, self.candidate)
 
         wrong_last = copy.deepcopy(complete)
         wrong_last_page = wrong_last["response_captures"][role]["pages"][0]
@@ -2195,120 +2271,180 @@ class TestIssue123Operations(_Issue123OperationsFixture):
         with pytest.raises(operations.EvidenceError, match="final page"):
             operations.evaluate_operations(wrong_last, raw, self.candidate)
 
-    def test_malformed_pagination_and_request_metadata_fail_closed(self):
+    @pytest.mark.parametrize(
+        "label_raw_case",
+        range(7),
+        ids=(
+            "flat-comments",
+            "trailing-page",
+            "object-total",
+            "graphql-not-pages",
+            "graphql-open-page",
+            "graphql-missing-cursor",
+            "raw-response-closure",
+        ),
+    )
+    def test_malformed_pagination_and_request_metadata_fail_closed(
+        self, label_raw_case
+    ):
+        self._check_malformed_pagination_and_request_metadata_fail_closed_phase(
+            phase="pagination", label_raw_case=label_raw_case
+        )
+
+    @pytest.mark.parametrize(
+        "label_changed_case",
+        range(15),
+        ids=(
+            "request-pagination",
+            "request-jq",
+            "request-endpoint",
+            "request-method",
+            "request-headers",
+            "request-parameters",
+            "release-request-endpoint",
+            "release-request-parameters",
+            "request-graphql",
+            "graphql-query",
+            "graphql-variable-type",
+            "run-id",
+            "release-id",
+            "release-tag",
+            "response-closure",
+        ),
+    )
+    def test_malformed_pagination_and_request_metadata_fail_closed_request_metadata(
+        self, label_changed_case
+    ):
+        self._check_malformed_pagination_and_request_metadata_fail_closed_phase(
+            phase="request_metadata", label_changed_case=label_changed_case
+        )
+
+    def _check_malformed_pagination_and_request_metadata_fail_closed_phase(
+        self, *, phase, label_raw_case=None, label_changed_case=None
+    ):
         _output, index_path, _scope = self._capture()
         document = json.loads(index_path.read_text())
-        raw_cases = []
-        flat_comments = copy.deepcopy(self.responses)
-        flat_comments["issue_123_comments"] = flat_comments["issue_123_comments"][0]
-        raw_cases.append(("flat-comments", flat_comments))
-        trailing_page = copy.deepcopy(self.responses)
-        marker = trailing_page["pull_request_comments"][0][0]
-        trailing_page["pull_request_comments"] = [
-            [
-                marker,
-                *[
-                    self._comment(
-                        2000 + index,
-                        self.number,
-                        f"ordinary PR comment {index}",
-                        owner=False,
-                    )
-                    for index in range(99)
+        if phase == "pagination":
+            raw_cases = []
+            flat_comments = copy.deepcopy(self.responses)
+            flat_comments["issue_123_comments"] = flat_comments["issue_123_comments"][0]
+            raw_cases.append(("flat-comments", flat_comments))
+            trailing_page = copy.deepcopy(self.responses)
+            marker = trailing_page["pull_request_comments"][0][0]
+            trailing_page["pull_request_comments"] = [
+                [
+                    marker,
+                    *[
+                        self._comment(
+                            2000 + index,
+                            self.number,
+                            f"ordinary PR comment {index}",
+                            owner=False,
+                        )
+                        for index in range(99)
+                    ],
                 ],
-            ],
-            [],
-        ]
-        trailing_page["pull_request"]["comments"] = operations.PAGE_SIZE
-        raw_cases.append(("trailing-page", trailing_page))
-        wrong_total = copy.deepcopy(self.responses)
-        wrong_total["ci_jobs"][0]["total_count"] = 3
-        raw_cases.append(("object-total", wrong_total))
-        graphql_object = copy.deepcopy(self.responses)
-        graphql_object["review_threads"] = graphql_object["review_threads"][0]
-        raw_cases.append(("graphql-not-pages", graphql_object))
-        open_graphql_page = copy.deepcopy(self.responses)
-        open_graphql_page["review_threads"][0]["data"]["repository"]["pullRequest"][
-            "reviewThreads"
-        ]["pageInfo"]["hasNextPage"] = True
-        raw_cases.append(("graphql-open-page", open_graphql_page))
-        missing_cursor = copy.deepcopy(self.responses)
-        missing_cursor["review_threads"][0]["data"]["repository"]["pullRequest"][
-            "reviewThreads"
-        ]["pageInfo"]["endCursor"] = None
-        raw_cases.append(("graphql-missing-cursor", missing_cursor))
-        missing_response = copy.deepcopy(self.responses)
-        del missing_response["candidate_commit"]
-        raw_cases.append(("raw-response-closure", missing_response))
-        # Raw and captured-document mutations are two ordered phases against one
-        # evidence snapshot, so keep both phases sequential.
-        for label, raw in raw_cases:
+                [],
+            ]
+            trailing_page["pull_request"]["comments"] = operations.PAGE_SIZE
+            raw_cases.append(("trailing-page", trailing_page))
+            wrong_total = copy.deepcopy(self.responses)
+            wrong_total["ci_jobs"][0]["total_count"] = 3
+            raw_cases.append(("object-total", wrong_total))
+            graphql_object = copy.deepcopy(self.responses)
+            graphql_object["review_threads"] = graphql_object["review_threads"][0]
+            raw_cases.append(("graphql-not-pages", graphql_object))
+            open_graphql_page = copy.deepcopy(self.responses)
+            open_graphql_page["review_threads"][0]["data"]["repository"]["pullRequest"][
+                "reviewThreads"
+            ]["pageInfo"]["hasNextPage"] = True
+            raw_cases.append(("graphql-open-page", open_graphql_page))
+            missing_cursor = copy.deepcopy(self.responses)
+            missing_cursor["review_threads"][0]["data"]["repository"]["pullRequest"][
+                "reviewThreads"
+            ]["pageInfo"]["endCursor"] = None
+            raw_cases.append(("graphql-missing-cursor", missing_cursor))
+            missing_response = copy.deepcopy(self.responses)
+            del missing_response["candidate_commit"]
+            raw_cases.append(("raw-response-closure", missing_response))
+            label_raw_case_values = tuple(raw_cases)
+            assert len(label_raw_case_values) == 7
+            label, raw = label_raw_case_values[label_raw_case]
             with (pytest.raises(operations.EvidenceError),):
                 operations.evaluate_operations(document, raw, self.candidate)
 
-        document_cases = []
-        wrong_pagination = copy.deepcopy(document)
-        wrong_pagination["responses"]["issue_123_comments"]["request"][
-            "paginated"
-        ] = False
-        document_cases.append(("request-pagination", wrong_pagination))
-        wrong_jq = copy.deepcopy(document)
-        wrong_jq["responses"]["issue_123_comments"]["request"]["jq"] = None
-        document_cases.append(("request-jq", wrong_jq))
-        wrong_endpoint = copy.deepcopy(document)
-        wrong_endpoint["responses"]["issue_123"]["request"][
-            "endpoint"
-        ] = "repos/ruddyscent/gmes/issues/124"
-        document_cases.append(("request-endpoint", wrong_endpoint))
-        wrong_method = copy.deepcopy(document)
-        wrong_method["responses"]["candidate_commit"]["request"]["method"] = "POST"
-        document_cases.append(("request-method", wrong_method))
-        wrong_headers = copy.deepcopy(document)
-        wrong_headers["responses"]["technical_release"]["request"]["headers"][
-            "X-GitHub-Api-Version"
-        ] = "2020-01-01"
-        document_cases.append(("request-headers", wrong_headers))
-        wrong_parameters = copy.deepcopy(document)
-        wrong_parameters["responses"]["issue_123_comments"]["request"]["parameters"] = {
-            "per_page": "99"
-        }
-        document_cases.append(("request-parameters", wrong_parameters))
-        wrong_release_endpoint = copy.deepcopy(document)
-        wrong_release_endpoint["responses"]["technical_release_assets"]["request"][
-            "endpoint"
-        ] = "repos/ruddyscent/gmes/releases/31/assets"
-        document_cases.append(("release-request-endpoint", wrong_release_endpoint))
-        wrong_release_parameters = copy.deepcopy(document)
-        wrong_release_parameters["responses"]["technical_release_assets"]["request"][
-            "parameters"
-        ] = {"per_page": "99"}
-        document_cases.append(("release-request-parameters", wrong_release_parameters))
-        wrong_graphql_flag = copy.deepcopy(document)
-        wrong_graphql_flag["responses"]["review_threads"]["request"]["graphql"] = False
-        document_cases.append(("request-graphql", wrong_graphql_flag))
-        wrong_query = copy.deepcopy(document)
-        wrong_query["responses"]["review_threads"]["request"]["query"] += "\n# drift"
-        document_cases.append(("graphql-query", wrong_query))
-        wrong_variables = copy.deepcopy(document)
-        wrong_variables["responses"]["review_threads"]["request"]["variables"][
-            "number"
-        ] = str(self.number)
-        document_cases.append(("graphql-variable-type", wrong_variables))
-        wrong_run = copy.deepcopy(document)
-        wrong_run["ci_run_id"] = 11
-        document_cases.append(("run-id", wrong_run))
-        wrong_release_id = copy.deepcopy(document)
-        wrong_release_id["technical_release_id"] = 31
-        document_cases.append(("release-id", wrong_release_id))
-        wrong_release_tag = copy.deepcopy(document)
-        wrong_release_tag["technical_release_tag"] = "v1.0.0"
-        document_cases.append(("release-tag", wrong_release_tag))
-        extra_response = copy.deepcopy(document)
-        extra_response["responses"]["unexpected"] = copy.deepcopy(
-            extra_response["responses"]["issue_123"]
-        )
-        document_cases.append(("response-closure", extra_response))
-        for label, changed in document_cases:
+        if phase == "request_metadata":
+            document_cases = []
+            wrong_pagination = copy.deepcopy(document)
+            wrong_pagination["responses"]["issue_123_comments"]["request"][
+                "paginated"
+            ] = False
+            document_cases.append(("request-pagination", wrong_pagination))
+            wrong_jq = copy.deepcopy(document)
+            wrong_jq["responses"]["issue_123_comments"]["request"]["jq"] = None
+            document_cases.append(("request-jq", wrong_jq))
+            wrong_endpoint = copy.deepcopy(document)
+            wrong_endpoint["responses"]["issue_123"]["request"][
+                "endpoint"
+            ] = "repos/ruddyscent/gmes/issues/124"
+            document_cases.append(("request-endpoint", wrong_endpoint))
+            wrong_method = copy.deepcopy(document)
+            wrong_method["responses"]["candidate_commit"]["request"]["method"] = "POST"
+            document_cases.append(("request-method", wrong_method))
+            wrong_headers = copy.deepcopy(document)
+            wrong_headers["responses"]["technical_release"]["request"]["headers"][
+                "X-GitHub-Api-Version"
+            ] = "2020-01-01"
+            document_cases.append(("request-headers", wrong_headers))
+            wrong_parameters = copy.deepcopy(document)
+            wrong_parameters["responses"]["issue_123_comments"]["request"][
+                "parameters"
+            ] = {"per_page": "99"}
+            document_cases.append(("request-parameters", wrong_parameters))
+            wrong_release_endpoint = copy.deepcopy(document)
+            wrong_release_endpoint["responses"]["technical_release_assets"]["request"][
+                "endpoint"
+            ] = "repos/ruddyscent/gmes/releases/31/assets"
+            document_cases.append(("release-request-endpoint", wrong_release_endpoint))
+            wrong_release_parameters = copy.deepcopy(document)
+            wrong_release_parameters["responses"]["technical_release_assets"][
+                "request"
+            ]["parameters"] = {"per_page": "99"}
+            document_cases.append(
+                ("release-request-parameters", wrong_release_parameters)
+            )
+            wrong_graphql_flag = copy.deepcopy(document)
+            wrong_graphql_flag["responses"]["review_threads"]["request"][
+                "graphql"
+            ] = False
+            document_cases.append(("request-graphql", wrong_graphql_flag))
+            wrong_query = copy.deepcopy(document)
+            wrong_query["responses"]["review_threads"]["request"][
+                "query"
+            ] += "\n# drift"
+            document_cases.append(("graphql-query", wrong_query))
+            wrong_variables = copy.deepcopy(document)
+            wrong_variables["responses"]["review_threads"]["request"]["variables"][
+                "number"
+            ] = str(self.number)
+            document_cases.append(("graphql-variable-type", wrong_variables))
+            wrong_run = copy.deepcopy(document)
+            wrong_run["ci_run_id"] = 11
+            document_cases.append(("run-id", wrong_run))
+            wrong_release_id = copy.deepcopy(document)
+            wrong_release_id["technical_release_id"] = 31
+            document_cases.append(("release-id", wrong_release_id))
+            wrong_release_tag = copy.deepcopy(document)
+            wrong_release_tag["technical_release_tag"] = "v1.0.0"
+            document_cases.append(("release-tag", wrong_release_tag))
+            extra_response = copy.deepcopy(document)
+            extra_response["responses"]["unexpected"] = copy.deepcopy(
+                extra_response["responses"]["issue_123"]
+            )
+            document_cases.append(("response-closure", extra_response))
+            label_changed_case_values = tuple(document_cases)
+            assert len(label_changed_case_values) == 15
+            label, changed = label_changed_case_values[label_changed_case]
             with (pytest.raises(operations.EvidenceError),):
                 operations.evaluate_operations(changed, self.responses, self.candidate)
 
@@ -2340,7 +2476,12 @@ class TestIssue123Operations(_Issue123OperationsFixture):
             )
         assert not (receipt_output.exists())
 
-    def test_live_receipt_preflight_uses_authenticated_b1_roots_not_cli_aliases(self):
+    @pytest.mark.parametrize(
+        "candidate_case", range(4), ids=("source", "reopened", "symlink", "dot-alias")
+    )
+    def test_live_receipt_preflight_uses_authenticated_b1_roots_not_cli_aliases(
+        self, candidate_case
+    ):
         source = self.root / "retained-source-b1"
         reopened = self.root / "retained-reopened-b1"
         index_root = self.root / "operations-index-root"
@@ -2392,25 +2533,27 @@ class TestIssue123Operations(_Issue123OperationsFixture):
         ):
             # Candidate paths share one authenticated lease and patch stack; their
             # cleanup assertions apply to the sequence as a whole.
-            for candidate in candidates:
-                with (
-                    pytest.raises(
-                        operations.EvidenceError, match="overlaps protected evidence"
-                    ),
+            candidate_case_values = tuple(candidates)
+            assert len(candidate_case_values) == 4
+            candidate = candidate_case_values[candidate_case]
+            with (
+                pytest.raises(
+                    operations.EvidenceError, match="overlaps protected evidence"
+                ),
+            ):
+                with operations.open_verified_operations_live(
+                    index_path=index_root / "index.json",
+                    manifest=operations.DEFAULT_MANIFEST,
+                    publication_policy=self.root / "policy.json",
+                    publication_policy_sha256="e" * 64,
+                    publication_assets={
+                        role: public_root / name
+                        for role, name in operations.TECHNICAL_RELEASE_ASSETS.items()
+                    },
+                    receipt_output=candidate,
+                    post_bundle_lease=lease,
                 ):
-                    with operations.open_verified_operations_live(
-                        index_path=index_root / "index.json",
-                        manifest=operations.DEFAULT_MANIFEST,
-                        publication_policy=self.root / "policy.json",
-                        publication_policy_sha256="e" * 64,
-                        publication_assets={
-                            role: public_root / name
-                            for role, name in operations.TECHNICAL_RELEASE_ASSETS.items()
-                        },
-                        receipt_output=candidate,
-                        post_bundle_lease=lease,
-                    ):
-                        pytest.fail("overlapping receipt path was accepted")
+                    pytest.fail("overlapping receipt path was accepted")
         baseline.assert_not_called()
         assert list(source.iterdir()) == []
         assert list(reopened.iterdir()) == []
@@ -3015,7 +3158,40 @@ class TestIssue123Operations(_Issue123OperationsFixture):
         assert command[command.index(number_argument) - 1] == "-F"
         assert "--slurp" not in command
 
-    def test_final_checklist_requires_exact_state_order_and_section(self):
+    @pytest.mark.parametrize(
+        "label_changed_body_case",
+        range(4),
+        ids=("unrelated-text", "heading", "line-endings", "whitespace"),
+    )
+    def test_final_checklist_requires_exact_state_order_and_section(
+        self, label_changed_body_case
+    ):
+        self._check_final_checklist_requires_exact_state_order_and_section_phase(
+            phase="state_order", label_changed_body_case=label_changed_body_case
+        )
+
+    @pytest.mark.parametrize(
+        "label_body_case",
+        range(6),
+        ids=(
+            "missing",
+            "substituted",
+            "wrong-section",
+            "unchecked",
+            "reordered",
+            "duplicated",
+        ),
+    )
+    def test_final_checklist_requires_exact_state_order_and_section_invalid_sections(
+        self, label_body_case
+    ):
+        self._check_final_checklist_requires_exact_state_order_and_section_phase(
+            phase="invalid_sections", label_body_case=label_body_case
+        )
+
+    def _check_final_checklist_requires_exact_state_order_and_section_phase(
+        self, *, phase, label_body_case=None, label_changed_body_case=None
+    ):
         checked = {
             "body": "\n".join(
                 (
@@ -3037,63 +3213,80 @@ class TestIssue123Operations(_Issue123OperationsFixture):
         ) == operations.checklist_transition_sha256(checked, "checked")
         # These transition variants share the checked/unchecked digest pair and
         # intentionally precede the exact checklist rejection matrix below.
-        for label, changed_body in (
-            ("unrelated-text", checked["body"] + "synthetic trailing line\n"),
-            (
-                "heading",
-                checked["body"].replace(
-                    operations.FINAL_CHECKLIST_SECTION,
-                    "## Implementation work changed",
-                ),
-            ),
-            ("line-endings", checked["body"].replace("\n", "\r\n")),
-            (
-                "whitespace",
-                checked["body"].replace(
-                    "## Implementation work\n",
-                    "## Implementation work \n",
-                ),
-            ),
-        ):
+        if phase == "state_order":
+            label_changed_body_case_values = tuple(
+                (
+                    ("unrelated-text", checked["body"] + "synthetic trailing line\n"),
+                    (
+                        "heading",
+                        checked["body"].replace(
+                            operations.FINAL_CHECKLIST_SECTION,
+                            "## Implementation work changed",
+                        ),
+                    ),
+                    ("line-endings", checked["body"].replace("\n", "\r\n")),
+                    (
+                        "whitespace",
+                        checked["body"].replace(
+                            "## Implementation work\n",
+                            "## Implementation work \n",
+                        ),
+                    ),
+                )
+            )
+            assert len(label_changed_body_case_values) == 4
+            label, changed_body = label_changed_body_case_values[
+                label_changed_body_case
+            ]
             changed = {**checked, "body": changed_body}
             try:
                 changed_transition = operations.checklist_transition_sha256(
                     changed, "checked"
                 )
             except operations.EvidenceError:
-                continue
-            assert changed_transition != operations.checklist_transition_sha256(
-                unchecked, "unchecked"
-            )
-        attacks = {
-            "missing": checked["body"].replace(
-                operations.FINAL_CHECKLIST_CHECKED[1], ""
-            ),
-            "substituted": checked["body"].replace(
-                "post-bundle checklist", "different checklist"
-            ),
-            "wrong-section": checked["body"].replace(
-                operations.FINAL_CHECKLIST_SECTION, "## Synthetic other section"
-            ),
-            "unchecked": checked["body"].replace("[x]", "[ ]"),
-            "reordered": "\n".join(
-                (
-                    operations.FINAL_CHECKLIST_SECTION,
-                    *reversed(operations.FINAL_CHECKLIST_CHECKED),
+                pass
+            else:
+                assert changed_transition != operations.checklist_transition_sha256(
+                    unchecked, "unchecked"
                 )
-            ),
-            "duplicated": checked["body"]
-            + "\n"
-            + operations.FINAL_CHECKLIST_CHECKED[0],
-        }
-        for label, body in attacks.items():
+        if phase == "invalid_sections":
+            attacks = {
+                "missing": checked["body"].replace(
+                    operations.FINAL_CHECKLIST_CHECKED[1], ""
+                ),
+                "substituted": checked["body"].replace(
+                    "post-bundle checklist", "different checklist"
+                ),
+                "wrong-section": checked["body"].replace(
+                    operations.FINAL_CHECKLIST_SECTION, "## Synthetic other section"
+                ),
+                "unchecked": checked["body"].replace("[x]", "[ ]"),
+                "reordered": "\n".join(
+                    (
+                        operations.FINAL_CHECKLIST_SECTION,
+                        *reversed(operations.FINAL_CHECKLIST_CHECKED),
+                    )
+                ),
+                "duplicated": checked["body"]
+                + "\n"
+                + operations.FINAL_CHECKLIST_CHECKED[0],
+            }
+            label_body_case_values = tuple(attacks.items())
+            assert len(label_body_case_values) == 6
+            label, body = label_body_case_values[label_body_case]
             with (pytest.raises(operations.EvidenceError),):
                 operations._validate_post_bundle_checklist(
                     {**checked, "body": body}, "checked"
                 )
 
+    @pytest.mark.parametrize(
+        "label_mutate_case",
+        range(6),
+        ids=("number", "state", "body", "nested-timestamp", "array-order", "extra"),
+    )
     def test_checklist_transition_commits_complete_response_except_contract_fields(
         self,
+        label_mutate_case,
     ):
         unchecked = copy.deepcopy(self.responses["issue_123"])
         checked = copy.deepcopy(unchecked)
@@ -3122,15 +3315,31 @@ class TestIssue123Operations(_Issue123OperationsFixture):
             "array-order": lambda value: value.update(labels=["b", "a"]),
             "extra": lambda value: value.update(extra_contract_value=True),
         }
-        for label, mutate in attacks.items():
-            changed = copy.deepcopy(checked)
-            mutate(changed)
-            assert (
-                operations.checklist_transition_sha256(changed, "checked")
-                != unchecked_digest
-            )
+        label_mutate_case_values = tuple(attacks.items())
+        assert len(label_mutate_case_values) == 6
+        label, mutate = label_mutate_case_values[label_mutate_case]
+        changed = copy.deepcopy(checked)
+        mutate(changed)
+        assert (
+            operations.checklist_transition_sha256(changed, "checked")
+            != unchecked_digest
+        )
 
-    def test_baseline_live_authority_rejects_missing_or_mutated_exact_bytes(self):
+    @pytest.mark.parametrize(
+        "attack_case",
+        range(6),
+        ids=(
+            "append",
+            "same-size",
+            "inode-replacement",
+            "symlink",
+            "mode",
+            "extra-file",
+        ),
+    )
+    def test_baseline_live_authority_rejects_missing_or_mutated_exact_bytes(
+        self, attack_case
+    ):
         authority, download_by_id = operations._synthetic_baseline_authority_fixture()
         api_root = f"https://api.github.com/repos/{operations.REPOSITORY}"
         web_root = f"https://github.com/{operations.REPOSITORY}"
@@ -3235,44 +3444,48 @@ class TestIssue123Operations(_Issue123OperationsFixture):
 
         # Each retained-tree mutation opens and closes a lease against the same
         # authenticated authority capture; preserve that ordered lifecycle.
-        for attack in (
-            "append",
-            "same-size",
-            "inode-replacement",
-            "symlink",
-            "mode",
-            "extra-file",
-        ):
-            lease = operations._capture_baseline_authority(
-                code_authority=authority,
-                manifest_authority=authority,
-                b1_authority=authority,
-                api_capture=capture,
-                asset_download=lambda identifier: download_by_id[identifier],
-                observed_at="2026-09-03T02:00:00Z",
+        attack_case_values = tuple(
+            (
+                "append",
+                "same-size",
+                "inode-replacement",
+                "symlink",
+                "mode",
+                "extra-file",
             )
-            first = lease._root / authority.assets[0].name
-            original = first.read_bytes()
-            if attack == "append":
-                first.write_bytes(original + b"x")
-            elif attack == "same-size":
-                changed = bytearray(original)
-                changed[0] ^= 1
-                first.write_bytes(changed)
-            elif attack == "inode-replacement":
-                replacement = first.with_name("replacement")
-                replacement.write_bytes(original)
-                replacement.replace(first)
-            elif attack == "symlink":
-                first.unlink()
-                first.symlink_to(authority.assets[1].name)
-            elif attack == "mode":
-                first.chmod(0o640)
-            else:
-                (lease._root / "unexpected-third-entry").write_bytes(b"x")
-            with pytest.raises(operations.EvidenceError):
-                lease.require_unchanged()
-            lease.close()
+        )
+        assert len(attack_case_values) == 6
+        attack = attack_case_values[attack_case]
+        lease = operations._capture_baseline_authority(
+            code_authority=authority,
+            manifest_authority=authority,
+            b1_authority=authority,
+            api_capture=capture,
+            asset_download=lambda identifier: download_by_id[identifier],
+            observed_at="2026-09-03T02:00:00Z",
+        )
+        first = lease._root / authority.assets[0].name
+        original = first.read_bytes()
+        if attack == "append":
+            first.write_bytes(original + b"x")
+        elif attack == "same-size":
+            changed = bytearray(original)
+            changed[0] ^= 1
+            first.write_bytes(changed)
+        elif attack == "inode-replacement":
+            replacement = first.with_name("replacement")
+            replacement.write_bytes(original)
+            replacement.replace(first)
+        elif attack == "symlink":
+            first.unlink()
+            first.symlink_to(authority.assets[1].name)
+        elif attack == "mode":
+            first.chmod(0o640)
+        else:
+            (lease._root / "unexpected-third-entry").write_bytes(b"x")
+        with pytest.raises(operations.EvidenceError):
+            lease.require_unchanged()
+        lease.close()
 
         missing_release = copy.deepcopy(release)
         missing_release["assets"] = missing_release["assets"][:-1]

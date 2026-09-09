@@ -182,12 +182,19 @@ class TestTorchCutoverContract:
         with pytest.raises(NotImplementedError, match="parallel=True.*unsupported"):
             gmes.Cartesian((1, 1, 1), parallel=True)
 
-    def test_retired_modules_are_absent_after_atomic_cutover(self):
-        for module_name in (
-            "gmes.fdtd",
-            "gmes.show",
-            "gmes.pw_source",
-            "gmes.pw_material",
-        ):
-            with pytest.raises(ModuleNotFoundError):
-                importlib.import_module(module_name)
+    @pytest.mark.parametrize(
+        "module_name_case", range(4), ids=("fdtd", "show", "pw-source", "pw-material")
+    )
+    def test_retired_modules_are_absent_after_atomic_cutover(self, module_name_case):
+        module_name_case_values = tuple(
+            (
+                "gmes.fdtd",
+                "gmes.show",
+                "gmes.pw_source",
+                "gmes.pw_material",
+            )
+        )
+        assert len(module_name_case_values) == 4
+        module_name = module_name_case_values[module_name_case]
+        with pytest.raises(ModuleNotFoundError):
+            importlib.import_module(module_name)

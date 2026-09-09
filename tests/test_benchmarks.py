@@ -53,19 +53,24 @@ def _torch_checkpoint(state, *, auxiliaries=(), probes=None):
 
 
 class TestFieldUpdateBenchmark:
-    def test_historical_native_readers_preserve_pinned_contract(self):
+    @pytest.mark.parametrize(
+        "reader_case", range(2), ids=("field-updates", "geometry-mapping")
+    )
+    def test_historical_native_readers_preserve_pinned_contract(self, reader_case):
         readers = (load_field_updates(), load_geometry_mapping())
-        for reader in readers:
-            contract = reader.historical_contract()
-            assert (contract["status"]) == ("historical-only")
-            assert (contract["reference_tag"]) == ("native-oracle-d87d25a")
-            assert (contract["reference_commit"]) == (
-                "d87d25afd160d96b1fa0890cacecd90802448d57"
-            )
-            assert (contract["observer_tag"]) == ("native-oracle-observer-v5")
-            assert (contract["summary_sha256"]) == (
-                "1c9bdce2717ba858fd03b2e40302a5b2d19a29920496f969e33aee36e34e1baa"
-            )
+        reader_case_values = tuple(readers)
+        assert len(reader_case_values) == 2
+        reader = reader_case_values[reader_case]
+        contract = reader.historical_contract()
+        assert (contract["status"]) == ("historical-only")
+        assert (contract["reference_tag"]) == ("native-oracle-d87d25a")
+        assert (contract["reference_commit"]) == (
+            "d87d25afd160d96b1fa0890cacecd90802448d57"
+        )
+        assert (contract["observer_tag"]) == ("native-oracle-observer-v5")
+        assert (contract["summary_sha256"]) == (
+            "1c9bdce2717ba858fd03b2e40302a5b2d19a29920496f969e33aee36e34e1baa"
+        )
 
 
 class TestTorchMaterialPlannerBenchmark:
@@ -313,7 +318,8 @@ class TestTorchDm2Benchmark:
             metrics["bounded_padding_elements"]
         )
 
-    def test_all_material_cases_execute_in_2d_and_3d(self):
+    @pytest.mark.parametrize("case_case", range(2), ids=("2d", "3d"))
+    def test_all_material_cases_execute_in_2d_and_3d(self, case_case):
         expected_models = {
             "cpml",
             "dcp-ade",
@@ -324,26 +330,28 @@ class TestTorchDm2Benchmark:
             "drude",
             "lorentz",
         }
-        for case in ("all-material-2d", "all-material-3d"):
-            space, geometry = self.benchmark.build_case(case, self.gmes)
-            simulation = self.gmes.TorchSimulation(
-                space=space,
-                geometry=geometry,
-                runtime=self.gmes.TorchRuntimeConfig(device="cpu", cpu_threads=1),
-            )
-            simulation.step()
-            models = {
-                bucket.signature.model
-                for component in simulation.plan.components.values()
-                for bucket in component.buckets
-            }
-            assert expected_models.issubset(models)
-            diagnostics = simulation.diagnostics()
-            assert diagnostics["dm2"]
-            assert (diagnostics["pml"]["active_cells"]) > (0)
-            assert (set(diagnostics["dispersive"]["models"])) == (
-                {"dcp-ade", "dcp-plrc", "dcp-rc", "drude", "lorentz"}
-            )
+        case_case_values = tuple(("all-material-2d", "all-material-3d"))
+        assert len(case_case_values) == 2
+        case = case_case_values[case_case]
+        space, geometry = self.benchmark.build_case(case, self.gmes)
+        simulation = self.gmes.TorchSimulation(
+            space=space,
+            geometry=geometry,
+            runtime=self.gmes.TorchRuntimeConfig(device="cpu", cpu_threads=1),
+        )
+        simulation.step()
+        models = {
+            bucket.signature.model
+            for component in simulation.plan.components.values()
+            for bucket in component.buckets
+        }
+        assert expected_models.issubset(models)
+        diagnostics = simulation.diagnostics()
+        assert diagnostics["dm2"]
+        assert (diagnostics["pml"]["active_cells"]) > (0)
+        assert (set(diagnostics["dispersive"]["models"])) == (
+            {"dcp-ade", "dcp-plrc", "dcp-rc", "drude", "lorentz"}
+        )
 
 
 class TestTorchTuningBenchmark:
@@ -352,7 +360,14 @@ class TestTorchTuningBenchmark:
         cls.benchmark = load_torch_tuning()
         cls.manifest = cls.benchmark.load_manifest(cls.benchmark.MANIFEST)
 
-    def test_cpu_baseline_environment_requires_exact_timing_runtime(self):
+    @pytest.mark.parametrize(
+        "name_value_case",
+        range(3),
+        ids=("torch-cuda-build", "cuda-runtime", "torch-patch-version"),
+    )
+    def test_cpu_baseline_environment_requires_exact_timing_runtime(
+        self, name_value_case
+    ):
         environment = {
             "hostname": "host",
             "platform": "platform",
@@ -379,16 +394,20 @@ class TestTorchTuningBenchmark:
             }
         }
         assert self.benchmark._torch_baseline_environment_matches(baseline, environment)
-        for name, value in (
-            ("torch", "2.13.0+cu126"),
-            ("cuda_runtime", "12.6"),
-            ("torch", "2.13.1+cpu"),
-        ):
-            candidate = copy.deepcopy(environment)
-            candidate[name] = value
-            assert not (
-                self.benchmark._torch_baseline_environment_matches(baseline, candidate)
+        name_value_case_values = tuple(
+            (
+                ("torch", "2.13.0+cu126"),
+                ("cuda_runtime", "12.6"),
+                ("torch", "2.13.1+cpu"),
             )
+        )
+        assert len(name_value_case_values) == 3
+        name, value = name_value_case_values[name_value_case]
+        candidate = copy.deepcopy(environment)
+        candidate[name] = value
+        assert not (
+            self.benchmark._torch_baseline_environment_matches(baseline, candidate)
+        )
         malformed = copy.deepcopy(baseline)
         malformed["environment"]["timing_runtime_identity"]["schema_version"] = True
         assert not (
@@ -532,7 +551,12 @@ class TestTorchTuningBenchmark:
         assert ("auxiliaries[0].probes.nested_ring") in (result["tracked_buffers"])
         assert (result["stages"]["initial"]["nonfinite_element_count"]) == (3)
 
-    def test_dynamic_state_finiteness_requires_complete_checkpoint_v1_schema(self):
+    @pytest.mark.parametrize(
+        "path_case", range(3), ids=("auxiliaries", "probes", "nested-probes")
+    )
+    def test_dynamic_state_finiteness_requires_complete_checkpoint_v1_schema(
+        self, path_case
+    ):
         import torch
 
         state = {name: torch.ones(1) for name in ("ex", "ey", "ez", "hx", "hy", "hz")}
@@ -541,14 +565,16 @@ class TestTorchTuningBenchmark:
             auxiliaries=(_torch_checkpoint(copy.deepcopy(state)),),
             probes={"ring": torch.ones(1)},
         )
-        for path in ("auxiliaries", "probes", "nested-probes"):
-            incomplete = copy.deepcopy(complete)
-            if path == "nested-probes":
-                del incomplete["auxiliaries"][0]["probes"]
-            else:
-                del incomplete[path]
-            with pytest.raises(ValueError, match="closure differs"):
-                self.benchmark._checkpoint_dynamic_tensors(incomplete)
+        path_case_values = tuple(("auxiliaries", "probes", "nested-probes"))
+        assert len(path_case_values) == 3
+        path = path_case_values[path_case]
+        incomplete = copy.deepcopy(complete)
+        if path == "nested-probes":
+            del incomplete["auxiliaries"][0]["probes"]
+        else:
+            del incomplete[path]
+        with pytest.raises(ValueError, match="closure differs"):
+            self.benchmark._checkpoint_dynamic_tensors(incomplete)
 
         non_tensor = copy.deepcopy(complete)
         non_tensor["probes"]["ring"] = 1
@@ -686,7 +712,25 @@ class TestTorchTuningBenchmark:
         assert (first) >= (0)
         assert (second) >= (0)
 
-    def test_linux_proc_statm_reader_rejects_malformed_or_truncated_data(self):
+    @pytest.mark.parametrize(
+        "name_payload_case",
+        range(10),
+        ids=(
+            "empty",
+            "missing-resident",
+            "empty-resident",
+            "truncated-resident",
+            "signed-size",
+            "signed-resident",
+            "positive-sign",
+            "nondigit",
+            "trailing-nondigit",
+            "full-buffer",
+        ),
+    )
+    def test_linux_proc_statm_reader_rejects_malformed_or_truncated_data(
+        self, name_payload_case
+    ):
         cases = (
             ("empty", b""),
             ("missing-resident", b"1000\n"),
@@ -702,30 +746,54 @@ class TestTorchTuningBenchmark:
                 b"1" * self.benchmark.LINUX_PROC_STATM_BUFFER_BYTES,
             ),
         )
-        for name, payload in cases:
+        name_payload_case_values = tuple(cases)
+        assert len(name_payload_case_values) == 10
+        name, payload = name_payload_case_values[name_payload_case]
 
-            def preadv(_fd, iov, _offset):
-                iov[0][: len(payload)] = payload
-                return len(payload)
+        def preadv(_fd, iov, _offset):
+            iov[0][: len(payload)] = payload
+            return len(payload)
 
-            with (
-                patch.object(self.benchmark.os, "getpid", return_value=321),
-                patch.object(self.benchmark.os, "sysconf", return_value=4096),
-                patch.object(self.benchmark.os, "open", return_value=17),
-                patch.object(
-                    self.benchmark.os,
-                    "preadv",
-                    side_effect=preadv,
-                    create=True,
-                ),
-                patch.object(self.benchmark.os, "close") as close_file,
-            ):
-                reader = self.benchmark._LinuxProcStatmReader()
-                assert (reader()) is None
-                reader.close()
-            close_file.assert_called_once_with(17)
+        with (
+            patch.object(self.benchmark.os, "getpid", return_value=321),
+            patch.object(self.benchmark.os, "sysconf", return_value=4096),
+            patch.object(self.benchmark.os, "open", return_value=17),
+            patch.object(
+                self.benchmark.os,
+                "preadv",
+                side_effect=preadv,
+                create=True,
+            ),
+            patch.object(self.benchmark.os, "close") as close_file,
+        ):
+            reader = self.benchmark._LinuxProcStatmReader()
+            assert (reader()) is None
+            reader.close()
+        close_file.assert_called_once_with(17)
 
-    def test_linux_proc_statm_reader_fails_closed_for_provider_errors(self):
+    @pytest.mark.parametrize(
+        "page_size_case", range(2), ids=("zero-page-size", "negative-page-size")
+    )
+    def test_linux_proc_statm_reader_fails_closed_for_provider_errors(
+        self, page_size_case
+    ):
+        self._check_linux_proc_statm_reader_fails_closed_for_provider_errors_phase(
+            phase="page_sizes", page_size_case=page_size_case
+        )
+
+    @pytest.mark.parametrize(
+        "error_case", range(2), ids=("os-error", "attribute-error")
+    )
+    def test_linux_proc_statm_reader_fails_closed_for_provider_errors_provider_errors(
+        self, error_case
+    ):
+        self._check_linux_proc_statm_reader_fails_closed_for_provider_errors_phase(
+            phase="provider_errors", error_case=error_case
+        )
+
+    def _check_linux_proc_statm_reader_fails_closed_for_provider_errors_phase(
+        self, *, phase, page_size_case=None, error_case=None
+    ):
         with (
             patch.object(self.benchmark.os, "getpid", return_value=321),
             patch.object(self.benchmark.os, "sysconf", side_effect=OSError),
@@ -736,7 +804,10 @@ class TestTorchTuningBenchmark:
             reader.close()
         open_file.assert_not_called()
 
-        for page_size in (0, -1):
+        if phase == "page_sizes":
+            page_size_case_values = tuple((0, -1))
+            assert len(page_size_case_values) == 2
+            page_size = page_size_case_values[page_size_case]
             with (
                 patch.object(self.benchmark.os, "getpid", return_value=321),
                 patch.object(
@@ -804,7 +875,10 @@ class TestTorchTuningBenchmark:
             reader.close()
         open_file.assert_not_called()
 
-        for error in (OSError, AttributeError):
+        if phase == "provider_errors":
+            error_case_values = tuple((OSError, AttributeError))
+            assert len(error_case_values) == 2
+            error = error_case_values[error_case]
             with (
                 patch.object(self.benchmark.os, "getpid", return_value=321),
                 patch.object(self.benchmark.os, "sysconf", return_value=4096),
@@ -1593,7 +1667,22 @@ class TestTorchTuningBenchmark:
         assert contract["checks"]["trace_allocation_integrity"]
         assert contract["satisfied"]
 
-    def test_cpu_nonzero_allocation_requires_canonical_public_issue_urls(self):
+    @pytest.mark.parametrize(
+        "value_case",
+        range(7),
+        ids=(
+            "missing",
+            "empty",
+            "duplicate",
+            "query",
+            "pull-request",
+            "zero-issue",
+            "mapping",
+        ),
+    )
+    def test_cpu_nonzero_allocation_requires_canonical_public_issue_urls(
+        self, value_case
+    ):
         valid_url = "https://github.com/pytorch/pytorch/issues/195330"
         invalid_values = (
             None,
@@ -1607,17 +1696,19 @@ class TestTorchTuningBenchmark:
         with tempfile.TemporaryDirectory() as directory:
             source_path = Path(directory) / "generated.cpp"
             source_path.write_text("// generated indexed-update kernel\n")
-            for value in invalid_values:
-                provenance = self._allocation_provenance(source_path)
-                if value is None:
-                    del provenance["upstream_issue_urls"]
-                else:
-                    provenance["upstream_issue_urls"] = value
-                contract = self._allocation_contract(
-                    self._allocation_profiler(), provenance
-                )
-                assert not (contract["satisfied"])
-                assert not (contract["checks"]["public_upstream_issues_valid"])
+            value_case_values = tuple(invalid_values)
+            assert len(value_case_values) == 7
+            value = value_case_values[value_case]
+            provenance = self._allocation_provenance(source_path)
+            if value is None:
+                del provenance["upstream_issue_urls"]
+            else:
+                provenance["upstream_issue_urls"] = value
+            contract = self._allocation_contract(
+                self._allocation_profiler(), provenance
+            )
+            assert not (contract["satisfied"])
+            assert not (contract["checks"]["public_upstream_issues_valid"])
 
     def test_cpu_allocation_rejects_full_field_or_domain_clones(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -2193,7 +2284,14 @@ class TestTorchTuningBenchmark:
         assert (result["geometric_mean_ratio"]) is None
         assert not (result["passed"])
 
-    def test_bootstrap_geomean_rejects_nonfinite_or_inconsistent_samples(self):
+    @pytest.mark.parametrize(
+        "malformed_case",
+        range(5),
+        ids=("nan", "zero", "inconsistent-ratio", "boolean-sample", "boolean-ratio"),
+    )
+    def test_bootstrap_geomean_rejects_nonfinite_or_inconsistent_samples(
+        self, malformed_case
+    ):
         statistics = dict(
             self.manifest["performance_gates"]["cpu_acceptance"]["statistics"]
         )
@@ -2207,20 +2305,24 @@ class TestTorchTuningBenchmark:
                 "candidate_to_torch_baseline_ratio": ratio,
             }
 
-        for malformed in (
-            gate(float("nan")),
-            gate(0.0),
-            gate(1.0, ratio=2.0),
-            gate(True),
-            gate(1.0, ratio=True),
-        ):
-            result = self.benchmark._bootstrap_geomean_regression(
-                [malformed],
-                statistics,
-                ratio_key="candidate_to_torch_baseline_ratio",
+        malformed_case_values = tuple(
+            (
+                gate(float("nan")),
+                gate(0.0),
+                gate(1.0, ratio=2.0),
+                gate(True),
+                gate(1.0, ratio=True),
             )
-            assert not (result["evaluated"])
-            assert not (result["passed"])
+        )
+        assert len(malformed_case_values) == 5
+        malformed = malformed_case_values[malformed_case]
+        result = self.benchmark._bootstrap_geomean_regression(
+            [malformed],
+            statistics,
+            ratio_key="candidate_to_torch_baseline_ratio",
+        )
+        assert not (result["evaluated"])
+        assert not (result["passed"])
 
     def test_state_progress_requires_every_field_and_material_state(self):
         import torch
@@ -2247,7 +2349,50 @@ class TestTorchTuningBenchmark:
         assert result["dispersive_state_changed"]
         assert result["dm2_state_changed"]
 
-    def test_cpu_slice_aggregator_recomputes_and_binds_evidence(self):
+    @pytest.mark.parametrize(
+        "label_runtime_mode_case",
+        range(4),
+        ids=("device", "precision", "graph", "compile-mode"),
+    )
+    def test_cpu_slice_aggregator_recomputes_and_binds_evidence(
+        self, label_runtime_mode_case
+    ):
+        self._check_cpu_slice_aggregator_recomputes_and_binds_evidence_phase(
+            phase="runtime_modes", label_runtime_mode_case=label_runtime_mode_case
+        )
+
+    @pytest.mark.parametrize(
+        "label_mutate_case",
+        range(16),
+        ids=(
+            "compiler-graph-break",
+            "compiled-region-count",
+            "steady-transfer",
+            "external-indexed-write",
+            "parent-storage",
+            "child-rss-window",
+            "child-cache",
+            "child-request",
+            "child-checkout",
+            "child-counter",
+            "child-storage",
+            "measurement-contract",
+            "changed-field",
+            "step-count",
+            "material-diagnostics",
+            "boundary-execution",
+        ),
+    )
+    def test_cpu_slice_aggregator_recomputes_and_binds_evidence_raw_evidence(
+        self, label_mutate_case
+    ):
+        self._check_cpu_slice_aggregator_recomputes_and_binds_evidence_phase(
+            phase="raw_evidence", label_mutate_case=label_mutate_case
+        )
+
+    def _check_cpu_slice_aggregator_recomputes_and_binds_evidence_phase(
+        self, *, phase, label_runtime_mode_case=None, label_mutate_case=None
+    ):
         manifest = json.loads(json.dumps(self.manifest))
         manifest["performance_gates"]["cpu_acceptance"]["statistics"]["resamples"] = 100
         cases = manifest["performance_gates"]["cpu_acceptance"]["cases"]
@@ -2764,7 +2909,12 @@ class TestTorchTuningBenchmark:
                     "compile_mode": "reduce-overhead",
                 },
             }
-            for label, runtime_mode in invalid_runtime_modes.items():
+            if phase == "runtime_modes":
+                label_runtime_mode_case_values = tuple(invalid_runtime_modes.items())
+                assert len(label_runtime_mode_case_values) == 4
+                label, runtime_mode = label_runtime_mode_case_values[
+                    label_runtime_mode_case
+                ]
                 wrong_mode = json.loads(json.dumps(correctness_evidence))
                 wrong_mode["runtime_mode"] = runtime_mode
                 assert not (
@@ -2992,7 +3142,10 @@ class TestTorchTuningBenchmark:
                 ].__setitem__("execution_representation", "tampered"),
             }
             raw_evidence_results = {}
-            for label, mutate in raw_evidence_mutations.items():
+            if phase == "raw_evidence":
+                label_mutate_case_values = tuple(raw_evidence_mutations.items())
+                assert len(label_mutate_case_values) == 16
+                label, mutate = label_mutate_case_values[label_mutate_case]
                 tampered = artifact(4)
                 mutate(tampered["cases"][0])
                 raw_evidence_results[label] = (
@@ -3021,7 +3174,8 @@ class TestTorchTuningBenchmark:
         assert not (bootstrap_failure["suite_acceptance"]["passed"])
         assert not (invalid_native_result["suite_acceptance"]["passed"])
         assert not (thread_environment_result["suite_acceptance"]["passed"])
-        for label, raw_evidence_result in raw_evidence_results.items():
+        if phase == "raw_evidence":
+            raw_evidence_result = raw_evidence_results[label]
             assert not (raw_evidence_result["suite_acceptance"]["passed"])
             assert ("CPU runtime evidence") in (
                 " ".join(raw_evidence_result["suite_acceptance"]["errors"])

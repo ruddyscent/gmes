@@ -193,23 +193,33 @@ class TestCiConfiguration:
         assert ("retention-days: 90") in (self.ci_workflow)
         assert ("overwrite: true") in (self.ci_workflow)
 
+    @pytest.mark.parametrize(
+        "workflow_build_constraints_case", range(2), ids=("ci", "release")
+    )
     def test_cpu_artifact_installers_preserve_pip_hash_and_sdist_backend_provenance(
         self,
+        workflow_build_constraints_case,
     ):
-        for workflow, build_constraints in (
-            (self.ci_workflow, "$CANDIDATE_DIR/build-constraints.txt"),
-            (self.release_workflow, "$GITHUB_WORKSPACE/build-constraints.txt"),
-        ):
-            assert ("uv sync --locked --no-install-project") in (workflow)
-            assert ("--extra torch-cpu --extra hdf5") in (workflow)
-            assert ("-m ensurepip") in (workflow)
-            assert ("-m pip --version") in (workflow)
-            assert ("pip 26.2.1") not in (workflow)
-            assert (f'--constraint "{build_constraints}"') in (workflow)
-            assert ("setuptools==84.0.0 wheel==0.48.0") in (workflow)
-            assert ("installer=(--no-deps --no-index --force-reinstall)") in (workflow)
-            assert ("installer+=(--no-build-isolation)") in (workflow)
-            assert ('"gmes @ file://${archive}#sha256=${digest}"') in (workflow)
+        workflow_build_constraints_case_values = tuple(
+            (
+                (self.ci_workflow, "$CANDIDATE_DIR/build-constraints.txt"),
+                (self.release_workflow, "$GITHUB_WORKSPACE/build-constraints.txt"),
+            )
+        )
+        assert len(workflow_build_constraints_case_values) == 2
+        workflow, build_constraints = workflow_build_constraints_case_values[
+            workflow_build_constraints_case
+        ]
+        assert ("uv sync --locked --no-install-project") in (workflow)
+        assert ("--extra torch-cpu --extra hdf5") in (workflow)
+        assert ("-m ensurepip") in (workflow)
+        assert ("-m pip --version") in (workflow)
+        assert ("pip 26.2.1") not in (workflow)
+        assert (f'--constraint "{build_constraints}"') in (workflow)
+        assert ("setuptools==84.0.0 wheel==0.48.0") in (workflow)
+        assert ("installer=(--no-deps --no-index --force-reinstall)") in (workflow)
+        assert ("installer+=(--no-build-isolation)") in (workflow)
+        assert ('"gmes @ file://${archive}#sha256=${digest}"') in (workflow)
         candidate_install = self.ci_workflow.split(
             'helper="$CANDIDATE_DIR/benchmarks/package_cutover.py"', 1
         )[1]

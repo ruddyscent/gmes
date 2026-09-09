@@ -1300,7 +1300,20 @@ class TestIssue123Completion(_Issue123CompletionFixture):
         assert stat.S_IMODE(staged.parent.stat().st_mode) == 0o700
         assert stat.S_IMODE(staged.stat().st_mode) == 0o600
 
-    def test_live_output_preflight_rejects_both_b1_roots_and_aliases(self):
+    @pytest.mark.parametrize(
+        "ordinal_candidate_case",
+        range(5),
+        ids=(
+            "source-root",
+            "source-child",
+            "reopened-root",
+            "reopened-child",
+            "dot-alias",
+        ),
+    )
+    def test_live_output_preflight_rejects_both_b1_roots_and_aliases(
+        self, ordinal_candidate_case
+    ):
         source = self.directory / "protected-source-b1"
         reopened = self.directory / "protected-reopened-b1"
         source.mkdir()
@@ -1313,11 +1326,13 @@ class TestIssue123Completion(_Issue123CompletionFixture):
             reopened / "nested-output",
             source / ".." / source.name / "dot-output",
         )
-        for ordinal, candidate in enumerate(candidates):
-            with (pytest.raises(completion.EvidenceError),):
-                completion._create_private_live_directory(candidate, roots)
-            if candidate.resolve() not in roots:
-                assert not (candidate.exists())
+        ordinal_candidate_case_values = tuple(enumerate(candidates))
+        assert len(ordinal_candidate_case_values) == 5
+        ordinal, candidate = ordinal_candidate_case_values[ordinal_candidate_case]
+        with (pytest.raises(completion.EvidenceError),):
+            completion._create_private_live_directory(candidate, roots)
+        if candidate.resolve() not in roots:
+            assert not (candidate.exists())
         alias = self.directory / "protected-source-alias"
         alias.symlink_to(source, target_is_directory=True)
         with pytest.raises(completion.EvidenceError):
@@ -1535,7 +1550,14 @@ class TestIssue123Completion(_Issue123CompletionFixture):
         assert not result["live_verification"]["invocation_succeeded"]
         assert not result["baseline_authority"]["satisfied"]
 
-    def test_completion_cli_requires_and_forwards_all_private_authority_inputs(self):
+    @pytest.mark.parametrize(
+        "required_case",
+        range(4),
+        ids=("reopened-index", "private-openings", "pre-ack-receipt", "final-receipt"),
+    )
+    def test_completion_cli_requires_and_forwards_all_private_authority_inputs(
+        self, required_case
+    ):
         runtime = [
             str(self.directory / f"runtime-{ordinal}.json") for ordinal in range(5)
         ]
@@ -1573,20 +1595,24 @@ class TestIssue123Completion(_Issue123CompletionFixture):
         ]
         # Check every missing private input before the same argument vector's
         # positive forwarding control; this is one staged CLI contract sequence.
-        for required in (
-            "--reopened-index",
-            "--private-openings",
-            "--pre-ack-bundle-reopen-receipt",
-            "--final-bundle-reopen-receipt",
+        required_case_values = tuple(
+            (
+                "--reopened-index",
+                "--private-openings",
+                "--pre-ack-bundle-reopen-receipt",
+                "--final-bundle-reopen-receipt",
+            )
+        )
+        assert len(required_case_values) == 4
+        required = required_case_values[required_case]
+        changed = list(arguments)
+        location = changed.index(required)
+        del changed[location : location + 2]
+        with (
+            mock.patch("sys.stderr", new=io.StringIO()),
+            pytest.raises(completion._CliUsageError),
         ):
-            changed = list(arguments)
-            location = changed.index(required)
-            del changed[location : location + 2]
-            with (
-                mock.patch("sys.stderr", new=io.StringIO()),
-                pytest.raises(completion._CliUsageError),
-            ):
-                completion._arguments(changed)
+            completion._arguments(changed)
 
         output = io.StringIO()
         with (
@@ -2286,7 +2312,12 @@ class TestIssue123Completion(_Issue123CompletionFixture):
         with pytest.raises(completion.EvidenceError):
             completion._validate_effective_material_plan(plan, "plan")
 
-    def test_descriptor_binds_exact_bytes_and_candidate(self):
+    @pytest.mark.parametrize(
+        "key_case",
+        range(5),
+        ids=("path", "sha256", "size-bytes", "media-type", "candidate-evidence"),
+    )
+    def test_descriptor_binds_exact_bytes_and_candidate(self, key_case):
         descriptor = self.write_json(
             "payload.json",
             {"candidate_evidence": self.candidate, "value": 1},
@@ -2295,17 +2326,21 @@ class TestIssue123Completion(_Issue123CompletionFixture):
         loaded = reader.load(descriptor, "payload")
         assert loaded.descriptor["sha256"] == descriptor["sha256"]
 
-        for key in (
-            "path",
-            "sha256",
-            "size_bytes",
-            "media_type",
-            "candidate_evidence",
-        ):
-            mutated = dict(descriptor)
-            del mutated[key]
-            with pytest.raises(completion.EvidenceError):
-                reader.load(mutated, "payload")
+        key_case_values = tuple(
+            (
+                "path",
+                "sha256",
+                "size_bytes",
+                "media_type",
+                "candidate_evidence",
+            )
+        )
+        assert len(key_case_values) == 5
+        key = key_case_values[key_case]
+        mutated = dict(descriptor)
+        del mutated[key]
+        with pytest.raises(completion.EvidenceError):
+            reader.load(mutated, "payload")
         mutated = dict(descriptor)
         mutated["extra"] = True
         with pytest.raises(completion.EvidenceError):
@@ -2637,7 +2672,33 @@ class TestIssue123Completion(_Issue123CompletionFixture):
             completion._npz_arrays(artifact, ["value"], "truncated")
         load.assert_not_called()
 
-    def test_differential_npz_requires_deflate_and_npy_v1_before_load(self):
+    @pytest.mark.parametrize(
+        "mutation_raw_case",
+        range(18),
+        ids=(
+            "tiny-huge-shape",
+            "truncated",
+            "padded",
+            "unsupported-version",
+            "object",
+            "structured",
+            "subarray",
+            "fortran",
+            "stored",
+            "symlink",
+            "directory-mode",
+            "prepended",
+            "trailing",
+            "encrypted",
+            "local-only-encrypted",
+            "local-only-stored",
+            "corrupt-deflate",
+            "invalid-deflate",
+        ),
+    )
+    def test_differential_npz_requires_deflate_and_npy_v1_before_load(
+        self, mutation_raw_case
+    ):
         comment = b"differential-group-binding"
 
         def group_npz(
@@ -2733,26 +2794,28 @@ class TestIssue123Completion(_Issue123CompletionFixture):
 
         # All malformed members are derived from the same canonical ZIP and its
         # discovered offsets; keep this preflight matrix in one archive sequence.
-        for mutation, raw in malformed.items():
-            artifact = completion.LoadedArtifact(
-                descriptor={},
-                path=self.directory / "group.npz",
-                raw=raw,
-                document=None,
+        mutation_raw_case_values = tuple(malformed.items())
+        assert len(mutation_raw_case_values) == 18
+        mutation, raw = mutation_raw_case_values[mutation_raw_case]
+        artifact = completion.LoadedArtifact(
+            descriptor={},
+            path=self.directory / "group.npz",
+            raw=raw,
+            document=None,
+        )
+        with (
+            mock.patch.object(
+                np, "load", side_effect=AssertionError("unsafe allocation")
+            ) as load,
+            pytest.raises(completion.EvidenceError),
+        ):
+            completion._npz_arrays(
+                artifact,
+                ["value"],
+                "group",
+                expected_comment=comment,
             )
-            with (
-                mock.patch.object(
-                    np, "load", side_effect=AssertionError("unsafe allocation")
-                ) as load,
-                pytest.raises(completion.EvidenceError),
-            ):
-                completion._npz_arrays(
-                    artifact,
-                    ["value"],
-                    "group",
-                    expected_comment=comment,
-                )
-            load.assert_not_called()
+        load.assert_not_called()
 
         artifact = completion.LoadedArtifact(
             descriptor={},
@@ -2784,7 +2847,27 @@ class TestIssue123Completion(_Issue123CompletionFixture):
             )
         load.assert_not_called()
 
-    def test_generic_correctness_npz_preflight_preserves_bounded_compatibility(self):
+    @pytest.mark.parametrize(
+        "version_case", range(3), ids=("npy-v1", "npy-v2", "npy-v3")
+    )
+    def test_generic_correctness_npz_preflight_preserves_bounded_compatibility(
+        self, version_case
+    ):
+        self._check_generic_correctness_npz_preflight_preserves_bounded_compatibility_phase(
+            phase="versions", version_case=version_case
+        )
+
+    @pytest.mark.parametrize("mutation_raw_case", range(2), ids=("renamed", "shaped"))
+    def test_generic_correctness_npz_preflight_preserves_bounded_compatibility_mutations(
+        self, mutation_raw_case
+    ):
+        self._check_generic_correctness_npz_preflight_preserves_bounded_compatibility_phase(
+            phase="mutations", mutation_raw_case=mutation_raw_case
+        )
+
+    def _check_generic_correctness_npz_preflight_preserves_bounded_compatibility_phase(
+        self, *, phase, version_case=None, mutation_raw_case=None
+    ):
         def npy_member(version, array):
             stream = io.BytesIO()
             header = {
@@ -2823,7 +2906,10 @@ class TestIssue123Completion(_Issue123CompletionFixture):
 
         # Compatibility acceptance precedes malformed metadata and size-cap
         # rejection using the same local NPZ factory, forming one staged contract.
-        for version in ((1, 0), (2, 0), (3, 0)):
+        if phase == "versions":
+            version_case_values = tuple(((1, 0), (2, 0), (3, 0)))
+            assert len(version_case_values) == 3
+            version = version_case_values[version_case]
             raw = generic_npz(version)
             with mock.patch.object(
                 np, "load", side_effect=AssertionError("unexpected NumPy load")
@@ -2833,10 +2919,15 @@ class TestIssue123Completion(_Issue123CompletionFixture):
                 )
             load.assert_not_called()
 
-        for mutation, raw in (
-            ("renamed", generic_npz((1, 0), string_name="invented")),
-            ("shaped", generic_npz((1, 0), string_shape=(1,))),
-        ):
+        if phase == "mutations":
+            mutation_raw_case_values = tuple(
+                (
+                    ("renamed", generic_npz((1, 0), string_name="invented")),
+                    ("shaped", generic_npz((1, 0), string_shape=(1,))),
+                )
+            )
+            assert len(mutation_raw_case_values) == 2
+            mutation, raw = mutation_raw_case_values[mutation_raw_case]
             with (pytest.raises(completion.EvidenceError, match="plain numeric type"),):
                 completion._validate_media_payload(
                     raw, completion.MEDIA_TYPE_NPZ, "generic correctness"
@@ -2893,7 +2984,23 @@ class TestIssue123Completion(_Issue123CompletionFixture):
                 all_zero=True,
             )
 
-    def test_cuda_memory_peak_covers_both_allocated_samples(self):
+    @pytest.mark.parametrize("field_value_case", range(2), ids=("before", "after"))
+    def test_cuda_memory_peak_covers_both_allocated_samples(self, field_value_case):
+        self._check_cuda_memory_peak_covers_both_allocated_samples_phase(
+            phase="single_gpu", field_value_case=field_value_case
+        )
+
+    @pytest.mark.parametrize("field_value_case", range(2), ids=("before", "after"))
+    def test_cuda_memory_peak_covers_both_allocated_samples_two_gpu(
+        self, field_value_case
+    ):
+        self._check_cuda_memory_peak_covers_both_allocated_samples_phase(
+            phase="two_gpu", field_value_case=field_value_case
+        )
+
+    def _check_cuda_memory_peak_covers_both_allocated_samples_phase(
+        self, *, phase, field_value_case=None
+    ):
         single_gpu = {
             "memory": {
                 "bounded": True,
@@ -2905,12 +3012,15 @@ class TestIssue123Completion(_Issue123CompletionFixture):
             }
         }
         completion._validate_cuda_memory(single_gpu, "single GPU")
-        # Mutate both samples of the same valid single-GPU memory record before
-        # moving to the corresponding two-GPU record below.
-        for field, value in (
-            ("cuda_allocated_before_bytes", 121),
-            ("cuda_allocated_after_bytes", 121),
-        ):
+        if phase == "single_gpu":
+            field_value_case_values = tuple(
+                (
+                    ("cuda_allocated_before_bytes", 121),
+                    ("cuda_allocated_after_bytes", 121),
+                )
+            )
+            assert len(field_value_case_values) == 2
+            field, value = field_value_case_values[field_value_case]
             malformed = copy.deepcopy(single_gpu)
             malformed["memory"][field] = value
             malformed["memory"]["cuda_allocated_growth_bytes"] = (
@@ -2931,10 +3041,15 @@ class TestIssue123Completion(_Issue123CompletionFixture):
             "bounded": True,
         }
         completion._validate_two_gpu_memory(two_gpu, "rank memory")
-        for field, value in (
-            ("allocated_before_bytes", 121),
-            ("allocated_after_bytes", 121),
-        ):
+        if phase == "two_gpu":
+            field_value_case_values = tuple(
+                (
+                    ("allocated_before_bytes", 121),
+                    ("allocated_after_bytes", 121),
+                )
+            )
+            assert len(field_value_case_values) == 2
+            field, value = field_value_case_values[field_value_case]
             malformed = copy.deepcopy(two_gpu)
             malformed[field] = value
             malformed["allocated_growth_bytes"] = (
@@ -3080,7 +3195,10 @@ class TestIssue123Completion(_Issue123CompletionFixture):
                 "test",
             )
 
-    def test_tuning_acceptance_binds_boundary_execution_representation(self):
+    @pytest.mark.parametrize("malformed_case", range(2), ids=("null", "list"))
+    def test_tuning_acceptance_binds_boundary_execution_representation(
+        self, malformed_case
+    ):
         counters = {name: 0 for name in completion.COMPILER_COUNTER_FIELDS}
         result = {
             "diagnostics": {
@@ -3109,15 +3227,17 @@ class TestIssue123Completion(_Issue123CompletionFixture):
             "allocation_contract": {"satisfied": True},
         }
         completion._validate_tuning_acceptance(result, "test")
-        for malformed in (None, []):
-            with (
-                pytest.raises(
-                    completion.EvidenceError, match="boundary execution diagnostics"
-                ),
-            ):
-                invalid = copy.deepcopy(result)
-                invalid["diagnostics"] = malformed
-                completion._validate_tuning_acceptance(invalid, "test")
+        malformed_case_values = tuple((None, []))
+        assert len(malformed_case_values) == 2
+        malformed = malformed_case_values[malformed_case]
+        with (
+            pytest.raises(
+                completion.EvidenceError, match="boundary execution diagnostics"
+            ),
+        ):
+            invalid = copy.deepcopy(result)
+            invalid["diagnostics"] = malformed
+            completion._validate_tuning_acceptance(invalid, "test")
         extra = copy.deepcopy(result)
         extra["diagnostics"]["boundaries"]["extra"] = True
         with pytest.raises(
@@ -3334,7 +3454,33 @@ class TestIssue123Completion(_Issue123CompletionFixture):
         with pytest.raises(completion.EvidenceError, match="dynamic-state"):
             completion._validate_cuda_state_finiteness(mixed_names, reference, "test")
 
-    def test_frozen_material_inventory_covers_every_required_lowered_case(self):
+    @pytest.mark.parametrize(
+        "name_case",
+        range(18),
+        ids=(
+            "bloch-2d",
+            "bloch-3d",
+            "coverage-1-contiguous",
+            "coverage-1-fragmented",
+            "coverage-10-contiguous",
+            "coverage-10-fragmented",
+            "coverage-50-contiguous",
+            "coverage-50-fragmented",
+            "coverage-90-contiguous",
+            "coverage-90-fragmented",
+            "cpu-crossover-2d",
+            "cpu-crossover-3d",
+            "cpu-large-2d",
+            "cpu-large-3d",
+            "equivalent-region-1",
+            "equivalent-region-32",
+            "single-gpu-2d",
+            "single-gpu-3d",
+        ),
+    )
+    def test_frozen_material_inventory_covers_every_required_lowered_case(
+        self, name_case
+    ):
         required = set(completion.POLICY_CASES) | set(completion.PAIRED_REAL_CASES)
         required |= set(completion.CUDA_CASES) | set(completion.REGION_INVARIANCE_CASES)
         assert set(completion._FROZEN_CUDA_MATERIAL_TOPOLOGY_BY_CASE) == required
@@ -3347,26 +3493,28 @@ class TestIssue123Completion(_Issue123CompletionFixture):
             "bloch-2d": 9,
             "equivalent-region-1": 15,
         }
-        for name in sorted(required):
-            workload = {"name": name}
-            inventory = completion._expected_cuda_persistent_material_inventory(
-                workload, "test"
+        name_case_values = tuple(sorted(required))
+        assert len(name_case_values) == 18
+        name = name_case_values[name_case]
+        workload = {"name": name}
+        inventory = completion._expected_cuda_persistent_material_inventory(
+            workload, "test"
+        )
+        if name in expected_tracked_counts:
+            assert (
+                len(completion.FIELD_ARRAYS) + len(inventory) + 3
+                == expected_tracked_counts[name]
             )
-            if name in expected_tracked_counts:
-                assert (
-                    len(completion.FIELD_ARRAYS) + len(inventory) + 3
-                    == expected_tracked_counts[name]
-                )
-            completion._validate_frozen_cuda_material_plan(
-                {
-                    "workload": workload,
-                    "runtime": {"precision": "float32"},
-                    "diagnostics": {
-                        "material_plan": self.frozen_material_plan(workload, "float32")
-                    },
+        completion._validate_frozen_cuda_material_plan(
+            {
+                "workload": workload,
+                "runtime": {"precision": "float32"},
+                "diagnostics": {
+                    "material_plan": self.frozen_material_plan(workload, "float32")
                 },
-                "test",
-            )
+            },
+            "test",
+        )
 
     def test_bloch_3d_real_cpu_eager_inventory_matches_frozen_contract(self):
         workload, space, geometry, sources, bloch = torch_tuning._build_case(
@@ -3824,7 +3972,11 @@ class TestIssue123Completion(_Issue123CompletionFixture):
                     trusted_runtime_receipt=trusted_receipt,
                 )
 
-    def test_nested_correctness_npz_headers_fail_before_any_numpy_loader(self):
+    @pytest.mark.parametrize("mutation_raw_case", range(2), ids=("huge", "truncated"))
+    @pytest.mark.parametrize("role_case", range(2), ids=("reference", "candidate"))
+    def test_nested_correctness_npz_headers_fail_before_any_numpy_loader(
+        self, mutation_raw_case, role_case
+    ):
         expected_evidence = completion._expected_correctness_candidate_evidence(
             self.manifest, self.candidate
         )
@@ -3908,39 +4060,43 @@ class TestIssue123Completion(_Issue123CompletionFixture):
         }
         # Both roles share one correctness index and trusted receipt; validate the
         # full nested archive closure before permitting any producer loader.
-        for role in ("reference", "candidate"):
-            for mutation, raw in malformed.items():
-                document = copy.deepcopy(base_document)
-                document["artifacts"][0][role] = self.write_bytes(
-                    f"nested/{role}-{mutation}.npz",
-                    raw,
-                    media_type=completion.MEDIA_TYPE_NPZ,
-                )
-                artifact = completion.LoadedArtifact(
-                    descriptor={"sha256": "a" * 64},
-                    path=self.directory / "correctness-index.json",
-                    raw=b"",
-                    document=document,
-                )
-                with (
-                    mock.patch(
-                        "benchmarks.torch_correctness.load_correctness_evidence_index",
-                        side_effect=AssertionError("producer loader reached"),
-                    ) as correctness_load,
-                    mock.patch.object(
-                        np, "load", side_effect=AssertionError("NumPy load reached")
-                    ) as numpy_load,
-                    pytest.raises(completion.EvidenceError),
-                ):
-                    completion._validate_correctness_index(
-                        artifact,
-                        self.manifest,
-                        self.candidate,
-                        completion.ArtifactReader(self.directory, self.candidate),
-                        trusted_runtime_receipt=trusted_receipt,
-                    )
-                correctness_load.assert_not_called()
-                numpy_load.assert_not_called()
+        role_case_values = tuple(("reference", "candidate"))
+        assert len(role_case_values) == 2
+        role = role_case_values[role_case]
+        mutation_raw_case_values = tuple(malformed.items())
+        assert len(mutation_raw_case_values) == 2
+        mutation, raw = mutation_raw_case_values[mutation_raw_case]
+        document = copy.deepcopy(base_document)
+        document["artifacts"][0][role] = self.write_bytes(
+            f"nested/{role}-{mutation}.npz",
+            raw,
+            media_type=completion.MEDIA_TYPE_NPZ,
+        )
+        artifact = completion.LoadedArtifact(
+            descriptor={"sha256": "a" * 64},
+            path=self.directory / "correctness-index.json",
+            raw=b"",
+            document=document,
+        )
+        with (
+            mock.patch(
+                "benchmarks.torch_correctness.load_correctness_evidence_index",
+                side_effect=AssertionError("producer loader reached"),
+            ) as correctness_load,
+            mock.patch.object(
+                np, "load", side_effect=AssertionError("NumPy load reached")
+            ) as numpy_load,
+            pytest.raises(completion.EvidenceError),
+        ):
+            completion._validate_correctness_index(
+                artifact,
+                self.manifest,
+                self.candidate,
+                completion.ArtifactReader(self.directory, self.candidate),
+                trusted_runtime_receipt=trusted_receipt,
+            )
+        correctness_load.assert_not_called()
+        numpy_load.assert_not_called()
 
     @pytest.mark.parametrize(
         "field",
@@ -3954,6 +4110,31 @@ class TestIssue123Completion(_Issue123CompletionFixture):
         ids=str,
     )
     def test_correctness_full_candidate_evidence_is_independently_frozen(self, field):
+        self._check_correctness_full_candidate_evidence_is_independently_frozen_phase(
+            phase="missing_fields", field=field
+        )
+
+    @pytest.mark.parametrize(
+        "field",
+        (
+            "evidence_contract_id",
+            "cpu_contract_id",
+            "runner_sha256",
+            "solver_sha256",
+            "solver_abi",
+        ),
+        ids=str,
+    )
+    def test_correctness_full_candidate_evidence_is_independently_frozen_wrong_fields(
+        self, field
+    ):
+        self._check_correctness_full_candidate_evidence_is_independently_frozen_phase(
+            phase="wrong_fields", field=field
+        )
+
+    def _check_correctness_full_candidate_evidence_is_independently_frozen_phase(
+        self, *, phase, field=None
+    ):
         expected = completion._expected_correctness_candidate_evidence(
             self.manifest, self.candidate
         )
@@ -3964,36 +4145,38 @@ class TestIssue123Completion(_Issue123CompletionFixture):
             raw=b"",
             document=None,
         )
-        evidence = copy.deepcopy(expected)
-        evidence.pop(field)
-        malformed = completion.LoadedArtifact(
-            descriptor=artifact.descriptor,
-            path=artifact.path,
-            raw=artifact.raw,
-            document={"candidate_evidence": evidence},
-        )
-        with pytest.raises(completion.EvidenceError, match="candidate evidence"):
-            completion._validate_correctness_index(
-                malformed,
-                self.manifest,
-                self.candidate,
-                mock.Mock(),
+        if phase == "missing_fields":
+            evidence = copy.deepcopy(expected)
+            evidence.pop(field)
+            malformed = completion.LoadedArtifact(
+                descriptor=artifact.descriptor,
+                path=artifact.path,
+                raw=artifact.raw,
+                document={"candidate_evidence": evidence},
             )
-        evidence = copy.deepcopy(expected)
-        evidence[field] = "0" * 64
-        malformed = completion.LoadedArtifact(
-            descriptor=artifact.descriptor,
-            path=artifact.path,
-            raw=artifact.raw,
-            document={"candidate_evidence": evidence},
-        )
-        with pytest.raises(completion.EvidenceError, match="candidate evidence"):
-            completion._validate_correctness_index(
-                malformed,
-                self.manifest,
-                self.candidate,
-                mock.Mock(),
+            with pytest.raises(completion.EvidenceError, match="candidate evidence"):
+                completion._validate_correctness_index(
+                    malformed,
+                    self.manifest,
+                    self.candidate,
+                    mock.Mock(),
+                )
+        if phase == "wrong_fields":
+            evidence = copy.deepcopy(expected)
+            evidence[field] = "0" * 64
+            malformed = completion.LoadedArtifact(
+                descriptor=artifact.descriptor,
+                path=artifact.path,
+                raw=artifact.raw,
+                document={"candidate_evidence": evidence},
             )
+            with pytest.raises(completion.EvidenceError, match="candidate evidence"):
+                completion._validate_correctness_index(
+                    malformed,
+                    self.manifest,
+                    self.candidate,
+                    mock.Mock(),
+                )
 
     def test_differential_comparison_is_manifest_derived_in_completion(self):
         fixture = self.differential_fixture()
@@ -4073,58 +4256,63 @@ class TestIssue123Completion(_Issue123CompletionFixture):
         with pytest.raises(completion.EvidenceError, match=message):
             fixture.validate_completion_mirror(document)
 
-    def test_differential_early_steps_cannot_use_normalized_acceptance(self):
+    @pytest.mark.parametrize(
+        "target_kind_case", range(2), ids=("field", "persistent-state")
+    )
+    def test_differential_early_steps_cannot_use_normalized_acceptance(
+        self, target_kind_case
+    ):
         # Keep the early-kind sweep before the late-step positive control: together
         # they prove the step-dependent transition within one contract sequence.
-        for target_kind in ("field", "persistent-state"):
-            fixture = self.differential_fixture()
-            document = fixture.document()
-            record = document["cases"][1]
-            reference = self.differential_group_arrays(fixture, record, "reference", 0)
-            candidate = self.differential_group_arrays(fixture, record, "candidate", 0)
-            if target_kind == "field":
-                target = "step/0/field/Ex"
-            else:
-                target = next(
-                    name
-                    for name in candidate
-                    if name.startswith("step/0/state/Ex/")
-                    and name.endswith("/0-Cpml/values")
-                    and candidate[name].size
-                )
-            comparisons = completion._expected_differential_array_comparisons(
-                fixture.manifest,
-                document["scope"],
-                {
-                    "case": record["case"],
-                    "device": record["device"],
-                    "precision": record["precision"],
-                },
-                list(reference),
+        target_kind_case_values = tuple(("field", "persistent-state"))
+        assert len(target_kind_case_values) == 2
+        target_kind = target_kind_case_values[target_kind_case]
+        fixture = self.differential_fixture()
+        document = fixture.document()
+        record = document["cases"][1]
+        reference = self.differential_group_arrays(fixture, record, "reference", 0)
+        candidate = self.differential_group_arrays(fixture, record, "candidate", 0)
+        if target_kind == "field":
+            target = "step/0/field/Ex"
+        else:
+            target = next(
+                name
+                for name in candidate
+                if name.startswith("step/0/state/Ex/")
+                and name.endswith("/0-Cpml/values")
+                and candidate[name].size
             )
-            assert (
-                comparisons[target]["mode"] == completion.DIFFERENTIAL_ELEMENTWISE_MODE
-            )
-            if target_kind == "persistent-state":
-                assert comparisons[target] == {
-                    "mode": completion.DIFFERENTIAL_ELEMENTWISE_MODE,
-                    **fixture.manifest["tolerances"]["torch"]["pml"]["float64"],
-                }
-            candidate[target].flat[0] += 1.0e-7
-            metrics, normalized_passed = completion._recompute_differential_metrics(
-                reference,
-                candidate,
-                record["comparison"],
-                "record-level normalized comparison",
-            )
-            assert normalized_passed
-            record["metrics"] = metrics
-            fixture.rewrite_group(document, 1, "candidate", 0, candidate)
-            with pytest.raises(
-                completion.EvidenceError,
-                match="differs from the projected fields|differential failed",
-            ):
-                fixture.validate_completion_mirror(document)
+        comparisons = completion._expected_differential_array_comparisons(
+            fixture.manifest,
+            document["scope"],
+            {
+                "case": record["case"],
+                "device": record["device"],
+                "precision": record["precision"],
+            },
+            list(reference),
+        )
+        assert comparisons[target]["mode"] == completion.DIFFERENTIAL_ELEMENTWISE_MODE
+        if target_kind == "persistent-state":
+            assert comparisons[target] == {
+                "mode": completion.DIFFERENTIAL_ELEMENTWISE_MODE,
+                **fixture.manifest["tolerances"]["torch"]["pml"]["float64"],
+            }
+        candidate[target].flat[0] += 1.0e-7
+        metrics, normalized_passed = completion._recompute_differential_metrics(
+            reference,
+            candidate,
+            record["comparison"],
+            "record-level normalized comparison",
+        )
+        assert normalized_passed
+        record["metrics"] = metrics
+        fixture.rewrite_group(document, 1, "candidate", 0, candidate)
+        with pytest.raises(
+            completion.EvidenceError,
+            match="differs from the projected fields|differential failed",
+        ):
+            fixture.validate_completion_mirror(document)
 
         fixture = self.differential_fixture()
         document = fixture.document()

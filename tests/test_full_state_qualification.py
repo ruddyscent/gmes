@@ -115,20 +115,27 @@ class TestFullArrayComparator:
             )["passed"]
         )
 
-    def test_missing_unexpected_and_broadcastable_shape_are_rejected(self):
+    @pytest.mark.parametrize(
+        "mutation_reason_case", range(3), ids=("missing", "shape", "unexpected")
+    )
+    def test_missing_unexpected_and_broadcastable_shape_are_rejected(
+        self, mutation_reason_case
+    ):
         key = "step/5/state/Ex/0-Drude/values"
-        for mutation, reason in (
-            (lambda a: a.pop(key), "missing"),
-            (lambda a: a.update({key: a[key][None, :]}), "shape"),
-            (lambda a: a.update({"unexpected": np.zeros(1)}), "unexpected"),
-        ):
-            actual = copy.deepcopy(self.expected)
-            mutation(actual)
-            result = qualification.compare_arrays(
-                self.expected, actual, self.tolerances
+        mutation_reason_case_values = tuple(
+            (
+                (lambda a: a.pop(key), "missing"),
+                (lambda a: a.update({key: a[key][None, :]}), "shape"),
+                (lambda a: a.update({"unexpected": np.zeros(1)}), "unexpected"),
             )
-            assert not (result["passed"])
-            assert (reason) in ([r["reason"] for r in result["failures"]])
+        )
+        assert len(mutation_reason_case_values) == 3
+        mutation, reason = mutation_reason_case_values[mutation_reason_case]
+        actual = copy.deepcopy(self.expected)
+        mutation(actual)
+        result = qualification.compare_arrays(self.expected, actual, self.tolerances)
+        assert not (result["passed"])
+        assert (reason) in ([r["reason"] for r in result["failures"]])
 
     def test_nonfinite_and_unpinned_tolerance_are_rejected(self):
         key = "step/2/field/Ex"
@@ -267,7 +274,28 @@ class TestFullArrayComparator:
         assert ("uuid") not in (metadata)
         assert ("GPU-private-stable-identifier") not in (repr(metadata))
 
-    def test_two_gpu_report_failures_propagate_to_a_nonzero_exit_code(self):
+    @pytest.mark.parametrize(
+        "values_case",
+        range(13),
+        ids=(
+            "capture-field",
+            "capture-material",
+            "capture-source",
+            "capture-auxiliary",
+            "capture-clock",
+            "source",
+            "auxiliary",
+            "clock",
+            "checkpoint",
+            "state-count",
+            "replay-count",
+            "inventory-count",
+            "rank-status",
+        ),
+    )
+    def test_two_gpu_report_failures_propagate_to_a_nonzero_exit_code(
+        self, values_case
+    ):
         passing_capture = {
             "field_comparison": {"passed": True},
             "material_comparison": {"passed": True},
@@ -321,32 +349,37 @@ class TestFullArrayComparator:
             values = list(arguments)
             values[index] = value
             failures.append(tuple(values))
-        for values in failures:
-            assert not (qualification._two_gpu_report_passed(*values))
-            assert (qualification._two_gpu_report_exit_code({"passed": False})) == (1)
+        values_case_values = tuple(failures)
+        assert len(values_case_values) == 13
+        values = values_case_values[values_case]
+        assert not (qualification._two_gpu_report_passed(*values))
+        assert (qualification._two_gpu_report_exit_code({"passed": False})) == (1)
         with pytest.raises(ValueError, match="boolean passed"):
             qualification._two_gpu_report_exit_code({})
 
-    def test_two_gpu_cli_returns_the_rank_zero_report_exit_code(self):
-        for exit_code in (0, 1):
-            with (
-                patch.object(
-                    qualification, "run_two_gpu_partition_case", return_value=exit_code
-                ) as runner,
-                patch.object(
-                    sys,
-                    "argv",
-                    [
-                        "full_state_qualification.py",
-                        "--mode",
-                        "two-gpu",
-                        "--output-dir",
-                        "unused-private-output",
-                    ],
-                ),
-            ):
-                assert (qualification.main()) == (exit_code)
-                assert (runner.call_args.kwargs["compile_policy"]) == ("eager")
+    @pytest.mark.parametrize("exit_code_case", range(2), ids=("passed", "failed"))
+    def test_two_gpu_cli_returns_the_rank_zero_report_exit_code(self, exit_code_case):
+        exit_code_case_values = tuple((0, 1))
+        assert len(exit_code_case_values) == 2
+        exit_code = exit_code_case_values[exit_code_case]
+        with (
+            patch.object(
+                qualification, "run_two_gpu_partition_case", return_value=exit_code
+            ) as runner,
+            patch.object(
+                sys,
+                "argv",
+                [
+                    "full_state_qualification.py",
+                    "--mode",
+                    "two-gpu",
+                    "--output-dir",
+                    "unused-private-output",
+                ],
+            ),
+        ):
+            assert (qualification.main()) == (exit_code)
+            assert (runner.call_args.kwargs["compile_policy"]) == ("eager")
 
     def test_two_gpu_compile_policy_records_and_propagates_to_both_runtimes(self):
         launch = SimpleNamespace(rank=0)
@@ -737,27 +770,39 @@ class TestNativeCaptureCompatibility:
 
 
 class TestIndependentCpuQualification:
-    def test_dm2_nonzero_state_closed_form_through_100_steps(self):
-        for precision in ("float64", "float32"):
-            result = qualification.run_dm2_invariant(
-                precision=precision, output=None, final_step=100
-            )
-            assert (result["status"]) == ("passed")
-            assert not (result["native_qualification"])
-            assert (result["capture_steps"][-1]) == (100)
+    @pytest.mark.parametrize("precision_case", range(2), ids=("float64", "float32"))
+    def test_dm2_nonzero_state_closed_form_through_100_steps(self, precision_case):
+        precision_case_values = tuple(("float64", "float32"))
+        assert len(precision_case_values) == 2
+        precision = precision_case_values[precision_case]
+        result = qualification.run_dm2_invariant(
+            precision=precision, output=None, final_step=100
+        )
+        assert (result["status"]) == ("passed")
+        assert not (result["native_qualification"])
+        assert (result["capture_steps"][-1]) == (100)
 
-    def test_numpy_yee_full_fields_at_five_capture_steps(self):
-        for precision in ("float64", "float32"):
-            for size in ((2, 0, 0), (2, 2, 0), (2, 2, 2)):
-                for paired in (False, True):
-                    result = qualification.run_analytic_case(
-                        size=size,
-                        precision=precision,
-                        paired_real=paired,
-                        output=None,
-                    )
-                    assert (result["status"]) == ("passed")
-                    assert not (result["native_qualification"])
-                    assert (result["reference"]["kind"]) == (
-                        "independent-numpy-equations"
-                    )
+    @pytest.mark.parametrize("paired_case", range(2), ids=("real", "paired-real"))
+    @pytest.mark.parametrize("size_case", range(3), ids=("1d", "2d", "3d"))
+    @pytest.mark.parametrize("precision_case", range(2), ids=("float64", "float32"))
+    def test_numpy_yee_full_fields_at_five_capture_steps(
+        self, paired_case, size_case, precision_case
+    ):
+        precision_case_values = tuple(("float64", "float32"))
+        assert len(precision_case_values) == 2
+        precision = precision_case_values[precision_case]
+        size_case_values = tuple(((2, 0, 0), (2, 2, 0), (2, 2, 2)))
+        assert len(size_case_values) == 3
+        size = size_case_values[size_case]
+        paired_case_values = tuple((False, True))
+        assert len(paired_case_values) == 2
+        paired = paired_case_values[paired_case]
+        result = qualification.run_analytic_case(
+            size=size,
+            precision=precision,
+            paired_real=paired,
+            output=None,
+        )
+        assert (result["status"]) == ("passed")
+        assert not (result["native_qualification"])
+        assert (result["reference"]["kind"]) == ("independent-numpy-equations")

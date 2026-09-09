@@ -78,7 +78,46 @@ uv build"""
         ) in (readme)
         assert ("An operator may reuse") not in (readme)
 
-    def test_issue123_authority_clis_and_fixed_point_are_documented(self):
+    @pytest.mark.parametrize(
+        "deferred_item_case",
+        range(6),
+        ids=(
+            "asset-generation",
+            "byte-schema",
+            "immutable-release",
+            "release-metadata",
+            "authority-reopen",
+            "publication-cutover",
+        ),
+    )
+    def test_issue123_authority_clis_and_fixed_point_are_documented(
+        self, deferred_item_case
+    ):
+        self._check_issue123_authority_clis_and_fixed_point_are_documented_phase(
+            phase="deferred_items", deferred_item_case=deferred_item_case
+        )
+
+    @pytest.mark.parametrize(
+        "forbidden_case",
+        range(5),
+        ids=(
+            "completion-claim",
+            "authority-waiver",
+            "runtime-fallback",
+            "final-acceptance",
+            "issue-completion",
+        ),
+    )
+    def test_issue123_authority_clis_and_fixed_point_are_documented_forbidden_literals(
+        self, forbidden_case
+    ):
+        self._check_issue123_authority_clis_and_fixed_point_are_documented_phase(
+            phase="forbidden_literals", forbidden_case=forbidden_case
+        )
+
+    def _check_issue123_authority_clis_and_fixed_point_are_documented_phase(
+        self, *, phase, deferred_item_case=None, forbidden_case=None
+    ):
         readme = self.benchmarks_readme
         normalized = " ".join(readme.split())
         plain = normalized.replace("`", "")
@@ -124,14 +163,19 @@ uv build"""
         ) in (normalized)
         assert (follow_up_url) in (readme)
         assert ("That follow-up owns the six deferred items") in (normalized)
-        for deferred_item in (
-            "production-bound final-SHA generation of the four public assets",
-            "actual-public-byte schema, cardinality, commitment, digest",
-            "final-SHA immutable release, four OWNER uploads",
-            "release link/tag/ID/URL/size/hash fields",
-            "release-dependent O0/B0/ack/O1/B1",
-            "production publication, cutover, a nonempty production registry",
-        ):
+        if phase == "deferred_items":
+            deferred_item_case_values = tuple(
+                (
+                    "production-bound final-SHA generation of the four public assets",
+                    "actual-public-byte schema, cardinality, commitment, digest",
+                    "final-SHA immutable release, four OWNER uploads",
+                    "release link/tag/ID/URL/size/hash fields",
+                    "release-dependent O0/B0/ack/O1/B1",
+                    "production publication, cutover, a nonempty production registry",
+                )
+            )
+            assert len(deferred_item_case_values) == 6
+            deferred_item = deferred_item_case_values[deferred_item_case]
             assert (deferred_item) in (normalized)
         assert (
             "These six items are deferred, unperformed, unsatisfied, still required, "
@@ -170,13 +214,18 @@ uv build"""
         boundary = normalized[
             boundary_start : normalized.index("~~~sh", boundary_start)
         ]
-        for forbidden in (
-            "M1 is complete",
-            "binding authority is waived",
-            "runtime fallback",
-            "final_acceptance may be true",
-            "issue_completion_satisfied may be true",
-        ):
+        if phase == "forbidden_literals":
+            forbidden_case_values = tuple(
+                (
+                    "M1 is complete",
+                    "binding authority is waived",
+                    "runtime fallback",
+                    "final_acceptance may be true",
+                    "issue_completion_satisfied may be true",
+                )
+            )
+            assert len(forbidden_case_values) == 5
+            forbidden = forbidden_case_values[forbidden_case]
             assert (forbidden) not in (boundary)
         assert ("complete canonical O0/O1 response projection") in (normalized)
         assert (
@@ -211,7 +260,44 @@ uv build"""
             capture_section
         )
 
-    def test_issue123_public_privacy_contract_is_documented_without_literals(self):
+    @pytest.mark.parametrize(
+        "forbidden_case",
+        range(4),
+        ids=("host-salt", "salt-length", "linux-home", "macos-home"),
+    )
+    def test_issue123_public_privacy_contract_is_documented_without_literals(
+        self, forbidden_case
+    ):
+        self._check_issue123_public_privacy_contract_is_documented_without_literals_phase(
+            phase="forbidden_literals", forbidden_case=forbidden_case
+        )
+
+    @pytest.mark.parametrize(
+        "variant_extra_reference_case",
+        range(10),
+        ids=(
+            "anchor",
+            "api",
+            "api-relative",
+            "api-command-token",
+            "prose",
+            "prose-colon",
+            "prose-hash",
+            "duplicate",
+            "prefix",
+            "suffix",
+        ),
+    )
+    def test_issue123_public_privacy_contract_is_documented_without_literals_variants(
+        self, variant_extra_reference_case
+    ):
+        self._check_issue123_public_privacy_contract_is_documented_without_literals_phase(
+            phase="variants", variant_extra_reference_case=variant_extra_reference_case
+        )
+
+    def _check_issue123_public_privacy_contract_is_documented_without_literals_phase(
+        self, *, phase, forbidden_case=None, variant_extra_reference_case=None
+    ):
         readme = self.benchmarks_readme
         normalized = " ".join(readme.split())
         assert (
@@ -224,12 +310,17 @@ uv build"""
         assert ("serialize no private paths, raw identities, keys, or openings") in (
             normalized
         )
-        for forbidden in (
-            "BASELINE_V3_HOST_SALT",
-            "32-byte-salted",
-            "/home/",
-            "/Users/",
-        ):
+        if phase == "forbidden_literals":
+            forbidden_case_values = tuple(
+                (
+                    "BASELINE_V3_HOST_SALT",
+                    "32-byte-salted",
+                    "/home/",
+                    "/Users/",
+                )
+            )
+            assert len(forbidden_case_values) == 4
+            forbidden = forbidden_case_values[forbidden_case]
             assert (forbidden) not in (readme)
         allowed_comment_url = (
             "https://github.com/ruddyscent/gmes/issues/123#issuecomment-5523144396"
@@ -245,29 +336,37 @@ uv build"""
             flags=re.IGNORECASE,
         )
         assert (comment_refs) == ([allowed_comment_url])
-        for variant, extra_reference in (
-            (
-                "anchor",
-                "https://github.com/synthetic-owner/synthetic-repository/"
-                "issues/123#issuecomment-111111",
-            ),
-            (
-                "api",
-                "https://api.github.com/repos/synthetic-owner/"
-                "synthetic-repository/issues/comments/111111",
-            ),
-            ("api-relative", "/issues/comments/111111"),
-            (
-                "api-command-token",
-                "repos/synthetic-owner/synthetic-repository/" "issues/comments/111111",
-            ),
-            ("prose", "Issue comment 111111"),
-            ("prose-colon", "Issue comment: 111111"),
-            ("prose-hash", "Issue comment #111111"),
-            ("duplicate", allowed_comment_url),
-            ("prefix", f"prefix{allowed_comment_url}"),
-            ("suffix", f"{allowed_comment_url}?copy=1"),
-        ):
+        if phase == "variants":
+            variant_extra_reference_case_values = tuple(
+                (
+                    (
+                        "anchor",
+                        "https://github.com/synthetic-owner/synthetic-repository/"
+                        "issues/123#issuecomment-111111",
+                    ),
+                    (
+                        "api",
+                        "https://api.github.com/repos/synthetic-owner/"
+                        "synthetic-repository/issues/comments/111111",
+                    ),
+                    ("api-relative", "/issues/comments/111111"),
+                    (
+                        "api-command-token",
+                        "repos/synthetic-owner/synthetic-repository/"
+                        "issues/comments/111111",
+                    ),
+                    ("prose", "Issue comment 111111"),
+                    ("prose-colon", "Issue comment: 111111"),
+                    ("prose-hash", "Issue comment #111111"),
+                    ("duplicate", allowed_comment_url),
+                    ("prefix", f"prefix{allowed_comment_url}"),
+                    ("suffix", f"{allowed_comment_url}?copy=1"),
+                )
+            )
+            assert len(variant_extra_reference_case_values) == 10
+            variant, extra_reference = variant_extra_reference_case_values[
+                variant_extra_reference_case
+            ]
             assert (
                 re.findall(
                     comment_ref_pattern,
@@ -284,15 +383,34 @@ uv build"""
         ) == ([allowed_comment_url])
         assert re.search(r"(?m)^[A-Z_]*COMMENT(?:_ID)?=\d{6,}$", readme) is None
 
-    def test_issue123_authority_versions_and_cardinalities_are_pinned(self):
+    @pytest.mark.parametrize(
+        "contract_case",
+        range(7),
+        ids=(
+            "projection-v1",
+            "bundle-v1",
+            "completion-v2",
+            "four-assets",
+            "five-receipts",
+            "operations-roles",
+            "live-v3",
+        ),
+    )
+    def test_issue123_authority_versions_and_cardinalities_are_pinned(
+        self, contract_case
+    ):
         normalized = " ".join(self.benchmarks_readme.split())
-        for contract in (
-            "public projection/publication schema v1",
-            "bundle specification v1",
-            "completion index v2",
-            "exactly four ordered public assets",
-            "exactly five ordered runtime receipts",
-            "exactly 22 operations roles",
-            "completion live output and private operations live receipt advance to v3",
-        ):
-            assert (contract) in (normalized)
+        contract_case_values = tuple(
+            (
+                "public projection/publication schema v1",
+                "bundle specification v1",
+                "completion index v2",
+                "exactly four ordered public assets",
+                "exactly five ordered runtime receipts",
+                "exactly 22 operations roles",
+                "completion live output and private operations live receipt advance to v3",
+            )
+        )
+        assert len(contract_case_values) == 7
+        contract = contract_case_values[contract_case]
+        assert (contract) in (normalized)

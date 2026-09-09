@@ -243,8 +243,10 @@ class TestSelectedLauncherObserver:
         assert (_Autotuner.run) is (original_run)
         assert (_StaticKernel.load_kernel) is (original_load)
 
-    def test_loaded_identity_and_artifact_mutations_reject_after_five_calls(self):
-        for mode in (
+    @pytest.mark.parametrize(
+        "mode_case",
+        range(7),
+        ids=(
             "kernel",
             "foreign-runner",
             "handle",
@@ -252,46 +254,61 @@ class TestSelectedLauncherObserver:
             "artifact",
             "missing",
             "config",
-        ):
-            with tempfile.TemporaryDirectory() as raw:
-                with attestation.pinned_observer(_FakeRuntime().adapter()) as observer:
-                    self._five_events_outside_interval(observer, Path(raw))
-                    result = observer._live_results[next(iter(observer._constructors))]
-                    parent = observer._live_callables[
-                        next(iter(observer._constructors))
-                    ]
-                    loaded = observer._loads[id(result.kernel)]
-                    if mode == "kernel":
-                        replacement = _StaticKernel(
-                            Path(loaded.path), loaded.name, loaded.kernel_hash
+        ),
+    )
+    def test_loaded_identity_and_artifact_mutations_reject_after_five_calls(
+        self, mode_case
+    ):
+        mode_case_values = tuple(
+            (
+                "kernel",
+                "foreign-runner",
+                "handle",
+                "path",
+                "artifact",
+                "missing",
+                "config",
+            )
+        )
+        assert len(mode_case_values) == 7
+        mode = mode_case_values[mode_case]
+        with tempfile.TemporaryDirectory() as raw:
+            with attestation.pinned_observer(_FakeRuntime().adapter()) as observer:
+                self._five_events_outside_interval(observer, Path(raw))
+                result = observer._live_results[next(iter(observer._constructors))]
+                parent = observer._live_callables[next(iter(observer._constructors))]
+                loaded = observer._loads[id(result.kernel)]
+                if mode == "kernel":
+                    replacement = _StaticKernel(
+                        Path(loaded.path), loaded.name, loaded.kernel_hash
+                    )
+                    replacement.__dict__.update(result.kernel.__dict__)
+                    result.kernel = replacement
+                elif mode == "foreign-runner":
+                    foreign = _StaticKernel(
+                        Path(loaded.path), loaded.name, loaded.kernel_hash
+                    )
+                    parent.__globals__["runner"] = foreign.run
+                elif mode == "handle":
+                    result.kernel.function += 1
+                elif mode == "path":
+                    result.kernel.cubin_path = loaded.path
+                elif mode == "artifact":
+                    Path(loaded.path).write_bytes(b"changed")
+                elif mode == "missing":
+                    Path(loaded.path).unlink()
+                else:
+                    result.config = _Config(999)
+                with observer.attested_interval():
+                    with observer.region("magnetic_half"):
+                        _Autotuner(attestation.MAGNETIC_KERNEL, parent).run(
+                            stream="stream"
                         )
-                        replacement.__dict__.update(result.kernel.__dict__)
-                        result.kernel = replacement
-                    elif mode == "foreign-runner":
-                        foreign = _StaticKernel(
-                            Path(loaded.path), loaded.name, loaded.kernel_hash
-                        )
-                        parent.__globals__["runner"] = foreign.run
-                    elif mode == "handle":
-                        result.kernel.function += 1
-                    elif mode == "path":
-                        result.kernel.cubin_path = loaded.path
-                    elif mode == "artifact":
-                        Path(loaded.path).write_bytes(b"changed")
-                    elif mode == "missing":
-                        Path(loaded.path).unlink()
-                    else:
-                        result.config = _Config(999)
-                    with observer.attested_interval():
-                        with observer.region("magnetic_half"):
-                            _Autotuner(attestation.MAGNETIC_KERNEL, parent).run(
-                                stream="stream"
-                            )
-                        for tuner in self._electric_tuners:
-                            with observer.region("electric_half"):
-                                tuner.run(stream="stream")
-                with pytest.raises(attestation.AttestationError):
-                    observer.diagnostic()
+                    for tuner in self._electric_tuners:
+                        with observer.region("electric_half"):
+                            tuner.run(stream="stream")
+            with pytest.raises(attestation.AttestationError):
+                observer.diagnostic()
 
     def _five_events_outside_interval(self, observer, directory):
         self._prepare(
@@ -310,25 +327,34 @@ class TestSelectedLauncherObserver:
             for _ in range(4)
         ]
 
-    def test_foreign_artifact_and_preexisting_load_are_rejected(self):
-        for mode in ("foreign", "foreign-bytes", "missing-raw", "preloaded"):
-            with tempfile.TemporaryDirectory() as raw:
-                result = self._result(Path(raw), attestation.MAGNETIC_KERNEL)
-                if mode == "preloaded":
-                    result.kernel.load_kernel(0)
-                elif mode == "foreign-bytes":
-                    Path(result.kernel.cubin_path).write_bytes(b"foreign binary")
-                elif mode == "missing-raw":
-                    result.kernel.cubin_raw = None
-                else:
-                    foreign = Path(raw) / "foreign.cubin"
-                    foreign.write_bytes(b"foreign")
-                    result.kernel.cubin_path = str(foreign)
-                with attestation.pinned_observer(_FakeRuntime().adapter()) as observer:
-                    result.make_launcher()
-                assert observer._problems
-                with pytest.raises(attestation.AttestationError):
-                    observer.diagnostic()
+    @pytest.mark.parametrize(
+        "mode_case",
+        range(4),
+        ids=("foreign", "foreign-bytes", "missing-raw", "preloaded"),
+    )
+    def test_foreign_artifact_and_preexisting_load_are_rejected(self, mode_case):
+        mode_case_values = tuple(
+            ("foreign", "foreign-bytes", "missing-raw", "preloaded")
+        )
+        assert len(mode_case_values) == 4
+        mode = mode_case_values[mode_case]
+        with tempfile.TemporaryDirectory() as raw:
+            result = self._result(Path(raw), attestation.MAGNETIC_KERNEL)
+            if mode == "preloaded":
+                result.kernel.load_kernel(0)
+            elif mode == "foreign-bytes":
+                Path(result.kernel.cubin_path).write_bytes(b"foreign binary")
+            elif mode == "missing-raw":
+                result.kernel.cubin_raw = None
+            else:
+                foreign = Path(raw) / "foreign.cubin"
+                foreign.write_bytes(b"foreign")
+                result.kernel.cubin_path = str(foreign)
+            with attestation.pinned_observer(_FakeRuntime().adapter()) as observer:
+                result.make_launcher()
+            assert observer._problems
+            with pytest.raises(attestation.AttestationError):
+                observer.diagnostic()
 
     def test_pre_call_fast_path_rejects_unknown_parent_association(self):
         runtime = _FakeRuntime()
@@ -363,40 +389,45 @@ class TestSelectedLauncherObserver:
             with pytest.raises(attestation.AttestationError):
                 observer.diagnostic()
 
-    def test_missing_mutated_and_symlink_cubins_fail_closed(self):
+    @pytest.mark.parametrize(
+        "mode_case", range(3), ids=("missing", "mutated", "symlink")
+    )
+    def test_missing_mutated_and_symlink_cubins_fail_closed(self, mode_case):
         runtime = _FakeRuntime()
         with tempfile.TemporaryDirectory() as raw:
             directory = Path(raw)
-            for mode in ("missing", "mutated", "symlink"):
-                with attestation.pinned_observer(runtime.adapter()) as observer:
-                    variant = directory / f"cache-{mode}"
-                    variant.mkdir()
-                    cubin = variant / f"{attestation.MAGNETIC_KERNEL}.cubin"
-                    cubin.write_bytes(b"before")
-                    if mode == "symlink":
-                        linked = directory / "linked.cubin"
-                        linked.symlink_to(cubin)
-                        cubin = linked
-                    result = _StaticResult(
-                        _launcher(
-                            attestation.MAGNETIC_KERNEL,
-                            _Config(),
-                            f"cache-{mode}",
-                        ),
-                        cubin,
+            mode_case_values = tuple(("missing", "mutated", "symlink"))
+            assert len(mode_case_values) == 3
+            mode = mode_case_values[mode_case]
+            with attestation.pinned_observer(runtime.adapter()) as observer:
+                variant = directory / f"cache-{mode}"
+                variant.mkdir()
+                cubin = variant / f"{attestation.MAGNETIC_KERNEL}.cubin"
+                cubin.write_bytes(b"before")
+                if mode == "symlink":
+                    linked = directory / "linked.cubin"
+                    linked.symlink_to(cubin)
+                    cubin = linked
+                result = _StaticResult(
+                    _launcher(
                         attestation.MAGNETIC_KERNEL,
-                    )
-                    parent = result.make_launcher()
-                    tuner = _Autotuner(attestation.MAGNETIC_KERNEL, parent)
-                    if mode == "mutated":
-                        cubin.write_bytes(b"after")
-                    elif mode == "missing":
-                        cubin.unlink()
-                    with observer.attested_interval():
-                        with observer.region("magnetic_half"):
-                            tuner.run(stream="stream")
-                with pytest.raises(attestation.AttestationError):
-                    observer.diagnostic()
+                        _Config(),
+                        f"cache-{mode}",
+                    ),
+                    cubin,
+                    attestation.MAGNETIC_KERNEL,
+                )
+                parent = result.make_launcher()
+                tuner = _Autotuner(attestation.MAGNETIC_KERNEL, parent)
+                if mode == "mutated":
+                    cubin.write_bytes(b"after")
+                elif mode == "missing":
+                    cubin.unlink()
+                with observer.attested_interval():
+                    with observer.region("magnetic_half"):
+                        tuner.run(stream="stream")
+            with pytest.raises(attestation.AttestationError):
+                observer.diagnostic()
 
     def test_preexisting_cache_is_rejected_before_patching(self):
         runtime = _FakeRuntime()
@@ -429,31 +460,38 @@ class TestSelectedLauncherObserver:
             with pytest.raises(attestation.AttestationError):
                 observer.diagnostic()
 
-    def test_revalidates_live_fast_and_parent_metadata(self):
+    @pytest.mark.parametrize(
+        "mode_case",
+        range(4),
+        ids=("fast-config", "fast-cache", "fast-runner", "parent-runner"),
+    )
+    def test_revalidates_live_fast_and_parent_metadata(self, mode_case):
         runtime = _FakeRuntime()
         with tempfile.TemporaryDirectory() as raw:
-            for mode in ("fast-config", "fast-cache", "fast-runner", "parent-runner"):
-                with attestation.pinned_observer(runtime.adapter()) as observer:
-                    result = self._result(Path(raw), attestation.MAGNETIC_KERNEL)
-                    parent = result.make_launcher()
-                    tuner = _Autotuner(attestation.MAGNETIC_KERNEL, parent)
-                    derived = tuner._build_fast_launcher(parent)
-                    tuner._cached_launcher = derived
-                    if mode == "fast-config":
-                        derived.config.kwargs["BLOCK"] = 999
-                    elif mode == "fast-cache":
-                        derived.cache_hash = "mutated-cache"
-                    elif mode == "fast-runner":
-                        derived.__globals__["runner"] = lambda *args, stream: None
-                    else:
-                        parent.__globals__["runner"] = lambda *args, stream: None
-                    with observer.attested_interval():
-                        with observer.region("magnetic_half"):
-                            tuner.run(stream="stream")
-                with pytest.raises(
-                    attestation.AttestationError, match="metadata changed"
-                ):
-                    observer.diagnostic()
+            mode_case_values = tuple(
+                ("fast-config", "fast-cache", "fast-runner", "parent-runner")
+            )
+            assert len(mode_case_values) == 4
+            mode = mode_case_values[mode_case]
+            with attestation.pinned_observer(runtime.adapter()) as observer:
+                result = self._result(Path(raw), attestation.MAGNETIC_KERNEL)
+                parent = result.make_launcher()
+                tuner = _Autotuner(attestation.MAGNETIC_KERNEL, parent)
+                derived = tuner._build_fast_launcher(parent)
+                tuner._cached_launcher = derived
+                if mode == "fast-config":
+                    derived.config.kwargs["BLOCK"] = 999
+                elif mode == "fast-cache":
+                    derived.cache_hash = "mutated-cache"
+                elif mode == "fast-runner":
+                    derived.__globals__["runner"] = lambda *args, stream: None
+                else:
+                    parent.__globals__["runner"] = lambda *args, stream: None
+                with observer.attested_interval():
+                    with observer.region("magnetic_half"):
+                        tuner.run(stream="stream")
+            with pytest.raises(attestation.AttestationError, match="metadata changed"):
+                observer.diagnostic()
 
 
 class TestPinnedRuntimeSourceGate:

@@ -211,10 +211,10 @@ call = runner.call
     def test_real_loader_dispatcher_frames_join_cpu_stub_launches(self):
         self._exercise()
 
-    def test_unknown_cross_region_substitution_missing_duplicate_and_exception_reject(
-        self,
-    ):
-        for mode in (
+    @pytest.mark.parametrize(
+        "mode_case",
+        range(9),
+        ids=(
             "unknown-tuner",
             "receiver",
             "cross-region",
@@ -224,8 +224,28 @@ call = runner.call
             "unowned-live",
             "nontarget-target",
             "no-runner",
-        ):
-            self._exercise(mode)
+        ),
+    )
+    def test_unknown_cross_region_substitution_missing_duplicate_and_exception_reject(
+        self,
+        mode_case,
+    ):
+        mode_case_values = tuple(
+            (
+                "unknown-tuner",
+                "receiver",
+                "cross-region",
+                "missing-dispatch",
+                "twice",
+                "exception",
+                "unowned-live",
+                "nontarget-target",
+                "no-runner",
+            )
+        )
+        assert len(mode_case_values) == 9
+        mode = mode_case_values[mode_case]
+        self._exercise(mode)
 
     def test_default_output_capture_does_not_install_module_or_join_hooks(self):
         from torch._inductor.graph import GraphLowering
@@ -409,35 +429,46 @@ class TestCaseProducerReceipt:
                 )
             yield simulation, receipt, evidence, join
 
-    def test_receipt_revalidation_suppresses_stale_module_and_join_projection(self):
-        for mode in ("normal", "preimage", "explicit", "plan", "modules-only"):
-            for simulation, receipt, evidence, join in self._synthetic_reports():
-                if mode == "preimage":
-                    simulation._compile_cache_key_preimage = ("foreign",)
-                    simulation.compile_cache_key = hashlib.sha256(
-                        repr(("foreign",)).encode()
-                    ).hexdigest()
-                elif mode == "explicit":
-                    receipt.reasons.append("producer-specialization-digest-differs")
-                elif mode == "plan":
-                    simulation.plan = object()
-                module_report = evidence.diagnostic()
-                if mode == "normal":
-                    assert (len(module_report["modules"])) == (2)
-                    assert (len(join.diagnostic()["events"])) == (5)
-                elif mode == "modules-only":
-                    assert (len(module_report["modules"])) == (2)
-                else:
-                    assert (module_report["modules"]) == ([])
-                    assert ("producer-receipt-revalidation-failed") in (
-                        module_report["reasons"]
-                    )
-                    join_report = join.diagnostic()
-                    assert (join_report["modules"]) == ([])
-                    assert (join_report["events"]) == ([])
-                    assert ("producer-receipt-revalidation-failed") in (
-                        join_report["reasons"]
-                    )
+    @pytest.mark.parametrize(
+        "mode_case",
+        range(5),
+        ids=("normal", "preimage", "explicit", "plan", "modules-only"),
+    )
+    def test_receipt_revalidation_suppresses_stale_module_and_join_projection(
+        self, mode_case
+    ):
+        mode_case_values = tuple(
+            ("normal", "preimage", "explicit", "plan", "modules-only")
+        )
+        assert len(mode_case_values) == 5
+        mode = mode_case_values[mode_case]
+        for simulation, receipt, evidence, join in self._synthetic_reports():
+            if mode == "preimage":
+                simulation._compile_cache_key_preimage = ("foreign",)
+                simulation.compile_cache_key = hashlib.sha256(
+                    repr(("foreign",)).encode()
+                ).hexdigest()
+            elif mode == "explicit":
+                receipt.reasons.append("producer-specialization-digest-differs")
+            elif mode == "plan":
+                simulation.plan = object()
+            module_report = evidence.diagnostic()
+            if mode == "normal":
+                assert (len(module_report["modules"])) == (2)
+                assert (len(join.diagnostic()["events"])) == (5)
+            elif mode == "modules-only":
+                assert (len(module_report["modules"])) == (2)
+            else:
+                assert (module_report["modules"]) == ([])
+                assert ("producer-receipt-revalidation-failed") in (
+                    module_report["reasons"]
+                )
+                join_report = join.diagnostic()
+                assert (join_report["modules"]) == ([])
+                assert (join_report["events"]) == ([])
+                assert ("producer-receipt-revalidation-failed") in (
+                    join_report["reasons"]
+                )
 
 
 _IDENTITY_SOURCE = """from tests.test_torch_lowered_materialization import _IdentityAsyncCompile
@@ -532,8 +563,10 @@ class TestReturnedModuleEvidence:
             report["modules"].clear()
             assert (len(evidence.diagnostic()["modules"])) == (2)
 
-    def test_substitutions_and_artifact_mutation_invalidate_returned_evidence(self):
-        for mode in (
+    @pytest.mark.parametrize(
+        "mode_case",
+        range(10),
+        ids=(
             "source",
             "module-path",
             "cache-key",
@@ -544,89 +577,114 @@ class TestReturnedModuleEvidence:
             "loop-function",
             "dispatch",
             "replay",
-        ):
-            with tempfile.TemporaryDirectory() as raw:
-                graph, module = self._load(Path(raw))
-                simulation = self._simulation()
-                evidence = lowering._ReturnedModuleEvidence()
-                evidence.capture(
-                    graph,
-                    module,
-                    [_IDENTITY_SOURCE],
-                    (simulation, "electric_half", simulation._electric_half),
+        ),
+    )
+    def test_substitutions_and_artifact_mutation_invalidate_returned_evidence(
+        self, mode_case
+    ):
+        mode_case_values = tuple(
+            (
+                "source",
+                "module-path",
+                "cache-key",
+                "receiver",
+                "call-code",
+                "tuner",
+                "tuner-function",
+                "loop-function",
+                "dispatch",
+                "replay",
+            )
+        )
+        assert len(mode_case_values) == 10
+        mode = mode_case_values[mode_case]
+        with tempfile.TemporaryDirectory() as raw:
+            graph, module = self._load(Path(raw))
+            simulation = self._simulation()
+            evidence = lowering._ReturnedModuleEvidence()
+            evidence.capture(
+                graph,
+                module,
+                [_IDENTITY_SOURCE],
+                (simulation, "electric_half", simulation._electric_half),
+            )
+            assert (evidence.reasons) == (["wrapper-pin-mismatch:electric_half"])
+            if mode == "source":
+                Path(graph.cache_path).write_text(_IDENTITY_SOURCE + "# modified\n")
+            elif mode == "module-path":
+                module.__file__ = graph.cache_path + ".foreign"
+            elif mode == "cache-key":
+                graph.cache_key = "foreign"
+            elif mode == "receiver":
+                module.call = module.Runner([]).call
+            elif mode == "call-code":
+                module.Runner.call.__code__ = (lambda self, args: None).__code__
+            elif mode == "tuner":
+                module.kernel = _IdentityAsyncCompile().triton(
+                    "kernel", "def kernel(): pass"
                 )
-                assert (evidence.reasons) == (["wrapper-pin-mismatch:electric_half"])
-                if mode == "source":
-                    Path(graph.cache_path).write_text(_IDENTITY_SOURCE + "# modified\n")
-                elif mode == "module-path":
-                    module.__file__ = graph.cache_path + ".foreign"
-                elif mode == "cache-key":
-                    graph.cache_key = "foreign"
-                elif mode == "receiver":
-                    module.call = module.Runner([]).call
-                elif mode == "call-code":
-                    module.Runner.call.__code__ = (lambda self, args: None).__code__
-                elif mode == "tuner":
-                    module.kernel = _IdentityAsyncCompile().triton(
-                        "kernel", "def kernel(): pass"
-                    )
-                elif mode == "tuner-function":
-                    module.kernel.fn = (
-                        _IdentityAsyncCompile()
-                        .triton("kernel", "def kernel(): pass")
-                        .fn
-                    )
-                elif mode == "loop-function":
-                    module.while_loop_body_graph_0 = lambda args: args
-                elif mode == "dispatch":
-                    simulation._electric_half = object()
-                else:
-                    simulation._cuda_graphs["electric_half"] = object()
-                report = evidence.diagnostic()
-                assert (report["modules"]) == ([])
-                assert report["reasons"]
+            elif mode == "tuner-function":
+                module.kernel.fn = (
+                    _IdentityAsyncCompile().triton("kernel", "def kernel(): pass").fn
+                )
+            elif mode == "loop-function":
+                module.while_loop_body_graph_0 = lambda args: args
+            elif mode == "dispatch":
+                simulation._electric_half = object()
+            else:
+                simulation._cuda_graphs["electric_half"] = object()
+            report = evidence.diagnostic()
+            assert (report["modules"]) == ([])
+            assert report["reasons"]
 
-    def test_precapture_foreign_code_filenames_reject_including_nested_code(self):
-        for mode in ("call", "module-function", "nested"):
-            with tempfile.TemporaryDirectory() as raw:
-                source = _IDENTITY_SOURCE
-                if mode == "nested":
-                    source = source.replace(
-                        "return while_loop_body_graph_0(args)",
-                        "def inner():\n            return args\n        return inner()",
-                    )
-                graph, module = self._load(Path(raw), source=source)
-                function = (
-                    module.while_loop_body_graph_0
-                    if mode == "module-function"
-                    else module.Runner.call
+    @pytest.mark.parametrize(
+        "mode_case", range(3), ids=("call", "module-function", "nested")
+    )
+    def test_precapture_foreign_code_filenames_reject_including_nested_code(
+        self, mode_case
+    ):
+        mode_case_values = tuple(("call", "module-function", "nested"))
+        assert len(mode_case_values) == 3
+        mode = mode_case_values[mode_case]
+        with tempfile.TemporaryDirectory() as raw:
+            source = _IDENTITY_SOURCE
+            if mode == "nested":
+                source = source.replace(
+                    "return while_loop_body_graph_0(args)",
+                    "def inner():\n            return args\n        return inner()",
                 )
-                original = function.__code__
-                if mode == "nested":
-                    replacement = original.replace(
-                        co_consts=tuple(
-                            (
-                                item.replace(co_filename="<foreign-private-file>")
-                                if isinstance(item, types.CodeType)
-                                else item
-                            )
-                            for item in original.co_consts
+            graph, module = self._load(Path(raw), source=source)
+            function = (
+                module.while_loop_body_graph_0
+                if mode == "module-function"
+                else module.Runner.call
+            )
+            original = function.__code__
+            if mode == "nested":
+                replacement = original.replace(
+                    co_consts=tuple(
+                        (
+                            item.replace(co_filename="<foreign-private-file>")
+                            if isinstance(item, types.CodeType)
+                            else item
                         )
+                        for item in original.co_consts
                     )
-                else:
-                    replacement = original.replace(co_filename="<foreign-private-file>")
-                assert (original) == (replacement)
-                function.__code__ = replacement
-                simulation = self._simulation()
-                evidence = lowering._ReturnedModuleEvidence()
-                evidence.capture(
-                    graph,
-                    module,
-                    [source],
-                    (simulation, "electric_half", simulation._electric_half),
                 )
-                assert (evidence.diagnostic()["modules"]) == ([])
-                assert ("returned-module-capture-rejected") in (evidence.reasons)
+            else:
+                replacement = original.replace(co_filename="<foreign-private-file>")
+            assert (original) == (replacement)
+            function.__code__ = replacement
+            simulation = self._simulation()
+            evidence = lowering._ReturnedModuleEvidence()
+            evidence.capture(
+                graph,
+                module,
+                [source],
+                (simulation, "electric_half", simulation._electric_half),
+            )
+            assert (evidence.diagnostic()["modules"]) == ([])
+            assert ("returned-module-capture-rejected") in (evidence.reasons)
 
     def test_same_filename_code_and_foreign_tuner_remain_explicitly_unverified(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -717,70 +775,80 @@ class TestReturnedModuleEvidence:
                 assert (private) not in (json.dumps(evidence.diagnostic()))
             assert ("returned-module-revalidation-failed") in (failed["reasons"])
 
-    def test_missing_emission_unknown_context_and_duplicate_declarations_reject(self):
-        for mode in ("missing", "multiple", "cross-region", "duplicate"):
-            with tempfile.TemporaryDirectory() as raw:
-                source = _IDENTITY_SOURCE
-                if mode == "duplicate":
-                    source += "kernel = async_compile.triton('kernel', 'def kernel(): pass')\n"
-                graph, module = self._load(Path(raw), source=source)
-                simulation = self._simulation()
-                emissions = (
-                    []
-                    if mode == "missing"
-                    else [source] * (2 if mode == "multiple" else 1)
+    @pytest.mark.parametrize(
+        "mode_case", range(4), ids=("missing", "multiple", "cross-region", "duplicate")
+    )
+    def test_missing_emission_unknown_context_and_duplicate_declarations_reject(
+        self, mode_case
+    ):
+        mode_case_values = tuple(("missing", "multiple", "cross-region", "duplicate"))
+        assert len(mode_case_values) == 4
+        mode = mode_case_values[mode_case]
+        with tempfile.TemporaryDirectory() as raw:
+            source = _IDENTITY_SOURCE
+            if mode == "duplicate":
+                source += (
+                    "kernel = async_compile.triton('kernel', 'def kernel(): pass')\n"
                 )
-                function = (
-                    simulation._magnetic_half
-                    if mode == "cross-region"
-                    else simulation._electric_half
-                )
-                evidence = lowering._ReturnedModuleEvidence()
-                evidence.capture(
-                    graph, module, emissions, (simulation, "electric_half", function)
-                )
-                assert evidence.reasons
-                assert (evidence.diagnostic()["modules"]) == ([])
+            graph, module = self._load(Path(raw), source=source)
+            simulation = self._simulation()
+            emissions = (
+                [] if mode == "missing" else [source] * (2 if mode == "multiple" else 1)
+            )
+            function = (
+                simulation._magnetic_half
+                if mode == "cross-region"
+                else simulation._electric_half
+            )
+            evidence = lowering._ReturnedModuleEvidence()
+            evidence.capture(
+                graph, module, emissions, (simulation, "electric_half", function)
+            )
+            assert evidence.reasons
+            assert (evidence.diagnostic()["modules"]) == ([])
 
-    def test_capture_hook_pairs_post_rewrite_emission_and_restores_on_exception(self):
+    @pytest.mark.parametrize("fail_case", range(2), ids=("success", "exception"))
+    def test_capture_hook_pairs_post_rewrite_emission_and_restores_on_exception(
+        self, fail_case
+    ):
         from torch._inductor.graph import GraphLowering
 
-        for fail in (False, True):
-            with tempfile.TemporaryDirectory() as raw:
-                code = types.SimpleNamespace(value=_IDENTITY_SOURCE)
-                graph = types.SimpleNamespace()
+        fail_case_values = tuple((False, True))
+        assert len(fail_case_values) == 2
+        fail = fail_case_values[fail_case]
+        with tempfile.TemporaryDirectory() as raw:
+            code = types.SimpleNamespace(value=_IDENTITY_SOURCE)
+            graph = types.SimpleNamespace()
 
-                def producer(instance, wrapper_code):
-                    wrapper_code.value += "# runtime rewrite\n"
-                    GraphLowering.save_output_code(wrapper_code.value)
-                    if fail:
-                        raise RuntimeError("compile fixture failed")
-                    produced, module = self._load(Path(raw), source=wrapper_code.value)
-                    instance.__dict__.update(produced.__dict__)
-                    return module
+            def producer(instance, wrapper_code):
+                wrapper_code.value += "# runtime rewrite\n"
+                GraphLowering.save_output_code(wrapper_code.value)
+                if fail:
+                    raise RuntimeError("compile fixture failed")
+                produced, module = self._load(Path(raw), source=wrapper_code.value)
+                instance.__dict__.update(produced.__dict__)
+                return module
 
-                observations = []
-                original_save = GraphLowering.save_output_code
-                original_compile = GraphLowering._compile_to_module_lines
-                with mock.patch.object(
-                    GraphLowering, "_compile_to_module_lines", producer
-                ):
-                    try:
-                        with lowering._capturing_output_code(
-                            lambda source: None, lambda *args: observations.append(args)
-                        ):
-                            module = GraphLowering._compile_to_module_lines(graph, code)
-                    except RuntimeError:
-                        assert fail
-                    else:
-                        assert not (fail)
-                        assert (observations[0][1]) is (module)
-                        assert (observations[0][2]) == ([code.value])
-                        lowering._returned_module_identity(graph, module, code.value)
-                    assert (GraphLowering._compile_to_module_lines) is (producer)
-                    assert (GraphLowering.save_output_code) is (original_save)
-                assert (GraphLowering._compile_to_module_lines) is (original_compile)
-                assert (len(observations)) == (0 if fail else 1)
+            observations = []
+            original_save = GraphLowering.save_output_code
+            original_compile = GraphLowering._compile_to_module_lines
+            with mock.patch.object(GraphLowering, "_compile_to_module_lines", producer):
+                try:
+                    with lowering._capturing_output_code(
+                        lambda source: None, lambda *args: observations.append(args)
+                    ):
+                        module = GraphLowering._compile_to_module_lines(graph, code)
+                except RuntimeError:
+                    assert fail
+                else:
+                    assert not (fail)
+                    assert (observations[0][1]) is (module)
+                    assert (observations[0][2]) == ([code.value])
+                    lowering._returned_module_identity(graph, module, code.value)
+                assert (GraphLowering._compile_to_module_lines) is (producer)
+                assert (GraphLowering.save_output_code) is (original_save)
+            assert (GraphLowering._compile_to_module_lines) is (original_compile)
+            assert (len(observations)) == (0 if fail else 1)
 
     def test_callback_exception_restores_both_hooks(self):
         from torch._inductor.graph import GraphLowering
@@ -960,7 +1028,10 @@ def helper():
         assert ("wrapper-execution-scope-incomplete") in (audit["reasons"])
         assert (len(audit["wrappers"][0]["launches"])) == (1)
 
-    def test_runner_call_reachable_helper_and_closure_alias_fail_closed(self):
+    @pytest.mark.parametrize("source_case", range(2), ids=("helper", "closure-alias"))
+    def test_runner_call_reachable_helper_and_closure_alias_fail_closed(
+        self, source_case
+    ):
         helper = """
 def hidden_copy(arg0_1):
     assert_size_stride(arg0_1, (8,), (1,))
@@ -976,34 +1047,50 @@ def hidden_copy(arg0_1):
         invoke = hidden_copy
         invoke()
 """
-        for source in (
-            _runner_wrapper(helpers=helper).replace(
-                launch, launch + "\n        hidden_copy(arg0_1)"
-            ),
-            _runner_wrapper().replace(launch, closure + launch),
-        ):
-            audit = self._audit(source)
-            assert not (audit["verified"])
-            assert ("wrapper-execution-call-unresolved") in (audit["reasons"])
-
-    def test_runner_call_requires_supported_export_binding(self):
-        for export, reason in (
-            ("", "wrapper-execution-entry-missing"),
+        source_case_values = tuple(
             (
-                "runner = Runner()\ncall = hidden_entry\n",
-                "wrapper-execution-entry-unresolved",
-            ),
-            (
-                "runner = Runner()\ncall = runner.call\ncall = hidden_entry\n",
-                "wrapper-execution-entry-rebound",
-            ),
-        ):
-            audit = self._audit(_runner_wrapper(export=export))
-            assert not (audit["verified"])
-            assert (reason) in (audit["reasons"])
-            assert ("wrapper-execution-scope-incomplete") in (audit["reasons"])
+                _runner_wrapper(helpers=helper).replace(
+                    launch, launch + "\n        hidden_copy(arg0_1)"
+                ),
+                _runner_wrapper().replace(launch, closure + launch),
+            )
+        )
+        assert len(source_case_values) == 2
+        source = source_case_values[source_case]
+        audit = self._audit(source)
+        assert not (audit["verified"])
+        assert ("wrapper-execution-call-unresolved") in (audit["reasons"])
 
-    def test_runner_scope_guard_rejects_known_and_annotated_rebindings(self):
+    @pytest.mark.parametrize(
+        "export_reason_case", range(3), ids=("missing", "unresolved", "rebound")
+    )
+    def test_runner_call_requires_supported_export_binding(self, export_reason_case):
+        export_reason_case_values = tuple(
+            (
+                ("", "wrapper-execution-entry-missing"),
+                (
+                    "runner = Runner()\ncall = hidden_entry\n",
+                    "wrapper-execution-entry-unresolved",
+                ),
+                (
+                    "runner = Runner()\ncall = runner.call\ncall = hidden_entry\n",
+                    "wrapper-execution-entry-rebound",
+                ),
+            )
+        )
+        assert len(export_reason_case_values) == 3
+        export, reason = export_reason_case_values[export_reason_case]
+        audit = self._audit(_runner_wrapper(export=export))
+        assert not (audit["verified"])
+        assert (reason) in (audit["reasons"])
+        assert ("wrapper-execution-scope-incomplete") in (audit["reasons"])
+
+    @pytest.mark.parametrize(
+        "source_case", range(2), ids=("primitive-rebound", "annotated-export")
+    )
+    def test_runner_scope_guard_rejects_known_and_annotated_rebindings(
+        self, source_case
+    ):
         helper = """
 def hidden_copy(arg0_1):
     copied = empty_strided_cuda((8,), (1,), torch.float64)
@@ -1019,10 +1106,12 @@ def hidden_copy(arg0_1):
             helpers=helper,
             export="runner = Runner()\ncall = runner.call\ncall: object = hidden_copy\n",
         )
-        for source in (primitive_rebound, annotated_export):
-            audit = self._audit(source)
-            assert not (audit["verified"])
-            assert ("wrapper-execution-scope-incomplete") in (audit["reasons"])
+        source_case_values = tuple((primitive_rebound, annotated_export))
+        assert len(source_case_values) == 2
+        source = source_case_values[source_case]
+        audit = self._audit(source)
+        assert not (audit["verified"])
+        assert ("wrapper-execution-scope-incomplete") in (audit["reasons"])
 
     def test_runner_call_local_reassignment_stays_unmapped(self):
         audit = self._audit(
@@ -1039,22 +1128,29 @@ def hidden_copy(arg0_1):
         assert not (audit["verified"])
         assert ("launch-output-unmapped:kernel:out_ptr0") in (audit["reasons"])
 
-    def test_runner_call_list_loop_and_clone_outputs_stay_unmapped(self):
-        for replacement in (
-            """        value = arg0_1.clone()
+    @pytest.mark.parametrize("replacement_case", range(2), ids=("clone", "list-loop"))
+    def test_runner_call_list_loop_and_clone_outputs_stay_unmapped(
+        self, replacement_case
+    ):
+        replacement_case_values = tuple(
+            (
+                """        value = arg0_1.clone()
         kernel.run(arg0_1, value, 8, grid=grid(8), stream=stream0)""",
-            """        values = [arg0_1]
+                """        values = [arg0_1]
         for _ in range(1):
             values[0] = copy_if_misaligned(values[0])
         kernel.run(arg0_1, values[0], 8, grid=grid(8), stream=stream0)""",
-        ):
-            source = _runner_wrapper().replace(
-                "        kernel.run(arg0_1, arg0_1, 8, grid=grid(8), stream=stream0)",
-                replacement,
             )
-            audit = self._audit(source)
-            assert not (audit["verified"])
-            assert ("launch-output-unmapped:kernel:out_ptr0") in (audit["reasons"])
+        )
+        assert len(replacement_case_values) == 2
+        replacement = replacement_case_values[replacement_case]
+        source = _runner_wrapper().replace(
+            "        kernel.run(arg0_1, arg0_1, 8, grid=grid(8), stream=stream0)",
+            replacement,
+        )
+        audit = self._audit(source)
+        assert not (audit["verified"])
+        assert ("launch-output-unmapped:kernel:out_ptr0") in (audit["reasons"])
 
     def test_ambiguous_runner_entrypoints_fail_closed(self):
         source = (
@@ -1066,24 +1162,36 @@ def hidden_copy(arg0_1):
         assert ("wrapper-execution-scope-ambiguous") in (audit["reasons"])
         assert ("wrapper-execution-scope-incomplete") in (audit["reasons"])
 
-    def test_arithmetic_field_workspaces_and_pool_reuse_are_diagnostic_only(self):
-        for allocation in (
-            "buf0 = empty_strided_cuda((8,), (1,), torch.float64)",
-            "buf0 = alloc_from_pool((8,), (1,), torch.float64)",
-        ):
-            audit = self._audit(_arithmetic_wrapper(allocation=allocation))
-            assert (audit["status"]) == ("verified")
-            assert audit["verified"]
-            candidates = audit["full_domain_output_candidates"]
-            assert (len(candidates)) == (1)
-            assert (candidates[0]["classification"]) == (
-                "arithmetic-produced-field-workspace"
+    @pytest.mark.parametrize(
+        "allocation_case", range(2), ids=("fresh-allocation", "pool-reuse")
+    )
+    def test_arithmetic_field_workspaces_and_pool_reuse_are_diagnostic_only(
+        self, allocation_case
+    ):
+        allocation_case_values = tuple(
+            (
+                "buf0 = empty_strided_cuda((8,), (1,), torch.float64)",
+                "buf0 = alloc_from_pool((8,), (1,), torch.float64)",
             )
-            assert (candidates[0]["reused_storage"]) == (
-                "alloc_from_pool" in allocation
-            )
+        )
+        assert len(allocation_case_values) == 2
+        allocation = allocation_case_values[allocation_case]
+        audit = self._audit(_arithmetic_wrapper(allocation=allocation))
+        assert (audit["status"]) == ("verified")
+        assert audit["verified"]
+        candidates = audit["full_domain_output_candidates"]
+        assert (len(candidates)) == (1)
+        assert (candidates[0]["classification"]) == (
+            "arithmetic-produced-field-workspace"
+        )
+        assert (candidates[0]["reused_storage"]) == ("alloc_from_pool" in allocation)
 
-    def test_identity_field_copy_and_unknown_payload_fail_closed(self):
+    @pytest.mark.parametrize(
+        "payload_case",
+        range(3),
+        ids=("identity-add-zero", "repeated-load", "conditional-load"),
+    )
+    def test_identity_field_copy_and_unknown_payload_fail_closed(self, payload_case):
         identity = self._audit(
             _wrapper(
                 allocation="buf0 = empty_strided_cuda((8,), (1,), torch.float64)",
@@ -1096,22 +1204,38 @@ def hidden_copy(arg0_1):
             "field-identity-copy"
         )
 
-        for payload in (
-            "value = tl.load(in_ptr0) + 0\n    tl.store(out_ptr0, value)",
-            "value = tl.load(in_ptr0)\n    value = tl.load(in_ptr0)\n    tl.store(out_ptr0, value)",
-            "if xnumel:\n        value = tl.load(in_ptr0) + tl.load(in_ptr0)\n        tl.store(out_ptr0, value)",
-        ):
-            unknown = self._audit(
-                _wrapper(
-                    allocation="buf0 = alloc_from_pool((8,), (1,), torch.float64)",
-                    output="buf0",
-                    payload=payload,
-                )
+        payload_case_values = tuple(
+            (
+                "value = tl.load(in_ptr0) + 0\n    tl.store(out_ptr0, value)",
+                "value = tl.load(in_ptr0)\n    value = tl.load(in_ptr0)\n    tl.store(out_ptr0, value)",
+                "if xnumel:\n        value = tl.load(in_ptr0) + tl.load(in_ptr0)\n        tl.store(out_ptr0, value)",
             )
-            assert not (unknown["verified"])
-            assert ("field-producer-unknown:kernel:out_ptr0") in (unknown["reasons"])
+        )
+        assert len(payload_case_values) == 3
+        payload = payload_case_values[payload_case]
+        unknown = self._audit(
+            _wrapper(
+                allocation="buf0 = alloc_from_pool((8,), (1,), torch.float64)",
+                output="buf0",
+                payload=payload,
+            )
+        )
+        assert not (unknown["verified"])
+        assert ("field-producer-unknown:kernel:out_ptr0") in (unknown["reasons"])
 
-    def test_selector_and_opaque_payloads_are_not_arithmetic_provenance(self):
+    @pytest.mark.parametrize(
+        "payload_case",
+        range(4),
+        ids=(
+            "same-input-selector",
+            "different-input-selector",
+            "conditional-expression",
+            "opaque-transform",
+        ),
+    )
+    def test_selector_and_opaque_payloads_are_not_arithmetic_provenance(
+        self, payload_case
+    ):
         payloads = (
             "left = tl.load(in_ptr0)\n    right = tl.load(in_ptr1)\n"
             "    value = tl.where(right > 0, left, left)\n"
@@ -1126,47 +1250,75 @@ def hidden_copy(arg0_1):
             "    value = opaque_transform(left, right)\n"
             "    tl.store(out_ptr0, value)",
         )
-        for payload in payloads:
-            source = _arithmetic_wrapper(
-                allocation="buf0 = empty_strided_cuda((8,), (1,), torch.float64)"
-            ).replace(
-                "left = tl.load(in_ptr0)\n    right = tl.load(in_ptr1)\n"
-                "    tl.store(out_ptr0, left - right)",
-                payload,
-            )
-            audit = self._audit(source)
-            assert not (audit["verified"])
-            assert ("field-producer-unknown:kernel:out_ptr0") in (audit["reasons"])
-            assert (audit["full_domain_output_candidates"][0]["classification"]) == (
-                "field-producer-unknown"
-            )
+        payload_case_values = tuple(payloads)
+        assert len(payload_case_values) == 4
+        payload = payload_case_values[payload_case]
+        source = _arithmetic_wrapper(
+            allocation="buf0 = empty_strided_cuda((8,), (1,), torch.float64)"
+        ).replace(
+            "left = tl.load(in_ptr0)\n    right = tl.load(in_ptr1)\n"
+            "    tl.store(out_ptr0, left - right)",
+            payload,
+        )
+        audit = self._audit(source)
+        assert not (audit["verified"])
+        assert ("field-producer-unknown:kernel:out_ptr0") in (audit["reasons"])
+        assert (audit["full_domain_output_candidates"][0]["classification"]) == (
+            "field-producer-unknown"
+        )
 
-    def test_larger_or_nonfield_outputs_are_not_clone_candidates(self):
-        for allocation in (
-            "buf0 = empty_strided_cuda((64,), (1,), torch.float64)",
-            "buf0 = empty_strided_cuda((8,), (1,), torch.int64)",
-            "buf0 = empty_strided_cuda((4, 2), (2, 1), torch.float64)",
-            "buf0 = empty_strided_cuda((8,), (1,), torch.float32)",
-            "buf0 = empty_strided_cuda((8,), (2,), torch.float64)",
-        ):
-            audit = self._audit(_wrapper(allocation=allocation, output="buf0"))
-            assert (audit["status"]) == ("verified")
-            assert audit["verified"]
-            assert (audit["full_domain_output_candidates"]) == ([])
-            assert (len(audit["non_field_output_exclusions"])) == (1)
-
-    def test_unknown_factory_mapping_and_opaque_paths_fail_closed(self):
-        for source, reason in (
+    @pytest.mark.parametrize(
+        "allocation_case",
+        range(5),
+        ids=(
+            "larger-output",
+            "integer-output",
+            "wrong-shape",
+            "wrong-precision",
+            "wrong-stride",
+        ),
+    )
+    def test_larger_or_nonfield_outputs_are_not_clone_candidates(self, allocation_case):
+        allocation_case_values = tuple(
             (
-                _wrapper(allocation="buf0 = mystery_alloc((8,))", output="buf0"),
-                "allocation-factory-unknown:buf0",
-            ),
-            (_wrapper(output="buf0"), "launch-output-unmapped:kernel:out_ptr0"),
-            ("extern_kernels.opaque()", "opaque-external-kernel"),
-        ):
-            audit = self._audit(source)
-            assert (audit["status"]) == ("unverified")
-            assert (reason) in (audit["reasons"])
+                "buf0 = empty_strided_cuda((64,), (1,), torch.float64)",
+                "buf0 = empty_strided_cuda((8,), (1,), torch.int64)",
+                "buf0 = empty_strided_cuda((4, 2), (2, 1), torch.float64)",
+                "buf0 = empty_strided_cuda((8,), (1,), torch.float32)",
+                "buf0 = empty_strided_cuda((8,), (2,), torch.float64)",
+            )
+        )
+        assert len(allocation_case_values) == 5
+        allocation = allocation_case_values[allocation_case]
+        audit = self._audit(_wrapper(allocation=allocation, output="buf0"))
+        assert (audit["status"]) == ("verified")
+        assert audit["verified"]
+        assert (audit["full_domain_output_candidates"]) == ([])
+        assert (len(audit["non_field_output_exclusions"])) == (1)
+
+    @pytest.mark.parametrize(
+        "source_reason_case",
+        range(3),
+        ids=("unknown-factory", "unmapped-output", "opaque-external"),
+    )
+    def test_unknown_factory_mapping_and_opaque_paths_fail_closed(
+        self, source_reason_case
+    ):
+        source_reason_case_values = tuple(
+            (
+                (
+                    _wrapper(allocation="buf0 = mystery_alloc((8,))", output="buf0"),
+                    "allocation-factory-unknown:buf0",
+                ),
+                (_wrapper(output="buf0"), "launch-output-unmapped:kernel:out_ptr0"),
+                ("extern_kernels.opaque()", "opaque-external-kernel"),
+            )
+        )
+        assert len(source_reason_case_values) == 3
+        source, reason = source_reason_case_values[source_reason_case]
+        audit = self._audit(source)
+        assert (audit["status"]) == ("unverified")
+        assert (reason) in (audit["reasons"])
 
     def test_missing_required_region_fails_closed(self):
         audit = self._audit(

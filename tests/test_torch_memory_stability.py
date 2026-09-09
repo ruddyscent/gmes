@@ -85,8 +85,14 @@ class TestStabilityEvidence:
         allocated.assert_not_called()
         reserved.assert_not_called()
 
+    @pytest.mark.parametrize(
+        "snapshot_case",
+        range(5),
+        ids=("empty", "missing-reserved", "string", "boolean", "negative"),
+    )
     def test_cuda_memory_snapshot_rejects_missing_malformed_bool_and_negative_values(
         self,
+        snapshot_case,
     ):
         valid = {
             "allocated_bytes": {"all": {"current": 11}},
@@ -108,16 +114,18 @@ class TestStabilityEvidence:
                 "reserved_bytes": {"all": {"current": -1}},
             },
         )
-        for snapshot in invalid_snapshots:
-            with (
-                mock.patch.object(
-                    stability.torch.cuda,
-                    "memory_stats_as_nested_dict",
-                    return_value=snapshot,
-                ),
-            ):
-                with pytest.raises(RuntimeError, match="non-negative integer"):
-                    stability._cuda_current_memory(torch.device("cuda", 0))
+        snapshot_case_values = tuple(invalid_snapshots)
+        assert len(snapshot_case_values) == 5
+        snapshot = snapshot_case_values[snapshot_case]
+        with (
+            mock.patch.object(
+                stability.torch.cuda,
+                "memory_stats_as_nested_dict",
+                return_value=snapshot,
+            ),
+        ):
+            with pytest.raises(RuntimeError, match="non-negative integer"):
+                stability._cuda_current_memory(torch.device("cuda", 0))
         assert (valid["allocated_bytes"]["all"]["current"]) == (11)
 
     def test_cuda_observation_uses_one_snapshot_and_not_legacy_flatteners(self):
@@ -180,16 +188,21 @@ class TestStabilityEvidence:
             stability._phase_progress(True, "warmup-start")
         write.assert_called_once_with(2, b"torch-memory-stability phase=warmup-start\n")
 
-    def test_prebound_storage_observer_detects_replacement_and_nonfinite(self):
-        for name in ("field", "material", "source"):
-            owner = torch.nn.Module()
-            owner.register_buffer(name, torch.ones(2))
-            observer = stability._buffer_observer((owner,))
-            assert observer.stable()
-            assert observer.finite()
-            owner.register_buffer(name, torch.full((2,), float("nan")))
-            assert not (observer.stable())
-            assert not (observer.finite())
+    @pytest.mark.parametrize("name_case", range(3), ids=("field", "material", "source"))
+    def test_prebound_storage_observer_detects_replacement_and_nonfinite(
+        self, name_case
+    ):
+        name_case_values = tuple(("field", "material", "source"))
+        assert len(name_case_values) == 3
+        name = name_case_values[name_case]
+        owner = torch.nn.Module()
+        owner.register_buffer(name, torch.ones(2))
+        observer = stability._buffer_observer((owner,))
+        assert observer.stable()
+        assert observer.finite()
+        owner.register_buffer(name, torch.full((2,), float("nan")))
+        assert not (observer.stable())
+        assert not (observer.finite())
 
     def test_prebound_storage_observer_rejects_added_or_removed_buffer_keys(self):
         added = torch.nn.Module()
@@ -230,19 +243,28 @@ class TestStabilityEvidence:
                 decision["hard_failures"]
             )
 
-    def test_unhealthy_warmup_cannot_qualify_a_both_runtime_collection(self):
-        for name in (
-            "candidate_finite",
-            "reference_finite",
-            "storage_stable",
-        ):
-            warmup = dict(_result()["observer_warmup"])
-            warmup[name] = [False]
-            decision = stability._evaluate(_result(observer_warmup=warmup))
-            assert not (decision["qualified"])
-            assert ("complete healthy primed observer warmup evidence is missing") in (
-                decision["hard_failures"]
+    @pytest.mark.parametrize(
+        "name_case",
+        range(3),
+        ids=("candidate-finite", "reference-finite", "storage-stable"),
+    )
+    def test_unhealthy_warmup_cannot_qualify_a_both_runtime_collection(self, name_case):
+        name_case_values = tuple(
+            (
+                "candidate_finite",
+                "reference_finite",
+                "storage_stable",
             )
+        )
+        assert len(name_case_values) == 3
+        name = name_case_values[name_case]
+        warmup = dict(_result()["observer_warmup"])
+        warmup[name] = [False]
+        decision = stability._evaluate(_result(observer_warmup=warmup))
+        assert not (decision["qualified"])
+        assert ("complete healthy primed observer warmup evidence is missing") in (
+            decision["hard_failures"]
+        )
         warmup = dict(_result()["observer_warmup"])
         warmup["field_error_checked"] = False
         decision = stability._evaluate(_result(observer_warmup=warmup))
@@ -399,17 +421,22 @@ class TestStabilityEvidence:
             decision["hard_failures"]
         )
 
-    def test_all_nonboth_advance_roles_remain_diagnostic(self):
-        for role in ("candidate", "reference", "none"):
-            decision = stability._evaluate(
-                _result(
-                    advance_role=role,
-                    observation_only=role == "none",
-                    field_error_checked=role == "none",
-                )
+    @pytest.mark.parametrize(
+        "role_case", range(3), ids=("candidate", "reference", "none")
+    )
+    def test_all_nonboth_advance_roles_remain_diagnostic(self, role_case):
+        role_case_values = tuple(("candidate", "reference", "none"))
+        assert len(role_case_values) == 3
+        role = role_case_values[role_case]
+        decision = stability._evaluate(
+            _result(
+                advance_role=role,
+                observation_only=role == "none",
+                field_error_checked=role == "none",
             )
-            assert decision["diagnostic_ok"]
-            assert not (decision["qualified"])
+        )
+        assert decision["diagnostic_ok"]
+        assert not (decision["qualified"])
 
     def test_copy_record_detects_non_clone_materialization(self):
         event = SimpleNamespace(key="aten::copy_", input_shapes=[(2, 3)])

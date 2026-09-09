@@ -353,7 +353,12 @@ class TestNativeSummary:
             with pytest.raises(ValueError, match="duplicate"):
                 self.summary.assemble_summary(duplicate, MANIFEST)
 
-    def test_rejects_cell_schema_workload_and_contract_changes(self):
+    @pytest.mark.parametrize(
+        "suffix_mutation_case", range(3), ids=("schema", "workload", "contract")
+    )
+    def test_rejects_cell_schema_workload_and_contract_changes(
+        self, suffix_mutation_case
+    ):
         mutations = {
             "schema": lambda cell: cell.__setitem__("schema_version", 1),
             "workload": lambda cell: cell["workload"].__setitem__("size", [1]),
@@ -363,13 +368,18 @@ class TestNativeSummary:
         }
         with tempfile.TemporaryDirectory() as directory:
             original = self._write_inputs(directory)
-            for suffix, mutation in mutations.items():
-                paths = list(original)
-                paths[0] = self._mutated_input(directory, original[0], mutation, suffix)
-                with pytest.raises(ValueError):
-                    self.summary.assemble_summary(paths, MANIFEST)
+            suffix_mutation_case_values = tuple(mutations.items())
+            assert len(suffix_mutation_case_values) == 3
+            suffix, mutation = suffix_mutation_case_values[suffix_mutation_case]
+            paths = list(original)
+            paths[0] = self._mutated_input(directory, original[0], mutation, suffix)
+            with pytest.raises(ValueError):
+                self.summary.assemble_summary(paths, MANIFEST)
 
-    def test_rejects_wrong_or_dirty_observer_checkout(self):
+    @pytest.mark.parametrize(
+        "suffix_mutation_case", range(2), ids=("wrong-commit", "dirty")
+    )
+    def test_rejects_wrong_or_dirty_observer_checkout(self, suffix_mutation_case):
         mutations = {
             "wrong-commit": lambda cell: cell["environment"].__setitem__(
                 "git_commit", "0" * 40
@@ -380,13 +390,16 @@ class TestNativeSummary:
         }
         with tempfile.TemporaryDirectory() as directory:
             original = self._write_inputs(directory)
-            for suffix, mutation in mutations.items():
-                paths = list(original)
-                paths[0] = self._mutated_input(directory, original[0], mutation, suffix)
-                with pytest.raises(ValueError, match="observer commit|dirty"):
-                    self.summary.assemble_summary(paths, MANIFEST)
+            suffix_mutation_case_values = tuple(mutations.items())
+            assert len(suffix_mutation_case_values) == 2
+            suffix, mutation = suffix_mutation_case_values[suffix_mutation_case]
+            paths = list(original)
+            paths[0] = self._mutated_input(directory, original[0], mutation, suffix)
+            with pytest.raises(ValueError, match="observer commit|dirty"):
+                self.summary.assemble_summary(paths, MANIFEST)
 
-    def test_rejects_invalid_threads_and_mixed_environments(self):
+    @pytest.mark.parametrize("suffix_mutation_case", range(2), ids=("thread", "host"))
+    def test_rejects_invalid_threads_and_mixed_environments(self, suffix_mutation_case):
         mutations = {
             "thread": lambda cell: (
                 cell["environment"].__setitem__("openmp_threads", 2),
@@ -398,11 +411,13 @@ class TestNativeSummary:
         }
         with tempfile.TemporaryDirectory() as directory:
             original = self._write_inputs(directory)
-            for suffix, mutation in mutations.items():
-                paths = list(original)
-                paths[0] = self._mutated_input(directory, original[0], mutation, suffix)
-                with pytest.raises(ValueError, match="thread count|one environment"):
-                    self.summary.assemble_summary(paths, MANIFEST)
+            suffix_mutation_case_values = tuple(mutations.items())
+            assert len(suffix_mutation_case_values) == 2
+            suffix, mutation = suffix_mutation_case_values[suffix_mutation_case]
+            paths = list(original)
+            paths[0] = self._mutated_input(directory, original[0], mutation, suffix)
+            with pytest.raises(ValueError, match="thread count|one environment"):
+                self.summary.assemble_summary(paths, MANIFEST)
 
     def test_rejects_physical_threads_that_differ_from_baseline_pin(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -457,7 +472,12 @@ class TestNativeSummary:
             with pytest.raises(ValueError, match="not frozen"):
                 self.summary.assemble_summary(paths, manifest_path)
 
-    def test_rejects_inconsistent_native_accounting(self):
+    @pytest.mark.parametrize(
+        "suffix_mutation_case",
+        range(3),
+        ids=("rss-peak", "updater-bytes", "throughput"),
+    )
+    def test_rejects_inconsistent_native_accounting(self, suffix_mutation_case):
         mutations = {
             "rss-peak": lambda cell: cell["memory"].__setitem__("peak_rss_bytes", 1),
             "updater-bytes": lambda cell: cell["updaters"][0].__setitem__(
@@ -469,11 +489,13 @@ class TestNativeSummary:
         }
         with tempfile.TemporaryDirectory() as directory:
             original = self._write_inputs(directory)
-            for suffix, mutation in mutations.items():
-                paths = list(original)
-                paths[0] = self._mutated_input(directory, original[0], mutation, suffix)
-                with pytest.raises(ValueError, match="RSS|updater|timing contract"):
-                    self.summary.assemble_summary(paths, MANIFEST)
+            suffix_mutation_case_values = tuple(mutations.items())
+            assert len(suffix_mutation_case_values) == 3
+            suffix, mutation = suffix_mutation_case_values[suffix_mutation_case]
+            paths = list(original)
+            paths[0] = self._mutated_input(directory, original[0], mutation, suffix)
+            with pytest.raises(ValueError, match="RSS|updater|timing contract"):
+                self.summary.assemble_summary(paths, MANIFEST)
 
     def test_rejects_signed_zero_environment_ambiguity(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -524,20 +546,34 @@ class TestNativeSummary:
             }
         )
 
-    def test_rejects_unpaired_nested_and_other_gpu_topology_controls(self):
+    @pytest.mark.parametrize(
+        "suffix_topology_case",
+        range(4),
+        ids=(
+            "unpaired-reset",
+            "unterminated-underline",
+            "nested-underline",
+            "other-control",
+        ),
+    )
+    def test_rejects_unpaired_nested_and_other_gpu_topology_controls(
+        self, suffix_topology_case
+    ):
         invalid = {
             "unpaired-reset": "\x1b[0mGPU0 GPU-0000",
             "unterminated-underline": "\x1b[4mGPU0 GPU-0000",
             "nested-underline": "\x1b[4mGPU\x1b[4m0\x1b[0m\x1b[0m GPU-0000",
             "other-control": "GPU0\x07 GPU-0000",
         }
-        for suffix, topology in invalid.items():
-            with (tempfile.TemporaryDirectory() as directory,):
-                paths = self._write_gpu_topology_inputs(directory, topology)
-                with pytest.raises(
-                    ValueError, match="unpaired|unterminated|nested|control"
-                ):
-                    self.summary.assemble_summary(paths, MANIFEST)
+        suffix_topology_case_values = tuple(invalid.items())
+        assert len(suffix_topology_case_values) == 4
+        suffix, topology = suffix_topology_case_values[suffix_topology_case]
+        with (tempfile.TemporaryDirectory() as directory,):
+            paths = self._write_gpu_topology_inputs(directory, topology)
+            with pytest.raises(
+                ValueError, match="unpaired|unterminated|nested|control"
+            ):
+                self.summary.assemble_summary(paths, MANIFEST)
 
     def test_rejects_duplicate_json_keys_and_inconsistent_raw_statistics(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -561,7 +597,10 @@ class TestNativeSummary:
             with pytest.raises(ValueError, match="non-finite JSON constant"):
                 self.summary.assemble_summary(paths, MANIFEST)
 
-    def test_rejects_ansi_keys_and_boolean_transfer_samples(self):
+    @pytest.mark.parametrize(
+        "suffix_mutation_case", range(2), ids=("ansi-key", "boolean-transfer")
+    )
+    def test_rejects_ansi_keys_and_boolean_transfer_samples(self, suffix_mutation_case):
         mutations = {
             "ansi-key": lambda cell: cell["updaters"][0].__setitem__(
                 "\x1b[31mcells", 10
@@ -572,8 +611,10 @@ class TestNativeSummary:
         }
         with tempfile.TemporaryDirectory() as directory:
             original = self._write_inputs(directory)
-            for suffix, mutation in mutations.items():
-                paths = list(original)
-                paths[0] = self._mutated_input(directory, original[0], mutation, suffix)
-                with pytest.raises(ValueError, match="ANSI|transfer"):
-                    self.summary.assemble_summary(paths, MANIFEST)
+            suffix_mutation_case_values = tuple(mutations.items())
+            assert len(suffix_mutation_case_values) == 2
+            suffix, mutation = suffix_mutation_case_values[suffix_mutation_case]
+            paths = list(original)
+            paths[0] = self._mutated_input(directory, original[0], mutation, suffix)
+            with pytest.raises(ValueError, match="ANSI|transfer"):
+                self.summary.assemble_summary(paths, MANIFEST)

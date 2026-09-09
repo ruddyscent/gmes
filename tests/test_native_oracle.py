@@ -232,33 +232,47 @@ class TestNativeOracle:
             ):
                 self.oracle.load_manifest(self._write_manifest(directory, manifest))
 
-    def test_manifest_rejects_redirected_or_weakened_cpu_timing_contract(self):
+    @pytest.mark.parametrize(
+        "group_name_value_case",
+        range(4),
+        ids=("root-commit", "individual-ratio", "resamples", "regression-ratio"),
+    )
+    def test_manifest_rejects_redirected_or_weakened_cpu_timing_contract(
+        self, group_name_value_case
+    ):
         mutations = (
             ("timing_reference", "root_commit", "0" * 40),
             (None, "max_individual_ratio", 1.10),
             ("statistics", "resamples", 1),
             ("statistics", "regression_ratio", 2.0),
         )
-        for group, name, value in mutations:
-            with (tempfile.TemporaryDirectory() as directory,):
-                manifest = copy.deepcopy(self.manifest)
-                acceptance = manifest["performance_gates"]["cpu_acceptance"]
-                (acceptance if group is None else acceptance[group])[name] = value
-                with pytest.raises(ValueError):
-                    self.oracle.load_manifest(self._write_manifest(directory, manifest))
+        group_name_value_case_values = tuple(mutations)
+        assert len(group_name_value_case_values) == 4
+        group, name, value = group_name_value_case_values[group_name_value_case]
+        with (tempfile.TemporaryDirectory() as directory,):
+            manifest = copy.deepcopy(self.manifest)
+            acceptance = manifest["performance_gates"]["cpu_acceptance"]
+            (acceptance if group is None else acceptance[group])[name] = value
+            with pytest.raises(ValueError):
+                self.oracle.load_manifest(self._write_manifest(directory, manifest))
 
-    def test_manifest_rejects_timing_runtime_identity_tampering(self):
-        for identity in (
-            None,
-            {"schema_version": 1, "torch": "2.13.0+cu126", "cuda_runtime": None},
-        ):
-            with (tempfile.TemporaryDirectory() as directory,):
-                manifest = copy.deepcopy(self.manifest)
-                manifest["performance_gates"]["cpu_acceptance"]["timing_reference"][
-                    "timing_runtime_identity"
-                ] = identity
-                with pytest.raises(ValueError, match="frozen baseline"):
-                    self.oracle.load_manifest(self._write_manifest(directory, manifest))
+    @pytest.mark.parametrize("identity_case", range(2), ids=("null", "cuda-build"))
+    def test_manifest_rejects_timing_runtime_identity_tampering(self, identity_case):
+        identity_case_values = tuple(
+            (
+                None,
+                {"schema_version": 1, "torch": "2.13.0+cu126", "cuda_runtime": None},
+            )
+        )
+        assert len(identity_case_values) == 2
+        identity = identity_case_values[identity_case]
+        with (tempfile.TemporaryDirectory() as directory,):
+            manifest = copy.deepcopy(self.manifest)
+            manifest["performance_gates"]["cpu_acceptance"]["timing_reference"][
+                "timing_runtime_identity"
+            ] = identity
+            with pytest.raises(ValueError, match="frozen baseline"):
+                self.oracle.load_manifest(self._write_manifest(directory, manifest))
 
     def test_manifest_rejects_noncanonical_cpu_artifact_release_url(self):
         manifest = copy.deepcopy(self.manifest)
@@ -342,8 +356,14 @@ class TestNativeOracle:
                 with pytest.raises(ValueError, match="array names must be unique"):
                     self.oracle._validate_archive(archive, self.manifest, "candidate")
 
+    @pytest.mark.parametrize(
+        "label_options_error_case",
+        range(3),
+        ids=("truncated-field", "reshaped-map", "bytecount"),
+    )
     def test_synthetic_candidate_rejects_truncation_dimension_and_bytecount_tampering(
         self,
+        label_options_error_case,
     ):
         """Exercise complete-archive checks with a temporary Torch candidate only."""
         with tempfile.TemporaryDirectory() as directory:
@@ -377,15 +397,30 @@ class TestNativeOracle:
                     "archive_array_bytes is inaccurate",
                 ),
             )
-            for label, options, error in mutations:
-                candidate = directory / f"{label}.npz"
-                self._rewrite_archive(baseline, candidate, **options)
-                with np.load(candidate, allow_pickle=False) as archive:
-                    with pytest.raises(ValueError, match=error):
-                        self.oracle._validate_archive(archive, manifest, "candidate")
+            label_options_error_case_values = tuple(mutations)
+            assert len(label_options_error_case_values) == 3
+            label, options, error = label_options_error_case_values[
+                label_options_error_case
+            ]
+            candidate = directory / f"{label}.npz"
+            self._rewrite_archive(baseline, candidate, **options)
+            with np.load(candidate, allow_pickle=False) as archive:
+                with pytest.raises(ValueError, match=error):
+                    self.oracle._validate_archive(archive, manifest, "candidate")
 
+    @pytest.mark.parametrize(
+        "label_arrays_validator_arguments_case",
+        range(4),
+        ids=(
+            "source-nonfinite",
+            "source-reshaped",
+            "material-nonfinite",
+            "material-reshaped",
+        ),
+    )
     def test_source_and_material_state_contracts_reject_nonfinite_and_reshaped_arrays(
         self,
+        label_arrays_validator_arguments_case,
     ):
         source_prefix = "step/1/source/Ex/0-unit-test-source"
         material_prefix = "step/1/state/Ex/0-dielectric"
@@ -397,44 +432,61 @@ class TestNativeOracle:
             f"{material_prefix}/indices": np.zeros((1, 3), dtype=np.int64),
             f"{material_prefix}/values": np.asarray([1.0]),
         }
-        for label, arrays, validator, arguments in (
+        label_arrays_validator_arguments_case_values = tuple(
             (
-                "source-nonfinite",
-                dict(
-                    source_arrays, **{f"{source_prefix}/values": np.asarray([np.nan])}
+                (
+                    "source-nonfinite",
+                    dict(
+                        source_arrays,
+                        **{f"{source_prefix}/values": np.asarray([np.nan])},
+                    ),
+                    self.oracle._validate_source_arrays,
+                    (self._source_record(), 1),
                 ),
-                self.oracle._validate_source_arrays,
-                (self._source_record(), 1),
-            ),
-            (
-                "source-reshaped",
-                dict(source_arrays, **{f"{source_prefix}/values": np.ones((1, 1))}),
-                self.oracle._validate_source_arrays,
-                (self._source_record(), 1),
-            ),
-            (
-                "material-nonfinite",
-                dict(
-                    material_arrays,
-                    **{f"{material_prefix}/values": np.asarray([np.inf])},
+                (
+                    "source-reshaped",
+                    dict(source_arrays, **{f"{source_prefix}/values": np.ones((1, 1))}),
+                    self.oracle._validate_source_arrays,
+                    (self._source_record(), 1),
                 ),
-                self.oracle._validate_material_records,
-                ([self._material_record()], 1, "state", {"Ex": (1,)}),
-            ),
-            (
-                "material-reshaped",
-                dict(material_arrays, **{f"{material_prefix}/values": np.ones((1, 1))}),
-                self.oracle._validate_material_records,
-                ([self._material_record()], 1, "state", {"Ex": (1,)}),
-            ),
-        ):
-            required = set()
-            with pytest.raises(
-                ValueError, match="(source updater state|material state)"
-            ):
-                validator(self._arrays(**arrays), *arguments, required)
+                (
+                    "material-nonfinite",
+                    dict(
+                        material_arrays,
+                        **{f"{material_prefix}/values": np.asarray([np.inf])},
+                    ),
+                    self.oracle._validate_material_records,
+                    ([self._material_record()], 1, "state", {"Ex": (1,)}),
+                ),
+                (
+                    "material-reshaped",
+                    dict(
+                        material_arrays,
+                        **{f"{material_prefix}/values": np.ones((1, 1))},
+                    ),
+                    self.oracle._validate_material_records,
+                    ([self._material_record()], 1, "state", {"Ex": (1,)}),
+                ),
+            )
+        )
+        assert len(label_arrays_validator_arguments_case_values) == 4
+        label, arrays, validator, arguments = (
+            label_arrays_validator_arguments_case_values[
+                label_arrays_validator_arguments_case
+            ]
+        )
+        required = set()
+        with pytest.raises(ValueError, match="(source updater state|material state)"):
+            validator(self._arrays(**arrays), *arguments, required)
 
-    def test_provenance_contract_rejects_source_and_clean_state_mismatches(self):
+    @pytest.mark.parametrize(
+        "label_mutate_case",
+        range(3),
+        ids=("source-outside-checkout", "dirty-source", "reference-source"),
+    )
+    def test_provenance_contract_rejects_source_and_clean_state_mismatches(
+        self, label_mutate_case
+    ):
         source = {
             "checkout": "/tmp/unit-test-source",
             "commit": "a" * 40,
@@ -447,26 +499,32 @@ class TestNativeOracle:
             "provenance": {"source": source, "controller": dict(source)},
             "reference_source": source["source"],
         }
-        for label, mutate in (
+        label_mutate_case_values = tuple(
             (
-                "source-outside-checkout",
-                lambda value: value.update(source="/tmp/outside.py"),
-            ),
-            (
-                "dirty-source",
-                lambda value: value.update(git_status=" M observer.py", clean=False),
-            ),
-            ("reference-source", lambda value: None),
-        ):
-            candidate = copy.deepcopy(metadata)
-            if label == "reference-source":
-                candidate["reference_source"] = "/tmp/different.py"
-            else:
-                mutate(candidate["provenance"]["source"])
-            with pytest.raises(ValueError):
-                self.oracle._validate_archive_provenance(
-                    candidate, self.manifest, "candidate"
-                )
+                (
+                    "source-outside-checkout",
+                    lambda value: value.update(source="/tmp/outside.py"),
+                ),
+                (
+                    "dirty-source",
+                    lambda value: value.update(
+                        git_status=" M observer.py", clean=False
+                    ),
+                ),
+                ("reference-source", lambda value: None),
+            )
+        )
+        assert len(label_mutate_case_values) == 3
+        label, mutate = label_mutate_case_values[label_mutate_case]
+        candidate = copy.deepcopy(metadata)
+        if label == "reference-source":
+            candidate["reference_source"] = "/tmp/different.py"
+        else:
+            mutate(candidate["provenance"]["source"])
+        with pytest.raises(ValueError):
+            self.oracle._validate_archive_provenance(
+                candidate, self.manifest, "candidate"
+            )
 
     def test_retained_readers_and_validators_remain_available(self):
         case = self.oracle.find_case(self.manifest, "drude-1")
@@ -479,15 +537,27 @@ class TestNativeOracle:
         with pytest.raises(ValueError):
             self.oracle.find_case(self.manifest, "not-a-workload")
 
-    def test_candidate_checkout_rejects_native_execution(self):
+    @pytest.mark.parametrize(
+        "operation_arguments_case", range(3), ids=("build", "capture", "benchmark")
+    )
+    def test_candidate_checkout_rejects_native_execution(
+        self, operation_arguments_case
+    ):
         case = self.oracle.find_case(self.manifest, "drude-1")
-        for operation, arguments in (
-            (self.oracle.build_simulation, (case, object())),
-            (self.oracle.capture_case, (case, self.manifest, Path("reference.npz"))),
-            (self.oracle.benchmark_case, (case, self.manifest, 1, 0, 1)),
-        ):
-            with pytest.raises(RuntimeError, match="retired"):
-                operation(*arguments)
+        operation_arguments_case_values = tuple(
+            (
+                (self.oracle.build_simulation, (case, object())),
+                (
+                    self.oracle.capture_case,
+                    (case, self.manifest, Path("reference.npz")),
+                ),
+                (self.oracle.benchmark_case, (case, self.manifest, 1, 0, 1)),
+            )
+        )
+        assert len(operation_arguments_case_values) == 3
+        operation, arguments = operation_arguments_case_values[operation_arguments_case]
+        with pytest.raises(RuntimeError, match="retired"):
+            operation(*arguments)
 
     def test_cli_only_exposes_reader_and_comparator_operations(self):
         with patch.object(sys, "argv", ["native_oracle.py", "--help"]):

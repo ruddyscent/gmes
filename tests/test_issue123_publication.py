@@ -642,7 +642,20 @@ class TestIssue123Publication(_Issue123PublicationFixture):
                 expected_assets=bad_ledger,
             )
 
-    def test_offline_release_capture_and_receipt_are_independently_reopenable(self):
+    @pytest.mark.parametrize(
+        "label_mutate_case",
+        range(5),
+        ids=(
+            "release-api-query",
+            "tag-ref-alias",
+            "mutable",
+            "asset-id-alias",
+            "download-query",
+        ),
+    )
+    def test_offline_release_capture_and_receipt_are_independently_reopenable(
+        self, label_mutate_case
+    ):
         release = self._release_capture()
         receipt = publication.finalize_publication(
             self.assets,
@@ -689,45 +702,50 @@ class TestIssue123Publication(_Issue123PublicationFixture):
             ).hexdigest()
         )
 
-        # Keep this audit sequential: every mutation is checked against the same
-        # receipt and release identity established above.
-        for label, mutate in (
+        label_mutate_case_values = tuple(
             (
-                "release-api-query",
-                lambda value: value.__setitem__("api_url", value["api_url"] + "?x=1"),
-            ),
-            (
-                "tag-ref-alias",
-                lambda value: value["tag_ref"].__setitem__(
-                    "api_url", value["tag_ref"]["api_url"].replace("/refs/", "/ref/")
+                (
+                    "release-api-query",
+                    lambda value: value.__setitem__(
+                        "api_url", value["api_url"] + "?x=1"
+                    ),
                 ),
-            ),
-            ("mutable", lambda value: value.__setitem__("immutable", False)),
-            (
-                "asset-id-alias",
-                lambda value: value["assets"][1].__setitem__(
-                    "asset_id", value["assets"][0]["asset_id"]
+                (
+                    "tag-ref-alias",
+                    lambda value: value["tag_ref"].__setitem__(
+                        "api_url",
+                        value["tag_ref"]["api_url"].replace("/refs/", "/ref/"),
+                    ),
                 ),
-            ),
-            (
-                "download-query",
-                lambda value: value["assets"][0].__setitem__(
-                    "browser_download_url",
-                    value["assets"][0]["browser_download_url"] + "?download=1",
+                ("mutable", lambda value: value.__setitem__("immutable", False)),
+                (
+                    "asset-id-alias",
+                    lambda value: value["assets"][1].__setitem__(
+                        "asset_id", value["assets"][0]["asset_id"]
+                    ),
                 ),
-            ),
-        ):
-            forged = copy.deepcopy(release)
-            mutate(forged)
-            with (pytest.raises(publication.PublicationError),):
-                publication.finalize_publication(
-                    self.assets,
-                    forged,
-                    expected_policy=self.policy,
-                    expected_release_identity=self.release_identity,
-                    expected_bindings=self.bindings,
-                    expected_assets=self.ledger,
-                )
+                (
+                    "download-query",
+                    lambda value: value["assets"][0].__setitem__(
+                        "browser_download_url",
+                        value["assets"][0]["browser_download_url"] + "?download=1",
+                    ),
+                ),
+            )
+        )
+        assert len(label_mutate_case_values) == 5
+        label, mutate = label_mutate_case_values[label_mutate_case]
+        forged = copy.deepcopy(release)
+        mutate(forged)
+        with (pytest.raises(publication.PublicationError),):
+            publication.finalize_publication(
+                self.assets,
+                forged,
+                expected_policy=self.policy,
+                expected_release_identity=self.release_identity,
+                expected_bindings=self.bindings,
+                expected_assets=self.ledger,
+            )
 
         bool_release_ids = copy.deepcopy(release)
         bool_release_ids["release_id"] = 1
@@ -1247,7 +1265,20 @@ class TestIssue123Publication(_Issue123PublicationFixture):
             assert str(root) not in printed.call_args.args[0]
             assert stat.S_IMODE(receipt_path.stat().st_mode) == 0o600
 
-    def test_publication_outputs_reject_bundle_public_and_alias_overlap(self):
+    @pytest.mark.parametrize(
+        "label_asset_output_sidecar_output_case",
+        range(5),
+        ids=(
+            "asset-under-bundle",
+            "sidecar-under-bundle",
+            "sidecar-equals-public",
+            "sidecar-nested-public",
+            "asset-bundle-alias",
+        ),
+    )
+    def test_publication_outputs_reject_bundle_public_and_alias_overlap(
+        self, label_asset_output_sidecar_output_case
+    ):
         policy, private = privacy_fixture._fixture()
         for policy_scope, private_scope in zip(
             policy["scopes"], private["scopes"], strict=True
@@ -1329,20 +1360,26 @@ class TestIssue123Publication(_Issue123PublicationFixture):
             ):
                 # These paths intentionally share one alias topology so the final
                 # bundle snapshot proves that every failed attempt left it intact.
-                for label, asset_output, sidecar_output in cases:
-                    with (pytest.raises(publication.PublicationError),):
-                        publication.prepare_publication(
-                            source_specification=specification,
-                            completion_index=completion_index,
-                            policy_path=policy_path,
-                            policy_sha256=policy_sha256,
-                            runtime_receipt_paths=runtime_paths,
-                            asset_output_directory=asset_output,
-                            private_openings_output=sidecar_output,
-                            salt=bytes(range(32)),
-                        )
-                    assert not (asset_output.exists())
-                    assert not (sidecar_output.exists())
+                label_asset_output_sidecar_output_case_values = tuple(cases)
+                assert len(label_asset_output_sidecar_output_case_values) == 5
+                label, asset_output, sidecar_output = (
+                    label_asset_output_sidecar_output_case_values[
+                        label_asset_output_sidecar_output_case
+                    ]
+                )
+                with (pytest.raises(publication.PublicationError),):
+                    publication.prepare_publication(
+                        source_specification=specification,
+                        completion_index=completion_index,
+                        policy_path=policy_path,
+                        policy_sha256=policy_sha256,
+                        runtime_receipt_paths=runtime_paths,
+                        asset_output_directory=asset_output,
+                        private_openings_output=sidecar_output,
+                        salt=bytes(range(32)),
+                    )
+                assert not (asset_output.exists())
+                assert not (sidecar_output.exists())
             bundle_after = {
                 path.relative_to(completion_index.parent).as_posix(): (
                     path.stat().st_dev,
@@ -1702,7 +1739,20 @@ class TestIssue123Publication(_Issue123PublicationFixture):
                 expected_bindings=self.bindings,
             )
 
-    def test_public_trace_validator_reconstructs_complete_flow_topology(self):
+    @pytest.mark.parametrize(
+        "case_phases_case",
+        range(5),
+        ids=(
+            "end-before-start",
+            "step-before-start",
+            "duplicate-start",
+            "duplicate-end",
+            "unclosed",
+        ),
+    )
+    def test_public_trace_validator_reconstructs_complete_flow_topology(
+        self, case_phases_case
+    ):
         valid_events = [
             self._event(0, "correlation-flow", 0, phase="flow-start", correlation=0),
             self._event(1, "correlation-flow", 1, phase="flow-start", correlation=1),
@@ -1788,30 +1838,30 @@ class TestIssue123Publication(_Issue123PublicationFixture):
             ("duplicate end", ("flow-start", "flow-end", "flow-end")),
             ("unclosed", ("flow-start", "flow-step")),
         )
-        # These topology cases share the validated summary fixture and intentionally
-        # remain sequential so the surrounding missing-ordinal checks run only once.
-        for case, phases in invalid_topologies:
-            events = [
-                self._event(
-                    index,
-                    "correlation-flow",
-                    index,
-                    phase=phase,
-                    correlation=0,
-                )
-                for index, phase in enumerate(phases)
-            ]
-            observed_summary = copy.deepcopy(summary)
-            observed_summary["event_count"] = len(events)
-            with pytest.raises(
-                publication.PublicationError, match="topology is incomplete"
-            ):
-                publication._recompute_trace_summary(
-                    events,
-                    observed_summary,
-                    f"{case} flow",
-                    [[event["semantic_token"], event["phase"]] for event in events],
-                )
+        case_phases_case_values = tuple(invalid_topologies)
+        assert len(case_phases_case_values) == 5
+        case, phases = case_phases_case_values[case_phases_case]
+        events = [
+            self._event(
+                index,
+                "correlation-flow",
+                index,
+                phase=phase,
+                correlation=0,
+            )
+            for index, phase in enumerate(phases)
+        ]
+        observed_summary = copy.deepcopy(summary)
+        observed_summary["event_count"] = len(events)
+        with pytest.raises(
+            publication.PublicationError, match="topology is incomplete"
+        ):
+            publication._recompute_trace_summary(
+                events,
+                observed_summary,
+                f"{case} flow",
+                [[event["semantic_token"], event["phase"]] for event in events],
+            )
 
     def test_public_trace_origin_uses_only_clocked_events(self):
         normalized = privacy.normalize_trace(privacy_fixture._cpu_eager_trace_bytes())
@@ -1835,7 +1885,19 @@ class TestIssue123Publication(_Issue123PublicationFixture):
                 "metadata-assisted origin",
             )
 
-    def test_semantic_and_tolerance_rehashes_cannot_bypass_validation(self):
+    @pytest.mark.parametrize(
+        "mutate_case",
+        range(4),
+        ids=(
+            "swap-event-kinds",
+            "add-event",
+            "forge-tolerance",
+            "forge-zero-reference",
+        ),
+    )
+    def test_semantic_and_tolerance_rehashes_cannot_bypass_validation(
+        self, mutate_case
+    ):
         def swap_event_kinds(entries):
             path = publication.SCOPE_PATHS["two_gpu"]
             scope = json.loads(entries[path])
@@ -1894,19 +1956,23 @@ class TestIssue123Publication(_Issue123PublicationFixture):
 
         # Rehash mutations intentionally share one pristine archive and culminate
         # in the thread-context control below.
-        for mutate in (
-            swap_event_kinds,
-            add_event,
-            forge_tolerance,
-            forge_zero_reference_excess,
-        ):
-            archive = self._rehash_archive(mutate)
-            with (pytest.raises(publication.PublicationError),):
-                publication.validate_public_archive(
-                    archive,
-                    expected_policy=self.policy,
-                    expected_bindings=self.bindings,
-                )
+        mutate_case_values = tuple(
+            (
+                swap_event_kinds,
+                add_event,
+                forge_tolerance,
+                forge_zero_reference_excess,
+            )
+        )
+        assert len(mutate_case_values) == 4
+        mutate = mutate_case_values[mutate_case]
+        archive = self._rehash_archive(mutate)
+        with (pytest.raises(publication.PublicationError),):
+            publication.validate_public_archive(
+                archive,
+                expected_policy=self.policy,
+                expected_bindings=self.bindings,
+            )
 
         def collapse_thread_context(entries):
             path = publication.SCOPE_PATHS["cpu"]
@@ -1922,7 +1988,12 @@ class TestIssue123Publication(_Issue123PublicationFixture):
                 expected_bindings=self.bindings,
             )
 
-    def test_scanner_and_untrusted_parser_fail_closed(self):
+    @pytest.mark.parametrize(
+        "attack_case",
+        range(5),
+        ids=("macos-temporary", "windows-runner", "bearer", "credentials", "tokens"),
+    )
+    def test_scanner_and_untrusted_parser_fail_closed(self, attack_case):
         attacks = (
             {"note": "/var/folders/aa/bb"},
             {"note": "C:\\runner\\_work\\repo"},
@@ -1930,11 +2001,11 @@ class TestIssue123Publication(_Issue123PublicationFixture):
             {"credentials": "abcdefghijklmnop"},
             {"tokens": "abcdefghijklmnop"},
         )
-        # Scanner probes stay sequential with the malformed-input and policy
-        # controls below to exercise one fail-closed validation progression.
-        for attack in attacks:
-            with (pytest.raises(publication.PublicationError),):
-                publication.scan_public_bytes(publication.canonical_json_bytes(attack))
+        attack_case_values = tuple(attacks)
+        assert len(attack_case_values) == 5
+        attack = attack_case_values[attack_case]
+        with (pytest.raises(publication.PublicationError),):
+            publication.scan_public_bytes(publication.canonical_json_bytes(attack))
         malformed = (
             b"[" * 2000 + b"0" + b"]" * 2000 + b"\n",
             b'{"value":' + b"9" * 5000 + b"}\n",
@@ -1991,19 +2062,50 @@ class TestIssue123Publication(_Issue123PublicationFixture):
                     expected_bindings=self.bindings,
                 )
 
-    def test_independent_payload_path_validator_rejects_windows_aliases(self):
-        names = (
-            "C:relative/evidence.bin",
-            "evidence/NUL.bin",
-            "evidence/file.bin:stream.bin",
-            "evidence/name./data.bin",
-            "evidence/LPT\N{SUPERSCRIPT TWO}.bin",
-            "．．/evidence.bin",
-            "evidence/ｐｒｉｖａｔｅ/data.bin",
+    @pytest.mark.parametrize(
+        "name_case",
+        range(7),
+        ids=(
+            "drive-relative",
+            "reserved-name",
+            "alternate-stream",
+            "trailing-dot",
+            "unicode-reserved",
+            "traversal",
+            "private-role",
+        ),
+    )
+    def test_independent_payload_path_validator_rejects_windows_aliases(
+        self, name_case
+    ):
+        self._check_independent_payload_path_validator_rejects_windows_aliases_phase(
+            phase="windows_names", name_case=name_case
         )
-        # Invalid aliases and the final portable control share one payload builder,
-        # so retain their ordered reject-then-accept progression.
-        for name in names:
+
+    @pytest.mark.parametrize("assignment_case", range(2), ids=("ascii", "fullwidth"))
+    def test_independent_payload_path_validator_rejects_windows_aliases_assignments(
+        self, assignment_case
+    ):
+        self._check_independent_payload_path_validator_rejects_windows_aliases_phase(
+            phase="assignments", assignment_case=assignment_case
+        )
+
+    def _check_independent_payload_path_validator_rejects_windows_aliases_phase(
+        self, *, phase, name_case=None, assignment_case=None
+    ):
+        if phase == "windows_names":
+            names = (
+                "C:relative/evidence.bin",
+                "evidence/NUL.bin",
+                "evidence/file.bin:stream.bin",
+                "evidence/name./data.bin",
+                "evidence/LPT\N{SUPERSCRIPT TWO}.bin",
+                "．．/evidence.bin",
+                "evidence/ｐｒｉｖａｔｅ/data.bin",
+            )
+            name_case_values = tuple(names)
+            assert len(name_case_values) == 7
+            name = name_case_values[name_case]
             with (pytest.raises(publication.PublicationError),):
                 publication._portable_payload_name(
                     name, "downloaded payload", "application/octet-stream"
@@ -2031,11 +2133,14 @@ class TestIssue123Publication(_Issue123PublicationFixture):
                 expected_bindings=self.bindings,
             )
 
-        assignments = (
-            "CUDA_VISIBLE_DEVICES=0",
-            _fullwidth_ascii("CUDA_VISIBLE_DEVICES=0"),
-        )
-        for assignment in assignments:
+        if phase == "assignments":
+            assignments = (
+                "CUDA_VISIBLE_DEVICES=0",
+                _fullwidth_ascii("CUDA_VISIBLE_DEVICES=0"),
+            )
+            assignment_case_values = tuple(assignments)
+            assert len(assignment_case_values) == 2
+            assignment = assignment_case_values[assignment_case]
             with (
                 pytest.raises(
                     publication.PublicationError,
@@ -2056,30 +2161,24 @@ class TestIssue123Publication(_Issue123PublicationFixture):
             name for _role, name in publication.ASSET_ORDER
         ]
 
-    def test_independent_text_scans_apply_nfkc_and_redact_keys(self):
-        marker = "authorization_private_probe_value"
-        with pytest.raises(publication.PublicationError) as exact_keys:
-            publication._exact_keys(
-                {marker: True}, {"expected"}, "downloaded fixture object"
-            )
-        assert all(
-            marker not in message for message in _exception_messages(exact_keys.value)
+    @pytest.mark.parametrize(
+        "attack_case", range(3), ids=("hostname", "windows-path", "nested-private-key")
+    )
+    def test_independent_text_scans_apply_nfkc_and_redact_keys(self, attack_case):
+        self._check_independent_text_scans_apply_nfkc_and_redact_keys_phase(
+            phase="normalization", attack_case=attack_case
         )
-        attacks = (
-            {_fullwidth_ascii("hostname"): "samplehost"},
-            {"public_label": _fullwidth_ascii("C:/Users/sampleuser/private-location")},
-            {"public": {marker: "value"}},
-        )
-        for attack in attacks:
-            raw = publication.canonical_json_bytes(attack)
-            with (pytest.raises(publication.PublicationError) as caught,):
-                publication.scan_public_bytes(raw, "downloaded fixture")
-            assert _exception_messages(caught.value)
-            assert all(
-                marker not in message for message in _exception_messages(caught.value)
-            )
 
-        environment_names = (
+    @pytest.mark.parametrize(
+        "environment_attack_case", range(2), ids=("key", "assignment")
+    )
+    @pytest.mark.parametrize(
+        "key_assignment_case", range(2), ids=("ascii", "fullwidth")
+    )
+    @pytest.mark.parametrize(
+        "environment_name_case",
+        range(32),
+        ids=(
             "PATH",
             "HOME",
             "CUDA_VISIBLE_DEVICES",
@@ -2112,10 +2211,94 @@ class TestIssue123Publication(_Issue123PublicationFixture):
             "PYTHONPATH",
             "LD_LIBRARY_PATH",
             "DYLD_LIBRARY_PATH",
+        ),
+    )
+    def test_independent_text_scans_apply_nfkc_and_redact_keys_environment_names(
+        self, environment_name_case, key_assignment_case, environment_attack_case
+    ):
+        self._check_independent_text_scans_apply_nfkc_and_redact_keys_phase(
+            phase="environment_names",
+            environment_name_case=environment_name_case,
+            key_assignment_case=key_assignment_case,
+            environment_attack_case=environment_attack_case,
         )
-        # Environment spellings share the redaction marker and the final safe-path
-        # control, making this an intentionally sequential normalization audit.
-        for environment_name in environment_names:
+
+    def _check_independent_text_scans_apply_nfkc_and_redact_keys_phase(
+        self,
+        *,
+        phase,
+        attack_case=None,
+        environment_attack_case=None,
+        key_assignment_case=None,
+        environment_name_case=None,
+    ):
+        marker = "authorization_private_probe_value"
+        with pytest.raises(publication.PublicationError) as exact_keys:
+            publication._exact_keys(
+                {marker: True}, {"expected"}, "downloaded fixture object"
+            )
+        assert all(
+            marker not in message for message in _exception_messages(exact_keys.value)
+        )
+        if phase == "normalization":
+            attacks = (
+                {_fullwidth_ascii("hostname"): "samplehost"},
+                {
+                    "public_label": _fullwidth_ascii(
+                        "C:/Users/sampleuser/private-location"
+                    )
+                },
+                {"public": {marker: "value"}},
+            )
+            attack_case_values = tuple(attacks)
+            assert len(attack_case_values) == 3
+            attack = attack_case_values[attack_case]
+            raw = publication.canonical_json_bytes(attack)
+            with (pytest.raises(publication.PublicationError) as caught,):
+                publication.scan_public_bytes(raw, "downloaded fixture")
+            assert _exception_messages(caught.value)
+            assert all(
+                marker not in message for message in _exception_messages(caught.value)
+            )
+
+        if phase == "environment_names":
+            environment_names = (
+                "PATH",
+                "HOME",
+                "CUDA_VISIBLE_DEVICES",
+                "RUNNER_NAME",
+                "RUNNER_OS",
+                "RUNNER_ARCH",
+                "RUNNER_TEMP",
+                "RUNNER_TOOL_CACHE",
+                "RUNNER_WORKSPACE",
+                "GITHUB_ACTOR",
+                "GITHUB_TRIGGERING_ACTOR",
+                "GITHUB_WORKSPACE",
+                "GITHUB_REPOSITORY",
+                "GITHUB_REPOSITORY_OWNER",
+                "GITHUB_RUN_ID",
+                "GITHUB_RUN_ATTEMPT",
+                "GITHUB_JOB",
+                "GITHUB_WORKFLOW",
+                "GITHUB_SHA",
+                "GITHUB_REF",
+                "GITHUB_HEAD_REF",
+                "GITHUB_BASE_REF",
+                "SSH_AUTH_SOCK",
+                "SHELL",
+                "TMPDIR",
+                "TEMP",
+                "TMP",
+                "VIRTUAL_ENV",
+                "CONDA_PREFIX",
+                "PYTHONPATH",
+                "LD_LIBRARY_PATH",
+                "DYLD_LIBRARY_PATH",
+            )
+            environment_name_case_values = tuple(environment_names)
+            assert len(environment_name_case_values) == 32
+            environment_name = environment_name_case_values[environment_name_case]
             variants = (
                 (
                     environment_name,
@@ -2126,16 +2309,22 @@ class TestIssue123Publication(_Issue123PublicationFixture):
                     _fullwidth_ascii(f"{environment_name}=synthetic-value"),
                 ),
             )
-            for key, assignment in variants:
-                for attack in (
+            key_assignment_case_values = tuple(variants)
+            assert len(key_assignment_case_values) == 2
+            key, assignment = key_assignment_case_values[key_assignment_case]
+            environment_attack_case_values = tuple(
+                (
                     {key: "synthetic-value"},
                     {"public_label": assignment},
-                ):
-                    with (pytest.raises(publication.PublicationError),):
-                        publication.scan_public_bytes(
-                            publication.canonical_json_bytes(attack),
-                            "downloaded fixture",
-                        )
+                )
+            )
+            assert len(environment_attack_case_values) == 2
+            attack = environment_attack_case_values[environment_attack_case]
+            with (pytest.raises(publication.PublicationError),):
+                publication.scan_public_bytes(
+                    publication.canonical_json_bytes(attack),
+                    "downloaded fixture",
+                )
 
         publication.scan_public_bytes(
             publication.canonical_json_bytes(

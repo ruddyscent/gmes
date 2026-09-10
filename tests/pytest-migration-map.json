@@ -28,7 +28,7 @@
     }
   ],
   "current_collection": {
-    "node_count": 4034
+    "node_count": 4171
   },
   "gaps": {
     "ambiguous_methods": [],
@@ -9720,7 +9720,23 @@
     "methods": 913,
     "subtests": 328
   },
-  "schema_version": 4,
+  "post_migration_additions": [
+    {
+      "node_count": 42,
+      "node_pattern": "tests/test_issue170_directory.py::*",
+      "path": "tests/test_issue170_directory.py",
+      "pattern_count": 20,
+      "reason": "Added after issue #179 to cover issue #170 native no-replace directory publication and retained-parent diagnostics."
+    },
+    {
+      "node_count": 95,
+      "node_pattern": "tests/test_issue170_timestamps.py::*",
+      "path": "tests/test_issue170_timestamps.py",
+      "pattern_count": 18,
+      "reason": "Added after issue #179 to cover issue #170 zero-link descriptors and signed pre-epoch timestamp contracts."
+    }
+  ],
+  "schema_version": 5,
   "semantic_audits": {
     "methods": [
       {

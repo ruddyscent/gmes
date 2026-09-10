@@ -229,7 +229,7 @@ def _assert_mapping_tamper_regressions(migration_map):
 def test_pytest_migration_map_is_complete_and_auditable():
     migration_map = json.loads(MAP_PATH.read_text())
 
-    assert migration_map["schema_version"] == 4
+    assert migration_map["schema_version"] == 5
     assert migration_map["base_revision"] == BASE_REVISION
     assert migration_map["baseline"] == {
         "log_sha256": BASELINE_LOG_SHA256,
@@ -307,8 +307,39 @@ def test_pytest_migration_map_is_complete_and_auditable():
             "reason": "validates the migration map itself",
         },
     ]
-    expected_patterns = mapped_patterns | MAP_VALIDATION_NODES
-    assert _current_converted_test_patterns() == expected_patterns
+    current_patterns = _current_converted_test_patterns()
+    additions = migration_map["post_migration_additions"]
+    assert all(
+        set(item) == {"node_count", "node_pattern", "path", "pattern_count", "reason"}
+        for item in additions
+    )
+    assert len({item["path"] for item in additions}) == len(additions)
+    assert len({item["node_pattern"] for item in additions}) == len(additions)
+    addition_patterns = set()
+    for item in additions:
+        path = item["path"]
+        assert path.startswith("tests/test_") and path.endswith(".py")
+        assert item["node_pattern"] == f"{path}::*"
+        assert (MAP_PATH.parent.parent / path).is_file()
+        assert type(item["pattern_count"]) is int and item["pattern_count"] > 0
+        assert type(item["node_count"]) is int and item["node_count"] > 0
+        assert type(item["reason"]) is str and item["reason"].strip()
+        prefix = f"{path}::"
+        declared_patterns = {
+            pattern for pattern in collected_counts if pattern.startswith(prefix)
+        }
+        assert declared_patterns == {
+            pattern for pattern in current_patterns if pattern.startswith(prefix)
+        }
+        assert len(declared_patterns) == item["pattern_count"], item
+        assert (
+            sum(collected_counts[pattern] for pattern in declared_patterns)
+            == item["node_count"]
+        ), item
+        addition_patterns.update(declared_patterns)
+    assert not (mapped_patterns | MAP_VALIDATION_NODES) & addition_patterns
+    expected_patterns = mapped_patterns | MAP_VALIDATION_NODES | addition_patterns
+    assert current_patterns == expected_patterns
     assert set(collected_counts) == expected_patterns
     assert all(collected_counts[node] == 1 for node in MAP_VALIDATION_NODES)
 

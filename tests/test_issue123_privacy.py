@@ -2890,9 +2890,9 @@ class TestIssue123PrivacyScanner:
             "negative-device",
             "negative-inode",
             "directory-mode",
-            "zero-nlink",
+            "negative-nlink",
             "negative-size",
-            "negative-mtime",
+            "mtime-underflow",
             "timestamp-overflow",
             "bool-device",
             "int-subclass-device",
@@ -3056,9 +3056,9 @@ class TestIssue123PrivacyScanner:
                 ),
             ),
             (
-                "zero-nlink",
+                "negative-nlink",
                 privacy._PrivateSdistReadView(
-                    0, identity_with(nlink=0), privacy._PRIVATE_SDIST_VIEW_SEAL
+                    0, identity_with(nlink=-1), privacy._PRIVATE_SDIST_VIEW_SEAL
                 ),
             ),
             (
@@ -3068,9 +3068,11 @@ class TestIssue123PrivacyScanner:
                 ),
             ),
             (
-                "negative-mtime",
+                "mtime-underflow",
                 privacy._PrivateSdistReadView(
-                    0, identity_with(mtime_ns=-1), privacy._PRIVATE_SDIST_VIEW_SEAL
+                    0,
+                    identity_with(mtime_ns=-(1 << 63) - 1),
+                    privacy._PRIVATE_SDIST_VIEW_SEAL,
                 ),
             ),
             (

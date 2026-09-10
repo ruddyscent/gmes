@@ -15,10 +15,8 @@ import math
 import os
 import platform
 import re
-import shutil
 import stat
 import sys
-import tempfile
 import zipfile
 import zlib
 from collections import Counter
@@ -31,6 +29,13 @@ from typing import Any, Callable
 from urllib.parse import urlsplit
 
 import numpy as np
+
+from benchmarks.issue123_directory import (
+    DirectoryPublicationError,
+    StagedDirectory,
+    copy_diagnostics,
+    report_diagnostics,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MANIFEST = ROOT / "benchmarks" / "native_oracle_workloads.json"
@@ -1044,6 +1049,7 @@ def _read_opened_regular_file(
         ) from error
     try:
         before = os.fstat(descriptor)
+        before_identity = _file_identity(before)
         _require(stat.S_ISREG(before.st_mode), f"{label} is not a regular file")
         _require(
             before.st_size == expected_size and 0 <= before.st_size <= max_bytes,
@@ -1059,14 +1065,13 @@ def _read_opened_regular_file(
             remaining -= len(chunk)
         raw = b"".join(chunks)
         after = os.fstat(descriptor)
+        after_identity = _file_identity(after)
     except OSError as error:
         raise EvidenceError(f"{label} bytes are unreadable") from error
     finally:
         os.close(descriptor)
     _require(
-        len(raw) == expected_size
-        and (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
-        == (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns),
+        len(raw) == expected_size and before_identity == after_identity,
         f"{label} changed while being read",
     )
     return raw
@@ -1611,24 +1616,64 @@ class LiveAuthoritySnapshots:
         return _retained_file_snapshot(self.reopened_bundle, self.reopened_bundle.index)
 
 
+def _identity_timestamp(metadata: os.stat_result, message: str) -> int:
+    value = metadata.st_mtime_ns
+    _require(
+        type(value) is int and -(1 << 63) <= value < (1 << 63),
+        message,
+    )
+    return value
+
+
 def _file_identity(metadata: os.stat_result) -> tuple[int, int, int, int]:
-    return (
+    stable = (
         metadata.st_dev,
         metadata.st_ino,
         metadata.st_size,
-        metadata.st_mtime_ns,
     )
+    _require(
+        all(type(value) is int and value >= 0 for value in stable),
+        "file identity is outside its exact integer contract",
+    )
+    return (
+        *stable,
+        _identity_timestamp(
+            metadata,
+            "file identity is outside its exact integer contract",
+        ),
+    )
+
+
+def _file_identity_with_mode(
+    metadata: os.stat_result, message: str
+) -> tuple[int, int, int, int, int]:
+    stable = (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_size,
+    )
+    _require(
+        all(type(value) is int and value >= 0 for value in stable),
+        message,
+    )
+    return (*stable, _identity_timestamp(metadata, message))
 
 
 def _artifact_descriptor_identity(
     metadata: os.stat_result,
 ) -> _ArtifactDescriptorIdentity:
+    identity = _file_identity_with_mode(
+        metadata,
+        "file identity is outside its exact integer contract",
+    )
+    _require(
+        type(metadata.st_ctime_ns) is int
+        and -(1 << 63) <= metadata.st_ctime_ns < (1 << 63),
+        "file change time is outside its exact integer contract",
+    )
     return _ArtifactDescriptorIdentity(
-        metadata.st_dev,
-        metadata.st_ino,
-        metadata.st_mode,
-        metadata.st_size,
-        metadata.st_mtime_ns,
+        *identity,
         metadata.st_ctime_ns,
     )
 
@@ -1689,7 +1734,7 @@ class _RetainedArtifactLease:
             try:
                 metadata = os.fstat(self._fd)
                 identity = _artifact_descriptor_identity(metadata)
-            except OSError:
+            except OSError, EvidenceError:
                 failure = "macOS sdist source is invalid"
             else:
                 if not stat.S_ISREG(metadata.st_mode):
@@ -1721,7 +1766,7 @@ class _RetainedArtifactLease:
                     failure = "macOS sdist source changed during validation"
                 raw = b"".join(chunks)
                 after = _artifact_descriptor_identity(os.fstat(self._fd))
-            except OSError:
+            except OSError, EvidenceError:
                 failure = "macOS sdist source is invalid"
             else:
                 if failure is None and (
@@ -2065,7 +2110,7 @@ class ArtifactReader:
             identity_failure = False
             try:
                 current_identity = _artifact_descriptor_identity(os.fstat(view.fd))
-            except OSError:
+            except OSError, EvidenceError:
                 identity_failure = True
             if identity_failure or current_identity != expected_identity:
                 raise EvidenceError(
@@ -3120,7 +3165,9 @@ def _ordered_correctness_archive_bindings(
                 and record["media_type"] == MEDIA_TYPE_NPZ
                 and isinstance(identity, tuple)
                 and len(identity) == 4
-                and all(type(item) is int and item >= 0 for item in identity),
+                and all(type(item) is int for item in identity)
+                and all(item >= 0 for item in identity[:3])
+                and -(1 << 63) <= identity[3] < (1 << 63),
                 f"{record_label} differs",
             )
             validated.append(copy.deepcopy(record))
@@ -11844,29 +11891,19 @@ def assemble_evidence_bundle(
         not output_directory.exists() and not output_directory.is_symlink(),
         "bundle output directory already exists",
     )
-    output_parent = _ensure_directory_without_symlinks(
-        output_directory.parent,
-        "bundle output parent",
-    )
-    output_directory = output_parent / output_directory.name
-    temporary = Path(
-        tempfile.mkdtemp(prefix=f".{output_directory.name}.", dir=output_parent)
-    )
+    failure = None
     try:
-        for descriptor, raw in sorted(prepared, key=lambda item: item[0]["path"]):
-            destination = temporary.joinpath(*PurePosixPath(descriptor["path"]).parts)
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            destination.write_bytes(raw)
-        index_path = temporary / "completion-index.json"
-        index_path.write_bytes(_canonical_json_bytes(index))
-        _require(
-            not output_directory.exists() and not output_directory.is_symlink(),
-            "bundle output directory appeared during assembly",
-        )
-        temporary.rename(output_directory)
-    except Exception:
-        shutil.rmtree(temporary)
-        raise
+        with StagedDirectory(output_directory, create_parents=True) as temporary:
+            output_directory = temporary.output
+            for descriptor, raw in sorted(prepared, key=lambda item: item[0]["path"]):
+                temporary.write(descriptor["path"], raw)
+            temporary.write("completion-index.json", _canonical_json_bytes(index))
+            temporary.publish()
+    except DirectoryPublicationError as error:
+        failure = EvidenceError(str(error))
+        copy_diagnostics(error, failure)
+    if failure is not None:
+        raise failure from None
     return output_directory / "completion-index.json"
 
 
@@ -12604,23 +12641,26 @@ def _require_staged_operations_inputs_unchanged(
 def _retained_file_identity(
     metadata: os.stat_result,
 ) -> tuple[int, int, int, int, int]:
-    return (
-        metadata.st_dev,
-        metadata.st_ino,
-        metadata.st_mode,
-        metadata.st_size,
-        metadata.st_mtime_ns,
+    return _file_identity_with_mode(
+        metadata,
+        "file identity is outside its exact integer contract",
     )
 
 
 def _retained_directory_identity(
     metadata: os.stat_result,
 ) -> tuple[int, int, int, int]:
+    stable = (metadata.st_dev, metadata.st_ino, metadata.st_mode)
+    _require(
+        all(type(value) is int and value >= 0 for value in stable),
+        "directory modification time is outside its exact integer contract",
+    )
     return (
-        metadata.st_dev,
-        metadata.st_ino,
-        metadata.st_mode,
-        metadata.st_mtime_ns,
+        *stable,
+        _identity_timestamp(
+            metadata,
+            "directory modification time is outside its exact integer contract",
+        ),
     )
 
 
@@ -14723,13 +14763,14 @@ def main(argv: list[str] | None = None) -> int:
     except _CliUsageError:
         print("issue123-completion-usage-failed", file=sys.stderr)
         return 2
-    except ImportError, OSError, EvidenceError, TypeError, ValueError:
+    except (ImportError, OSError, EvidenceError, TypeError, ValueError) as error:
         token = (
             f"issue123-completion-{command}-failed"
             if command is not None
             else "issue123-completion-usage-failed"
         )
         print(token, file=sys.stderr)
+        report_diagnostics(error)
         return 2
 
 

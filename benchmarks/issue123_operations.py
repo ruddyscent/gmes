@@ -9,7 +9,6 @@ import hashlib
 import json
 import os
 import re
-import shutil
 import stat
 import subprocess
 import sys
@@ -22,6 +21,12 @@ from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from benchmarks.host_contract import candidate_evidence
+from benchmarks.issue123_directory import (
+    DirectoryPublicationError,
+    StagedDirectory,
+    copy_diagnostics,
+    report_diagnostics,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MANIFEST = ROOT / "benchmarks" / "native_oracle_workloads.json"
@@ -626,10 +631,12 @@ def _github_api_raw(
     return raw
 
 
-def _descriptor(path: Path, base: Path, candidate: dict[str, str]) -> dict[str, Any]:
-    raw = path.read_bytes()
+def _descriptor(
+    path: str, stage: StagedDirectory, candidate: dict[str, str]
+) -> dict[str, Any]:
+    raw = stage.read(path)
     return {
-        "path": path.relative_to(base).as_posix(),
+        "path": path,
         "sha256": hashlib.sha256(raw).hexdigest(),
         "size_bytes": len(raw),
         "media_type": MEDIA_TYPE_JSON,
@@ -675,22 +682,18 @@ def _publication_receipt_envelope(
 def _staged_operations_output(output_directory: Path, output_parent: Path):
     """Publish one complete operations capture without a partial destination."""
 
-    temporary = Path(
-        tempfile.mkdtemp(prefix=f".{output_directory.name}.", dir=output_parent)
-    )
+    failure = None
     try:
-        yield temporary
-        _require(
-            not output_directory.exists() and not output_directory.is_symlink(),
-            "operations output appeared during assembly",
-        )
-        temporary.rename(output_directory)
-    except BaseException:
-        try:
-            shutil.rmtree(temporary)
-        except OSError:
-            pass
-        raise
+        with StagedDirectory(
+            output_parent / output_directory.name, create_parents=True
+        ) as stage:
+            yield stage
+            stage.publish()
+    except DirectoryPublicationError as error:
+        failure = EvidenceError(str(error))
+        copy_diagnostics(error, failure)
+    if failure is not None:
+        raise failure from None
 
 
 def capture_operations(
@@ -754,25 +757,9 @@ def capture_operations(
         type(technical_release_id) is int and technical_release_id > 0,
         "technical release id differs",
     )
-    try:
-        from benchmarks import issue123_completion as completion
-    except ImportError:
-        raise EvidenceError("operations output parent is unavailable") from None
-    try:
-        output_parent = completion._ensure_directory_without_symlinks(
-            output_directory.parent,
-            "operations output parent",
-        )
-    except OSError, TypeError, ValueError, completion.EvidenceError:
-        raise EvidenceError("operations output parent is unavailable") from None
-    output_directory = output_parent / output_directory.name
-    _require(
-        not output_directory.exists() and not output_directory.is_symlink(),
-        "operations output already exists",
-    )
+    output_parent = output_directory.parent
     with _staged_operations_output(output_directory, output_parent) as temporary:
-        raw_directory = temporary / "raw"
-        raw_directory.mkdir()
+        output_directory = temporary.output
         records: dict[str, dict[str, Any]] = {}
         response_captures: dict[str, dict[str, Any]] = {}
 
@@ -786,8 +773,8 @@ def capture_operations(
             paginated: bool = False,
             graphql_variables: dict[str, str | int] | None = None,
         ) -> Any:
-            path = raw_directory / f"{role}.json"
-            path.write_bytes(raw)
+            path = f"raw/{role}.json"
+            temporary.write(path, raw)
             records[role] = {
                 "request": {
                     "endpoint": endpoint,
@@ -974,21 +961,24 @@ def capture_operations(
             "responses": records,
             "response_captures": response_captures,
         }
-        index_path = temporary / "operations-index.json"
-        index_path.write_text(
-            json.dumps(index, allow_nan=False, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
+        index_path = "operations-index.json"
+        temporary.write(
+            index_path,
+            (
+                json.dumps(index, allow_nan=False, indent=2, sort_keys=True) + "\n"
+            ).encode("utf-8"),
         )
-        scope_path = temporary / "scope.json"
-        scope_path.write_text(
-            json.dumps(
-                {"index": _descriptor(index_path, temporary, candidate)},
-                allow_nan=False,
-                indent=2,
-                sort_keys=True,
-            )
-            + "\n",
-            encoding="utf-8",
+        temporary.write(
+            "scope.json",
+            (
+                json.dumps(
+                    {"index": _descriptor(index_path, temporary, candidate)},
+                    allow_nan=False,
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n"
+            ).encode("utf-8"),
         )
     return (
         output_directory / "operations-index.json",
@@ -3149,21 +3139,57 @@ def evaluate_operations(
     }
 
 
+def _identity_timestamp(metadata: os.stat_result, message: str) -> int:
+    value = metadata.st_mtime_ns
+    _require(
+        type(value) is int and -(1 << 63) <= value < (1 << 63),
+        message,
+    )
+    return value
+
+
+def _file_identity(metadata: os.stat_result, message: str) -> tuple[int, int, int, int]:
+    stable = (metadata.st_dev, metadata.st_ino, metadata.st_size)
+    _require(
+        all(type(value) is int and value >= 0 for value in stable),
+        message,
+    )
+    return (*stable, _identity_timestamp(metadata, message))
+
+
+def _file_identity_with_mode(
+    metadata: os.stat_result, message: str
+) -> tuple[int, int, int, int, int]:
+    stable = (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_size,
+    )
+    _require(
+        all(type(value) is int and value >= 0 for value in stable),
+        message,
+    )
+    return (*stable, _identity_timestamp(metadata, message))
+
+
 def _bounded_file_bytes(path: Path, label: str, limit: int) -> tuple[Path, bytes]:
+    identity_message = f"{label} file identity or byte size differs"
     try:
         resolved = path.resolve(strict=True)
         before = resolved.stat()
+        before_identity = _file_identity(before, identity_message)
         raw = resolved.read_bytes()
         after = resolved.stat()
+        after_identity = _file_identity(after, identity_message)
     except OSError as error:
         raise EvidenceError(f"{label} is unavailable") from error
     _require(
         resolved.is_file()
         and 0 < len(raw) <= limit
-        and (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
-        == (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+        and before_identity == after_identity
         and before.st_size == len(raw),
-        f"{label} file identity or byte size differs",
+        identity_message,
     )
     return resolved, raw
 
@@ -3797,15 +3823,12 @@ class BaselineAuthorityLease:
         for lease in self._assets:
             try:
                 retained = os.fstat(lease.descriptor)
-            except OSError:
+                identity = _file_identity_with_mode(
+                    retained,
+                    "retained baseline asset changed",
+                )
+            except OSError, EvidenceError:
                 raise EvidenceError("retained baseline asset changed") from None
-            identity = (
-                retained.st_dev,
-                retained.st_ino,
-                retained.st_mode,
-                retained.st_size,
-                retained.st_mtime_ns,
-            )
             _require(
                 identity == lease.identity
                 and stat.S_ISREG(retained.st_mode)
@@ -3837,12 +3860,13 @@ class BaselineAuthorityLease:
                     lease.expectation.size_bytes,
                 )
                 if (
-                    reopened_metadata.st_dev,
-                    reopened_metadata.st_ino,
-                    reopened_metadata.st_mode,
-                    reopened_metadata.st_size,
-                    reopened_metadata.st_mtime_ns,
-                ) != lease.identity or reopened_raw != raw:
+                    _file_identity_with_mode(
+                        reopened_metadata,
+                        "retained baseline asset changed",
+                    )
+                    != lease.identity
+                    or reopened_raw != raw
+                ):
                     reopen_failure = EvidenceError("retained baseline asset changed")
             except OSError, EvidenceError:
                 reopen_failure = EvidenceError("retained baseline asset changed")
@@ -4015,7 +4039,11 @@ def _capture_baseline_authority(
                     view = view[written:]
                 os.fsync(descriptor)
                 metadata = os.fstat(descriptor)
-            except OSError:
+                identity = _file_identity_with_mode(
+                    metadata,
+                    f"fresh baseline release asset {ordinal} bytes differ",
+                )
+            except OSError, EvidenceError:
                 if descriptor is not None:
                     try:
                         os.close(descriptor)
@@ -4024,13 +4052,6 @@ def _capture_baseline_authority(
                 raise EvidenceError(
                     "baseline release asset could not be staged"
                 ) from None
-            identity = (
-                metadata.st_dev,
-                metadata.st_ino,
-                metadata.st_mode,
-                metadata.st_size,
-                metadata.st_mtime_ns,
-            )
             _require(
                 stat.S_ISREG(metadata.st_mode)
                 and stat.S_IMODE(metadata.st_mode) == 0o600
@@ -4232,9 +4253,12 @@ class _RetainedReceipt:
 
     def require_unchanged(self) -> None:
         _require(self.descriptor >= 0, "retained live receipt is closed")
+        identity_message = "retained live receipt changed"
         try:
             metadata = os.fstat(self.descriptor)
             named = self.path.lstat()
+            metadata_identity = _file_identity_with_mode(metadata, identity_message)
+            named_identity = _file_identity_with_mode(named, identity_message)
             current = BaselineAuthorityLease._read_descriptor(
                 self.descriptor,
                 len(self.raw),
@@ -4242,22 +4266,8 @@ class _RetainedReceipt:
         except OSError:
             raise EvidenceError("retained live receipt changed") from None
         _require(
-            (
-                metadata.st_dev,
-                metadata.st_ino,
-                metadata.st_mode,
-                metadata.st_size,
-                metadata.st_mtime_ns,
-            )
-            == self.identity
-            and (
-                named.st_dev,
-                named.st_ino,
-                named.st_mode,
-                named.st_size,
-                named.st_mtime_ns,
-            )
-            == self.identity
+            metadata_identity == self.identity
+            and named_identity == self.identity
             and stat.S_ISREG(metadata.st_mode)
             and stat.S_IMODE(metadata.st_mode) == 0o600
             and current == self.raw,
@@ -4286,27 +4296,19 @@ def _retain_live_receipt(path: Path, expected_raw: bytes) -> _RetainedReceipt:
         metadata = os.fstat(descriptor)
         raw = BaselineAuthorityLease._read_descriptor(descriptor, len(expected_raw))
         named = path.lstat()
-        identity = (
-            metadata.st_dev,
-            metadata.st_ino,
-            metadata.st_mode,
-            metadata.st_size,
-            metadata.st_mtime_ns,
+        identity_message = "live-verification receipt durable bytes differ"
+        identity = _file_identity_with_mode(
+            metadata,
+            identity_message,
         )
+        named_identity = _file_identity_with_mode(named, identity_message)
         _require(
             stat.S_ISREG(metadata.st_mode)
             and stat.S_IMODE(metadata.st_mode) == 0o600
             and metadata.st_size == len(expected_raw)
             and raw == expected_raw
-            and (
-                named.st_dev,
-                named.st_ino,
-                named.st_mode,
-                named.st_size,
-                named.st_mtime_ns,
-            )
-            == identity,
-            "live-verification receipt durable bytes differ",
+            and named_identity == identity,
+            identity_message,
         )
     except BaseException:
         try:
@@ -4736,8 +4738,9 @@ def main(argv: list[str] | None = None) -> int:
     except _CliUsageError:
         print("issue123-operations-usage-failed", file=sys.stderr)
         return 2
-    except ImportError, OSError, EvidenceError, TypeError, ValueError:
+    except (ImportError, OSError, EvidenceError, TypeError, ValueError) as error:
         print(f"issue123-operations-{command}-failed", file=sys.stderr)
+        report_diagnostics(error)
         return 2
 
 

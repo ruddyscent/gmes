@@ -1218,6 +1218,70 @@ deferred, and production publication and cutover remain blocked on #169. The
 commands below document the executable fail-closed interface; they do not
 claim present production readiness.
 
+Issue #170 compatibility and directory publication contracts:
+
+- A retained private sdist descriptor may already have zero links. The file
+  must still be regular, readable, nonempty, and within the archive limits.
+  Link count remains part of the exact identity: unlinking or changing the
+  file after retention fails validation. Validation owns a duplicate and uses
+  positional reads; it neither closes nor seeks the caller's descriptor.
+- Filesystem identity timestamps use signed 64-bit integer nanoseconds,
+  including pre-epoch values, with exact comparison and deterministic rejection
+  outside `[-2**63, 2**63-1]`. Device, inode, and size remain nonnegative under
+  their existing constraints. Private JSON integers retain the sign and exact
+  value; stat identities are not added to public inventories. PAX `mtime` is
+  a separate decimal-seconds contract: at most nine fractional digits, no
+  exponent, and the complete value within `[-2**63, 2**63-1]` seconds. Identity
+  comparisons and PAX range checks use exact arithmetic without clamping or
+  libc epoch conversion. The logical tar parser's timestamp metadata is not
+  used as an identity or emitted by the sdist inventory.
+  ISO chronology compares timezone-aware datetimes, including pre-epoch dates.
+  Public traces retain only bounded local deltas, not their absolute origin;
+  all existing metadata and forbidden-value privacy scans still apply.
+- Operations capture, completion bundle assembly, and publication preparation
+  retain directory descriptors from parent acquisition through staged writes,
+  exact-byte verification, publication, and cleanup. Only leaf names reach the
+  native rename call: Linux `renameat2(RENAME_NOREPLACE)` and Darwin
+  `renameatx_np(RENAME_EXCL)`. Unsupported platforms, native symbols, or
+  filesystems, and cross-filesystem renames fail closed without copy/replace
+  fallbacks. Parent paths must have no `..` or arbitrary symlink components;
+  Darwin's existing `/tmp` and `/var` system aliases remain supported.
+- Failures expose fixed `issue123-directory-not-committed`,
+  `issue123-directory-committed`, `issue123-directory-ambiguous`, or
+  `issue123-directory-partial-commit` diagnostics. Cleanup/close failures add
+  `issue123-directory-cleanup-incomplete` or `issue123-directory-close-failed`
+  without masking the primary error or rendering private paths. The exception
+  also carries `directory_publication_state` and `directory_cleanup_codes`.
+  Ambiguous or committed destinations are preserved. In the two-output prepare
+  operation, a later sidecar failure preserves complete public assets and reports
+  partial commit; it does not imply that the sidecar is absent. Inspect the
+  existing outputs before retrying. Newly created ancestor directories may
+  remain after a failure; cleanup only removes ledger-owned staged entries.
+
+Retained descriptors prevent parent-path redirection, but do not freeze a
+namespace against another process with the same UID. Name/inode checks and
+unlink are not one atomic conditional operation; source substitution and
+parent displacement can still cause refusal, reported residue, or a committed
+directory whose requested pathname no longer resolves to it. Mode 0700 is not
+same-UID isolation. These are explicit residuals, not a claim of hostile-process
+immunity or crash-recovery guarantees. Retaining staged file/directory handles
+costs O(entries + path depth) descriptors; verification rereads the staged bytes.
+Descriptor exhaustion fails closed. Native Linux and Darwin filesystem checks
+are distinct from injected ABI/error tests.
+
+The original #123 bespoke oracle/protocol proposals remain unadopted. Exact-byte
+historical baseline recovery has unavailable-source and unbounded investigation
+cost; a coherent-decoy/hostile acceptance oracle needs a separate threat model,
+independent fixtures, and ongoing validator maintenance; a one-private-build
+protocol adds orchestration and recapture cost without making separate output
+commits atomic. Current evidence supports focused producer/consumer regressions
+and retained-input checks instead. Residual risks include shared assumptions
+between validators, coherent but incorrect evidence, and multi-step operational
+failure. Reconsider these proposals only with a concrete uncovered failure,
+estimated benefit/cost, and a new owner decision. They are not restored closure
+blockers. These changes do not populate evaluator bindings, adopt M1, or perform
+any of the six release-chain/production-authority items owned by #169.
+
 Once #169 discharges the deferred chain with exact-byte OWNER-adopted
 policy/profile bytes and its required tests, the adapter may become
 production-authoritative without changing the public

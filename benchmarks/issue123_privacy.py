@@ -2274,9 +2274,7 @@ def _scan_tar_metadata_fields(
                 len(encoded) <= MAX_TRACE_NUMBER_LITERAL_BYTES
                 and encoded.isascii()
                 and timestamp is not None
-                and -(1 << 63)
-                <= int(timestamp.group(1) + timestamp.group(2))
-                <= (1 << 63) - 1,
+                and -(1 << 63) <= Fraction(item) <= (1 << 63) - 1,
                 f"{label} contains an invalid tar timestamp",
             )
         if key == "hdrcharset":
@@ -3677,6 +3675,7 @@ def _private_sdist_source_matches(
 _PRIVATE_SDIST_MAX_FD = (1 << 31) - 1
 _PRIVATE_SDIST_MAX_UNSIGNED_STAT_VALUE = (1 << 64) - 1
 _PRIVATE_SDIST_MAX_TIMESTAMP_NS = (1 << 63) - 1
+_PRIVATE_SDIST_MIN_TIMESTAMP_NS = -(1 << 63)
 
 
 def _private_sdist_identity_is_valid(identity: Any) -> bool:
@@ -3702,10 +3701,14 @@ def _private_sdist_identity_is_valid(identity: Any) -> bool:
         and 0 < inode <= _PRIVATE_SDIST_MAX_UNSIGNED_STAT_VALUE
         and 0 <= mode <= 0o177777
         and stat.S_ISREG(mode)
-        and 0 < nlink <= _PRIVATE_SDIST_MAX_UNSIGNED_STAT_VALUE
+        and 0 <= nlink <= _PRIVATE_SDIST_MAX_UNSIGNED_STAT_VALUE
         and 0 < size <= _PRIVATE_SDIST_MAX_UNSIGNED_STAT_VALUE
-        and 0 <= mtime_ns <= _PRIVATE_SDIST_MAX_TIMESTAMP_NS
-        and 0 <= ctime_ns <= _PRIVATE_SDIST_MAX_TIMESTAMP_NS
+        and _PRIVATE_SDIST_MIN_TIMESTAMP_NS
+        <= mtime_ns
+        <= _PRIVATE_SDIST_MAX_TIMESTAMP_NS
+        and _PRIVATE_SDIST_MIN_TIMESTAMP_NS
+        <= ctime_ns
+        <= _PRIVATE_SDIST_MAX_TIMESTAMP_NS
     )
 
 
@@ -5997,6 +6000,40 @@ def _lexical_path_without_symlinks(
     return _audit_absolute_path(absolute, label, require_leaf=require_leaf)
 
 
+def _identity_timestamp(metadata: os.stat_result, message: str) -> int:
+    value = metadata.st_mtime_ns
+    _require(
+        type(value) is int and -(1 << 63) <= value < (1 << 63),
+        message,
+    )
+    return value
+
+
+def _file_identity(metadata: os.stat_result, message: str) -> tuple[int, int, int, int]:
+    stable = (metadata.st_dev, metadata.st_ino, metadata.st_size)
+    _require(
+        all(type(value) is int and value >= 0 for value in stable),
+        message,
+    )
+    return (*stable, _identity_timestamp(metadata, message))
+
+
+def _file_identity_with_mode(
+    metadata: os.stat_result, message: str
+) -> tuple[int, int, int, int, int]:
+    stable = (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_size,
+    )
+    _require(
+        all(type(value) is int and value >= 0 for value in stable),
+        message,
+    )
+    return (*stable, _identity_timestamp(metadata, message))
+
+
 def _private_file_bytes(
     path_value: Path | str,
     label: str,
@@ -6011,9 +6048,11 @@ def _private_file_bytes(
         raise PrivacyError(f"{label} is unavailable") from None
     try:
         before = os.fstat(descriptor)
+        identity_message = f"{label} identity or byte bound differs"
+        before_identity = _file_identity(before, identity_message)
         _require(
             stat.S_ISREG(before.st_mode) and 0 < before.st_size <= maximum,
-            f"{label} identity or byte bound differs",
+            identity_message,
         )
         chunks = []
         remaining = before.st_size
@@ -6024,17 +6063,17 @@ def _private_file_bytes(
             remaining -= len(chunk)
         _require(not os.read(descriptor, 1), f"{label} changed while being read")
         after = os.fstat(descriptor)
+        after_identity = _file_identity(after, identity_message)
+        named_identity = _file_identity(path.lstat(), identity_message)
     except Exception:
         os.close(descriptor)
         raise
     os.close(descriptor)
     raw = b"".join(chunks)
     _require(
-        (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
-        == (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
-        and before.st_size == len(raw)
-        and path.lstat().st_ino == before.st_ino,
-        f"{label} identity or byte bound differs",
+        before_identity == after_identity == named_identity
+        and before.st_size == len(raw),
+        identity_message,
     )
     return path, raw
 
@@ -6215,6 +6254,8 @@ def write_private_authority_file(
         close_failure = False
         try:
             before = os.fstat(descriptor)
+            identity_message = "private authority committed leaf bytes differ"
+            before_identity = _file_identity_with_mode(before, identity_message)
             chunks: list[bytes] = []
             remaining = len(raw)
             while remaining:
@@ -6230,27 +6271,15 @@ def write_private_authority_file(
                 "private authority committed leaf bytes differ",
             )
             after = os.fstat(descriptor)
+            after_identity = _file_identity_with_mode(after, identity_message)
             _require(
                 stat.S_ISREG(before.st_mode)
                 and stat.S_IMODE(before.st_mode) == 0o600
                 and before.st_size == len(raw)
                 and (before.st_dev, before.st_ino) == ownership.identity
-                and (
-                    before.st_dev,
-                    before.st_ino,
-                    before.st_mode,
-                    before.st_size,
-                    before.st_mtime_ns,
-                )
-                == (
-                    after.st_dev,
-                    after.st_ino,
-                    after.st_mode,
-                    after.st_size,
-                    after.st_mtime_ns,
-                )
+                and before_identity == after_identity
                 and b"".join(chunks) == raw,
-                "private authority committed leaf bytes differ",
+                identity_message,
             )
         finally:
             try:

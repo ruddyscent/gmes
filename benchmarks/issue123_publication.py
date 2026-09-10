@@ -14,17 +14,21 @@ import json
 import math
 import os
 import re
-import shutil
 import stat
 import struct
 import sys
-import tempfile
 import unicodedata
 import zipfile
 from collections.abc import Mapping, Sequence
 from pathlib import Path, PurePosixPath
 from statistics import median
 from typing import Any
+
+from benchmarks.issue123_directory import (
+    StagedDirectory,
+    copy_diagnostics,
+    report_diagnostics,
+)
 
 SCHEMA_VERSION = 1
 PROJECTION_KIND = "issue-123-publication-projection"
@@ -3838,51 +3842,46 @@ def prepare_publication(
         and not private_path.is_symlink(),
         "protected openings output already exists or is invalid",
     )
-    temporary: Path | None = None
     file_failure: PublicationError | None = None
     try:
-        temporary = Path(tempfile.mkdtemp(prefix=f".{output.name}.", dir=output_parent))
-        for _role, name in ASSET_ORDER:
-            _write_exclusive(
-                temporary / name, assets[name], f"publication asset {name}", 0o644
+        with StagedDirectory(output_parent / output.name) as temporary:
+            output = temporary.output
+            for _role, name in ASSET_ORDER:
+                temporary.write(name, assets[name], 0o644)
+            reopened = {name: temporary.read(name) for _role, name in ASSET_ORDER}
+            validate_publication_assets(
+                reopened,
+                expected_policy=policy,
+                expected_bindings=policy["bindings"],
+                expected_assets={
+                    item["role"]: {
+                        key: item[key] for key in ("name", "size_bytes", "sha256")
+                    }
+                    for item in ledger
+                },
             )
-        reopened = {
-            name: _production_file_bytes(
-                temporary / name,
-                f"reopened publication asset {name}",
-                MAX_ARCHIVE_BYTES,
-            )
-            for _role, name in ASSET_ORDER
-        }
-        validate_publication_assets(
-            reopened,
-            expected_policy=policy,
-            expected_bindings=policy["bindings"],
-            expected_assets={
-                item["role"]: {
-                    key: item[key] for key in ("name", "size_bytes", "sha256")
-                }
-                for item in ledger
-            },
-        )
-        _require(reopened == assets, "reopened publication bytes differ")
-        temporary.rename(output)
-        _commit_private_authority_file(
-            private_path,
-            protected_raw,
-            forbidden_roots=(completion_bundle_root, output),
-        )
+            _require(reopened == assets, "reopened publication bytes differ")
+            temporary.publish()
+            # Two separate destinations cannot be one filesystem transaction.
+            # Keep the complete assets if the later private-file commit fails.
+            temporary.state = "partial-commit"
+            try:
+                _commit_private_authority_file(
+                    private_path,
+                    protected_raw,
+                    forbidden_roots=(completion_bundle_root, output),
+                )
+            except PublicationCommitError:
+                temporary.state = "committed"
+                raise
+            temporary.state = "committed"
+            temporary.verify()
     except PublicationCommitError:
         raise
-    except OSError, TypeError, ValueError:
+    except (OSError, TypeError, ValueError) as error:
         file_failure = PublicationError("publication files could not be prepared")
+        copy_diagnostics(error, file_failure)
     if file_failure is not None:
-        if temporary is not None:
-            try:
-                if temporary.exists():
-                    shutil.rmtree(temporary)
-            except OSError:
-                pass
         raise file_failure from None
     return {
         "asset_directory": output,
@@ -4038,13 +4037,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     except _CliUsageError:
         print("issue123-publication-usage-failed", file=sys.stderr)
         return 2
-    except ImportError, OSError, PublicationError, TypeError, ValueError:
+    except (ImportError, OSError, PublicationError, TypeError, ValueError) as error:
         token = (
             f"issue123-publication-{command}-failed"
             if command is not None
             else "issue123-publication-usage-failed"
         )
         print(token, file=sys.stderr)
+        report_diagnostics(error)
         return 2
 
 

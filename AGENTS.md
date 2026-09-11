@@ -24,6 +24,19 @@ This file provides guidance for contributors and coding agents working in this r
   complete, then report only the completed changes, verification results, and
   any unresolved issues.
 
+## Codex model settings
+
+- Use GPT-6 Astra (`gpt-6-astra`) with `low` reasoning effort for ordinary
+  project tasks, matching `.codex/config.toml`.
+- Use GPT-6 Astra with `low` reasoning effort as the manager baseline; select
+  `high` when complex issue or pull request management warrants it. This
+  project-specific choice overrides the global GPT-5.6 Sol manager default;
+  retain the existing orchestration workflow and choose worker models and
+  reasoning effort according to their assigned roles.
+- Verify the effective model and reasoning effort in the active session before
+  reporting them. A configuration file states defaults, not proof of the
+  settings used by an already-running task.
+
 ## Project overview
 
 GMES (GIST Maxwell's Equations Solver) is a pure-Python PyTorch package for

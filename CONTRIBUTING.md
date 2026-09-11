@@ -27,6 +27,37 @@ affected tests. The pure build constraints cover setuptools and wheel; do not
 restore a native build dependency or cache key. `tests/test_packaging.py` and
 `tests/test_release.py` check the universal artifact contract.
 
+## Codex development settings
+
+The project defaults to GPT-6 Astra (`gpt-6-astra`) with `low` reasoning effort
+in [`.codex/config.toml`](.codex/config.toml). These settings configure the
+development assistant; GMES does not require an OpenAI API integration or key.
+For complex issue or pull request management, select `high` when warranted
+as described in [`AGENTS.md`](AGENTS.md).
+
+Codex loads project configuration only for trusted projects. The precedence
+among these settings is command-line overrides, project configuration,
+the selected profile, then user-level defaults;
+see the [official configuration documentation](https://learn.chatgpt.com/docs/config-file/config-basic).
+Before evaluating a task, check its effective model and reasoning effort in
+the session's model controls (or `/status` in the CLI). Record those settings
+with the revision, task, and verification results. Reading this file alone
+does not establish an existing task's active settings or account access, and
+editing project configuration does not switch an already-running task.
+
+For a temporary CLI override, use the previously recorded values:
+
+```sh
+codex -m <previous-model-id> -c 'model_reasoning_effort="<previous-effort>"'
+```
+
+To roll back the project defaults, restore the previous model settings
+or remove these two project keys to inherit the next applicable profile or
+user defaults, and update the
+project model guidance in `AGENTS.md` accordingly. Start a new session and
+verify its effective settings after either change. Compare representative
+tasks before claiming any improvement in quality, latency, or usage.
+
 ## Verification
 
 Run the narrowest relevant tests, then the complete supported CPU suite:

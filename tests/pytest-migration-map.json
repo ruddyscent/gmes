@@ -28,7 +28,7 @@
     }
   ],
   "current_collection": {
-    "node_count": 4174
+    "node_count": 4325
   },
   "gaps": {
     "ambiguous_methods": [],
@@ -9741,6 +9741,13 @@
       "path": "tests/test_torch_compile_capability.py",
       "pattern_count": 1,
       "reason": "Added after issue #179 to verify capability-aware compilation skips preserve eager coverage and propagate unrelated failures."
+    },
+    {
+      "node_count": 151,
+      "node_pattern": "tests/test_pygeom_unbounded.py::*",
+      "path": "tests/test_pygeom_unbounded.py",
+      "pattern_count": 5,
+      "reason": "Added after issue #179 to cover nonfinite containment queries and finite/unbounded, rotated, and skew Block/Ellipsoid bounds and material lookup without invalid arithmetic."
     }
   ],
   "schema_version": 5,

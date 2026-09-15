@@ -85,6 +85,7 @@ from .geometry import (
     Ellipsoid,
     Shell,
     Sphere,
+    vectorized_geometry,
 )
 from .material import (
     Const,
@@ -155,6 +156,7 @@ __all__ = [
     "Ellipsoid",
     "Sphere",
     "Shell",
+    "vectorized_geometry",
     "Ex",
     "Ey",
     "Ez",

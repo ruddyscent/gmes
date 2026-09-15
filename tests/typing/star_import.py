@@ -13,3 +13,5 @@ assert_type(space, Cartesian)
 assert_type(dielectric, Dielectric)
 assert_type(geometry_entry, DefaultMedium)
 assert_type(component, type[Ex])
+
+assert_type(vectorized_geometry(Sphere), type[Sphere])

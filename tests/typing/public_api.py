@@ -51,3 +51,18 @@ assert_type(
     callback,
     Callable[[gmes.TorchSourceLoweringContext], Iterable[gmes.TorchPointSourceRecord]],
 )
+
+
+@gmes.vectorized_geometry
+class CustomSphere(gmes.Sphere):
+    """The decorator preserves a custom geometry's concrete static type."""
+
+    def radius_squared(self) -> float:
+        """Return a subclass-specific property for checker coverage."""
+        return float(self.radius**2)
+
+
+custom_sphere = CustomSphere(gmes.Dielectric(), radius=0.5)
+assert_type(custom_sphere, CustomSphere)
+assert_type(custom_sphere.radius_squared(), float)
+assert_type(gmes.vectorized_geometry(CustomSphere), type[CustomSphere])

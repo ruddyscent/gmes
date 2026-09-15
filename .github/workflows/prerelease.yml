@@ -49,5 +49,8 @@ jobs:
             --extra-index-url https://download.pytorch.org/whl/cpu \
             -e .
           python -m pip check
+      - name: Report Torch compilation capability
+        run: |
+          python -c "import platform, torch; print('Python:', platform.python_version()); print('Torch:', torch.__version__); print('TorchDynamo supported:', torch._dynamo.is_dynamo_supported())"
       - name: Run tests
         run: python -m pytest -v

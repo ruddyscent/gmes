@@ -66,10 +66,10 @@ class TestUvCacheKey:
 
     def test_locks_explicit_pytorch_213_accelerator_variants(self):
         project = self.project_configuration["project"]
-        assert ("torch>=2.13,<2.14") in (project["dependencies"])
+        assert ("torch>=2.14,<2.15") in (project["dependencies"])
         extras = project["optional-dependencies"]
         for extra in ("torch-cpu", "torch-cu126", "torch-cu130"):
-            assert (extras[extra]) == (["torch>=2.13,<2.14"])
+            assert (extras[extra]) == (["torch>=2.14,<2.15"])
 
         expected_indexes = {
             "pytorch-cpu": "https://download.pytorch.org/whl/cpu",
@@ -97,9 +97,9 @@ class TestUvCacheKey:
         }
         assert (torch_packages) >= (
             {
-                ("2.13.0+cpu", expected_indexes["pytorch-cpu"]),
-                ("2.13.0+cu126", expected_indexes["pytorch-cu126"]),
-                ("2.13.0+cu130", expected_indexes["pytorch-cu130"]),
+                ("2.14.0+cpu", expected_indexes["pytorch-cpu"]),
+                ("2.14.0+cu126", expected_indexes["pytorch-cu126"]),
+                ("2.14.0+cu130", expected_indexes["pytorch-cu130"]),
             }
         )
 

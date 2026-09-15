@@ -15,7 +15,7 @@ controls, and MPI launcher are retired.
 ## Requirements and installation
 
 - Python 3.14 or newer
-- NumPy 2.3 or newer, SciPy 1.16 or newer, and PyTorch `>=2.13,<2.14`
+- NumPy 2.3 or newer, SciPy 1.16 or newer, and PyTorch `>=2.14,<2.15`
 
 GMES itself is a universal pure-Python package: installation and source builds
 do not require a C/C++ compiler, SWIG, Cython, OpenMP, or system headers.

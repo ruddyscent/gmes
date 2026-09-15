@@ -30,15 +30,15 @@ classifiers = [
 dependencies = [
     "numpy>=2.3",
     "scipy>=1.16",
-    "torch>=2.13,<2.14",
+    "torch>=2.14,<2.15",
 ]
 
 [project.optional-dependencies]
 plot = ["matplotlib>=3.10"]
 hdf5 = ["tables>=3.10"]
-torch-cpu = ["torch>=2.13,<2.14"]
-torch-cu126 = ["torch>=2.13,<2.14"]
-torch-cu130 = ["torch>=2.13,<2.14"]
+torch-cpu = ["torch>=2.14,<2.15"]
+torch-cu126 = ["torch>=2.14,<2.15"]
+torch-cu130 = ["torch>=2.14,<2.15"]
 all = [
     "matplotlib>=3.10",
     "tables>=3.10",

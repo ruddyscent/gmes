@@ -48,7 +48,7 @@ uv build"""
         agents = self.primary_documents["AGENTS.md"]
         assert ("uv lock --upgrade") in (readme)
         assert ("PEP 735") in (readme)
-        assert ("PyTorch `>=2.13,<2.14`") in (readme)
+        assert ("PyTorch `>=2.14,<2.15`") in (readme)
         assert ("py3-none-any") in (readme)
         assert ("No compiler, SWIG, Cython, OpenMP runtime, or MPI") in (contributing)
         assert ("pure-Python PyTorch package") in (agents)

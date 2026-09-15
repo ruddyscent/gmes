@@ -32,7 +32,7 @@ MAP_VALIDATION_NODES = {MAP_VALIDATION_NODE, FAILURE_COLLECTOR_NODE}
 # The sidecar gives reviewers a compact relation-only diff; this independent
 # constant prevents the editable JSON and sidecar from authenticating each other.
 MAPPING_RELATIONS_SHA256 = (
-    "ceda6bd42b92433a531ea2101058758bb6a3d4ed2976351e63b5c5dbce77af56"
+    "dc820c1261940cd945edf387cbf8594828c2398345ab7b85c678c505007af42c"
 )
 
 
@@ -389,7 +389,7 @@ def test_pytest_migration_map_is_complete_and_auditable():
     expected_helper_destinations = {
         "tests/test_docstrings.py::DocstringCoverageTest._assert_public_members_documented::subTest@131": {
             "tests/test_docstrings.py::TestDocstringCoverage::test_public_exports_have_docstrings": (
-                483,
+                484,
                 344,
             ),
             "tests/test_docstrings.py::TestDocstringCoverage::test_supported_extension_hooks_have_docstrings": (

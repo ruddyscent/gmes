@@ -283,6 +283,7 @@ class TestTorchDm2:
         assert DM2_PACKED_ITERATIONS_PER_CONDITION == 3
         assert "DM2_PACKED_ITERATIONS_PER_CONDITION" in torch_dm2.__all__
 
+    @pytest.mark.requires_torch_compile
     def test_packed_cpu_workspace_is_exact_nonpersistent_and_fixed(self):
         material = gmes.Dm2(
             eps_inf=1.4,
@@ -325,6 +326,7 @@ class TestTorchDm2:
             "_packed_loop_state" in name for name in simulation.state.state_dict()
         )
 
+    @pytest.mark.requires_torch_compile
     def test_compiled_packed_corrector_preserves_early_convergence(self):
         _, simulation = _simulations(gmes.Dm2(), compile_policy="compile")
 
@@ -493,6 +495,7 @@ class TestTorchDm2:
                 err_msg=name,
             )
 
+    @pytest.mark.requires_torch_compile
     def test_compiled_preconditioned_state_matches_at_fixed_capture_steps(self):
         material = gmes.Dm2(
             omega=(0.7,),
@@ -639,6 +642,7 @@ class TestTorchDm2:
                 field_before[snapshot["targets"]],
             )
 
+    @pytest.mark.requires_torch_compile
     def test_compiled_invalid_error_commits_the_same_state_as_eager(self):
         eager = self._build_failure_simulation(gmes.Dm2(gamma=np.nan), "eager")
         compiled = self._build_failure_simulation(gmes.Dm2(gamma=np.nan), "compile")
@@ -657,6 +661,7 @@ class TestTorchDm2:
         assert errors[1] == errors[0]
         self._assert_simulation_state_matches(compiled, eager)
 
+    @pytest.mark.requires_torch_compile
     def test_compiled_nonconvergence_commits_the_same_state_as_eager(self):
         eager = self._build_failure_simulation(gmes.Dm2(rtol=-1), "eager")
         compiled = self._build_failure_simulation(gmes.Dm2(rtol=-1), "compile")
@@ -677,6 +682,7 @@ class TestTorchDm2:
         assert torch.all(compiled.state._dm2_status == 2)
         assert torch.all(compiled.state._dm2_iterations == DM2_MAX_ITERATIONS)
 
+    @pytest.mark.requires_torch_compile
     def test_compiled_fullgraph_matches_dense_reference(self):
         material = gmes.Dm2(
             omega=(0.7,),
@@ -715,6 +721,7 @@ class TestTorchDm2:
         assert addresses == simulation.buffer_addresses()
 
     @pytest.mark.skipif(not (torch.cuda.is_available()), reason="CUDA is unavailable")
+    @pytest.mark.requires_torch_compile
     def test_cuda_compiled_float32_has_fixed_storage_and_allocation(self):
         simulation = gmes.TorchSimulation(
             space=gmes.Cartesian((2, 2, 0), 2),

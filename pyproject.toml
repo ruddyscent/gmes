@@ -57,6 +57,9 @@ dev = [
 
 [tool.pytest.ini_options]
 norecursedirs = ["tests/fixtures"]
+markers = [
+    "requires_torch_compile: requires real TorchDynamo compilation support",
+]
 
 [project.urls]
 Homepage = "https://github.com/ruddyscent/gmes"

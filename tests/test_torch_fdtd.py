@@ -344,6 +344,7 @@ class TestTorchRuntimeConfig:
                 runtime=config,
             )
 
+    @pytest.mark.requires_torch_compile
     def test_compile_cache_key_tracks_execution_specialization(self):
         assert (TORCH_SOLVER_ABI) == ("torch-fdtd-regions-v15")
         assert (issue123_completion.TORCH_SOLVER_ABI) == (TORCH_SOLVER_ABI)
@@ -815,6 +816,7 @@ class TestTorchState:
         assert (simulation.plan.material_ids_ex.dtype) == (torch.int32)
 
     @pytest.mark.skipif(not (torch.cuda.is_available()), reason="CUDA is unavailable")
+    @pytest.mark.requires_torch_compile
     def test_reduce_overhead_cuda_graph_uses_non_nested_half_steps(self, request):
         torch._dynamo.reset()
         request.addfinalizer(torch._dynamo.reset)
@@ -875,6 +877,7 @@ class TestTorchState:
             torch.testing.assert_close(captured[name], value, msg=name)
 
     @pytest.mark.skipif(not (torch.cuda.is_available()), reason="CUDA is unavailable")
+    @pytest.mark.requires_torch_compile
     def test_cuda_graph_capture_failure_rolls_back_state_and_registry(self):
         simulation = TorchSimulation(
             space=gmes.Cartesian((2, 2, 2), 2),
@@ -1065,6 +1068,7 @@ class TestTorchOracle:
     def test_cpu_eager_float32_matches_numpy_step_with_separate_tolerance(self):
         self._compare(device="cpu", precision="float32", compile_policy="eager")
 
+    @pytest.mark.requires_torch_compile
     def test_cpu_fullgraph_collapsed_z_matches_numpy_step_and_dense_reference(self):
         self._compare(
             device="cpu",
@@ -1074,6 +1078,7 @@ class TestTorchOracle:
             resolution=4,
         )
 
+    @pytest.mark.requires_torch_compile
     def test_cpu_fullgraph_bloch_matches_numpy_step_and_dense_reference(self):
         torch._dynamo.reset()
         simulation = self._compare(
@@ -1089,6 +1094,7 @@ class TestTorchOracle:
         assert (addresses) == (simulation.buffer_addresses())
 
     @pytest.mark.skipif(not (torch.cuda.is_available()), reason="CUDA is unavailable")
+    @pytest.mark.requires_torch_compile
     def test_cuda_fullgraph_collapsed_z_matches_cpu_reference(self):
         self._compare(
             device="cuda:0",
@@ -1108,6 +1114,7 @@ class TestTorchOracle:
         )
 
     @pytest.mark.skipif(not (torch.cuda.is_available()), reason="CUDA is unavailable")
+    @pytest.mark.requires_torch_compile
     def test_cuda_fullgraph_float32_has_stable_storage_and_allocation(self):
         simulation = self._compare(
             device="cuda:0",

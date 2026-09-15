@@ -431,7 +431,15 @@ class TestDispersiveOracle:
             completed = capture
 
     @pytest.mark.parametrize(
-        "model", ("drude", "lorentz", "dcp-ade", "dcp-plrc", "dcp-rc"), ids=str
+        "model",
+        (
+            "drude",
+            "lorentz",
+            "dcp-ade",
+            pytest.param("dcp-plrc", marks=pytest.mark.requires_torch_compile),
+            "dcp-rc",
+        ),
+        ids=str,
     )
     def test_paired_real_complex_recurrences_match_dense_reference(self, model):
         bloch = (0.07, 0.11, 0.13)
@@ -452,6 +460,7 @@ class TestDispersiveOracle:
         for name, value in simulation.state.named_buffers():
             assert not value.is_complex(), name
 
+    @pytest.mark.requires_torch_compile
     def test_paired_real_mixed_grouping_matches_dense_reference(self, request):
         bloch = (0.07, 0.11, 0.13)
         previous_threads = torch.get_num_threads()
@@ -556,6 +565,7 @@ class TestDispersiveOracle:
                 results["dense"][component], results["tiled"][component]
             )
 
+    @pytest.mark.requires_torch_compile
     def test_compiled_forced_policies_keep_distinct_execution_identity(self):
         results = {}
         compile_cache_keys = set()
@@ -642,6 +652,7 @@ class TestDispersiveOracle:
             complex_fields=False,
         )
 
+    @pytest.mark.requires_torch_compile
     def test_compiled_exact_schema_float32_matches_bucketed_execution(self, request):
         previous_threads = torch.get_num_threads()
         request.addfinalizer(lambda: torch.set_num_threads(previous_threads))
@@ -694,6 +705,7 @@ class TestDispersiveOracle:
             if value.is_floating_point():
                 assert value.dtype == torch.float32
 
+    @pytest.mark.requires_torch_compile
     def test_compiled_bulk_phases_preserve_dispersive_oracle_and_storage(self):
         torch._dynamo.reset()
         reference, simulation = _reference_and_torch(
@@ -835,6 +847,7 @@ class TestDispersiveOracle:
         )
 
     @pytest.mark.skipif(not (torch.cuda.is_available()), reason="CUDA is unavailable")
+    @pytest.mark.requires_torch_compile
     def test_cuda_compiled_float32_has_stable_storage_and_allocation(self):
         torch._dynamo.reset()
         reference, simulation = _reference_and_torch(
@@ -862,7 +875,11 @@ class TestDispersiveOracle:
         assert addresses == simulation.buffer_addresses()
         assert allocated == torch.cuda.memory_allocated(simulation.device)
 
-    @pytest.mark.parametrize("experimental", (False, True), ids=("baseline", "grouped"))
+    @pytest.mark.parametrize(
+        "experimental",
+        (False, pytest.param(True, marks=pytest.mark.requires_torch_compile)),
+        ids=("baseline", "grouped"),
+    )
     def test_mixed_pml_and_dispersive_underlying_match_capture_steps(
         self, request, experimental
     ):
@@ -922,6 +939,7 @@ class TestDispersiveOracle:
 
 
 class TestDispersiveStorage:
+    @pytest.mark.requires_torch_compile
     def test_compiled_exact_schema_groups_preserve_logical_state_and_results(
         self, request
     ):

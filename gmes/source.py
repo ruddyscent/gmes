@@ -705,7 +705,7 @@ class TotalFieldScatteredField(Src):
         lhs = (sin(0.5 * dt * omega) / v / dt) ** 2
         rhs = sum((np.sin(0.5 * zeta * np.array(ds) * k) / ds) ** 2)
 
-        return lhs - rhs
+        return float(lhs - rhs)
 
     def _1d_dispersion_relation(
         self, ds: float, zeta: float, v: float, omega: float, dt: float, k: float
@@ -830,6 +830,7 @@ class TotalFieldScatteredField(Src):
                 else lowering.auxiliary_spec.space.spc_to_exact_ex_idx
             )(*((0, 0, self._metric_from_center_along_beam_axis(samp_i2s(*idx)))))
             low = np.floor(sample).astype(np.intp)
+            high = low + (0, 0, 1)
             weight1 = float(sample[2] - low[2])
             coefficient = (
                 signs[component.__name__][face.str()]
@@ -844,8 +845,8 @@ class TotalFieldScatteredField(Src):
                     component.__name__,
                     idx,
                     "Hy" if electric else "Ex",
-                    tuple(low),
-                    tuple(low + (0, 0, 1)),
+                    (int(low[0]), int(low[1]), int(low[2])),
+                    (int(high[0]), int(high[1]), int(high[2])),
                     1.0 - weight1,
                     weight1,
                     coefficient,

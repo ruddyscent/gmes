@@ -5,7 +5,7 @@
 from collections.abc import Iterator, Sequence
 from copy import deepcopy
 from dataclasses import dataclass
-from math import sqrt
+from math import isfinite, sqrt
 from typing import Any, Protocol, cast
 
 import numpy as np
@@ -1009,7 +1009,9 @@ class Block(GeometricObject):
                 lengths of these vectors are ignored. Must be linearly
                 independent. They default to the three Cartesian axis.
             size -- The lengths of the block edges along each of its
-                three axes. Default is (1, 1, 1).
+                three axes. Positive infinity leaves an axis unbounded.
+                Default is (1, 1, 1). Containment queries require finite
+                coordinates, even along unbounded axes.
 
         """
         GeometricObject.__init__(self, material)
@@ -1045,7 +1047,10 @@ class Block(GeometricObject):
         self.projection_matrix.setfield(np.linalg.inv(basis), np.double)
 
     def in_object(self, point: Vector3) -> bool:
-        """Check whether the given point is in this block."""
+        """Check whether a finite point is in this block, including its boundary."""
+        # Infinity is also used as a background-medium lookup sentinel.
+        if not all(isfinite(point[axis]) for axis in range(3)):
+            return False
         rx = point[0] - self.center[0]
         ry = point[1] - self.center[1]
         rz = point[2] - self.center[2]
@@ -1086,6 +1091,12 @@ class Block(GeometricObject):
         )
 
     def _contains_points(self, x: RealArray, y: RealArray, z: RealArray) -> BoolArray:
+        finite = np.isfinite(x) & np.isfinite(y) & np.isfinite(z)
+        if not np.all(finite):
+            x, y, z = np.broadcast_arrays(x, y, z)
+            matches = np.zeros_like(finite)
+            matches[finite] = self._contains_points(x[finite], y[finite], z[finite])
+            return matches
         projection = self._project_points(x, y, z)
         return cast(
             BoolArray,
@@ -1095,7 +1106,21 @@ class Block(GeometricObject):
         )
 
     def geom_box(self) -> GeomBox:
-        """Return a GeomBox for this block."""
+        """Return conservative Cartesian bounds, including unbounded edges.
+
+        Unbounded extents must survive geometry-tree partitioning. These
+        bounds correct infinite-corner arithmetic that could select background
+        material at finite points contained by an unbounded object.
+        """
+        if np.isinf(self.size).any():
+            # Sum nonnegative Cartesian extents: a zero axis component has
+            # no extent even for an infinite edge. Infinite corners cannot
+            # be added/subtracted to obtain these bounds.
+            basis = np.abs(np.column_stack((self.e1, self.e2, self.e3)))
+            extents = np.zeros_like(basis)
+            np.multiply(0.5 * np.abs(self.size), basis, out=extents, where=basis != 0)
+            half_size = extents.sum(axis=1)
+            return GeomBox(self.center - half_size, self.center + half_size)
         tmpBox = GeomBox(low=self.center, high=self.center)
         # enlarge the box to be big enough to contain all 8 corners
         # of the block.
@@ -1154,7 +1179,9 @@ class Ellipsoid(Block):
         self.inverse_semi_axes = d["isa"]
 
     def in_object(self, point: Vector3) -> bool:
-        """Check whether the given point is in this ellipsoid."""
+        """Check whether a finite point is in this ellipsoid, including its boundary."""
+        if not all(isfinite(point[axis]) for axis in range(3)):
+            return False
         rx = point[0] - self.center[0]
         ry = point[1] - self.center[1]
         rz = point[2] - self.center[2]
@@ -1178,6 +1205,12 @@ class Ellipsoid(Block):
         return bool(truth)
 
     def _contains_points(self, x: RealArray, y: RealArray, z: RealArray) -> BoolArray:
+        finite = np.isfinite(x) & np.isfinite(y) & np.isfinite(z)
+        if not np.all(finite):
+            x, y, z = np.broadcast_arrays(x, y, z)
+            matches = np.zeros_like(finite)
+            matches[finite] = self._contains_points(x[finite], y[finite], z[finite])
+            return matches
         projection = self._project_points(x, y, z)
         q0 = self.inverse_semi_axes[0] * projection[0]
         q1 = self.inverse_semi_axes[1] * projection[1]

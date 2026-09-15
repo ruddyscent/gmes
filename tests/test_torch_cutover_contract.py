@@ -24,6 +24,7 @@ EXPECTED_EXPORTS = frozenset(
         "Ellipsoid",
         "Sphere",
         "Shell",
+        "vectorized_geometry",
         "Ex",
         "Ey",
         "Ez",
@@ -118,7 +119,7 @@ class TestTorchCutoverContract:
     """Verify the supported public boundary independently of legacy adapters."""
 
     def test_exact_root_exports_and_canonical_constant_identity(self):
-        assert (len(gmes.__all__)) == (98)
+        assert (len(gmes.__all__)) == (99)
         assert (set(gmes.__all__)) == (EXPECTED_EXPORTS)
         assert (len(gmes.__all__)) == (len(set(gmes.__all__)))
         assert (gmes.Ex) is (gmes.constant.Ex)

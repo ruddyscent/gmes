@@ -6,7 +6,8 @@ from collections.abc import Iterator, Sequence
 from copy import deepcopy
 from dataclasses import dataclass
 from math import isfinite, sqrt
-from typing import Any, Protocol, cast
+from types import MethodType
+from typing import Any, ClassVar, Protocol, cast
 
 import numpy as np
 from numpy.typing import NDArray
@@ -587,6 +588,16 @@ class GeomBoxTree(object):
                     matches = geometry._contains_points(
                         x[leaf_positions], y[leaf_positions], z[leaf_positions]
                     )
+                    if not isinstance(matches, np.ndarray) or matches.dtype != np.bool_:
+                        raise TypeError(
+                            f"{type(geometry).__name__}._contains_points() must return "
+                            "a Boolean NumPy array"
+                        )
+                    if matches.shape != leaf_positions.shape:
+                        raise ValueError(
+                            f"{type(geometry).__name__}._contains_points() must return "
+                            "the same shape as the coordinate arrays"
+                        )
                 else:
                     matches = np.fromiter(
                         (
@@ -619,6 +630,12 @@ class GeomBoxTree(object):
     @staticmethod
     def _uses_vectorized_predicate(geometry: GeometricObject) -> bool:
         geometry_type = type(geometry)
+        contract = geometry_type._gmes_vectorized_contract
+        if contract is not None:
+            return contract == (
+                _predicate_implementation(geometry_type.in_object),
+                _predicate_implementation(geometry_type._contains_points),
+            )
         return geometry_type in _BUILTIN_VECTOR_GEOMETRY_TYPES or (
             getattr(geometry_type, "_gmes_vectorized_geometry", False) is True
         )
@@ -701,10 +718,10 @@ class GeometricObject(object):
 
     """
 
-    # Custom classes may explicitly set this to True when their parameters
-    # preserve or override `_contains_points()` with equivalent array semantics.
-    # The opt-in is inherited by parameter-only subclasses.
+    # Legacy opt-in retains its original inheritance semantics. New extensions
+    # should use vectorized_geometry for containment-aware inheritance.
     _gmes_vectorized_geometry = False
+    _gmes_vectorized_contract: ClassVar[tuple[object, object] | None] = None
 
     center: RealArray
     box: GeomBox | None
@@ -770,6 +787,13 @@ class GeometricObject(object):
         raise NotImplementedError
 
     def _contains_points(self, x: RealArray, y: RealArray, z: RealArray) -> BoolArray:
+        """Return scalar-equivalent containment for matching float64 1-D arrays.
+
+        This is the supported array hook for ``vectorized_geometry`` despite
+        its historical underscore. Overrides must return a Boolean NumPy array
+        of the input shape, including shape (0,) for empty input. Do not mutate
+        inputs or depend on call counts, tile boundaries, or point ordering.
+        """
         return np.fromiter(
             (self.in_object(point) for point in zip(x, y, z, strict=True)),
             dtype=np.bool_,
@@ -782,6 +806,49 @@ class GeometricObject(object):
         print(" " * indent, "center:", self.center)
         if self.material:
             self.material.display_info(indent + 5)
+
+
+def _predicate_implementation(predicate: object) -> object:
+    """Identify classmethod implementations independently of their bound class."""
+    return predicate.__func__ if isinstance(predicate, MethodType) else predicate
+
+
+def vectorized_geometry[T: GeometricObject](geometry_type: type[T]) -> type[T]:
+    """Opt a geometry class into bounded, scalar-equivalent array containment.
+
+    The class must implement or inherit an array ``_contains_points(x, y, z)``
+    predicate other than the base scalar loop. It receives same-length 1-D
+    float64 NumPy arrays and must return a Boolean NumPy array of that shape.
+    Each result must agree with ``in_object((x[i], y[i], z[i]))``; structural
+    validation at lowering cannot prove that semantic obligation.
+
+    Parameter-only subclasses inherit this opt-in. Replacing either containment
+    method makes a subclass fall back to scalar lookup until decorated again.
+    Normal Python MRO selects the inherited contract. A public contract takes
+    precedence over the legacy marker, whose behavior otherwise stays unchanged.
+    Reapplying this decorator renews the contract and returns the original class;
+    it wraps no methods and leaves introspection and serialization hooks intact.
+
+    Raises:
+        TypeError: If the argument is not a geometry class with callable
+            containment methods and an array predicate other than the base loop.
+    """
+    if not isinstance(geometry_type, type) or not issubclass(
+        geometry_type, GeometricObject
+    ):
+        raise TypeError("vectorized_geometry requires a GeometricObject subclass")
+    if (
+        not callable(geometry_type.in_object)
+        or not callable(geometry_type._contains_points)
+        or geometry_type.in_object is GeometricObject.in_object
+        or geometry_type._contains_points is GeometricObject._contains_points
+    ):
+        raise TypeError("vectorized_geometry requires scalar and array predicates")
+    geometry_type._gmes_vectorized_contract = (
+        _predicate_implementation(geometry_type.in_object),
+        _predicate_implementation(geometry_type._contains_points),
+    )
+    return geometry_type
 
 
 class DefaultMedium(GeometricObject):

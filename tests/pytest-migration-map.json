@@ -28,7 +28,7 @@
     }
   ],
   "current_collection": {
-    "node_count": 4327
+    "node_count": 4376
   },
   "gaps": {
     "ambiguous_methods": [],
@@ -42,7 +42,7 @@
     {
       "new": [
         {
-          "count": 483,
+          "count": 484,
           "node_pattern": "tests/test_docstrings.py::TestDocstringCoverage::test_public_exports_have_docstrings",
           "old_case_count": 344
         },
@@ -80,7 +80,7 @@
           "node_pattern": "tests/test_annotations.py::TestAnnotationCoverage::test_public_annotation_inventory_is_complete"
         },
         {
-          "count": 272,
+          "count": 273,
           "node_pattern": "tests/test_annotations.py::TestAnnotationCoverage::test_public_annotations_are_complete_and_resolvable"
         }
       ],
@@ -1098,7 +1098,7 @@
       "line": 79,
       "new": [
         {
-          "count": 483,
+          "count": 484,
           "node_pattern": "tests/test_docstrings.py::TestDocstringCoverage::test_public_exports_have_docstrings"
         }
       ],
@@ -9748,6 +9748,13 @@
       "path": "tests/test_pygeom_unbounded.py",
       "pattern_count": 5,
       "reason": "Added after issue #179 to cover nonfinite containment queries and finite/unbounded, rotated, and skew Block/Ellipsoid bounds and material lookup without invalid arithmetic."
+    },
+    {
+      "node_count": 47,
+      "node_pattern": "tests/test_vectorized_geometry.py::*",
+      "path": "tests/test_vectorized_geometry.py",
+      "pattern_count": 18,
+      "reason": "Added after issue #179 to cover issue #127 public vectorized geometry opt-in, inheritance, predicate validation, serialization, bounded lowering, and CPU execution contracts."
     }
   ],
   "schema_version": 5,
@@ -9760,7 +9767,7 @@
             "node_pattern": "tests/test_annotations.py::TestAnnotationCoverage::test_public_annotation_inventory_is_complete"
           },
           {
-            "count": 272,
+            "count": 273,
             "node_pattern": "tests/test_annotations.py::TestAnnotationCoverage::test_public_annotations_are_complete_and_resolvable"
           }
         ],
@@ -10186,7 +10193,7 @@
     ],
     "subtests": [
       {
-        "count": 272,
+        "count": 273,
         "node_pattern": "tests/test_annotations.py::TestAnnotationCoverage::test_public_annotations_are_complete_and_resolvable",
         "old": "tests/test_annotations.py::AnnotationCoverageTest.test_public_annotations_are_complete_and_resolvable::subTest@100",
         "parameter_tokens": [
@@ -10700,7 +10707,7 @@
       "line": 100,
       "new": [
         {
-          "count": 272,
+          "count": 273,
           "node_pattern": "tests/test_annotations.py::TestAnnotationCoverage::test_public_annotations_are_complete_and_resolvable"
         }
       ],
@@ -10925,7 +10932,7 @@
       "line": 95,
       "new": [
         {
-          "count": 483,
+          "count": 484,
           "node_pattern": "tests/test_docstrings.py::TestDocstringCoverage::test_public_exports_have_docstrings"
         }
       ],
@@ -10967,7 +10974,7 @@
       "line": 131,
       "new": [
         {
-          "count": 483,
+          "count": 484,
           "node_pattern": "tests/test_docstrings.py::TestDocstringCoverage::test_public_exports_have_docstrings"
         },
         {

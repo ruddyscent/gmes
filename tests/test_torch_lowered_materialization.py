@@ -312,6 +312,7 @@ class TestCaseProducerReceipt:
         )
         return simulation, receipt
 
+    @pytest.mark.requires_torch_compile
     def test_real_lazy_cpu_constructor_records_all_material_producers(self):
         simulation, receipt = self._construct_all_material()
         assert receipt.valid_for(simulation)
@@ -335,6 +336,7 @@ class TestCaseProducerReceipt:
         )
         assert ("caller_descriptor_sha256") in (report)
 
+    @pytest.mark.requires_torch_compile
     def test_changed_descriptor_and_effective_courant_stay_explicitly_unverified(self):
         simulation, receipt = self._construct_all_material(
             descriptor_name="report-only-impostor", courant_ratio=0.5
@@ -349,6 +351,7 @@ class TestCaseProducerReceipt:
         ):
             assert (gap) in (receipt.diagnostic()["unverified"])
 
+    @pytest.mark.requires_torch_compile
     def test_cross_wiring_and_post_capture_preimage_replacement_reject(self):
         simulation, receipt = self._construct_all_material()
         assert not (receipt.valid_for(object()))
@@ -434,6 +437,7 @@ class TestCaseProducerReceipt:
         range(5),
         ids=("normal", "preimage", "explicit", "plan", "modules-only"),
     )
+    @pytest.mark.requires_torch_compile
     def test_receipt_revalidation_suppresses_stale_module_and_join_projection(
         self, mode_case
     ):

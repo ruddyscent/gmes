@@ -396,7 +396,13 @@ class TestTorchPmlOracle:
 
     @pytest.mark.parametrize(
         ("model", "compile_policy"),
-        ((gmes.Upml, "eager"), (gmes.Cpml, "eager"), (gmes.Cpml, "compile")),
+        (
+            (gmes.Upml, "eager"),
+            (gmes.Cpml, "eager"),
+            pytest.param(
+                gmes.Cpml, "compile", marks=pytest.mark.requires_torch_compile
+            ),
+        ),
         ids=("upml-eager", "cpml-eager", "cpml-compiled"),
     )
     def test_nonzero_fields_and_state_match_at_reference_steps(
@@ -428,8 +434,10 @@ class TestTorchPmlOracle:
         ids=("float32-real", "float64-bloch", "float32-bloch"),
     )
     def test_float32_and_paired_real_bloch_use_model_tolerances(
-        self, model, precision, bloch
+        self, model, precision, bloch, request
     ):
+        if model is gmes.Cpml or (precision == "float64" and bloch is not None):
+            request.getfixturevalue("requires_torch_compile")
         reference, simulation = _reference_and_torch(
             model,
             precision=precision,
@@ -450,7 +458,11 @@ class TestTorchPmlOracle:
         ((4, 0, 0), (4, 3, 0), (3, 3, 2)),
         ids=("one-dimensional", "two-dimensional", "three-dimensional"),
     )
-    @pytest.mark.parametrize("model", (gmes.Upml, gmes.Cpml), ids=("upml", "cpml"))
+    @pytest.mark.parametrize(
+        "model",
+        (gmes.Upml, pytest.param(gmes.Cpml, marks=pytest.mark.requires_torch_compile)),
+        ids=("upml", "cpml"),
+    )
     def test_collapsed_1d_2d_and_3d_modes_match_dense_reference(self, size, model):
         reference, simulation = _reference_and_torch(
             model,
@@ -507,6 +519,7 @@ class TestTorchPmlOracle:
         } == {policy}
 
     @pytest.mark.parametrize("model", (gmes.Upml, gmes.Cpml), ids=("upml", "cpml"))
+    @pytest.mark.requires_torch_compile
     def test_compiled_z_collapsed_specialization_matches_dense_reference(self, model):
         torch._dynamo.reset()
         reference, simulation = _reference_and_torch(
@@ -524,6 +537,7 @@ class TestTorchPmlOracle:
     @pytest.mark.parametrize(
         "precision", ("float64", "float32"), ids=("float64", "float32")
     )
+    @pytest.mark.requires_torch_compile
     def test_compiled_custom_kappa_sparse_residual_matches_dense_reference(
         self, precision
     ):
@@ -562,6 +576,7 @@ class TestTorchPmlOracle:
             == SPARSE_CPML_REPRESENTATION
         )
 
+    @pytest.mark.requires_torch_compile
     def test_extreme_float32_kappa_uses_stable_compact_fallback(self):
         geometry = [
             gmes.DefaultMedium(gmes.Dielectric(eps_inf=2.5, mu_inf=1.2)),
@@ -582,6 +597,7 @@ class TestTorchPmlOracle:
             == DEFAULT_CPML_REPRESENTATION
         )
 
+    @pytest.mark.requires_torch_compile
     def test_compiled_cpu_crossover_manifest_matches_dense_reference_state(self):
         torch._dynamo.reset()
         spec = next(
@@ -744,6 +760,7 @@ class TestTorchPmlOracle:
             == 0
         )
 
+    @pytest.mark.requires_torch_compile
     def test_long_run_absorbs_seeded_energy_like_dense_reference(self):
         reference, simulation = _reference_and_torch(
             gmes.Cpml,
@@ -1073,6 +1090,7 @@ class TestTorchPmlStorage:
                 err_msg=f"{model.__name__} {component_name}",
             )
 
+    @pytest.mark.requires_torch_compile
     def test_compiled_cpml_uses_sparse_state_with_canonical_checkpoint(self):
         simulation = gmes.TorchSimulation(
             space=gmes.Cartesian((4, 4, 4), 3),
@@ -1176,6 +1194,7 @@ class TestTorchPmlStorage:
         for name in before:
             torch.testing.assert_close(before[name], after[name])
 
+    @pytest.mark.requires_torch_compile
     def test_cpu_fullgraph_has_no_graph_break_or_storage_change(self):
         torch._dynamo.reset()
         reference, simulation = _reference_and_torch(
@@ -1192,7 +1211,9 @@ class TestTorchPmlStorage:
 
     @pytest.mark.skipif(not (torch.cuda.is_available()), reason="CUDA is unavailable")
     @pytest.mark.parametrize(
-        "compile_policy", ("eager", "compile"), ids=("eager", "compile")
+        "compile_policy",
+        ("eager", pytest.param("compile", marks=pytest.mark.requires_torch_compile)),
+        ids=("eager", "compile"),
     )
     @pytest.mark.parametrize("model", (gmes.Upml, gmes.Cpml), ids=("upml", "cpml"))
     def test_cuda_eager_and_fullgraph_have_stable_memory(self, compile_policy, model):

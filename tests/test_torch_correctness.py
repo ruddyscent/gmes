@@ -686,6 +686,7 @@ class TestTorchCorrectness:
                 result["failures"][0]["error"]
             )
 
+    @pytest.mark.requires_torch_compile
     def test_compiled_dummy_long_capture_covers_topology_and_tolerance(self):
         capture_steps = [1, 2, 5, 20, 100]
         manifest = self._small_manifest(("dummy",))

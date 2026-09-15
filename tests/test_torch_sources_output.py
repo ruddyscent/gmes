@@ -337,6 +337,7 @@ class TestTorchPointSource:
         assert float(simulation.state.source_time) == 100 * simulation.plan.dt
         assert simulation.state.source_time.data_ptr() == source_time_address
 
+    @pytest.mark.requires_torch_compile
     def test_compiled_material_phases_keep_source_storage_fixed(self):
         reference = _torch_simulation(_point_sources, size=(2, 2, 2))
         simulation = _torch_simulation(
@@ -361,6 +362,7 @@ class TestTorchPointSource:
             == FUSED_SOURCE_REPRESENTATION
         )
 
+    @pytest.mark.requires_torch_compile
     def test_compile_cache_key_tracks_source_component(self):
         def build(component):
             return gmes.TorchSimulation(
@@ -789,7 +791,15 @@ class TestTorchTransparentSource:
     @pytest.mark.skipif(not (torch.cuda.is_available()), reason="CUDA is unavailable")
     @pytest.mark.parametrize(
         ("compile_policy", "compile_mode", "capture_graphs"),
-        (("eager", "default", False), ("compile", "reduce-overhead", True)),
+        (
+            ("eager", "default", False),
+            pytest.param(
+                "compile",
+                "reduce-overhead",
+                True,
+                marks=pytest.mark.requires_torch_compile,
+            ),
+        ),
         ids=("eager", "compiled-graph"),
     )
     def test_cuda_float32_tfsf_eager_and_graph_keep_double_auxiliary(
@@ -821,6 +831,7 @@ class TestTorchTransparentSource:
         for name in ("Ex", "Hy"):
             assert np.isfinite(actual_auxiliary[name]).all(), name
 
+    @pytest.mark.requires_torch_compile
     def test_all_tfsf_faces_and_paired_real_auxiliary_replay_exactly(self):
         simulation = _torch_simulation(
             lambda: [_tfsf()],
@@ -1079,7 +1090,9 @@ class TestTorchTransparentSource:
 
 class TestTorchBoundary:
     @pytest.mark.parametrize(
-        "compile_policy", ("eager", "compile"), ids=("eager", "compiled")
+        "compile_policy",
+        ("eager", pytest.param("compile", marks=pytest.mark.requires_torch_compile)),
+        ids=("eager", "compiled"),
     )
     def test_collapsed_paired_real_boundaries_match_bloch_phase_equation(
         self, compile_policy

@@ -24,5 +24,12 @@ class TestTypingFixture:
             text=True,
         )
         output = result.stdout + result.stderr
-        assert result.returncode != 0, output
-        assert output.count("[arg-type]") == 3, output
+        assert result.returncode == 1, output
+        errors = [line for line in output.splitlines() if ": error:" in line]
+        fixture_errors = [
+            line for line in errors if line.startswith("tests/typing/invalid_api.py:")
+        ]
+        assert len(fixture_errors) == 3, output
+        for line, argument in zip(fixture_errors, ("device", "location", "target")):
+            assert f'Argument "{argument}"' in line and "[arg-type]" in line, output
+        assert errors == fixture_errors, output

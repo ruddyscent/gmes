@@ -19,7 +19,7 @@ try:
 
 except ImportError as error:  # pragma: no cover
     raise ImportError(
-        "GMES Torch execution requires PyTorch 2.13; run `uv sync --locked`."
+        "GMES Torch execution requires PyTorch 2.14; run `uv sync --locked`."
     ) from error
 
 from .geometry import Cartesian, DefaultMedium, GeomBoxTree

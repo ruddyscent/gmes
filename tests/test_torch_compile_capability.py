@@ -1,5 +1,7 @@
 """Verify compilation skips without masking eager tests or runtime failures."""
 
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -57,3 +59,45 @@ def test_compile_capability_gate_preserves_test_outcomes(pytester, capability):
         # in the test body. Neither may turn into an unsupported-runtime skip.
         result.assert_outcomes(passed=2, errors=1, failed=1)
         result.stdout.fnmatch_lines(["*RuntimeError: capability probe failed*"])
+
+
+@pytest.mark.parametrize(
+    "operation",
+    (
+        "import",
+        pytest.param("compile", marks=pytest.mark.requires_torch_compile),
+    ),
+)
+def test_inductor_import_does_not_warn_about_torchscript(operation):
+    """Exercise the first import/compile in a fresh process without suppression."""
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import sys
+import warnings
+
+import torch
+
+torch.set_num_threads(1)
+torch.set_num_interop_threads(1)
+with warnings.catch_warnings(record=True) as recorded:
+    warnings.simplefilter("always")
+    if sys.argv[1] == "import":
+        import torch.utils.mkldnn
+        import torch._inductor.fx_passes.pre_grad
+    else:
+        x = torch.arange(8, device="cpu", dtype=torch.float64)
+        compiled = torch.compile(lambda x: x.sin() + 1, fullgraph=True, mode="default")
+        torch.testing.assert_close(compiled(x), x.sin() + 1)
+incidental = [str(w.message) for w in recorded if "torch.jit.script_method" in str(w.message)]
+assert not incidental, (torch.__version__, incidental)
+""",
+            operation,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr

@@ -47,7 +47,7 @@ active build or runtime dependencies.
 
 ## Compatibility
 
-- Target Python 3.14 or newer and PyTorch `>=2.13,<2.14`.
+- Target Python 3.14 or newer and PyTorch `>=2.14,<2.15`.
 - Python 2 compatibility is not required.
 - Preserve numerical behavior unless a change is explicitly documented and covered by regression tests.
 - Use the declarative PEP 517 build declared in `pyproject.toml`; it must not

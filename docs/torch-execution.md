@@ -310,7 +310,7 @@ or dtype.
 
 ## Install a wheel variant
 
-GMES pins the stable PyTorch 2.13 line as `torch>=2.13,<2.14`. The universal
+GMES pins the stable PyTorch 2.14 line as `torch>=2.14,<2.15`. The universal
 package requirement does not contain a local CUDA suffix. The uv lock records
 the CPU, CUDA 12.6, and CUDA 13.0 variants as mutually exclusive deployment
 choices using PyTorch's explicit indexes:
@@ -329,6 +329,12 @@ uv sync --locked --extra torch-cu130 --extra hdf5
 Do not enable more than one `torch-*` extra. CI explicitly requests
 `torch-cpu` so a GPU runtime package is not mistaken for GPU test coverage.
 The package's universal wheel does not select or validate an accelerator.
+PyTorch 2.14.0 wheels are available for Python 3.14 and 3.15 on Linux x86_64
+and ARM64 for all three indexes, and on macOS 14 or newer ARM64 for the CPU
+index. Wheel availability alone does not establish runtime compatibility.
+The 2.14 import path defers MKLDNN TorchScript construction, avoiding the
+incidental `torch.jit.script_method` warnings during ordinary compilation;
+this does not add Python 3.14 TorchScript support.
 
 Historical 2.13 compatibility probes used Python 3.14.7 and Linux NVIDIA
 compute capabilities 8.6 and 7.5. They are not final CPU/macOS/CUDA acceptance

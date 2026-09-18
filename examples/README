@@ -15,6 +15,18 @@ $ uv sync --locked --extra torch-cpu --extra hdf5
 $ uv run --no-sync python examples/<example file name>
 
 ###################################################################
+taflove_chapter2.py
+
+Reproduces the seven numbered figures (eleven panels) in Taflove and
+Hagness, Computational Electrodynamics, third edition, Chapter 2.
+Uses analytical dispersion curves and the public GMES Maxwell solver
+for every time-stepped figure, including the intentional local-instability
+experiments. An independent scalar recurrence checks the simulated fields.
+See TAFLOVE_CHAPTER2.md for source parameters, limitations, and commands.
+
+$ uv run --no-sync python -m examples.taflove_chapter2 --figure 2.1
+
+###################################################################
 ziolkowski1995.py
 
 Reproduces Figs. 1-12 from R. W. Ziolkowski, J. M. Arnold, and

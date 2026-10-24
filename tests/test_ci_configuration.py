@@ -216,7 +216,7 @@ class TestCiConfiguration:
         assert ("-m pip --version") in (workflow)
         assert ("pip 26.2.1") not in (workflow)
         assert (f'--constraint "{build_constraints}"') in (workflow)
-        assert ("setuptools==84.0.0 wheel==0.48.0") in (workflow)
+        assert ("setuptools==84.1.0 wheel==0.48.0") in (workflow)
         assert ("installer=(--no-deps --no-index --force-reinstall)") in (workflow)
         assert ("installer+=(--no-build-isolation)") in (workflow)
         assert ('"gmes @ file://${archive}#sha256=${digest}"') in (workflow)

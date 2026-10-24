@@ -40,7 +40,7 @@ uv venv --clear --python 3.14 "$ENV"
 )
 "$ENV/bin/python" -m ensurepip
 "$ENV/bin/python" -m pip install --no-deps \
-  --constraint "$CANDIDATE/build-constraints.txt" setuptools==84.0.0 wheel==0.48.0
+  --constraint "$CANDIDATE/build-constraints.txt" setuptools==84.1.0 wheel==0.48.0
 ARCHIVE_SHA256="$(shasum -a 256 "$ARCHIVE" | awk '{print $1}')"
 INSTALLER=(--no-deps --no-index --force-reinstall)
 case "$ARCHIVE" in *.tar.gz) INSTALLER+=(--no-build-isolation) ;; esac

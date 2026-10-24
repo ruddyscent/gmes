@@ -94,7 +94,7 @@ jobs:
             "$environment/bin/python" -m pip --version
             "$environment/bin/python" -m pip install --no-deps \
               --constraint "$CANDIDATE_DIR/build-constraints.txt" \
-              setuptools==84.0.0 wheel==0.48.0
+              setuptools==84.1.0 wheel==0.48.0
             digest="$(shasum -a 256 "$archive" | awk '{print $1}')"
             installer=(--no-deps --no-index --force-reinstall)
             if [[ "$archive" == *.tar.gz ]]; then

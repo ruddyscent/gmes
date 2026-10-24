@@ -42,7 +42,7 @@ class TestUvCacheKey:
         constraints = set(self.uv_configuration["build-constraint-dependencies"])
         assert (constraints) == (
             {
-                "setuptools==84.0.0",
+                "setuptools==84.1.0",
                 "wheel==0.48.0",
             }
         )

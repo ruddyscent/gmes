@@ -144,7 +144,7 @@ jobs:
                 "import gmes; from pathlib import Path; assert not Path(gmes.__file__).resolve().is_relative_to(Path('${GITHUB_WORKSPACE}').resolve())"
             )
           done
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-distributions-source
           path: release-dist/*
@@ -214,7 +214,7 @@ jobs:
                 --evidence-dir "$EVIDENCE_DIR/$(basename "$archive")"
             )
           done
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: issue-124-release-cpu-${{ matrix.os }}
           path: ${{ runner.temp }}/issue-124-release-package-evidence
@@ -243,7 +243,7 @@ jobs:
           python3 utils/release.py --tag "${RELEASE_TAG}" \
             --collect-dir downloaded-artifacts --dist-dir dist
           uvx --from twine==6.2.0 twine check dist/*
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-distributions
           path: dist/*

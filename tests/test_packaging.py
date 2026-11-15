@@ -151,7 +151,7 @@ class TestSourceDistribution:
                         "--no-deps",
                         "--constraint",
                         str(project_root / "build-constraints.txt"),
-                        "setuptools==84.1.0",
+                        "setuptools==84.2.1",
                         "wheel==0.48.0",
                     ],
                     cwd=output_directory,

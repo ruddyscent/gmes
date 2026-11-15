@@ -66,15 +66,14 @@ class TestUvCacheKey:
 
     def test_locks_explicit_pytorch_213_accelerator_variants(self):
         project = self.project_configuration["project"]
-        assert ("torch>=2.14,<2.15") in (project["dependencies"])
+        assert ("torch>=2.15,<2.16") in (project["dependencies"])
         extras = project["optional-dependencies"]
-        for extra in ("torch-cpu", "torch-cu126", "torch-cu130"):
-            assert (extras[extra]) == (["torch>=2.14,<2.15"])
+        for extra in ("torch-cpu", "torch-cu132"):
+            assert (extras[extra]) == (["torch>=2.15,<2.16"])
 
         expected_indexes = {
             "pytorch-cpu": "https://download.pytorch.org/whl/cpu",
-            "pytorch-cu126": "https://download.pytorch.org/whl/cu126",
-            "pytorch-cu130": "https://download.pytorch.org/whl/cu130",
+            "pytorch-cu132": "https://download.pytorch.org/whl/cu132",
         }
         indexes = {item["name"]: item for item in self.uv_configuration["index"]}
         assert ({name: indexes[name]["url"] for name in expected_indexes}) == (
@@ -85,8 +84,7 @@ class TestUvCacheKey:
         assert ({(source["extra"], source["index"]) for source in sources}) == (
             {
                 ("torch-cpu", "pytorch-cpu"),
-                ("torch-cu126", "pytorch-cu126"),
-                ("torch-cu130", "pytorch-cu130"),
+                ("torch-cu132", "pytorch-cu132"),
             }
         )
 
@@ -97,9 +95,8 @@ class TestUvCacheKey:
         }
         assert (torch_packages) >= (
             {
-                ("2.14.0+cpu", expected_indexes["pytorch-cpu"]),
-                ("2.14.0+cu126", expected_indexes["pytorch-cu126"]),
-                ("2.14.0+cu130", expected_indexes["pytorch-cu130"]),
+                ("2.15.0+cpu", expected_indexes["pytorch-cpu"]),
+                ("2.15.0+cu132", expected_indexes["pytorch-cu132"]),
             }
         )
 

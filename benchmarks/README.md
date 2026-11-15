@@ -871,13 +871,13 @@ JSON/stdout/stderr, and profiler evidence separate. The strong mixed case uses t
 the 96x96x96 single-GPU volume along x. Homogeneous and deliberately
 imbalanced mixed cases validate the decomposition decision separately.
 
-Install the CUDA 12.6 lock variant and capture the physical inventory before
+Install the CUDA 13.2 lock variant and capture the physical inventory before
 the run. PyTorch device enumeration may differ from the physical
 `nvidia-smi -L` order, so the JSON device table and rank diagnostics are the
 authoritative binding record.
 
 ```sh
-uv sync --locked --extra torch-cu126 --extra hdf5
+uv sync --locked --extra torch-cu132 --extra hdf5
 nvidia-smi -L
 nvidia-smi topo -m
 

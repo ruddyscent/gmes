@@ -310,31 +310,31 @@ or dtype.
 
 ## Install a wheel variant
 
-GMES pins the stable PyTorch 2.14 line as `torch>=2.14,<2.15`. The universal
+GMES pins the stable PyTorch 2.15 line as `torch>=2.15,<2.16`. The universal
 package requirement does not contain a local CUDA suffix. The uv lock records
-the CPU, CUDA 12.6, and CUDA 13.0 variants as mutually exclusive deployment
-choices using PyTorch's explicit indexes:
+the CPU and CUDA 13.2 variants as mutually exclusive deployment choices using
+PyTorch's explicit indexes:
 
 ```sh
 # Linux and macOS CPU CI/development
 uv sync --locked --extra torch-cpu --extra hdf5
 
-# Linux target with the CUDA 12.6 runtime
-uv sync --locked --extra torch-cu126 --extra hdf5
-
-# Linux target with the CUDA 13.0 runtime
-uv sync --locked --extra torch-cu130 --extra hdf5
+# Linux target with the CUDA 13.2 runtime
+uv sync --locked --extra torch-cu132 --extra hdf5
 ```
 
 Do not enable more than one `torch-*` extra. CI explicitly requests
 `torch-cpu` so a GPU runtime package is not mistaken for GPU test coverage.
 The package's universal wheel does not select or validate an accelerator.
-PyTorch 2.14.0 wheels are available for Python 3.14 and 3.15 on Linux x86_64
-and ARM64 for all three indexes, and on macOS 14 or newer ARM64 for the CPU
-index. Wheel availability alone does not establish runtime compatibility.
-The 2.14 import path defers MKLDNN TorchScript construction, avoiding the
-incidental `torch.jit.script_method` warnings during ordinary compilation;
-this does not add Python 3.14 TorchScript support.
+PyTorch 2.15.0 wheels are available for Python 3.14 and 3.15 on Linux x86_64
+and ARM64 for both indexes, and on macOS 14 or newer ARM64 for the CPU index.
+PyTorch 2.15.0 publishes CUDA wheels only for CUDA 13.2, so the former
+`torch-cu126` and `torch-cu130` extras were replaced by `torch-cu132`; CUDA 12
+runtimes are no longer a supported deployment choice. Wheel availability alone
+does not establish runtime compatibility. The deferred MKLDNN TorchScript
+construction adopted with 2.14 still avoids incidental
+`torch.jit.script_method` warnings during ordinary compilation; this does not
+add Python 3.14 TorchScript support.
 
 Historical 2.13 compatibility probes used Python 3.14.7 and Linux NVIDIA
 compute capabilities 8.6 and 7.5. They are not final CPU/macOS/CUDA acceptance

@@ -146,8 +146,8 @@ class TestCiConfiguration:
             "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 " "# v7.0.1"
         )
         upload = (
-            "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a "
-            "# v7.0.1"
+            "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 "
+            "# v7.0.2"
         )
         assert (self.ci_workflow.count("name: Python 3.14 / ${{ matrix.os }}")) == (1)
         assert (self.ci_workflow.count(checkout)) == (2)
@@ -216,7 +216,7 @@ class TestCiConfiguration:
         assert ("-m pip --version") in (workflow)
         assert ("pip 26.2.1") not in (workflow)
         assert (f'--constraint "{build_constraints}"') in (workflow)
-        assert ("setuptools==84.1.0 wheel==0.48.0") in (workflow)
+        assert ("setuptools==84.2.1 wheel==0.48.0") in (workflow)
         assert ("installer=(--no-deps --no-index --force-reinstall)") in (workflow)
         assert ("installer+=(--no-build-isolation)") in (workflow)
         assert ('"gmes @ file://${archive}#sha256=${digest}"') in (workflow)

@@ -36,7 +36,7 @@ uv venv --clear --python 3.14 "$ENV"
 (
   cd "$CANDIDATE"
   UV_PROJECT_ENVIRONMENT="$ENV" uv sync --locked --no-install-project \
-    --extra torch-cu130 --extra hdf5
+    --extra torch-cu132 --extra hdf5
 )
 "$ENV/bin/python" -m ensurepip
 "$ENV/bin/python" -m pip install --no-deps \

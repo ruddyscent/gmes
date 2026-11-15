@@ -17,9 +17,9 @@ uv build
 
 No compiler, SWIG, Cython, OpenMP runtime, or MPI installation is required to
 build GMES. The `dev` dependencies are installed by default as a PEP 735
-group. Select exactly one Torch extra (`torch-cpu`, `torch-cu126`, or
-`torch-cu130`); CUDA extras are Linux deployment choices, not evidence that a
-GPU gate ran. `plot` and `hdf5` remain independent optional extras.
+group. Select exactly one Torch extra (`torch-cpu` or `torch-cu132`); the CUDA
+extra is a Linux deployment choice, not evidence that a GPU gate ran. `plot`
+and `hdf5` remain independent optional extras.
 
 `uv sync --locked` consumes the committed lockfile. Update dependencies only
 in a dedicated change with `uv lock --upgrade`, then verify the lock and the

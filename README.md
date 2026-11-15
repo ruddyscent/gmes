@@ -15,7 +15,7 @@ controls, and MPI launcher are retired.
 ## Requirements and installation
 
 - Python 3.14 or newer
-- NumPy 2.3 or newer, SciPy 1.16 or newer, and PyTorch `>=2.14,<2.15`
+- NumPy 2.3 or newer, SciPy 1.16 or newer, and PyTorch `>=2.15,<2.16`
 
 GMES itself is a universal pure-Python package: installation and source builds
 do not require a C/C++ compiler, SWIG, Cython, OpenMP, or system headers.
@@ -35,8 +35,7 @@ uv build
 The `dev` dependency group is installed by default and is a PEP 735 group, not
 a package extra. Consume the committed lock with `uv sync --locked`; use
 `uv lock --upgrade` only in a dedicated dependency update. Select
-`torch-cu126` or `torch-cu130` instead of `torch-cpu` only on a Linux CUDA
-target. The package has no CUDA suffix and bundles no CUDA or native GMES
+`torch-cu132` instead of `torch-cpu` only on a Linux CUDA 13.2 target. The package has no CUDA suffix and bundles no CUDA or native GMES
 library.
 
 This checkout requires uv 0.12.5. The current verified platform scope remains
